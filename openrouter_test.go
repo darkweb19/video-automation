@@ -22,7 +22,7 @@ func TestOpenRouterListVideoModels(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Errorf("authorization = %q", got)
 		}
-		_, _ = w.Write([]byte(`{"data":[{"id":"google/veo-3.1","name":"Veo 3.1","supported_durations":[4,8],"supported_aspect_ratios":["9:16"],"generate_audio":true}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"google/veo-3.1","name":"Veo 3.1","supported_durations":[4,8],"supported_aspect_ratios":["9:16"],"generate_audio":true,"pricing_skus":{"per-video-second":"0.50","per-video-second-1080p":"0.75"}}]}`))
 	}))
 	defer server.Close()
 
@@ -30,7 +30,7 @@ func TestOpenRouterListVideoModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 1 || models[0].Provider != "google" || len(models[0].Durations) != 2 || models[0].Audio == nil || !*models[0].Audio {
+	if len(models) != 1 || models[0].Provider != "google" || len(models[0].Durations) != 2 || models[0].Audio == nil || !*models[0].Audio || models[0].PricePerSecond != "0.50" {
 		t.Fatalf("unexpected models: %#v", models)
 	}
 }
@@ -41,7 +41,7 @@ func TestOpenRouterGenerationNormalization(t *testing.T) {
 			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"id":"job_123","status":"pending"}`))
+		_, _ = w.Write([]byte(`{"id":"job_123","status":"pending","usage":{"cost":0.42}}`))
 	}))
 	defer server.Close()
 
@@ -49,7 +49,7 @@ func TestOpenRouterGenerationNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if generation.ID != "job_123" || generation.Status != "queued" || generation.Model != "google/veo-3.1" {
+	if generation.ID != "job_123" || generation.Status != "queued" || generation.Model != "google/veo-3.1" || generation.CostUSD != "0.42" {
 		t.Fatalf("unexpected generation: %#v", generation)
 	}
 }

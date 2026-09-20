@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -136,7 +137,8 @@ func (c *OpenRouterClient) ListVideoModels(ctx context.Context) ([]VideoModel, e
 		models = append(models, VideoModel{
 			ID: model.ID, Name: model.Name, Provider: providerFromModelID(model.ID),
 			Durations: model.SupportedDurations, AspectRatios: model.SupportedAspectRatios,
-			Audio: model.GenerateAudio,
+			Audio: model.GenerateAudio, PricingSKUs: model.PricingSKUs,
+			PricePerSecond: lowestPerSecondPrice(model.PricingSKUs),
 		})
 	}
 	return models, nil
@@ -269,14 +271,18 @@ type openRouterGeneration struct {
 	Model        string   `json:"model"`
 	Error        string   `json:"error"`
 	UnsignedURLs []string `json:"unsigned_urls"`
+	Usage        struct {
+		Cost json.Number `json:"cost"`
+	} `json:"usage"`
 }
 
 type openRouterVideoModel struct {
-	ID                    string   `json:"id"`
-	Name                  string   `json:"name"`
-	SupportedDurations    []int    `json:"supported_durations"`
-	SupportedAspectRatios []string `json:"supported_aspect_ratios"`
-	GenerateAudio         *bool    `json:"generate_audio"`
+	ID                    string            `json:"id"`
+	Name                  string            `json:"name"`
+	SupportedDurations    []int             `json:"supported_durations"`
+	SupportedAspectRatios []string          `json:"supported_aspect_ratios"`
+	GenerateAudio         *bool             `json:"generate_audio"`
+	PricingSKUs           map[string]string `json:"pricing_skus"`
 }
 
 func (c *OpenRouterClient) normalizeGeneration(source openRouterGeneration) (*Generation, error) {
@@ -295,11 +301,29 @@ func (c *OpenRouterClient) normalizeGeneration(source openRouterGeneration) (*Ge
 	default:
 		return nil, fmt.Errorf("OpenRouter returned an unsupported video status %q", source.Status)
 	}
-	generation := &Generation{ID: source.ID, Status: status, Model: source.Model, Error: source.Error}
+	generation := &Generation{ID: source.ID, Status: status, Model: source.Model, Error: source.Error, CostUSD: string(source.Usage.Cost)}
 	if generation.Status == "completed" && generation.ID != "" {
 		generation.OutputURL = "/video?id=" + url.QueryEscape(generation.ID)
 	}
 	return generation, nil
+}
+
+func lowestPerSecondPrice(skus map[string]string) string {
+	var lowest string
+	var lowestValue float64
+	for name, price := range skus {
+		if !strings.HasPrefix(name, "per-video-second") {
+			continue
+		}
+		value, err := strconv.ParseFloat(price, 64)
+		if err != nil || value < 0 {
+			continue
+		}
+		if lowest == "" || value < lowestValue {
+			lowest, lowestValue = price, value
+		}
+	}
+	return lowest
 }
 
 func providerFromModelID(id string) string {
