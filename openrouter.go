@@ -134,11 +134,19 @@ func (c *OpenRouterClient) ListVideoModels(ctx context.Context) ([]VideoModel, e
 
 	models := make([]VideoModel, 0, len(response.Data))
 	for _, model := range response.Data {
+		pricePerSecond := lowestPerSecondPrice(model.PricingSKUs)
+		pricePerGeneration := generationPrice(model.PricingSKUs)
+		priceUnit := ""
+		if pricePerSecond != "" {
+			priceUnit = "second"
+		} else if pricePerGeneration != "" {
+			priceUnit = "generation"
+		}
 		models = append(models, VideoModel{
 			ID: model.ID, Name: model.Name, Provider: providerFromModelID(model.ID),
 			Durations: model.SupportedDurations, AspectRatios: model.SupportedAspectRatios,
 			Audio: model.GenerateAudio, PricingSKUs: model.PricingSKUs,
-			PricePerSecond: lowestPerSecondPrice(model.PricingSKUs),
+			PricePerSecond: pricePerSecond, PricePerGeneration: pricePerGeneration, PriceUnit: priceUnit,
 		})
 	}
 	return models, nil
@@ -324,6 +332,18 @@ func lowestPerSecondPrice(skus map[string]string) string {
 		}
 	}
 	return lowest
+}
+
+func generationPrice(skus map[string]string) string {
+	price, found := skus["generate"]
+	if !found {
+		return ""
+	}
+	value, err := strconv.ParseFloat(price, 64)
+	if err != nil || value < 0 {
+		return ""
+	}
+	return price
 }
 
 func providerFromModelID(id string) string {

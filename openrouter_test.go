@@ -22,7 +22,7 @@ func TestOpenRouterListVideoModels(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Errorf("authorization = %q", got)
 		}
-		_, _ = w.Write([]byte(`{"data":[{"id":"google/veo-3.1","name":"Veo 3.1","supported_durations":[4,8],"supported_aspect_ratios":["9:16"],"generate_audio":true,"pricing_skus":{"per-video-second":"0.50","per-video-second-1080p":"0.75"}}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"google/veo-3.1","name":"Veo 3.1","supported_durations":[4,8],"supported_aspect_ratios":["9:16"],"generate_audio":true,"pricing_skus":{"per-video-second":"0.50","per-video-second-1080p":"0.75"}},{"id":"openai/sora-2","name":"Sora 2","pricing_skus":{"generate":"0.50"}}]}`))
 	}))
 	defer server.Close()
 
@@ -30,8 +30,11 @@ func TestOpenRouterListVideoModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 1 || models[0].Provider != "google" || len(models[0].Durations) != 2 || models[0].Audio == nil || !*models[0].Audio || models[0].PricePerSecond != "0.50" {
+	if len(models) != 2 || models[0].Provider != "google" || len(models[0].Durations) != 2 || models[0].Audio == nil || !*models[0].Audio || models[0].PricePerSecond != "0.50" || models[0].PricePerGeneration != "" || models[0].PriceUnit != "second" {
 		t.Fatalf("unexpected models: %#v", models)
+	}
+	if models[1].PricePerSecond != "" || models[1].PricePerGeneration != "0.50" || models[1].PriceUnit != "generation" {
+		t.Fatalf("unexpected generation pricing: %#v", models[1])
 	}
 }
 

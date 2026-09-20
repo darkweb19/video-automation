@@ -253,18 +253,37 @@
     return formatted ? `$${formatted}` : "—";
   }
 
+  function validPrice(value) {
+    const price = Number(value);
+    return Number.isFinite(price) && price >= 0 ? price : null;
+  }
+
   function modelPricing(model) {
     const skus = model && model.pricing_skus && typeof model.pricing_skus === "object"
       ? Object.entries(model.pricing_skus)
       : [];
     const perSecond = skus
-      .filter(([name, value]) => name.startsWith("per-video-second") && Number.isFinite(Number(value)) && Number(value) >= 0)
+      .filter(([name, value]) => name.startsWith("per-video-second") && validPrice(value) !== null)
       .map(([, value]) => Number(value));
-    const supplied = Number(model && model.price_per_second);
-    const price = Number.isFinite(supplied) && supplied >= 0
-      ? supplied
-      : (perSecond.length ? Math.min(...perSecond) : null);
-    return { price, hasVariants: perSecond.length > 1 };
+    const suppliedPerSecond = validPrice(model && model.price_per_second);
+    if (suppliedPerSecond !== null || perSecond.length) {
+      return {
+        price: suppliedPerSecond !== null ? suppliedPerSecond : Math.min(...perSecond),
+        unit: "second",
+        hasVariants: perSecond.length > 1
+      };
+    }
+
+    const suppliedPerGeneration = validPrice(model && model.price_per_generation);
+    const generationSKU = skus.find(([name, value]) => name === "generate" && validPrice(value) !== null);
+    const generationPrice = suppliedPerGeneration !== null
+      ? suppliedPerGeneration
+      : (generationSKU ? Number(generationSKU[1]) : null);
+    if (generationPrice !== null) {
+      return { price: generationPrice, unit: "generation", hasVariants: false };
+    }
+
+    return { price: null, unit: "", hasVariants: false };
   }
 
   function modelLabel(model) {
@@ -272,6 +291,9 @@
     const pricing = modelPricing(model);
     if (pricing.price === null) return `${name} — Price unavailable`;
     const prefix = pricing.hasVariants ? "From " : "";
+    if (pricing.unit === "generation") {
+      return `${name} — ${prefix}$${formatPriceNumber(pricing.price)}/generation`;
+    }
     return `${name} — ${prefix}$${formatPriceNumber(pricing.price)}/sec`;
   }
 
@@ -316,9 +338,17 @@
 
   function updateEstimate() {
     const model = selectedModel();
-    const duration = Number(elements.duration.value);
     const pricing = modelPricing(model);
-    if (!model || pricing.price === null || !Number.isFinite(duration) || duration <= 0) {
+    if (!model || pricing.price === null) {
+      elements.costEstimate.textContent = "Unavailable";
+      return;
+    }
+    if (pricing.unit === "generation") {
+      elements.costEstimate.textContent = `${formatUSD(pricing.price)}/generation`;
+      return;
+    }
+    const duration = Number(elements.duration.value);
+    if (!Number.isFinite(duration) || duration <= 0) {
       elements.costEstimate.textContent = "Unavailable";
       return;
     }

@@ -39,6 +39,10 @@ type VideoModel struct {
 	Audio          *bool             `json:"audio,omitempty"`
 	PricingSKUs    map[string]string `json:"pricing_skus,omitempty"`
 	PricePerSecond string            `json:"price_per_second,omitempty"`
+	// PricePerGeneration is populated only for OpenRouter's fixed "generate" SKU.
+	// It must not be multiplied by the requested duration.
+	PricePerGeneration string `json:"price_per_generation,omitempty"`
+	PriceUnit          string `json:"price_unit,omitempty"`
 }
 
 type VideoProvider interface {
