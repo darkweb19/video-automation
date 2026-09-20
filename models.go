@@ -26,16 +26,19 @@ type Generation struct {
 	Progress  *int   `json:"progress,omitempty"`
 	OutputURL string `json:"output_url,omitempty"`
 	Error     string `json:"error,omitempty"`
+	CostUSD   string `json:"cost_usd,omitempty"`
 }
 
 // VideoModel describes the capabilities OpenRouter exposes for a video model.
 type VideoModel struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Provider     string   `json:"provider,omitempty"`
-	Durations    []int    `json:"durations,omitempty"`
-	AspectRatios []string `json:"aspect_ratios,omitempty"`
-	Audio        *bool    `json:"audio,omitempty"`
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Provider       string            `json:"provider,omitempty"`
+	Durations      []int             `json:"durations,omitempty"`
+	AspectRatios   []string          `json:"aspect_ratios,omitempty"`
+	Audio          *bool             `json:"audio,omitempty"`
+	PricingSKUs    map[string]string `json:"pricing_skus,omitempty"`
+	PricePerSecond string            `json:"price_per_second,omitempty"`
 }
 
 type VideoProvider interface {
