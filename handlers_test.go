@@ -180,7 +180,7 @@ func TestModelsUpstreamFailure(t *testing.T) {
 
 func TestStaticAssets(t *testing.T) {
 	handler := testHandler(&mockProvider{})
-	for _, target := range []string{"/", "/static/app.js", "/static/styles.css"} {
+	for _, target := range []string{"/", "/static/app.js", "/static/styles.css", "/static/model-picker.css"} {
 		response := request(handler, http.MethodGet, target, "")
 		if response.Code != http.StatusOK || response.Body.Len() == 0 {
 			t.Fatalf("GET %s = %d (%d bytes)", target, response.Code, response.Body.Len())

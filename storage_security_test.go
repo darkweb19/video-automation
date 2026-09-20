@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -248,6 +250,103 @@ func TestLoginThrottleBlocksAndCleansUp(t *testing.T) {
 	}
 	if len(throttle.attempts) != 0 {
 		t.Fatalf("stale attempts = %#v", throttle.attempts)
+	}
+}
+
+func TestRecoveryCodeIsSingleUseAndInvalidatesSessions(t *testing.T) {
+	store := newTestStore(t)
+	provisionTestUser(t, store)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := httptest.NewRecorder()
+	if err := security.NewSession(session, httptest.NewRequest(http.MethodPost, "/", nil), "sujanshrestha"); err != nil {
+		t.Fatal(err)
+	}
+	cookie := session.Result().Cookies()[0]
+	code := "ABCD-EFGH-JKLM-NPQR"
+	if err := store.CreateRecoveryCode("sujanshrestha", recoveryCodeHash(code), time.Now().Add(recoveryCodeLifetime).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	newHash, err := hashPassword("New-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := store.ConsumeRecoveryCode("sujanshrestha", recoveryCodeHash(code), newHash, time.Now().Unix())
+	if err != nil || !ok {
+		t.Fatalf("consume recovery code = %t, %v", ok, err)
+	}
+	if _, _, err := store.SessionUser(tokenHash(cookie.Value), time.Now().Unix()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("old session remains valid: %v", err)
+	}
+	storedHash, err := store.PasswordHash("sujanshrestha")
+	if err != nil || !checkPassword(storedHash, "New-password-123") {
+		t.Fatalf("new password was not stored: %v", err)
+	}
+	ok, err = store.ConsumeRecoveryCode("sujanshrestha", recoveryCodeHash(code), newHash, time.Now().Unix())
+	if err != nil || ok {
+		t.Fatalf("reused recovery code = %t, %v", ok, err)
+	}
+	if err := store.CreateRecoveryCode("sujanshrestha", recoveryCodeHash("WXYZ-2345-6789-ABCD"), time.Now().Add(-time.Second).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = store.ConsumeRecoveryCode("sujanshrestha", recoveryCodeHash("WXYZ-2345-6789-ABCD"), newHash, time.Now().Unix())
+	if err != nil || ok {
+		t.Fatalf("expired recovery code = %t, %v", ok, err)
+	}
+}
+
+func TestPasswordRecoveryEndpoint(t *testing.T) {
+	store := newTestStore(t)
+	provisionTestUser(t, store)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := "ABCD-EFGH-JKLM-NPQR"
+	if err := store.CreateRecoveryCode("sujanshrestha", recoveryCodeHash(code), time.Now().Add(recoveryCodeLifetime).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	app := NewDashboardHandler(store, security, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	recovery := httptest.NewRecorder()
+	recoveryRequest := httptest.NewRequest(http.MethodPost, "/api/password/recover", strings.NewReader(`{"username":"sujanshrestha","code":"abcd-efgh-jklm-npqr","new_password":"Recovered-password-123"}`))
+	recoveryRequest.Header.Set("Content-Type", "application/json")
+	app.ServeHTTP(recovery, recoveryRequest)
+	if recovery.Code != http.StatusOK {
+		t.Fatalf("recovery = %d: %s", recovery.Code, recovery.Body.String())
+	}
+
+	login := httptest.NewRecorder()
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"sujanshrestha","password":"Recovered-password-123"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	app.ServeHTTP(login, loginRequest)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login after recovery = %d: %s", login.Code, login.Body.String())
+	}
+
+	reuse := httptest.NewRecorder()
+	reuseRequest := httptest.NewRequest(http.MethodPost, "/api/password/recover", strings.NewReader(`{"username":"sujanshrestha","code":"abcd-efgh-jklm-npqr","new_password":"Another-password-123"}`))
+	reuseRequest.Header.Set("Content-Type", "application/json")
+	app.ServeHTTP(reuse, reuseRequest)
+	if reuse.Code != http.StatusBadRequest || !strings.Contains(reuse.Body.String(), "invalid or expired") {
+		t.Fatalf("reused recovery = %d: %s", reuse.Code, reuse.Body.String())
+	}
+}
+
+func TestGenerateRecoveryCodeFormat(t *testing.T) {
+	code, err := generateRecoveryCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(code, "-")
+	if len(parts) != 4 {
+		t.Fatalf("recovery code format = %q", code)
+	}
+	for _, part := range parts {
+		if len(part) != 4 {
+			t.Fatalf("recovery code format = %q", code)
+		}
 	}
 }
 

@@ -32,6 +32,22 @@ Stop it without deleting data:
 docker compose down
 ```
 
+## Password recovery
+
+If you forget the password, generate a one-time recovery code from the same data directory as the running app. For Docker:
+
+```bash
+docker compose exec video-automation /app/video-automation recovery-code
+```
+
+For a local development server:
+
+```bash
+go run . recovery-code
+```
+
+Open **Forgot password?** on the sign-in card, then enter the code and a new password. The code expires after 15 minutes, works once, and generating a replacement invalidates the previous code. A successful reset signs out every existing session. Recovery codes are stored only as hashes.
+
 The app is deliberately bound to `127.0.0.1` (localhost), not all network interfaces. To use a different local port, set `APP_PORT` for the command, for example `APP_PORT=9000 docker compose up -d`. On PowerShell use `$env:APP_PORT = "9000"` first.
 
 ## Data persistence and backups

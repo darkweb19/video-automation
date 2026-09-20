@@ -19,24 +19,27 @@ import (
 const apiKeySetting = "openrouter_api_key"
 
 type dashboardApp struct {
-	store    *Store
-	security *Security
-	logger   *slog.Logger
-	baseURL  string
-	limiter  *loginThrottle
+	store           *Store
+	security        *Security
+	logger          *slog.Logger
+	baseURL         string
+	limiter         *loginThrottle
+	recoveryLimiter *loginThrottle
 }
 
 func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger, limiter: newLoginThrottle()}
+	app := &dashboardApp{store: store, security: security, logger: logger, limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", app.index)
 	mux.HandleFunc("GET /static/app.js", app.static("static/app.js", "application/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /static/styles.css", app.static("static/styles.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /static/model-picker.css", app.static("static/model-picker.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /health", app.health)
 	mux.HandleFunc("POST /api/login", app.login)
+	mux.HandleFunc("POST /api/password/recover", app.recoverPassword)
 	mux.HandleFunc("GET /api/session", app.session)
 	mux.Handle("POST /api/logout", app.requireAuth(http.HandlerFunc(app.logout)))
 	mux.Handle("GET /models", app.requirePasswordChanged(http.HandlerFunc(app.models)))
@@ -167,6 +170,61 @@ func (a *dashboardApp) session(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"username": identity.Username, "must_change_password": identity.MustChangePassword})
+}
+
+func (a *dashboardApp) recoverPassword(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) || !isJSON(r.Header.Get("Content-Type")) {
+		if !isJSON(r.Header.Get("Content-Type")) {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		}
+		return
+	}
+	if a.recoveryLimiter == nil {
+		a.recoveryLimiter = newLoginThrottle()
+	}
+	ip := clientIP(r)
+	if !a.recoveryLimiter.Allow(ip) {
+		writeError(w, http.StatusTooManyRequests, "too many recovery attempts; try again later")
+		return
+	}
+	var input struct {
+		Username    string `json:"username"`
+		Code        string `json:"code"`
+		NewPassword string `json:"new_password"`
+	}
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	username := strings.TrimSpace(input.Username)
+	code := normalizeRecoveryCode(input.Code)
+	if len(input.NewPassword) < 10 || len(input.NewPassword) > 200 {
+		writeError(w, http.StatusBadRequest, "new password must be 10–200 characters")
+		return
+	}
+	if username == "" || len(code) != 16 {
+		a.recoveryLimiter.Failed(ip)
+		writeError(w, http.StatusBadRequest, "invalid or expired recovery code")
+		return
+	}
+	newHash, err := hashPassword(input.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to reset password")
+		return
+	}
+	ok, err := a.store.ConsumeRecoveryCode(username, recoveryCodeHash(code), newHash, time.Now().Unix())
+	if err != nil {
+		a.logger.Error("password recovery failed")
+		writeError(w, http.StatusInternalServerError, "unable to reset password")
+		return
+	}
+	if !ok {
+		a.recoveryLimiter.Failed(ip)
+		writeError(w, http.StatusBadRequest, "invalid or expired recovery code")
+		return
+	}
+	a.recoveryLimiter.Succeeded(ip)
+	a.security.Logout(w, r)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "password reset"})
 }
 
 func (a *dashboardApp) logout(w http.ResponseWriter, r *http.Request) {

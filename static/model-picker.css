@@ -1,0 +1,214 @@
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.model-field,
+.model-picker {
+  position: relative;
+}
+
+.model-trigger {
+  width: 100%;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid #d5d9e2;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+  outline: none;
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+
+.model-trigger:hover:not(:disabled) {
+  border-color: #b8beca;
+}
+
+.model-trigger:focus-visible,
+.model-picker.open .model-trigger {
+  border-color: #7969ec;
+  box-shadow: 0 0 0 3px rgba(102, 86, 232, .12);
+}
+
+.model-trigger-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.model-placeholder {
+  color: #7a8394;
+  font-size: 13px;
+}
+
+.model-chevron {
+  width: 8px;
+  height: 8px;
+  margin: 0 3px 4px 10px;
+  border-right: 2px solid #81899a;
+  border-bottom: 2px solid #81899a;
+  transform: rotate(45deg);
+  transition: transform .18s ease;
+}
+
+.model-picker.open .model-chevron {
+  margin-bottom: -4px;
+  transform: rotate(225deg);
+}
+
+.model-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid #dfe2e9;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 16px 40px rgba(24, 32, 50, .14);
+}
+
+.model-option {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.model-option:hover,
+.model-option:focus-visible {
+  background: #f5f4ff;
+  outline: none;
+}
+
+.model-option[aria-selected="true"] {
+  background: #efedff;
+}
+
+.model-option-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-option-copy strong {
+  overflow: hidden;
+  color: #222a3b;
+  font-size: 12px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-option-copy span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.model-option-price {
+  color: #4f46b8;
+  font-size: 10px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.provider-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(17, 24, 39, .08);
+  border-radius: 9px;
+  background: #f3f4f6;
+  color: #374151;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: -.03em;
+}
+
+.provider-mark.google { background: linear-gradient(135deg, #edf4ff, #fff3e7); color: #4285f4; }
+.provider-mark.openai { background: #edf8f5; color: #0d7a68; }
+.provider-mark.minimax { background: #fff0f2; color: #e5445d; }
+.provider-mark.bytedance { background: #eef4ff; color: #315be8; }
+.provider-mark.kling { background: #f0efff; color: #6757d9; }
+.provider-mark.luma { background: #f1f2f5; color: #171b24; }
+.provider-mark.runway { background: #eefcff; color: #067b91; }
+.model-trigger .provider-mark { flex: 0 0 auto; }
+.model-trigger .model-option-copy strong { font-size: 13px; }
+.model-trigger .model-option-copy span { font-size: 10px; }
+
+@media (max-width: 520px) {
+  .model-option { grid-template-columns: 34px minmax(0, 1fr); }
+  .model-option-price { grid-column: 2; }
+  .model-menu { max-height: 260px; }
+}
+
+.login-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: -10px 0 2px;
+}
+
+.login-actions .text-button,
+.recovery-back {
+  padding: 2px 0;
+}
+
+.recovery-back {
+  margin: 18px 0 20px;
+}
+
+.recovery-command {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px 10px;
+  margin: 18px 0 22px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #f7f7fa;
+}
+
+.recovery-command span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.recovery-command code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #343b4d;
+  font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+#recovery-code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}

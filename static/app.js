@@ -10,6 +10,16 @@
     loginUsername: $("#login-username"),
     loginPassword: $("#login-password"),
     loginError: $("#login-error"),
+    loginView: $("#login-view"),
+    recoveryView: $("#recovery-view"),
+    showRecovery: $("#show-recovery"),
+    hideRecovery: $("#hide-recovery"),
+    recoveryForm: $("#recovery-form"),
+    recoveryUsername: $("#recovery-username"),
+    recoveryCode: $("#recovery-code"),
+    recoveryPassword: $("#recovery-password"),
+    recoveryConfirm: $("#recovery-confirm"),
+    recoveryError: $("#recovery-error"),
     appShell: $("#app-shell"),
     accountName: $("#account-name"),
     logout: $("#logout"),
@@ -18,6 +28,10 @@
     pageKicker: $("#page-kicker"),
     pageTitle: $("#page-title"),
     model: $("#model"),
+    modelPicker: $("#model-picker"),
+    modelTrigger: $("#model-trigger"),
+    modelTriggerContent: $("#model-trigger-content"),
+    modelMenu: $("#model-menu"),
     duration: $("#duration"),
     aspectRatio: $("#aspect-ratio"),
     prompt: $("#prompt"),
@@ -206,7 +220,23 @@
     elements.appShell.hidden = true;
     elements.loginScreen.hidden = false;
     elements.loginPassword.value = "";
+    showLoginView(false);
     window.setTimeout(() => elements.loginUsername.focus(), 0);
+  }
+
+  function showLoginView(focus = true) {
+    elements.recoveryView.hidden = true;
+    elements.loginView.hidden = false;
+    elements.recoveryError.textContent = "";
+    if (focus) window.setTimeout(() => elements.loginUsername.focus(), 0);
+  }
+
+  function showRecoveryView() {
+    elements.loginView.hidden = true;
+    elements.recoveryView.hidden = false;
+    elements.recoveryError.textContent = "";
+    elements.recoveryUsername.value = elements.loginUsername.value.trim() || "sujanshrestha";
+    window.setTimeout(() => elements.recoveryCode.focus(), 0);
   }
 
   function showAuthenticated(username, mustChangePassword) {
@@ -297,6 +327,103 @@
     return `${name} — ${prefix}$${formatPriceNumber(pricing.price)}/sec`;
   }
 
+  function providerDetails(model) {
+    const provider = String(model.provider || model.id.split("/")[0] || "AI");
+    const key = provider.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const known = {
+      google: { name: "Google", initials: "G", className: "google" },
+      openai: { name: "OpenAI", initials: "OA", className: "openai" },
+      minimax: { name: "MiniMax", initials: "M", className: "minimax" },
+      bytedance: { name: "ByteDance", initials: "BD", className: "bytedance" },
+      kwaivgi: { name: "Kling AI", initials: "K", className: "kling" },
+      klingai: { name: "Kling AI", initials: "K", className: "kling" },
+      luma: { name: "Luma", initials: "L", className: "luma" },
+      runway: { name: "Runway", initials: "R", className: "runway" }
+    };
+    if (known[key]) return known[key];
+    const name = provider.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+    const initials = name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "AI";
+    return { name, initials, className: "generic" };
+  }
+
+  function modelPriceLabel(model) {
+    const pricing = modelPricing(model);
+    if (pricing.price === null) return "Price unavailable";
+    const prefix = pricing.hasVariants ? "From " : "";
+    const suffix = pricing.unit === "generation" ? "/generation" : "/sec";
+    return `${prefix}$${formatPriceNumber(pricing.price)}${suffix}`;
+  }
+
+  function providerMark(model) {
+    const provider = providerDetails(model);
+    return make("span", { className: `provider-mark ${provider.className}`, text: provider.initials });
+  }
+
+  function modelOptionContent(model, compact = false) {
+    const provider = providerDetails(model);
+    const fragment = document.createDocumentFragment();
+    fragment.append(providerMark(model));
+    const copy = make("span", { className: "model-option-copy" });
+    copy.append(make("strong", { text: model.name || model.id || "Unnamed model" }));
+    copy.append(make("span", {
+      text: compact ? `${provider.name} · ${modelPriceLabel(model)}` : provider.name
+    }));
+    fragment.append(copy);
+    if (!compact) fragment.append(make("span", { className: "model-option-price", text: modelPriceLabel(model) }));
+    return fragment;
+  }
+
+  function closeModelMenu() {
+    elements.modelMenu.hidden = true;
+    elements.modelTrigger.setAttribute("aria-expanded", "false");
+    elements.modelPicker.classList.remove("open");
+  }
+
+  function openModelMenu() {
+    if (elements.modelTrigger.disabled) return;
+    elements.modelMenu.hidden = false;
+    elements.modelTrigger.setAttribute("aria-expanded", "true");
+    elements.modelPicker.classList.add("open");
+    const selected = $(".model-option[aria-selected='true']", elements.modelMenu)
+      || $(".model-option", elements.modelMenu);
+    if (selected) selected.focus();
+  }
+
+  function renderModelPicker(message = "Select a model") {
+    const selected = selectedModel();
+    elements.modelTriggerContent.replaceChildren();
+    if (selected) {
+      elements.modelTriggerContent.append(modelOptionContent(selected, true));
+    } else {
+      elements.modelTriggerContent.append(make("span", { className: "model-placeholder", text: message }));
+    }
+    $$(".model-option", elements.modelMenu).forEach((option) => {
+      option.setAttribute("aria-selected", String(option.dataset.value === elements.model.value));
+    });
+  }
+
+  function selectModel(value) {
+    elements.model.value = value;
+    renderModelPicker();
+    closeModelMenu();
+    elements.model.dispatchEvent(new Event("change", { bubbles: true }));
+    elements.modelTrigger.focus();
+  }
+
+  function renderModelMenu() {
+    elements.modelMenu.replaceChildren();
+    state.models.forEach((model) => {
+      const option = make("button", { className: "model-option", type: "button" });
+      option.dataset.value = model.id;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(model.id === elements.model.value));
+      option.append(modelOptionContent(model));
+      option.addEventListener("click", () => selectModel(model.id));
+      elements.modelMenu.append(option);
+    });
+    renderModelPicker();
+  }
+
   function selectedModel() {
     return state.models.find((model) => model.id === elements.model.value) || null;
   }
@@ -322,6 +449,7 @@
 
   function updateModelOptions() {
     const model = selectedModel();
+    renderModelPicker();
     if (!model) {
       fillSelect(elements.duration, [], String, "Provider default");
       fillSelect(elements.aspectRatio, [], String, "Provider default");
@@ -359,11 +487,14 @@
   async function loadModels(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
     elements.model.disabled = true;
+    elements.modelTrigger.disabled = true;
+    closeModelMenu();
     elements.generate.disabled = true;
     elements.model.replaceChildren();
     const loadingOption = make("option", { text: "Loading models…" });
     loadingOption.value = "";
     elements.model.append(loadingOption);
+    renderModelPicker("Loading models…");
     try {
       const payload = await request("/models");
       state.models = Array.isArray(payload && payload.models) ? payload.models : [];
@@ -372,15 +503,22 @@
         const option = make("option", { text: "No video models available" });
         option.value = "";
         elements.model.append(option);
+        elements.modelMenu.replaceChildren();
         updateModelOptions();
+        renderModelPicker("No video models available");
         return;
       }
+      const placeholder = make("option", { text: "Select a model" });
+      placeholder.value = "";
+      elements.model.append(placeholder);
       state.models.forEach((model) => {
         const option = make("option", { text: modelLabel(model) });
         option.value = model.id;
         elements.model.append(option);
       });
       elements.model.disabled = false;
+      elements.modelTrigger.disabled = false;
+      renderModelMenu();
       updateModelOptions();
       renderHistory();
       renderRecent();
@@ -392,7 +530,9 @@
       });
       option.value = "";
       elements.model.append(option);
+      elements.modelMenu.replaceChildren();
       updateModelOptions();
+      renderModelPicker(error.status === 422 ? "Configure an API key in Settings" : "Models unavailable");
       if (notify && error.status !== 422 && error.status !== 401) toast(error.message, true);
     }
   }
@@ -758,6 +898,10 @@
     try {
       const record = await request("/generate", { method: "POST", body: JSON.stringify(requestBody) });
       setStatusRecord(record);
+      elements.generatorForm.reset();
+      elements.promptCount.textContent = "0 / 4000";
+      elements.promptError.textContent = "";
+      updateModelOptions();
       toast("Generation submitted.");
       pollGeneration(record.id, 1000);
       loadHistory(false);
@@ -878,6 +1022,43 @@
     }
   }
 
+  async function submitRecovery(event) {
+    event.preventDefault();
+    elements.recoveryError.textContent = "";
+    const password = elements.recoveryPassword.value;
+    if (password.length < 10 || password.length > 200) {
+      elements.recoveryError.textContent = "New password must be 10–200 characters.";
+      elements.recoveryPassword.focus();
+      return;
+    }
+    if (password !== elements.recoveryConfirm.value) {
+      elements.recoveryError.textContent = "Passwords do not match.";
+      elements.recoveryConfirm.focus();
+      return;
+    }
+    const button = $("button[type='submit']", elements.recoveryForm);
+    setButtonBusy(button, true, "Resetting…");
+    try {
+      const username = elements.recoveryUsername.value.trim();
+      await request("/api/password/recover", {
+        method: "POST",
+        body: JSON.stringify({
+          username,
+          code: elements.recoveryCode.value,
+          new_password: password
+        })
+      }, true);
+      elements.recoveryForm.reset();
+      elements.loginUsername.value = username;
+      showLoginView();
+      toast("Password reset. Sign in with your new password.");
+    } catch (error) {
+      elements.recoveryError.textContent = error.message;
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
   async function logout() {
     elements.logout.disabled = true;
     try {
@@ -892,12 +1073,38 @@
 
   function bindEvents() {
     elements.loginForm.addEventListener("submit", submitLogin);
+    elements.recoveryForm.addEventListener("submit", submitRecovery);
+    elements.showRecovery.addEventListener("click", showRecoveryView);
+    elements.hideRecovery.addEventListener("click", () => showLoginView());
+    elements.recoveryCode.addEventListener("input", () => {
+      const value = elements.recoveryCode.value.toUpperCase().replace(/[^A-Z2-9]/g, "").slice(0, 16);
+      elements.recoveryCode.value = value.match(/.{1,4}/g)?.join("-") || "";
+    });
     elements.logout.addEventListener("click", logout);
     elements.generatorForm.addEventListener("submit", submitGeneration);
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
     elements.passwordForm.addEventListener("submit", updatePassword);
     elements.refreshHistory.addEventListener("click", () => loadHistory(true));
     elements.model.addEventListener("change", updateModelOptions);
+    elements.modelTrigger.addEventListener("click", () => {
+      if (elements.modelMenu.hidden) openModelMenu();
+      else closeModelMenu();
+    });
+    elements.modelMenu.addEventListener("keydown", (event) => {
+      const options = $$(".model-option", elements.modelMenu);
+      const index = options.indexOf(document.activeElement);
+      if ((event.key === "ArrowDown" || event.key === "ArrowUp") && options.length) {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        options[(index + direction + options.length) % options.length].focus();
+      } else if (event.key === "Escape") {
+        closeModelMenu();
+        elements.modelTrigger.focus();
+      }
+    });
+    document.addEventListener("click", (event) => {
+      if (!elements.modelPicker.contains(event.target)) closeModelMenu();
+    });
     elements.duration.addEventListener("change", updateEstimate);
     elements.prompt.addEventListener("input", () => {
       const count = Array.from(elements.prompt.value).length;

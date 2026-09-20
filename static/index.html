@@ -5,20 +5,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FrameVault — Video dashboard</title>
   <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/model-picker.css">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
     <div class="login-panel">
       <div class="brand-mark" aria-hidden="true">F</div>
-      <p class="eyebrow">Private workspace</p>
-      <h1>Welcome back</h1>
-      <p class="subtle">Sign in to manage generations and stored videos.</p>
-      <form id="login-form" class="stack" novalidate>
-        <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required></div>
-        <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required></div>
-        <p id="login-error" class="form-error" role="alert"></p>
-        <button class="button primary full" type="submit">Sign in</button>
-      </form>
+      <div id="login-view">
+        <p class="eyebrow">Private workspace</p>
+        <h1>Welcome back</h1>
+        <p class="subtle">Sign in to manage generations and stored videos.</p>
+        <form id="login-form" class="stack" novalidate>
+          <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required></div>
+          <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required></div>
+          <div class="login-actions"><button id="show-recovery" class="text-button" type="button">Forgot password?</button></div>
+          <p id="login-error" class="form-error" role="alert"></p>
+          <button class="button primary full" type="submit">Sign in</button>
+        </form>
+      </div>
+      <div id="recovery-view" hidden>
+        <button id="hide-recovery" class="text-button recovery-back" type="button">← Back to sign in</button>
+        <p class="eyebrow">Account recovery</p>
+        <h1>Reset password</h1>
+        <p class="subtle">Generate a one-time code in the server terminal. It expires after 15 minutes.</p>
+        <div class="recovery-command"><span>Local</span><code>go run . recovery-code</code><span>Docker</span><code>docker compose exec video-automation /app/video-automation recovery-code</code></div>
+        <form id="recovery-form" class="stack" novalidate>
+          <div class="field"><label for="recovery-username">Username</label><input id="recovery-username" name="username" autocomplete="username" required></div>
+          <div class="field"><label for="recovery-code">One-time code</label><input id="recovery-code" name="code" autocomplete="one-time-code" placeholder="XXXX-XXXX-XXXX-XXXX" spellcheck="false" required></div>
+          <div class="field"><label for="recovery-password">New password</label><input id="recovery-password" name="new-password" type="password" autocomplete="new-password" minlength="10" required></div>
+          <div class="field"><label for="recovery-confirm">Confirm new password</label><input id="recovery-confirm" name="confirm-password" type="password" autocomplete="new-password" minlength="10" required></div>
+          <p id="recovery-error" class="form-error" role="alert"></p>
+          <button class="button primary full" type="submit">Reset password</button>
+        </form>
+      </div>
     </div>
   </section>
 
@@ -65,7 +84,17 @@
               <div class="panel-head"><div><h2>New generation</h2><p>Configure your video request</p></div></div>
               <form id="generator-form" novalidate>
                 <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" required></textarea><p id="prompt-error" class="form-error"></p></div>
-                <div class="field"><label for="model">Model and price</label><select id="model" required disabled><option value="">Loading models…</option></select></div>
+                <div class="field model-field">
+                  <label id="model-label" for="model-trigger">Model and price</label>
+                  <div id="model-picker" class="model-picker">
+                    <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
+                      <span id="model-trigger-content" class="model-trigger-content"><span class="model-placeholder">Loading models…</span></span>
+                      <span class="model-chevron" aria-hidden="true"></span>
+                    </button>
+                    <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
+                  </div>
+                  <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models…</option></select>
+                </div>
                 <div class="form-grid"><div class="field"><label for="duration">Duration</label><select id="duration"></select></div><div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div></div>
                 <div class="estimate"><span>Estimated generation cost</span><strong id="cost-estimate">Unavailable</strong><small>Final cost comes directly from OpenRouter.</small></div>
                 <button id="generate" class="button primary full" type="submit" disabled>Generate video</button>

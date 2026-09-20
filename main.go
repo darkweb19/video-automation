@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,6 +31,19 @@ func main() {
 	if err != nil || store.EnsureUser("sujanshrestha", initialHash) != nil {
 		logger.Error("initial user setup failed")
 		os.Exit(1)
+	}
+	if len(os.Args) > 1 {
+		if os.Args[1] != "recovery-code" || len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: video-automation recovery-code")
+			os.Exit(2)
+		}
+		code, err := generateRecoveryCode()
+		if err != nil || store.CreateRecoveryCode("sujanshrestha", recoveryCodeHash(code), time.Now().Add(recoveryCodeLifetime).Unix()) != nil {
+			fmt.Fprintln(os.Stderr, "unable to generate recovery code")
+			os.Exit(1)
+		}
+		fmt.Printf("One-time recovery code: %s\nExpires in 15 minutes. Generating another code invalidates this one.\n", code)
+		return
 	}
 	security, err := NewSecurity(store)
 	if err != nil {

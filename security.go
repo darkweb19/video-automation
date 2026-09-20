@@ -20,10 +20,13 @@ import (
 )
 
 const (
-	sessionCookie      = "video_dashboard_session"
-	sessionLifetime    = 24 * time.Hour
-	passwordIterations = 210000
+	sessionCookie        = "video_dashboard_session"
+	sessionLifetime      = 24 * time.Hour
+	recoveryCodeLifetime = 15 * time.Minute
+	passwordIterations   = 210000
 )
+
+const recoveryAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 type Security struct {
 	store *Store
@@ -137,6 +140,29 @@ func pbkdf2SHA256(password, salt []byte, iterations, keyLength int) []byte {
 func tokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func generateRecoveryCode() (string, error) {
+	random := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, random); err != nil {
+		return "", err
+	}
+	code := make([]byte, 0, 19)
+	for i, value := range random {
+		if i > 0 && i%4 == 0 {
+			code = append(code, '-')
+		}
+		code = append(code, recoveryAlphabet[int(value)%len(recoveryAlphabet)])
+	}
+	return string(code), nil
+}
+
+func normalizeRecoveryCode(code string) string {
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
+}
+
+func recoveryCodeHash(code string) string {
+	return tokenHash(normalizeRecoveryCode(code))
 }
 
 func (s *Security) NewSession(w http.ResponseWriter, r *http.Request, username string) error {

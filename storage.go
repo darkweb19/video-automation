@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -81,6 +82,12 @@ func (s *Store) migrate() error {
 			username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
 			expires_at INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS password_recovery_codes (
+			username TEXT PRIMARY KEY REFERENCES users(username) ON DELETE CASCADE,
+			token_hash TEXT NOT NULL,
+			expires_at INTEGER NOT NULL,
+			created_at INTEGER NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
@@ -106,6 +113,7 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS generations_created_at ON generations(created_at DESC);
 		CREATE INDEX IF NOT EXISTS generations_status ON generations(status);
 		DELETE FROM sessions WHERE expires_at <= unixepoch();
+		DELETE FROM password_recovery_codes WHERE expires_at <= unixepoch();
 	`)
 	if err != nil {
 		return fmt.Errorf("initialize database: %w", err)
@@ -185,6 +193,54 @@ func (s *Store) ChangePassword(username, passwordHash string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) CreateRecoveryCode(username, codeHash string, expiresAt int64) error {
+	result, err := s.db.Exec(`INSERT INTO password_recovery_codes(username,token_hash,expires_at,created_at) VALUES(?,?,?,?) ON CONFLICT(username) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,created_at=excluded.created_at`, username, codeHash, expiresAt, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) ConsumeRecoveryCode(username, codeHash, passwordHash string, now int64) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var storedHash string
+	var expiresAt int64
+	if err := tx.QueryRow(`SELECT token_hash,expires_at FROM password_recovery_codes WHERE username=?`, username).Scan(&storedHash, &expiresAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if expiresAt <= now || subtle.ConstantTimeCompare([]byte(storedHash), []byte(codeHash)) != 1 {
+		return false, nil
+	}
+	result, err := tx.Exec(`UPDATE users SET password_hash=?,must_change_password=0,updated_at=? WHERE username=?`, passwordHash, now, username)
+	if err != nil {
+		return false, err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return false, sql.ErrNoRows
+	}
+	if _, err = tx.Exec(`DELETE FROM sessions WHERE username=?`, username); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(`DELETE FROM password_recovery_codes WHERE username=?`, username); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) CreateSession(tokenHash, username string, expiresAt int64) error {
