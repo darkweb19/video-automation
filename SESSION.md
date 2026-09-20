@@ -10,6 +10,8 @@
 - Included the generation-form clearing and custom provider-aware model picker in the shipped feature commit.
 - Passed `node --check static/app.js`, `gofmt`, `go test ./...`, `git diff --check`, and a real CLI smoke test.
 - Committed as `5f748f4 feat: add secure password recovery` and pushed through `origin/main`.
+- Fixed the unresponsive Forgot password button caused by potentially mixed cached frontend assets: static files now use a version query and `Cache-Control: no-store`.
+- Added coverage confirming versioned static URLs resolve and return the no-store policy; pushed as `c3f232c fix: prevent stale frontend assets`.
 
 ## Decisions locked
 - Recovery uses terminal-generated codes instead of email/SMTP.
@@ -22,12 +24,13 @@
 2. Sujan: decide later whether official provider SVG logos should replace the current branded initial marks.
 
 ## Next steps
-1. Rebuild/restart the app so the new command, migration, endpoint, and UI are active.
-2. Generate a recovery code and reset the forgotten password from the Forgot password form.
-3. Sign in with the new password and confirm the used code cannot be reused.
+1. Rebuild/recreate the Docker app from current `main`, then hard-refresh the login page once.
+2. Confirm Forgot password opens the recovery form.
+3. Generate a recovery code, reset the password, and confirm the used code cannot be reused.
 
 ## Gotchas
 - Docker command: `docker compose exec video-automation /app/video-automation recovery-code`.
 - Local command: `go run . recovery-code`; it must use the same `DATA_DIR` as the server.
 - Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` for Go checks on this machine.
 - The working tree was clean after the feature push; browser-based visual QA remains unavailable in this environment.
+- The hotfix only takes effect after the deployed container is rebuilt from commit `c3f232c` or newer.
