@@ -1,28 +1,32 @@
 # Session handoff — 2026-09-20
 
 ## What was done
-- Updated the generation form to clear prompt, model, duration, aspect ratio, validation, and cost estimate after a successful `/generate` response.
-- Kept form values intact when generation submission fails.
-- Replaced the native model select UI with an accessible custom picker showing provider marks, model names, providers, and prices.
-- Added keyboard navigation, outside-click dismissal, responsive styles, and loading/empty/error states for the picker.
-- Added `static/model-picker.css`, embedded/served it from both Go handlers, and covered its static route in tests.
-- Verified `static/app.js` with `node --check`, ran `gofmt`, passed `go test ./...`, and passed `git diff --check`.
+- Added `go run . recovery-code` and the Docker equivalent to generate a one-time password recovery code.
+- Added hashed recovery-code storage with 15-minute expiry, replacement invalidation, atomic consumption, and session invalidation.
+- Added a rate-limited unauthenticated password-recovery endpoint with generic invalid/expired errors.
+- Added a minimal Forgot password flow inside the existing white login card, including password confirmation.
+- Documented local and Docker recovery commands in README.md.
+- Added tests for successful recovery, expiry, one-time use, session invalidation, new-password login, and code formatting.
+- Previously added generation-form clearing and the custom provider-aware model picker remain in the uncommitted working tree.
+- Passed `node --check static/app.js`, `gofmt`, `go test ./...`, `git diff --check`, and a real CLI smoke test.
 
 ## Decisions locked
-- The generation form resets only after OpenRouter accepts the request; failed requests retain the user's work.
-- Resetting means the full form is cleared, including model selection and derived capability fields.
-- Provider identity uses lightweight branded initial marks with no external image/CDN dependency.
+- Recovery uses terminal-generated codes instead of email/SMTP.
+- Codes expire after 15 minutes, work once, and are stored only as SHA-256 hashes.
+- Generating a replacement invalidates the prior code; resetting a password invalidates all sessions.
+- The recovery UI stays inside the existing login card with no new dependency.
 
 ## Open questions
-1. Sujan: confirm the custom model picker visually in the running app; the in-app browser was unavailable during this session.
-2. Sujan: decide later whether official provider SVG logos are worth adding instead of the current branded initial marks.
+1. Sujan: visually confirm the recovery form and custom model picker; no browser backend was available for visual QA.
+2. Sujan: decide later whether official provider SVG logos should replace the current branded initial marks.
 
 ## Next steps
-1. Run the app, sign in, and visually inspect the model picker on desktop and mobile.
-2. Submit one low-cost generation and confirm the full form clears immediately after successful submission.
-3. Confirm a deliberately rejected submission leaves all form values intact.
+1. Rebuild/restart the app so the new command, migration, endpoint, and UI are active.
+2. Generate a recovery code and reset the forgotten password from the Forgot password form.
+3. Sign in with the new password and confirm the used code cannot be reused.
 
 ## Gotchas
-- Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` when running Go checks on this machine.
-- Browser-based visual QA could not run because no browser backend was available.
-- Existing working-tree changes are uncommitted except for this handoff file.
+- Docker command: `docker compose exec video-automation /app/video-automation recovery-code`.
+- Local command: `go run . recovery-code`; it must use the same `DATA_DIR` as the server.
+- Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` for Go checks on this machine.
+- Feature changes are uncommitted; only handoff updates are committed separately.
