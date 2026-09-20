@@ -180,10 +180,13 @@ func TestModelsUpstreamFailure(t *testing.T) {
 
 func TestStaticAssets(t *testing.T) {
 	handler := testHandler(&mockProvider{})
-	for _, target := range []string{"/", "/static/app.js", "/static/styles.css", "/static/model-picker.css"} {
+	for _, target := range []string{"/", "/static/app.js?v=test", "/static/styles.css?v=test", "/static/model-picker.css?v=test"} {
 		response := request(handler, http.MethodGet, target, "")
 		if response.Code != http.StatusOK || response.Body.Len() == 0 {
 			t.Fatalf("GET %s = %d (%d bytes)", target, response.Code, response.Body.Len())
+		}
+		if response.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("GET %s cache control = %q", target, response.Header().Get("Cache-Control"))
 		}
 	}
 }

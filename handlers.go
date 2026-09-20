@@ -58,6 +58,7 @@ func (h *handler) static(name, contentType string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	}

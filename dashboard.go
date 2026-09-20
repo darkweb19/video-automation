@@ -80,7 +80,7 @@ func (a *dashboardApp) static(name, contentType string) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(body)
 	}
 }
