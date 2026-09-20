@@ -1,26 +1,28 @@
 # Session handoff — 2026-09-20
 
 ## What was done
-- Built the standard-library Go API and embedded vanilla frontend for OpenRouter video generation.
-- Added current OpenRouter video model discovery, async submission, status normalization, and authenticated video streaming.
-- Added strict validation, bounded request bodies, safe job IDs, timeouts, same-origin POST protection, and structured logging.
-- Added handler and OpenRouter client tests with no real upstream calls.
-- Documented setup, API usage, capability fallback behavior, and verification in README.md.
+- Updated the generation form to clear prompt, model, duration, aspect ratio, validation, and cost estimate after a successful `/generate` response.
+- Kept form values intact when generation submission fails.
+- Replaced the native model select UI with an accessible custom picker showing provider marks, model names, providers, and prices.
+- Added keyboard navigation, outside-click dismissal, responsive styles, and loading/empty/error states for the picker.
+- Added `static/model-picker.css`, embedded/served it from both Go handlers, and covered its static route in tests.
+- Verified `static/app.js` with `node --check`, ran `gofmt`, passed `go test ./...`, and passed `git diff --check`.
 
 ## Decisions locked
-- Only `OPENROUTER_API_KEY` is used; `.env` files are not loaded automatically.
-- Duration and aspect ratio controls use OpenRouter metadata; missing metadata means provider defaults are omitted.
-- Provider progress is shown only when supplied; current documented responses use an indeterminate state.
-- Generated video is streamed through `/video` so the API key never reaches the browser.
+- The generation form resets only after OpenRouter accepts the request; failed requests retain the user's work.
+- Resetting means the full form is cleared, including model selection and derived capability fields.
+- Provider identity uses lightweight branded initial marks with no external image/CDN dependency.
 
 ## Open questions
-1. Live model discovery and paid generation need verification with Sujan's OpenRouter key and account credits.
+1. Sujan: confirm the custom model picker visually in the running app; the in-app browser was unavailable during this session.
+2. Sujan: decide later whether official provider SVG logos are worth adding instead of the current branded initial marks.
 
 ## Next steps
-- Set `OPENROUTER_API_KEY`, run `go run .`, and open http://localhost:8080.
-- Confirm `/models` against the live account, then run one low-cost generation if desired.
+1. Run the app, sign in, and visually inspect the model picker on desktop and mobile.
+2. Submit one low-cost generation and confirm the full form clears immediately after successful submission.
+3. Confirm a deliberately rejected submission leaves all form values intact.
 
 ## Gotchas
-- The machine's default Go build cache is access-denied; set `GOCACHE` to the workspace `.gocache` when running checks.
-- No browser runtime was available for visual inspection; mocked DOM/fetch behavior and local HTTP routes were verified.
-- The workspace is not a Git repository, so no commit was created.
+- Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` when running Go checks on this machine.
+- Browser-based visual QA could not run because no browser backend was available.
+- Existing working-tree changes are uncommitted except for this handoff file.
