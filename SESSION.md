@@ -7,8 +7,9 @@
 - Added a minimal Forgot password flow inside the existing white login card, including password confirmation.
 - Documented local and Docker recovery commands in README.md.
 - Added tests for successful recovery, expiry, one-time use, session invalidation, new-password login, and code formatting.
-- Previously added generation-form clearing and the custom provider-aware model picker remain in the uncommitted working tree.
+- Included the generation-form clearing and custom provider-aware model picker in the shipped feature commit.
 - Passed `node --check static/app.js`, `gofmt`, `go test ./...`, `git diff --check`, and a real CLI smoke test.
+- Committed as `5f748f4 feat: add secure password recovery` and pushed through `origin/main`.
 
 ## Decisions locked
 - Recovery uses terminal-generated codes instead of email/SMTP.
@@ -29,4 +30,4 @@
 - Docker command: `docker compose exec video-automation /app/video-automation recovery-code`.
 - Local command: `go run . recovery-code`; it must use the same `DATA_DIR` as the server.
 - Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` for Go checks on this machine.
-- Feature changes are uncommitted; only handoff updates are committed separately.
+- The working tree was clean after the feature push; browser-based visual QA remains unavailable in this environment.
