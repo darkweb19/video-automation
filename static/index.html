@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Video Generator</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="container">
+    <section class="card" aria-labelledby="page-title">
+      <h1 id="page-title">AI Video Generator</h1>
+
+      <form id="generator-form" novalidate>
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" name="prompt" rows="6" placeholder="Describe the video you want..." required></textarea>
+        <div class="field-meta"><span id="prompt-error" class="field-error" role="alert"></span><span id="prompt-count">0 / 4000</span></div>
+
+        <label for="model">Model</label>
+        <select id="model" name="model" required disabled>
+          <option value="">Loading video models...</option>
+        </select>
+
+        <div class="options">
+          <div>
+            <label for="duration">Duration</label>
+            <select id="duration" name="duration"></select>
+          </div>
+          <div>
+            <label for="aspect-ratio">Aspect ratio</label>
+            <select id="aspect-ratio" name="aspect_ratio"></select>
+          </div>
+        </div>
+
+        <button id="generate" type="submit" disabled>Generate Video</button>
+      </form>
+
+      <section class="status-section" aria-live="polite" aria-labelledby="status-heading">
+        <h2 id="status-heading">Generation Status</h2>
+        <p id="status-label">Idle</p>
+        <div id="progress-wrap" class="progress-wrap" hidden>
+          <div id="progress-bar" class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+        </div>
+        <p id="status-detail" class="muted"></p>
+        <div id="error" class="error" role="alert" hidden></div>
+        <button id="retry-status" class="secondary" type="button" hidden>Retry status</button>
+      </section>
+
+      <section id="video-section" class="video-section" aria-labelledby="video-heading" hidden>
+        <h2 id="video-heading">Generated Video</h2>
+        <video id="generated-video" controls playsinline preload="metadata"></video>
+        <a id="open-video" target="_blank" rel="noopener noreferrer">Open Video</a>
+      </section>
+    </section>
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
