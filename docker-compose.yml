@@ -1,0 +1,41 @@
+services:
+  # Docker creates named volumes as root-owned. This one-shot initializer grants
+  # the unprivileged application user access before the dashboard starts.
+  volume-init:
+    image: video-automation:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: |
+      mkdir -p /data/videos
+      chown -R app:app /data
+    volumes:
+      - video_automation_data:/data
+    restart: "no"
+
+  video-automation:
+    image: video-automation:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    environment:
+      DATA_DIR: /data
+      # Optional first-run bootstrap only. Prefer the authenticated Settings UI.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    volumes:
+      - video_automation_data:/data
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  video_automation_data:
+    name: video_automation_data

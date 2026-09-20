@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.gocache
+.gomodcache
+data
+*.exe
+*.test
+coverage.out
+SESSION.md
+README.md

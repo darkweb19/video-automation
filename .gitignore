@@ -3,3 +3,4 @@
 *.test
 coverage.out
 .gocache/
+.gomodcache/
