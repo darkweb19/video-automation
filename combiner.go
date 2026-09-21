@@ -60,7 +60,7 @@ func combineProjectVideo(ctx context.Context, runner commandRunner, inputs []str
 		_ = os.Remove(tempPath)
 		return 0, fmt.Errorf("combine scenes: %w", err)
 	}
-	file, err := os.Open(tempPath)
+	file, err := os.OpenFile(tempPath, os.O_RDWR, 0)
 	if err != nil {
 		return 0, err
 	}
