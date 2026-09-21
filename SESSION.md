@@ -1,30 +1,28 @@
 # Session handoff — 2026-09-21
 
 ## What was done
-- Added a durable 30-second Shorts project workflow: topic to free-model story/script to five independent six-second clips to final MP4.
-- Persisted projects, scripts, continuity bible, scene attempts/progress, provider IDs, clip paths, and final-video metadata in SQLite.
-- Added authenticated project APIs, a dashboard project view/history, overall and per-scene progress, and failed-scene-only retry.
-- Added FFmpeg to the Docker runtime; assembly normalizes five clips to silent 1080x1920 H.264, 30 fps, square pixels, and 30 seconds.
-- Kept the existing single-clip flow and protected stored project/video paths.
-- Verified gofmt, Go tests/vet, JavaScript syntax, diff whitespace, combiner mocks, and an isolated compiled-server `/health` response.
+- Delivered the durable project pipeline and generation audit trace in `3158fb0` (`feat: expose permanent generation pipeline trace`).
+- Added README documentation for prompts, schema, raw response, model metadata, normalized outputs, events, timestamps, and retries in `c6c4ea2` (`docs: document generation trace`).
+- Current verification: `go test ./...`, `node --check static/app.js`, and `git diff --check` pass.
+- No paid generation was performed; browser visual QA was unavailable.
 
 ## Decisions locked
-- Script generation uses `openrouter/free`; video scenes default to compatible MiniMax K3 Pro, with a compatible 6-second/9:16 fallback only when unavailable.
-- Each project contains exactly five scenes at six seconds; no narration, subtitles, music, YouTube upload, Hermes, or autonomous scheduling.
-- Retries of provider creation are explicit per scene; download failures retry durably without resubmitting a paid generation.
-- The final output is served from the authenticated dashboard at `/api/projects/{id}/video`.
+- Script generation uses `openrouter/free`; video scenes use the selected compatible six-second vertical model.
+- Every project has five independent six-second scenes and a combined 30-second vertical MP4.
+- The trace is an operational process/audit record, not hidden chain-of-thought or private reasoning.
+- Failed scenes can be retried without regenerating successful scenes; final video remains authenticated.
 
 ## Open questions
-1. Sujan: configure a valid OpenRouter key and perform a paid end-to-end generation after reviewing the selected model price.
-2. Sujan: visually verify the dashboard in Docker after rebuild; no browser UI session was available here.
+1. Sujan: configure a valid OpenRouter key and review the selected model price/balance.
+2. Sujan: perform a paid end-to-end generation after browser visual QA.
 
 ## Next steps
-1. Rebuild the Docker app from current `main`, then open the dashboard and set the OpenRouter API key.
-2. Confirm MiniMax K3 Pro appears as the selected compatible default and submit a real topic.
-3. Check the finished vertical MP4 in YouTube Shorts before considering an optional future upload integration.
+1. Rebuild the Docker app from current `main` and open the dashboard.
+2. Verify the pipeline timeline and collapsed generation details in a browser.
+3. Submit one low-cost project and inspect the resulting vertical MP4.
 
 ## Gotchas
-- Local FFmpeg and Docker are not installed; FFmpeg is installed in the Dockerfile and assembly behavior is covered with command-level mocks.
-- The available OpenRouter balance was not inspected and no paid API call was made.
-- `openrouter/free` availability can vary; a script-generation failure remains retryable at the project level.
-- Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` for Go checks on this machine.
+- Local Docker and FFmpeg are unavailable; FFmpeg is installed in the Docker image.
+- `openrouter/free` availability can vary, so text-generation failures remain retryable.
+- Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` for Go checks.
+- Back up `/data/secret.key` with the database; it is required to decrypt the stored API key.
