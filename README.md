@@ -76,6 +76,8 @@ Within that volume:
 
 Projects, scene prompts, provider job IDs, statuses, errors, costs, and file paths are stored in SQLite. The background worker resumes unfinished planning, polling, downloading, and combining work after a restart. If the process stops while a paid scene submission is in flight, that scene is marked failed instead of being silently resubmitted; use **Retry scene** after checking OpenRouter activity because the interrupted request may already have been accepted upstream.
 
+Each project also keeps a permanent process/audit trace. In **Generation details**, expandable sections retain the exact text-generation system prompt, user prompt, JSON schema, raw assistant response, router (`openrouter/free`), actual model when returned, normalized story/script/continuity, and each scene's final video prompt. The **Pipeline** timeline records stages, statuses, timestamps, errors, and attempts/retries. This is an operational audit trace, not hidden chain-of-thought or private reasoning. Raw assistant responses are capped at 1 MiB.
+
 The displayed project estimate covers five video generations. Provider pricing and capabilities can change, so confirm the estimate and account balance before starting a project.
 
 Back up the whole volume, including `secret.key`; the database cannot decrypt a stored API key without it. This command writes a portable archive to the current directory:
