@@ -61,6 +61,7 @@
     projectProgressBar: $("#project-progress-bar"),
     projectStatusDetail: $("#project-status-detail"),
     projectError: $("#project-error"),
+    retryProject: $("#retry-project"),
     projectStory: $("#project-story"),
     projectScenes: $("#project-scenes"),
     projectFinal: $("#project-final"),
@@ -989,6 +990,8 @@
     const error = projectValue(project, "error", "message");
     elements.projectError.hidden = !error;
     elements.projectError.textContent = error || "";
+    const hasFailedScene = scenes.some((scene) => ["failed", "error"].includes(String(projectValue(scene, "status")).toLowerCase()));
+    elements.retryProject.hidden = status !== "failed" || hasFailedScene;
 
     const story = projectValue(project, "story", "story_text");
     const script = projectValue(project, "script", "full_script", "fullScript");
@@ -1062,6 +1065,22 @@
     } catch (error) {
       setButtonBusy(button, false);
       if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function retryCurrentProject() {
+    const id = state.currentProjectID;
+    if (!id) return;
+    setButtonBusy(elements.retryProject, true, "Retrying...");
+    try {
+      const payload = await request(`/api/projects/${encodeURIComponent(id)}/retry`, { method: "POST" });
+      renderProject(payload && payload.project ? payload.project : payload);
+      toast("Project retry started.");
+      pollProject(id, 1000);
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(elements.retryProject, false);
     }
   }
 
@@ -1376,6 +1395,7 @@
     });
     elements.logout.addEventListener("click", logout);
     elements.generatorForm.addEventListener("submit", submitGeneration);
+    elements.retryProject.addEventListener("click", retryCurrentProject);
     elements.modeOptions.forEach((button) => button.addEventListener("click", () => setGenerationMode(button.dataset.mode)));
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
     elements.passwordForm.addEventListener("submit", updatePassword);
