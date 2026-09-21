@@ -35,6 +35,13 @@
     duration: $("#duration"),
     aspectRatio: $("#aspect-ratio"),
     prompt: $("#prompt"),
+    projectTopic: $("#project-topic"),
+    projectTopicError: $("#project-topic-error"),
+    projectInputs: $("#project-inputs"),
+    singleOptions: $("#single-options"),
+    projectOptions: $("#project-options"),
+    projectModelNote: $("#project-model-note"),
+    modeOptions: $$(".mode-option"),
     promptCount: $("#prompt-count"),
     promptError: $("#prompt-error"),
     costEstimate: $("#cost-estimate"),
@@ -49,6 +56,17 @@
     retryStatus: $("#retry-status"),
     generatedVideo: $("#generated-video"),
     openVideo: $("#open-video"),
+    projectStatus: $("#project-status"),
+    projectProgressWrap: $("#project-progress-wrap"),
+    projectProgressBar: $("#project-progress-bar"),
+    projectStatusDetail: $("#project-status-detail"),
+    projectError: $("#project-error"),
+    projectStory: $("#project-story"),
+    projectScenes: $("#project-scenes"),
+    projectFinal: $("#project-final"),
+    projectVideo: $("#project-video"),
+    projectDownload: $("#project-download"),
+    projectHistory: $("#project-history"),
     historyGrid: $("#history-grid"),
     recentList: $("#recent-list"),
     refreshHistory: $("#refresh-history"),
@@ -87,6 +105,10 @@
     historyRefreshTimer: 0,
     currentGenerationID: "",
     pollTimer: 0,
+    mode: "project",
+    projects: [],
+    currentProjectID: "",
+    projectPollTimer: 0,
     toastTimer: 0,
     authenticated: false,
     mustChangePassword: false
@@ -170,6 +192,63 @@
     state.pollTimer = 0;
   }
 
+  function stopProjectPolling() {
+    window.clearTimeout(state.projectPollTimer);
+    state.projectPollTimer = 0;
+  }
+
+  function projectValue(project, ...keys) {
+    for (const key of keys) {
+      if (project && project[key] !== undefined && project[key] !== null) return project[key];
+    }
+    return "";
+  }
+
+  function projectID(project) {
+    return String(projectValue(project, "id", "project_id", "projectID"));
+  }
+
+  function setGenerationMode(mode) {
+    state.mode = mode === "single" ? "single" : "project";
+    const project = state.mode === "project";
+    elements.modeOptions.forEach((button) => {
+      const active = button.dataset.mode === state.mode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    elements.projectInputs.hidden = !project;
+    elements.projectOptions.hidden = !project;
+    elements.projectModelNote.hidden = !project;
+    elements.singleOptions.hidden = project;
+    elements.prompt.hidden = project;
+    elements.prompt.closest(".field").hidden = project;
+    elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
+    elements.statusActive.hidden = project;
+    elements.projectStatus.hidden = !project;
+    if (project) {
+      const selected = state.models.find((model) => model.id === elements.model.value);
+      if (state.models.length && !supportsProject(selected)) {
+        const preferred = state.models.find((model) => supportsProject(model) && isMiniMaxK3Pro(model));
+        const fallback = state.models.find(supportsProject);
+        if (preferred || fallback) selectModel((preferred || fallback).id);
+      }
+      elements.statusEmpty.hidden = Boolean(state.currentProjectID);
+    } else {
+      elements.statusEmpty.hidden = false;
+    }
+    updateEstimate();
+  }
+
+  function supportsProject(model) {
+    return Array.isArray(model && model.durations) && model.durations.includes(6)
+      && Array.isArray(model.aspect_ratios) && model.aspect_ratios.includes("9:16");
+  }
+
+  function isMiniMaxK3Pro(model) {
+    const label = `${model && model.name || ""} ${model && model.id || ""}`.toLowerCase();
+    return label.includes("minimax") && label.includes("k3") && label.includes("pro");
+  }
+
   function stopHistoryRefresh() {
     window.clearTimeout(state.historyRefreshTimer);
     state.historyRefreshTimer = 0;
@@ -205,6 +284,7 @@
 
   function showLoggedOut() {
     stopPolling();
+    stopProjectPolling();
     stopHistoryRefresh();
     state.authenticated = false;
     state.currentGenerationID = "";
@@ -266,7 +346,10 @@
     elements.sidebar.classList.remove("open");
     elements.menuButton.setAttribute("aria-expanded", "false");
     if (view === "settings" && !state.mustChangePassword) loadSettings(false);
-    if (view === "history" && !state.mustChangePassword) loadHistory(false);
+    if (view === "history" && !state.mustChangePassword) {
+      loadHistory(false);
+      loadProjects(false);
+    }
   }
 
   function formatPriceNumber(value, minimum = 2) {
@@ -472,10 +555,12 @@
       return;
     }
     if (pricing.unit === "generation") {
-      elements.costEstimate.textContent = `${formatUSD(pricing.price)}/generation`;
+      elements.costEstimate.textContent = state.mode === "project"
+        ? `${formatUSD(pricing.price * 5)} total for 5 generations`
+        : `${formatUSD(pricing.price)}/generation`;
       return;
     }
-    const duration = Number(elements.duration.value);
+    const duration = state.mode === "project" ? 30 : Number(elements.duration.value);
     if (!Number.isFinite(duration) || duration <= 0) {
       elements.costEstimate.textContent = "Unavailable";
       return;
@@ -516,6 +601,17 @@
         option.value = model.id;
         elements.model.append(option);
       });
+      if (!elements.model.value) {
+        const preferred = state.models.find((model) => supportsProject(model) && isMiniMaxK3Pro(model));
+        const fallback = state.models.find(supportsProject);
+        const selected = preferred || fallback;
+        if (selected) elements.model.value = selected.id;
+        elements.projectModelNote.textContent = preferred
+          ? "MiniMax K3 Pro selected by default."
+          : fallback
+            ? `MiniMax K3 Pro is unavailable; ${fallback.name || fallback.id} is the compatible default.`
+            : "No available model currently supports both 6-second clips and vertical 9:16 output.";
+      }
       elements.model.disabled = false;
       elements.modelTrigger.disabled = false;
       renderModelMenu();
@@ -859,8 +955,206 @@
     }, delay);
   }
 
+  function projectScenes(project) {
+    const scenes = projectValue(project, "scenes", "scene_list");
+    return Array.isArray(scenes) ? scenes.slice().sort((a, b) => Number(projectValue(a, "scene_number", "number", "scene")) - Number(projectValue(b, "scene_number", "number", "scene"))) : [];
+  }
+
+  function projectProgress(project, scenes) {
+    const supplied = Number(projectValue(project, "progress", "progress_percent", "percent"));
+    if (Number.isFinite(supplied)) return Math.max(0, Math.min(100, supplied <= 1 ? supplied * 100 : supplied));
+    if (!scenes.length) return ["completed", "complete"].includes(String(project.status).toLowerCase()) ? 100 : 0;
+    const done = scenes.filter((scene) => ["completed", "complete", "ready"].includes(String(projectValue(scene, "status")).toLowerCase()) || projectValue(scene, "video_ready")).length;
+    return Math.round((done / 5) * 100);
+  }
+
+  function renderProject(project) {
+    if (!project) return;
+    const scenes = projectScenes(project);
+    const status = String(projectValue(project, "status") || "queued").toLowerCase();
+    const id = projectID(project);
+    const progress = projectProgress(project, scenes);
+    state.currentProjectID = id;
+    elements.statusEmpty.hidden = true;
+    elements.statusActive.hidden = true;
+    elements.projectStatus.hidden = false;
+    elements.statusBadge.className = `badge ${statusClass(status)}`;
+    elements.statusBadge.textContent = status.replaceAll("_", " ");
+    elements.projectProgressWrap.hidden = ["completed", "complete", "failed"].includes(status);
+    elements.projectProgressBar.style.width = `${progress}%`;
+    elements.projectProgressBar.style.animation = "none";
+    elements.projectStatusDetail.textContent = status === "completed" || status === "complete"
+      ? "Your 30-second video is ready."
+      : status === "failed" ? "The project could not be completed." : `Project progress: ${progress}%`;
+    const error = projectValue(project, "error", "message");
+    elements.projectError.hidden = !error;
+    elements.projectError.textContent = error || "";
+
+    const story = projectValue(project, "story", "story_text");
+    const script = projectValue(project, "script", "full_script", "fullScript");
+    elements.projectStory.hidden = !story && !script;
+    elements.projectStory.replaceChildren();
+    if (story) elements.projectStory.append(make("strong", { text: "Story" }), make("div", { text: story }));
+    if (script) elements.projectStory.append(make("strong", { text: "Full script" }), make("div", { text: script }));
+
+    elements.projectScenes.replaceChildren();
+    scenes.forEach((scene, index) => {
+      const number = Number(projectValue(scene, "scene_number", "number", "scene")) || index + 1;
+      const sceneStatus = String(projectValue(scene, "status") || "queued").toLowerCase();
+      const card = make("article", { className: `scene-card scene-${statusClass(sceneStatus)}` });
+      const head = make("div", { className: "scene-head" });
+      head.append(make("strong", { text: `Scene ${number}` }), statusBadge(sceneStatus));
+      card.append(head);
+      const sceneScript = projectValue(scene, "script", "scene_script", "description");
+      const prompt = projectValue(scene, "prompt", "video_prompt", "generation_prompt");
+      if (sceneScript) card.append(make("p", { className: "scene-copy", text: sceneScript }));
+      if (prompt) card.append(make("p", { className: "scene-prompt", text: prompt }));
+      const sceneError = projectValue(scene, "error", "message");
+      if (sceneError) card.append(make("div", { className: "alert error", text: sceneError }));
+      if (["failed", "error"].includes(sceneStatus)) {
+        const retry = make("button", { className: "button secondary scene-retry", type: "button", text: "Retry scene" });
+        retry.addEventListener("click", () => retryProjectScene(id, number, retry));
+        card.append(retry);
+      }
+      elements.projectScenes.append(card);
+    });
+
+    const videoReady = Boolean(projectValue(project, "video_ready", "final_video_ready")) || status === "completed" || status === "complete";
+    elements.projectFinal.hidden = !videoReady || !id;
+    if (videoReady && id) {
+      const videoURL = `/api/projects/${encodeURIComponent(id)}/video`;
+      elements.projectVideo.src = videoURL;
+      elements.projectDownload.href = `${videoURL}?download=1`;
+    }
+  }
+
+  async function pollProject(id, delay = 0) {
+    stopProjectPolling();
+    state.currentProjectID = id;
+    state.projectPollTimer = window.setTimeout(async () => {
+      if (!state.authenticated || state.currentProjectID !== id || state.mode !== "project") return;
+      try {
+        const payload = await request(`/api/projects/${encodeURIComponent(id)}`);
+        const project = payload && payload.project ? payload.project : payload;
+        renderProject(project);
+        const status = String(projectValue(project, "status")).toLowerCase();
+        if (!["completed", "complete", "failed", "error"].includes(status)) pollProject(id, 3000);
+        else {
+          await loadProjects(false);
+          toast(status === "failed" || status === "error" ? "Project failed." : "30-second video saved.", status === "failed" || status === "error");
+        }
+      } catch (error) {
+        if (error.status === 401) return;
+        elements.projectError.hidden = false;
+        elements.projectError.textContent = error.message;
+        pollProject(id, 5000);
+      }
+    }, delay);
+  }
+
+  async function retryProjectScene(id, number, button) {
+    setButtonBusy(button, true, "Retryingâ€¦");
+    try {
+      const payload = await request(`/api/projects/${encodeURIComponent(id)}/scenes/${encodeURIComponent(number)}/retry`, { method: "POST" });
+      renderProject(payload && payload.project ? payload.project : payload);
+      toast(`Scene ${number} retry submitted.`);
+      pollProject(id, 1000);
+    } catch (error) {
+      setButtonBusy(button, false);
+      if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function loadProjects(notify = true) {
+    if (!state.authenticated || state.mustChangePassword) return;
+    try {
+      const payload = await request("/api/projects");
+      state.projects = Array.isArray(payload) ? payload : (Array.isArray(payload && payload.projects) ? payload.projects : []);
+      if (!state.currentProjectID) {
+        const active = state.projects.find((project) => !["completed", "complete", "failed", "error"].includes(String(projectValue(project, "status")).toLowerCase()));
+        if (active) state.currentProjectID = projectID(active);
+      }
+      elements.projectHistory.replaceChildren();
+      if (state.projects.length) {
+        elements.projectHistory.append(make("h3", { className: "project-history-title", text: "30-second projects" }));
+        const list = make("div", { className: "project-history-list" });
+        state.projects.forEach((project) => {
+          const id = projectID(project);
+          const item = make("article", { className: "project-history-item" });
+          const copy = make("div");
+          copy.append(make("strong", { text: projectValue(project, "topic", "title", "story") || "Untitled project" }));
+          copy.append(make("p", { text: `${String(projectValue(project, "status") || "queued").replaceAll("_", " ")} · ${formatDate(projectValue(project, "created_at", "createdAt"))}` }));
+          item.append(copy);
+          const open = make("button", { className: "button secondary", type: "button", text: "Open" });
+          open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); pollProject(id, 0); });
+          item.append(open);
+          list.append(item);
+        });
+        elements.projectHistory.append(list);
+        if (state.currentProjectID && state.mode === "project") {
+          const active = state.projects.find((project) => projectID(project) === state.currentProjectID);
+          if (active) {
+            setGenerationMode("project");
+            renderProject(active);
+            const activeStatus = String(projectValue(active, "status")).toLowerCase();
+            if (!["completed", "complete", "failed", "error"].includes(activeStatus)) pollProject(state.currentProjectID, 0);
+          }
+        }
+      }
+    } catch (error) {
+      if (notify && error.status !== 401 && error.status !== 404) toast(error.message, true);
+    }
+  }
+
+  async function submitProject() {
+    const topic = elements.projectTopic.value.trim();
+    elements.projectTopicError.textContent = "";
+    if (!topic) {
+      elements.projectTopicError.textContent = "Enter a topic or story idea.";
+      elements.projectTopic.focus();
+      return;
+    }
+    if (!elements.model.value) {
+      toast("Select an available model first.", true);
+      return;
+    }
+    setButtonBusy(elements.generate, true, "Building projectâ€¦");
+    elements.statusEmpty.hidden = true;
+    elements.projectStatus.hidden = false;
+    elements.statusBadge.className = "badge queued";
+    elements.statusBadge.textContent = "Submitting";
+    elements.projectStatusDetail.textContent = "Generating story and five-scene scriptâ€¦";
+    elements.projectError.hidden = true;
+    elements.projectScenes.replaceChildren();
+    try {
+      const payload = await request("/api/projects", { method: "POST", body: JSON.stringify({ topic, model: elements.model.value }) });
+      const project = payload && payload.project ? payload.project : payload;
+      const id = projectID(project);
+      renderProject(project);
+      if (!id) throw new APIError("Project was created without an id.", 500);
+      elements.projectTopic.value = "";
+      elements.projectTopicError.textContent = "";
+      toast("Project submitted. Script generation has started.");
+      pollProject(id, 1000);
+      loadProjects(false);
+    } catch (error) {
+      elements.projectError.hidden = false;
+      elements.projectError.textContent = error.message;
+      elements.statusBadge.className = "badge failed";
+      elements.statusBadge.textContent = "Failed";
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(elements.generate, false);
+      elements.generate.disabled = !elements.model.value;
+    }
+  }
+
   async function submitGeneration(event) {
     event.preventDefault();
+    if (state.mode === "project") {
+      await submitProject();
+      return;
+    }
     if (state.mustChangePassword) {
       navigate("settings");
       return;
@@ -1082,9 +1376,10 @@
     });
     elements.logout.addEventListener("click", logout);
     elements.generatorForm.addEventListener("submit", submitGeneration);
+    elements.modeOptions.forEach((button) => button.addEventListener("click", () => setGenerationMode(button.dataset.mode)));
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
     elements.passwordForm.addEventListener("submit", updatePassword);
-    elements.refreshHistory.addEventListener("click", () => loadHistory(true));
+    elements.refreshHistory.addEventListener("click", () => { loadHistory(true); loadProjects(true); });
     elements.model.addEventListener("change", updateModelOptions);
     elements.modelTrigger.addEventListener("click", () => {
       if (elements.modelMenu.hidden) openModelMenu();
@@ -1131,18 +1426,20 @@
         stopHistoryRefresh();
       } else if (state.authenticated && !state.mustChangePassword) {
         loadHistory(false, false);
+        loadProjects(false);
       }
     });
   }
 
   async function bootstrap() {
     bindEvents();
+    setGenerationMode("project");
     elements.menuButton.setAttribute("aria-expanded", "false");
     try {
       const session = await request("/api/session", {}, true);
       showAuthenticated(session.username, session.must_change_password);
       if (!state.mustChangePassword) {
-        await Promise.allSettled([loadHistory(false, false), loadModels(false), loadSettings(false)]);
+        await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false), loadSettings(false)]);
       }
     } catch (error) {
       showLoggedOut();

@@ -82,7 +82,15 @@
           <div class="two-column">
             <section class="panel generator-panel">
               <div class="panel-head"><div><h2>New generation</h2><p>Configure your video request</p></div></div>
+              <div id="generation-mode" class="mode-switch" role="tablist" aria-label="Generation type">
+                <button class="mode-option active" type="button" data-mode="project" role="tab" aria-selected="true">30-second project</button>
+                <button class="mode-option" type="button" data-mode="single" role="tab" aria-selected="false">Single clip</button>
+              </div>
               <form id="generator-form" novalidate>
+                <div id="project-inputs">
+                  <div class="field"><div class="label-row"><label for="project-topic">Topic or story idea</label><span>Auto-scripted</span></div><textarea id="project-topic" rows="7" placeholder="What should this 30-second Short be about?" required></textarea><p id="project-topic-error" class="form-error"></p></div>
+                  <p class="field-hint">We generate the story, full script, and five connected six-second scenes automatically.</p>
+                </div>
                 <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" required></textarea><p id="prompt-error" class="form-error"></p></div>
                 <div class="field model-field">
                   <label id="model-label" for="model-trigger">Model and price</label>
@@ -94,10 +102,12 @@
                     <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
                   </div>
                   <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models…</option></select>
+                  <small id="project-model-note">MiniMax K3 Pro is preferred when it is available with 6-second vertical output.</small>
                 </div>
-                <div class="form-grid"><div class="field"><label for="duration">Duration</label><select id="duration"></select></div><div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div></div>
+                <div id="single-options" class="form-grid"><div class="field"><label for="duration">Duration</label><select id="duration"></select></div><div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div></div>
+                <div id="project-options" class="project-options"><span>Output</span><strong>Vertical 9:16 · 30 seconds · 5 scenes</strong></div>
                 <div class="estimate"><span>Estimated generation cost</span><strong id="cost-estimate">Unavailable</strong><small>Final cost comes directly from OpenRouter.</small></div>
-                <button id="generate" class="button primary full" type="submit" disabled>Generate video</button>
+                <button id="generate" class="button primary full" type="submit" disabled>Generate 30-second project</button>
               </form>
             </section>
             <aside class="panel status-panel">
@@ -111,6 +121,14 @@
                 <video id="generated-video" controls playsinline preload="metadata" hidden></video>
                 <a id="open-video" class="button secondary full" hidden>Download video</a>
               </div>
+              <div id="project-status" hidden>
+                <div id="project-progress-wrap" class="progress-wrap"><div id="project-progress-bar" class="progress-bar"></div></div>
+                <p id="project-status-detail" class="subtle">Preparing your projectâ€¦</p>
+                <div id="project-error" class="alert error" role="alert" hidden></div>
+                <div id="project-story" class="project-story" hidden></div>
+                <div id="project-scenes" class="project-scenes"></div>
+                <div id="project-final" class="project-final" hidden><video id="project-video" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a></div>
+              </div>
             </aside>
           </div>
         </section>
@@ -118,6 +136,7 @@
         <section class="view" data-page="history">
           <section class="panel">
             <div class="panel-head"><div><h2>Generation history</h2><p>Videos and metadata stored in your Docker volume</p></div><button id="refresh-history" class="button secondary">Refresh</button></div>
+            <div id="project-history" class="project-history"></div>
             <div id="history-grid" class="history-grid"><div class="empty">No generations yet.</div></div>
           </section>
         </section>
