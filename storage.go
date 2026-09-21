@@ -15,9 +15,10 @@ import (
 )
 
 type Store struct {
-	db       *sql.DB
-	dataDir  string
-	videoDir string
+	db         *sql.DB
+	dataDir    string
+	videoDir   string
+	projectDir string
 }
 
 type GenerationRecord struct {
@@ -47,12 +48,16 @@ func OpenStore(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(videoDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
+	projectDir := filepath.Join(dataDir, "projects")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create project directory: %w", err)
+	}
 	db, err := sql.Open("sqlite", filepath.Join(dataDir, "app.db"))
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, dataDir: dataDir, videoDir: videoDir}
+	store := &Store{db: db, dataDir: dataDir, videoDir: videoDir, projectDir: projectDir}
 	if err := store.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -112,8 +117,45 @@ func (s *Store) migrate() error {
 		);
 		CREATE INDEX IF NOT EXISTS generations_created_at ON generations(created_at DESC);
 		CREATE INDEX IF NOT EXISTS generations_status ON generations(status);
+		CREATE TABLE IF NOT EXISTS video_projects (
+			id TEXT PRIMARY KEY,
+			topic TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			story TEXT NOT NULL DEFAULT '',
+			script TEXT NOT NULL DEFAULT '',
+			continuity TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL,
+			status TEXT NOT NULL,
+			error TEXT NOT NULL DEFAULT '',
+			final_video_path TEXT NOT NULL DEFAULT '',
+			final_size_bytes INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS project_scenes (
+			project_id TEXT NOT NULL REFERENCES video_projects(id) ON DELETE CASCADE,
+			scene_number INTEGER NOT NULL CHECK(scene_number BETWEEN 1 AND 5),
+			title TEXT NOT NULL,
+			scene_script TEXT NOT NULL,
+			prompt TEXT NOT NULL,
+			status TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			provider_generation_id TEXT NOT NULL DEFAULT '',
+			cost_usd TEXT NOT NULL DEFAULT '',
+			video_path TEXT NOT NULL DEFAULT '',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			download_attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(project_id, scene_number)
+		);
+		CREATE INDEX IF NOT EXISTS video_projects_status ON video_projects(status);
+		CREATE INDEX IF NOT EXISTS project_scenes_status ON project_scenes(status,next_attempt_at);
 		DELETE FROM sessions WHERE expires_at <= unixepoch();
 		DELETE FROM password_recovery_codes WHERE expires_at <= unixepoch();
+		UPDATE project_scenes SET status='failed',error='Scene submission was interrupted; retry this scene',updated_at=unixepoch() WHERE status='submitting';
 	`)
 	if err != nil {
 		return fmt.Errorf("initialize database: %w", err)
