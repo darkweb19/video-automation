@@ -1,36 +1,30 @@
-# Session handoff — 2026-09-20
+# Session handoff — 2026-09-21
 
 ## What was done
-- Added `go run . recovery-code` and the Docker equivalent to generate a one-time password recovery code.
-- Added hashed recovery-code storage with 15-minute expiry, replacement invalidation, atomic consumption, and session invalidation.
-- Added a rate-limited unauthenticated password-recovery endpoint with generic invalid/expired errors.
-- Added a minimal Forgot password flow inside the existing white login card, including password confirmation.
-- Documented local and Docker recovery commands in README.md.
-- Added tests for successful recovery, expiry, one-time use, session invalidation, new-password login, and code formatting.
-- Included the generation-form clearing and custom provider-aware model picker in the shipped feature commit.
-- Passed `node --check static/app.js`, `gofmt`, `go test ./...`, `git diff --check`, and a real CLI smoke test.
-- Committed as `5f748f4 feat: add secure password recovery` and pushed through `origin/main`.
-- Fixed the unresponsive Forgot password button caused by potentially mixed cached frontend assets: static files now use a version query and `Cache-Control: no-store`.
-- Added coverage confirming versioned static URLs resolve and return the no-store policy; pushed as `c3f232c fix: prevent stale frontend assets`.
+- Added a durable 30-second Shorts project workflow: topic to free-model story/script to five independent six-second clips to final MP4.
+- Persisted projects, scripts, continuity bible, scene attempts/progress, provider IDs, clip paths, and final-video metadata in SQLite.
+- Added authenticated project APIs, a dashboard project view/history, overall and per-scene progress, and failed-scene-only retry.
+- Added FFmpeg to the Docker runtime; assembly normalizes five clips to silent 1080x1920 H.264, 30 fps, square pixels, and 30 seconds.
+- Kept the existing single-clip flow and protected stored project/video paths.
+- Verified gofmt, Go tests/vet, JavaScript syntax, diff whitespace, combiner mocks, and an isolated compiled-server `/health` response.
 
 ## Decisions locked
-- Recovery uses terminal-generated codes instead of email/SMTP.
-- Codes expire after 15 minutes, work once, and are stored only as SHA-256 hashes.
-- Generating a replacement invalidates the prior code; resetting a password invalidates all sessions.
-- The recovery UI stays inside the existing login card with no new dependency.
+- Script generation uses `openrouter/free`; video scenes default to compatible MiniMax K3 Pro, with a compatible 6-second/9:16 fallback only when unavailable.
+- Each project contains exactly five scenes at six seconds; no narration, subtitles, music, YouTube upload, Hermes, or autonomous scheduling.
+- Retries of provider creation are explicit per scene; download failures retry durably without resubmitting a paid generation.
+- The final output is served from the authenticated dashboard at `/api/projects/{id}/video`.
 
 ## Open questions
-1. Sujan: visually confirm the recovery form and custom model picker; no browser backend was available for visual QA.
-2. Sujan: decide later whether official provider SVG logos should replace the current branded initial marks.
+1. Sujan: configure a valid OpenRouter key and perform a paid end-to-end generation after reviewing the selected model price.
+2. Sujan: visually verify the dashboard in Docker after rebuild; no browser UI session was available here.
 
 ## Next steps
-1. Rebuild/recreate the Docker app from current `main`, then hard-refresh the login page once.
-2. Confirm Forgot password opens the recovery form.
-3. Generate a recovery code, reset the password, and confirm the used code cannot be reused.
+1. Rebuild the Docker app from current `main`, then open the dashboard and set the OpenRouter API key.
+2. Confirm MiniMax K3 Pro appears as the selected compatible default and submit a real topic.
+3. Check the finished vertical MP4 in YouTube Shorts before considering an optional future upload integration.
 
 ## Gotchas
-- Docker command: `docker compose exec video-automation /app/video-automation recovery-code`.
-- Local command: `go run . recovery-code`; it must use the same `DATA_DIR` as the server.
+- Local FFmpeg and Docker are not installed; FFmpeg is installed in the Dockerfile and assembly behavior is covered with command-level mocks.
+- The available OpenRouter balance was not inspected and no paid API call was made.
+- `openrouter/free` availability can vary; a script-generation failure remains retryable at the project level.
 - Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` for Go checks on this machine.
-- The working tree was clean after the feature push; browser-based visual QA remains unavailable in this environment.
-- The hotfix only takes effect after the deployed container is rebuilt from commit `c3f232c` or newer.
