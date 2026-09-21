@@ -10,9 +10,10 @@ COPY . ./
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/video-automation .
 
 FROM alpine:3.24
-RUN addgroup -S app && adduser -S -G app -h /app app \
-    && mkdir -p /data \
-    && chown -R app:app /data
+RUN apk add --no-cache ffmpeg \
+	&& addgroup -S app && adduser -S -G app -h /app app \
+	&& mkdir -p /data/videos /data/projects \
+	&& chown -R app:app /data
 
 COPY --from=build --chown=app:app /out/video-automation /app/video-automation
 
