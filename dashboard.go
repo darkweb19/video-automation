@@ -46,6 +46,12 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("POST /generate", app.requirePasswordChanged(http.HandlerFunc(app.generate)))
 	mux.Handle("GET /status", app.requirePasswordChanged(http.HandlerFunc(app.status)))
 	mux.Handle("GET /api/generations", app.requirePasswordChanged(http.HandlerFunc(app.history)))
+	mux.Handle("POST /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.createProject)))
+	mux.Handle("GET /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.projects)))
+	mux.Handle("GET /api/projects/{id}", app.requirePasswordChanged(http.HandlerFunc(app.project)))
+	mux.Handle("POST /api/projects/{id}/retry", app.requirePasswordChanged(http.HandlerFunc(app.retryProject)))
+	mux.Handle("POST /api/projects/{id}/scenes/{scene}/retry", app.requirePasswordChanged(http.HandlerFunc(app.retryProjectScene)))
+	mux.Handle("GET /api/projects/{id}/video", app.requirePasswordChanged(http.HandlerFunc(app.projectVideo)))
 	mux.Handle("DELETE /api/generations/{id}", app.requirePasswordChanged(http.HandlerFunc(app.deleteGeneration)))
 	mux.Handle("GET /video", app.requirePasswordChanged(http.HandlerFunc(app.video)))
 	mux.Handle("GET /api/settings", app.requirePasswordChanged(http.HandlerFunc(app.settings)))
@@ -410,6 +416,184 @@ func (a *dashboardApp) history(w http.ResponseWriter, r *http.Request) {
 		next = strconv.FormatInt(last.CreatedAt, 10) + ":" + last.ID
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"generations": records, "stats": stats, "next_page": next})
+}
+
+func compatibleProjectModel(model VideoModel) bool {
+	return containsInt(model.Durations, ProjectSceneSeconds) && containsString(model.AspectRatios, ProjectAspectRatio)
+}
+
+func preferredProjectModel(models []VideoModel) (VideoModel, bool) {
+	for _, model := range models {
+		name := strings.ToLower(model.ID + " " + model.Name)
+		if compatibleProjectModel(model) && strings.Contains(name, "minimax") && strings.Contains(name, "k3") && strings.Contains(name, "pro") {
+			return model, true
+		}
+	}
+	for _, model := range models {
+		if compatibleProjectModel(model) {
+			return model, true
+		}
+	}
+	return VideoModel{}, false
+}
+
+func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) || !isJSON(r.Header.Get("Content-Type")) {
+		if !isJSON(r.Header.Get("Content-Type")) {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		}
+		return
+	}
+	var input ProjectRequest
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	input.Topic, input.Model = strings.TrimSpace(input.Topic), strings.TrimSpace(input.Model)
+	if input.Topic == "" || len([]rune(input.Topic)) > MaxPromptLength {
+		writeError(w, http.StatusBadRequest, "a topic or story idea of at most 4,000 characters is required")
+		return
+	}
+	provider, err := a.provider()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	models, err := provider.ListVideoModels(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "unable to validate video models")
+		return
+	}
+	var model VideoModel
+	var ok bool
+	if input.Model == "" {
+		model, ok = preferredProjectModel(models)
+	} else {
+		model, ok = findModel(models, input.Model)
+		ok = ok && compatibleProjectModel(model)
+	}
+	if !ok {
+		writeError(w, http.StatusBadRequest, "select a video model that supports 6-second clips in 9:16")
+		return
+	}
+	project, err := a.store.InsertProject(input.Topic, model.ID)
+	if err != nil {
+		a.logger.Error("create project failed")
+		writeError(w, http.StatusInternalServerError, "unable to create project")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, project)
+}
+
+func (a *dashboardApp) projects(w http.ResponseWriter, _ *http.Request) {
+	projects, err := a.store.Projects(24)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to load projects")
+		return
+	}
+	if projects == nil {
+		projects = []VideoProject{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
+}
+
+func (a *dashboardApp) project(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	project, err := a.store.Project(id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to load project")
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
+}
+
+func (a *dashboardApp) retryProjectScene(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	number, err := strconv.Atoi(r.PathValue("scene"))
+	if !safeID(id) || err != nil || number < 1 || number > ProjectSceneCount {
+		writeError(w, http.StatusBadRequest, "invalid project or scene")
+		return
+	}
+	if err := a.store.RetryScene(id, number); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusConflict, "only a failed scene can be retried")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to retry scene")
+		return
+	}
+	project, err := a.store.Project(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to load project")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, project)
+}
+
+func (a *dashboardApp) retryProject(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	if err := a.store.RetryProject(id); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusConflict, "only a failed project can be retried")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to retry project")
+		return
+	}
+	project, _ := a.store.Project(id)
+	writeJSON(w, http.StatusAccepted, project)
+}
+
+func (a *dashboardApp) projectVideo(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	project, err := a.store.Project(id)
+	if err != nil || !project.FinalVideoReady {
+		writeError(w, http.StatusNotFound, "final video not found")
+		return
+	}
+	clean := filepath.Clean(project.FinalVideoPath)
+	rel, err := filepath.Rel(a.store.projectDir, clean)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		writeError(w, http.StatusForbidden, "invalid final video path")
+		return
+	}
+	file, err := os.Open(clean)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "final video not found")
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to read final video")
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="project-%s.mp4"`, id))
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	http.ServeContent(w, r, filepath.Base(clean), info.ModTime(), file)
 }
 
 func (a *dashboardApp) deleteGeneration(w http.ResponseWriter, r *http.Request) {

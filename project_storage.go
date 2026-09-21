@@ -286,6 +286,26 @@ func (s *Store) RetryScene(projectID string, number int) error {
 	return err
 }
 
+func (s *Store) RetryProject(projectID string) error {
+	project, err := s.Project(projectID)
+	if err != nil || project.Status != "failed" {
+		return sql.ErrNoRows
+	}
+	status := "planning"
+	if project.Script != "" {
+		status = "generating"
+		allComplete := len(project.Scenes) == ProjectSceneCount
+		for _, scene := range project.Scenes {
+			allComplete = allComplete && scene.Status == "completed"
+		}
+		if allComplete {
+			status = "combining"
+		}
+	}
+	_, err = s.db.Exec(`UPDATE video_projects SET status=?,error='',updated_at=? WHERE id=? AND status='failed'`, status, time.Now().Unix(), projectID)
+	return err
+}
+
 func (s *Store) SceneVideoPath(projectID string, number int) string {
 	return filepath.Join(s.projectDir, projectID, fmt.Sprintf("scene-%d.mp4", number))
 }
