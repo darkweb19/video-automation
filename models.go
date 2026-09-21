@@ -12,10 +12,11 @@ const (
 
 // GenerateRequest is the application's provider-independent video request.
 type GenerateRequest struct {
-	Prompt      string `json:"prompt"`
-	Model       string `json:"model"`
-	Duration    int    `json:"duration,omitempty"`
-	AspectRatio string `json:"aspect_ratio,omitempty"`
+	Prompt        string `json:"prompt"`
+	Model         string `json:"model"`
+	Duration      int    `json:"duration,omitempty"`
+	AspectRatio   string `json:"aspect_ratio,omitempty"`
+	GenerateAudio *bool  `json:"generate_audio,omitempty"`
 }
 
 // Generation is the normalized state returned to the browser.
@@ -55,4 +56,71 @@ type VideoProvider interface {
 // browser without exposing the upstream API credential.
 type VideoContentProvider interface {
 	GetVideoContent(context.Context, string, string) (*http.Response, error)
+}
+
+const (
+	ProjectSceneCount   = 5
+	ProjectSceneSeconds = 6
+	ProjectAspectRatio  = "9:16"
+	ScriptModel         = "openrouter/free"
+)
+
+type ProjectRequest struct {
+	Topic string `json:"topic"`
+	Model string `json:"model"`
+}
+
+type StoryPlan struct {
+	Title      string           `json:"title"`
+	Story      string           `json:"story"`
+	Script     string           `json:"script"`
+	Continuity string           `json:"continuity"`
+	Scenes     []StoryPlanScene `json:"scenes"`
+}
+
+type StoryPlanScene struct {
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	Script      string `json:"script"`
+	VideoPrompt string `json:"video_prompt"`
+}
+
+type ProjectScene struct {
+	ProjectID            string `json:"project_id,omitempty"`
+	Number               int    `json:"number"`
+	Title                string `json:"title"`
+	Script               string `json:"script"`
+	Prompt               string `json:"prompt"`
+	Status               string `json:"status"`
+	Attempts             int    `json:"attempts"`
+	ProviderGenerationID string `json:"provider_generation_id,omitempty"`
+	CostUSD              string `json:"cost_usd,omitempty"`
+	VideoPath            string `json:"-"`
+	VideoReady           bool   `json:"video_ready"`
+	SizeBytes            int64  `json:"size_bytes,omitempty"`
+	Error                string `json:"error,omitempty"`
+	DownloadAttempts     int    `json:"download_attempts,omitempty"`
+	NextAttemptAt        int64  `json:"next_attempt_at,omitempty"`
+	CreatedAt            int64  `json:"created_at"`
+	UpdatedAt            int64  `json:"updated_at"`
+}
+
+type VideoProject struct {
+	ID              string         `json:"id"`
+	Topic           string         `json:"topic"`
+	Title           string         `json:"title,omitempty"`
+	Story           string         `json:"story,omitempty"`
+	Script          string         `json:"script,omitempty"`
+	Continuity      string         `json:"continuity,omitempty"`
+	Model           string         `json:"model"`
+	Status          string         `json:"status"`
+	Progress        int            `json:"progress"`
+	Error           string         `json:"error,omitempty"`
+	FinalVideoPath  string         `json:"-"`
+	FinalVideoReady bool           `json:"final_video_ready"`
+	FinalSizeBytes  int64          `json:"final_size_bytes,omitempty"`
+	TotalCostUSD    string         `json:"total_cost_usd,omitempty"`
+	Scenes          []ProjectScene `json:"scenes"`
+	CreatedAt       int64          `json:"created_at"`
+	UpdatedAt       int64          `json:"updated_at"`
 }
