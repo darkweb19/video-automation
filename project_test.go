@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -154,5 +156,69 @@ func TestPreferredProjectModelRequiresVerticalSixSeconds(t *testing.T) {
 	model, ok := preferredProjectModel(models)
 	if !ok || model.ID != "other/vertical" {
 		t.Fatalf("unexpected preferred model: %+v, %v", model, ok)
+	}
+}
+
+func TestCreateProjectDefaultsToCompatibleMiniMaxK3Pro(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/videos/models" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"minimax/k3-pro","name":"MiniMax K3 Pro","supported_durations":[6],"supported_aspect_ratios":["9:16"]}]}`))
+	}))
+	defer server.Close()
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := security.Encrypt("test-openrouter-key")
+	if err != nil || store.SetSetting(apiKeySetting, encrypted) != nil {
+		t.Fatal("save test key")
+	}
+	app := &dashboardApp{store: store, security: security, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), baseURL: server.URL}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/projects", strings.NewReader(`{"topic":"A fox finds a lost star","model":""}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.createProject(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var project VideoProject
+	if err := json.NewDecoder(recorder.Body).Decode(&project); err != nil {
+		t.Fatal(err)
+	}
+	if project.Model != "minimax/k3-pro" || project.Status != "planning" {
+		t.Fatalf("project = %+v", project)
+	}
+}
+
+func TestProjectFinalVideoIsServedFromProjectStorage(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("topic", "minimax/k3-pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.ProjectFinalPath(project.ID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("final-video")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkProjectReady(project.ID, path, int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+	app := &dashboardApp{store: store, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/video?download=1", nil)
+	request.SetPathValue("id", project.ID)
+	app.projectVideo(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != string(content) {
+		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Header().Get("Content-Disposition"), project.ID) {
+		t.Fatalf("content disposition = %q", recorder.Header().Get("Content-Disposition"))
 	}
 }
