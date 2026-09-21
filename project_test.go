@@ -225,7 +225,7 @@ func TestCombineProjectVideoBuildsNormalizedThirtySecondOutput(t *testing.T) {
 			t.Fatalf("runner = %s", name)
 		}
 		joined := strings.Join(args, " ")
-		for _, expected := range []string{"scale=1080:1920", "trim=duration=6", "concat=n=5:v=1:a=0", "-an", "libx264"} {
+		for _, expected := range []string{"scale=1080:1920", "setsar=1", "trim=duration=6", "concat=n=5:v=1:a=0", "-an", "libx264"} {
 			if !strings.Contains(joined, expected) {
 				t.Fatalf("missing %q in FFmpeg args", expected)
 			}

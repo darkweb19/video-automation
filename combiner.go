@@ -49,7 +49,7 @@ func combineProjectVideo(ctx context.Context, runner commandRunner, inputs []str
 	labels := strings.Builder{}
 	for index := range inputs {
 		label := fmt.Sprintf("v%d", index)
-		filters = append(filters, fmt.Sprintf("[%d:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30,tpad=stop_mode=clone:stop_duration=%d,trim=duration=%d,setpts=PTS-STARTPTS[%s]", index, ProjectSceneSeconds, ProjectSceneSeconds, label))
+		filters = append(filters, fmt.Sprintf("[%d:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration=%d,trim=duration=%d,setpts=PTS-STARTPTS[%s]", index, ProjectSceneSeconds, ProjectSceneSeconds, label))
 		labels.WriteString("[")
 		labels.WriteString(label)
 		labels.WriteString("]")
