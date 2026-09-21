@@ -154,6 +154,31 @@ func (s *Store) migrate() error {
 		);
 		CREATE INDEX IF NOT EXISTS video_projects_status ON video_projects(status);
 		CREATE INDEX IF NOT EXISTS project_scenes_status ON project_scenes(status,next_attempt_at);
+		CREATE TABLE IF NOT EXISTS project_text_generation (
+			project_id TEXT PRIMARY KEY REFERENCES video_projects(id) ON DELETE CASCADE,
+			router_model TEXT NOT NULL DEFAULT '',
+			actual_model TEXT NOT NULL DEFAULT '',
+			system_prompt TEXT NOT NULL DEFAULT '',
+			user_prompt TEXT NOT NULL DEFAULT '',
+			response_schema TEXT NOT NULL DEFAULT '',
+			raw_response TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			started_at INTEGER NOT NULL DEFAULT 0,
+			completed_at INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE IF NOT EXISTS project_pipeline_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id TEXT NOT NULL REFERENCES video_projects(id) ON DELETE CASCADE,
+			stage TEXT NOT NULL,
+			status TEXT NOT NULL,
+			message TEXT NOT NULL DEFAULT '',
+			scene_number INTEGER NOT NULL DEFAULT 0,
+			attempt INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS project_pipeline_events_project_id ON project_pipeline_events(project_id,id);
 		DELETE FROM sessions WHERE expires_at <= unixepoch();
 		DELETE FROM password_recovery_codes WHERE expires_at <= unixepoch();
 		UPDATE project_scenes SET status='failed',error='Scene submission was interrupted; retry this scene',updated_at=unixepoch() WHERE status='submitting';

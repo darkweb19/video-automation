@@ -127,8 +127,16 @@
                 <p id="project-status-detail" class="subtle">Preparing your projectâ€¦</p>
                 <div id="project-error" class="alert error" role="alert" hidden></div>
                 <button id="retry-project" class="button secondary" type="button" hidden>Retry project</button>
+                <section id="project-pipeline" class="project-pipeline" aria-labelledby="project-pipeline-title">
+                  <div class="trace-heading"><h3 id="project-pipeline-title">Pipeline</h3><span class="trace-caption">Process trace</span></div>
+                  <ol id="project-pipeline-list" class="pipeline-list"></ol>
+                </section>
                 <div id="project-story" class="project-story" hidden></div>
                 <div id="project-scenes" class="project-scenes"></div>
+                <section id="project-trace" class="project-trace" aria-labelledby="project-trace-title">
+                  <div class="trace-heading"><div><h3 id="project-trace-title">Generation details</h3><p>Recorded inputs, outputs, and retry history.</p></div></div>
+                  <div id="project-trace-sections" class="trace-sections"></div>
+                </section>
                 <div id="project-final" class="project-final" hidden><video id="project-video" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a></div>
               </div>
             </aside>

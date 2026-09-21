@@ -124,6 +124,41 @@ type VideoProject struct {
 	FinalSizeBytes  int64          `json:"final_size_bytes,omitempty"`
 	TotalCostUSD    string         `json:"total_cost_usd,omitempty"`
 	Scenes          []ProjectScene `json:"scenes"`
-	CreatedAt       int64          `json:"created_at"`
-	UpdatedAt       int64          `json:"updated_at"`
+	// TextGeneration contains auditable request/response artifacts for the
+	// script planner. It never includes credentials or provider headers.
+	TextGeneration TextGenerationTrace `json:"text_generation"`
+	// PipelineEvents is ordered oldest first and intentionally records state
+	// transitions rather than every polling loop.
+	PipelineEvents []PipelineEvent `json:"pipeline_events"`
+	CreatedAt      int64           `json:"created_at"`
+	UpdatedAt      int64           `json:"updated_at"`
+}
+
+// TextGenerationTrace is the durable, user-visible record of a structured
+// script-generation request. RawResponse is the assistant content exactly as
+// received, subject to MaxScriptRawResponseBytes.
+type TextGenerationTrace struct {
+	RouterModel    string `json:"router_model"`
+	ActualModel    string `json:"actual_model,omitempty"`
+	SystemPrompt   string `json:"system_prompt"`
+	UserPrompt     string `json:"user_prompt"`
+	ResponseSchema string `json:"response_schema"`
+	RawResponse    string `json:"raw_response,omitempty"`
+	Status         string `json:"status"`
+	Error          string `json:"error,omitempty"`
+	StartedAt      int64  `json:"started_at,omitempty"`
+	CompletedAt    int64  `json:"completed_at,omitempty"`
+	UpdatedAt      int64  `json:"updated_at"`
+}
+
+// PipelineEvent records an auditable workflow transition. SceneNumber and
+// Attempt are omitted for project-wide steps.
+type PipelineEvent struct {
+	ID          int64  `json:"id"`
+	Stage       string `json:"stage"`
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	SceneNumber int    `json:"scene_number,omitempty"`
+	Attempt     int    `json:"attempt,omitempty"`
+	CreatedAt   int64  `json:"created_at"`
 }

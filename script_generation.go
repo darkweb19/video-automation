@@ -1,13 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
+
+const MaxScriptRawResponseBytes = 1 << 20
 
 const scriptSystemPrompt = `You are a short-form visual storyteller and video prompt director. Create a complete silent 30-second vertical video plan from the user's topic. The final video has exactly five sequential scenes, each exactly six seconds. There is no narration, dialogue, subtitles, music, logos, or on-screen text. Tell the story only through visible action.
 
@@ -66,55 +72,89 @@ func appendContinuityBible(plan *StoryPlan) error {
 	return nil
 }
 
-func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) (StoryPlan, error) {
+func newTextGenerationTrace(topic string) (TextGenerationTrace, error) {
 	topic = strings.TrimSpace(topic)
 	if topic == "" {
-		return StoryPlan{}, errors.New("topic is required")
+		return TextGenerationTrace{}, errors.New("topic is required")
+	}
+	schema, err := json.Marshal(storyPlanSchema())
+	if err != nil {
+		return TextGenerationTrace{}, fmt.Errorf("encode story plan schema: %w", err)
+	}
+	return TextGenerationTrace{RouterModel: ScriptModel, SystemPrompt: scriptSystemPrompt, UserPrompt: "Create the video plan for this topic or story idea:\n\n" + topic, ResponseSchema: string(schema), Status: "request_building", UpdatedAt: time.Now().Unix()}, nil
+}
+
+// GenerateStoryPlan returns the normalized plan and auditable provider
+// artifacts. Validation and continuity are separate processor stages.
+func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) (StoryPlan, TextGenerationTrace, error) {
+	trace, err := newTextGenerationTrace(topic)
+	if err != nil {
+		return StoryPlan{}, trace, err
 	}
 	request := map[string]any{
-		"model": ScriptModel,
-		"messages": []map[string]string{
-			{"role": "system", "content": scriptSystemPrompt},
-			{"role": "user", "content": "Create the video plan for this topic or story idea:\n\n" + topic},
-		},
-		"temperature": 0.7,
-		"response_format": map[string]any{
-			"type":        "json_schema",
-			"json_schema": map[string]any{"name": "short_video_plan", "strict": true, "schema": storyPlanSchema()},
-		},
-		"provider": map[string]any{"require_parameters": true},
+		"model":           ScriptModel,
+		"messages":        []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
+		"temperature":     0.7,
+		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "short_video_plan", "strict": true, "schema": storyPlanSchema()}},
+		"provider":        map[string]any{"require_parameters": true},
+	}
+	trace.Status = "started"
+	trace.StartedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
+	fail := func(message string) (StoryPlan, TextGenerationTrace, error) {
+		trace.Status, trace.Error = "failed", message
+		trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
+		return StoryPlan{}, trace, errors.New(message)
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return fail(fmt.Sprintf("encode OpenRouter request: %v", err))
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(encoded))
+	if err != nil {
+		return fail(err.Error())
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+c.APIKey)
+	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpResponse, err := c.client().Do(httpRequest)
+	if err != nil {
+		return fail(fmt.Sprintf("OpenRouter request: %v", err))
+	}
+	defer httpResponse.Body.Close()
+	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
+		return fail(readUpstreamError(httpResponse).Error())
+	}
+	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, MaxScriptRawResponseBytes+1))
+	if err != nil {
+		return fail(fmt.Sprintf("read OpenRouter response: %v", err))
+	}
+	if len(body) > MaxScriptRawResponseBytes {
+		return fail(fmt.Sprintf("OpenRouter script response exceeds %d bytes", MaxScriptRawResponseBytes))
 	}
 	var response struct {
+		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := c.doJSON(ctx, "POST", "/chat/completions", request, &response); err != nil {
-		return StoryPlan{}, err
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fail(fmt.Sprintf("decode OpenRouter response: %v", err))
 	}
+	trace.ActualModel = response.Model
 	if len(response.Choices) == 0 || strings.TrimSpace(response.Choices[0].Message.Content) == "" {
-		return StoryPlan{}, errors.New("OpenRouter returned an empty script")
+		return fail("OpenRouter returned an empty script")
+	}
+	trace.RawResponse = response.Choices[0].Message.Content
+	if len(trace.RawResponse) > MaxScriptRawResponseBytes {
+		return fail(fmt.Sprintf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes))
 	}
 	var plan StoryPlan
-	if err := json.Unmarshal([]byte(response.Choices[0].Message.Content), &plan); err != nil {
-		return StoryPlan{}, fmt.Errorf("decode generated script: %w", err)
+	if err := json.Unmarshal([]byte(trace.RawResponse), &plan); err != nil {
+		return fail(fmt.Sprintf("decode generated script: %v", err))
 	}
-	if err := validateStoryPlan(plan); err != nil {
-		return StoryPlan{}, err
-	}
-	if utf8.RuneCountInString(plan.Script) > 12000 || utf8.RuneCountInString(plan.Continuity) > 8000 {
-		return StoryPlan{}, errors.New("generated script exceeded the storage limit")
-	}
-	for index := range plan.Scenes {
-		plan.Scenes[index].VideoPrompt = strings.TrimSpace(plan.Scenes[index].VideoPrompt) + "\n\nContinuity bible — apply exactly in this scene:\n" + strings.TrimSpace(plan.Continuity)
-		if utf8.RuneCountInString(plan.Scenes[index].VideoPrompt) > MaxPromptLength {
-			return StoryPlan{}, fmt.Errorf("scene %d prompt exceeds %d characters after continuity rules", plan.Scenes[index].Number, MaxPromptLength)
-		}
-	}
-	if err := appendContinuityBible(&plan); err != nil {
-		return StoryPlan{}, err
-	}
-	return plan, nil
+	trace.Status = "completed"
+	trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
+	return plan, trace, nil
 }

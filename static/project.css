@@ -18,3 +18,268 @@
   background: linear-gradient(90deg, #7766ee, #9a8cff);
   transition: width 0.25s ease;
 }
+
+.project-pipeline {
+  margin: 20px 0 18px;
+  padding-top: 17px;
+  border-top: 1px solid #edf0f4;
+}
+
+.trace-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.trace-heading h3 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.trace-heading p,
+.trace-caption {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.pipeline-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pipeline-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 9px;
+  min-height: 52px;
+}
+
+.pipeline-item:not(:last-child)::before {
+  position: absolute;
+  top: 20px;
+  bottom: 0;
+  left: 10px;
+  width: 1px;
+  background: #e2e5ec;
+  content: "";
+}
+
+.pipeline-marker {
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 21px;
+  height: 21px;
+  border: 1px solid #dfe2e9;
+  border-radius: 50%;
+  background: #fff;
+  color: #8991a0;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.pipeline-completed .pipeline-marker {
+  border-color: #b9e5d1;
+  background: #e7f7f0;
+  color: var(--success);
+}
+
+.pipeline-processing .pipeline-marker,
+.pipeline-queued .pipeline-marker {
+  border-color: #d6cffd;
+  background: #f1efff;
+  color: var(--primary);
+}
+
+.pipeline-failed .pipeline-marker,
+.pipeline-download_failed .pipeline-marker {
+  border-color: #f0c3c0;
+  background: #ffeded;
+  color: var(--danger);
+}
+
+.pipeline-copy {
+  min-width: 0;
+  padding: 1px 0 13px;
+}
+
+.pipeline-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 21px;
+}
+
+.pipeline-title strong {
+  font-size: 11px;
+}
+
+.pipeline-title .badge {
+  margin-left: auto;
+  padding: 3px 7px;
+  font-size: 9px;
+}
+
+.pipeline-copy p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.pipeline-meta {
+  display: block;
+  margin-top: 4px;
+  color: #8a92a0;
+  font-size: 9px;
+}
+
+.pipeline-error {
+  margin-top: 5px;
+  color: var(--danger);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.pipeline-event-details {
+  margin-top: 5px;
+  font-size: 10px;
+}
+
+.pipeline-event-details summary {
+  color: var(--primary);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.project-trace {
+  margin-top: 20px;
+  padding-top: 17px;
+  border-top: 1px solid #edf0f4;
+}
+
+.project-trace > .trace-heading {
+  margin-bottom: 11px;
+}
+
+.trace-sections {
+  display: grid;
+  gap: 7px;
+}
+
+.trace-section {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.trace-section summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  min-height: 37px;
+  padding: 9px 11px;
+  color: var(--ink);
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.trace-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.trace-section summary::before {
+  width: 12px;
+  color: var(--muted);
+  content: "+";
+  font-size: 15px;
+  line-height: 1;
+}
+
+.trace-section[open] > summary::before {
+  content: "−";
+}
+
+.trace-section summary:focus-visible,
+.pipeline-event-details summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.trace-section-title {
+  flex: 1;
+}
+
+.trace-section-meta {
+  overflow: hidden;
+  max-width: 58%;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-section-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 11px 11px;
+  border-top: 1px solid #f0f1f4;
+  background: #fcfcfd;
+}
+
+.trace-field {
+  min-width: 0;
+}
+
+.trace-label {
+  display: block;
+  margin: 9px 0 4px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+
+.trace-value,
+.trace-code {
+  margin: 0;
+  color: #394254;
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.trace-code {
+  max-height: 240px;
+  overflow: auto;
+  padding: 9px;
+  border: 1px solid #e8eaf0;
+  border-radius: 6px;
+  background: #f7f7fa;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+}
+
+@media (max-width: 760px) {
+  .trace-section-meta {
+    max-width: 42%;
+  }
+
+  .pipeline-title .badge {
+    flex-shrink: 0;
+  }
+}

@@ -62,8 +62,12 @@
     projectStatusDetail: $("#project-status-detail"),
     projectError: $("#project-error"),
     retryProject: $("#retry-project"),
+    projectPipeline: $("#project-pipeline"),
+    projectPipelineList: $("#project-pipeline-list"),
     projectStory: $("#project-story"),
     projectScenes: $("#project-scenes"),
+    projectTrace: $("#project-trace"),
+    projectTraceSections: $("#project-trace-sections"),
     projectFinal: $("#project-final"),
     projectVideo: $("#project-video"),
     projectDownload: $("#project-download"),
@@ -642,8 +646,10 @@
   }
 
   function statusClass(status) {
+    const normalized = String(status || "").toLowerCase();
     const supported = new Set(["completed", "queued", "processing", "downloading", "download_failed", "failed", "neutral"]);
-    return supported.has(status) ? status : "neutral";
+    if (["planning", "generating", "combining", "submitting", "pending", "retry", "retrying", "started", "running"].includes(normalized)) return "processing";
+    return supported.has(normalized) ? normalized : "neutral";
   }
 
   function formatDate(timestamp) {
@@ -971,6 +977,254 @@
     return Math.round((done / 5) * 100);
   }
 
+  function firstTraceValue(source, ...keys) {
+    if (!source || typeof source !== "object") return "";
+    for (const key of keys) {
+      const value = source[key];
+      if (value !== undefined && value !== null && value !== "") return value;
+    }
+    return "";
+  }
+
+  function traceText(value) {
+    if (value === undefined || value === null || value === "") return "";
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch (error) {
+      return String(value);
+    }
+  }
+
+  function traceJSON(value) {
+    if (value === undefined || value === null || value === "") return "";
+    if (typeof value !== "string") return traceText(value);
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch (error) {
+      return value;
+    }
+  }
+
+  function formatTraceDate(value) {
+    if (value === undefined || value === null || value === "") return "";
+    if (typeof value === "string" && Number.isNaN(Number(value))) {
+      const parsed = new Date(value);
+      if (!Number.isNaN(parsed.getTime())) {
+        return new Intl.DateTimeFormat("en-CA", {
+          month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit"
+        }).format(parsed);
+      }
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return String(value);
+    return formatDate(numeric > 100000000000 ? numeric / 1000 : numeric);
+  }
+
+  function traceStatus(value, fallback = "queued") {
+    const normalized = String(value || "").toLowerCase().replace(/[\s-]+/g, "_");
+    if (["completed", "complete", "done", "success", "succeeded", "ready"].includes(normalized)) return "completed";
+    if (["failed", "failure", "error", "errored", "cancelled", "canceled"].includes(normalized)) return "failed";
+    if (["processing", "running", "started", "in_progress", "active"].includes(normalized)) return "processing";
+    if (["retry", "retrying", "rescheduled"].includes(normalized)) return "processing";
+    if (["downloading", "download_failed"].includes(normalized)) return normalized;
+    if (["queued", "pending", "waiting", "created", "submitted"].includes(normalized)) return "queued";
+    return fallback;
+  }
+
+  function traceStageLabel(value) {
+    const stage = String(value || "pipeline").trim();
+    const normalized = stage.toLowerCase().replace(/[\s-]+/g, "_");
+    const known = {
+      text_generation: "Story and script",
+      story_generation: "Story and script",
+      story_script: "Story and script",
+      script_generation: "Story and script",
+      scene_generation: "Scene generation",
+      scenes: "Scene generation",
+      video_generation: "Scene generation",
+      assembly: "Final video",
+      final_video: "Final video",
+      final_video_assembly: "Final video",
+      project: "Project",
+      text_request: "Text request",
+      validation: "Validation",
+      continuity: "Continuity",
+      scene_submission: "Scene submission",
+      scene_poll: "Scene polling",
+      scene_download: "Scene download",
+      scene_retry: "Scene retry",
+      combine: "Final video",
+      project_complete: "Complete",
+      complete: "Complete"
+    };
+    if (known[normalized]) return known[normalized];
+    const sceneMatch = normalized.match(/^(?:scene|clip)[_: ]?(\d+)$/);
+    if (sceneMatch) return `Scene ${sceneMatch[1]}`;
+    return stage.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()) || "Pipeline";
+  }
+
+  function projectPipelineEvents(project, scenes, status) {
+    let supplied = projectValue(project, "pipeline_events", "pipelineEvents", "events", "pipeline");
+    if (supplied && !Array.isArray(supplied) && typeof supplied === "object") {
+      supplied = firstTraceValue(supplied, "events", "items", "pipeline_events");
+    }
+    const recordedEvents = Array.isArray(supplied) ? supplied.map((event, index) => {
+        const source = event && typeof event === "object" ? event : { message: event };
+        const eventStatus = traceStatus(firstTraceValue(source, "status", "state", "result"), "queued");
+        const error = firstTraceValue(source, "error", "error_message", "failure");
+        return {
+          stage: `${traceStageLabel(firstTraceValue(source, "stage", "name", "step", "type") || `Stage ${index + 1}`)}${firstTraceValue(source, "scene_number", "sceneNumber", "scene") ? ` · Scene ${firstTraceValue(source, "scene_number", "sceneNumber", "scene")}` : ""}`,
+          status: error ? "failed" : eventStatus,
+          message: String(firstTraceValue(source, "message", "description", "detail") || (error ? error : "")),
+          details: firstTraceValue(source, "details", "metadata", "data"),
+          error: String(error || ""),
+          timestamp: firstTraceValue(source, "timestamp", "created_at", "createdAt", "time", "at"),
+          retries: firstTraceValue(source, "retries", "retry_count", "attempts"),
+          attempt: firstTraceValue(source, "attempt", "attempt_number", "attemptNumber")
+        };
+      }) : [];
+
+    const textGeneration = projectValue(project, "text_generation", "textGeneration", "generation_details");
+    const textRecordStatus = textGeneration && typeof textGeneration === "object"
+      ? traceStatus(firstTraceValue(textGeneration, "status", "state"), "queued")
+      : "queued";
+    const hasText = Boolean(projectValue(project, "story", "story_text", "script", "full_script", "fullScript")
+      || textRecordStatus === "completed"
+      || (textGeneration && typeof textGeneration === "object" && firstTraceValue(textGeneration, "raw_response", "rawResponse", "response")));
+    const textStatus = hasText ? "completed" : (status === "failed" || status === "error" ? "failed" : "processing");
+    const sceneStatuses = scenes.map((scene) => traceStatus(projectValue(scene, "status", "state"), "queued"));
+    const allScenesDone = scenes.length > 0 && sceneStatuses.every((item) => item === "completed");
+    const sceneFailed = sceneStatuses.some((item) => item === "failed" || item === "download_failed");
+    const sceneActive = sceneStatuses.some((item) => item === "processing" || item === "downloading");
+    const sceneStatus = sceneFailed ? "failed" : allScenesDone ? "completed" : sceneActive ? "processing" : "queued";
+    const finalStatus = ["completed", "complete"].includes(status) ? "completed" : status === "failed" || status === "error" ? "failed" : allScenesDone ? "processing" : "queued";
+    const derivedEvents = [
+      { stage: "Story and script", status: textStatus, message: hasText ? "Story, script, and continuity data recorded." : "Waiting for text generation." },
+      { stage: "Scene generation", status: sceneStatus, message: scenes.length ? `${scenes.length} scene${scenes.length === 1 ? "" : "s"} tracked.` : "Waiting for scene records." },
+      { stage: "Final video", status: finalStatus, message: finalStatus === "completed" ? "Final video assembled and saved." : "Waiting for all scenes to finish." }
+    ].map((event) => ({ ...event, derived: true }));
+    const hasTextStage = recordedEvents.some((event) => ["Story and script", "Text request", "Validation", "Continuity"].includes(event.stage));
+    const hasSceneStage = recordedEvents.some((event) => ["Scene generation", "Scene submission", "Scene polling", "Scene download", "Scene retry"].includes(event.stage) || event.stage.startsWith("Scene "));
+    const hasFinalStage = recordedEvents.some((event) => event.stage === "Final video" || event.stage === "Complete");
+    return recordedEvents.concat([
+      !hasTextStage ? derivedEvents[0] : null,
+      !hasSceneStage ? derivedEvents[1] : null,
+      !hasFinalStage ? derivedEvents[2] : null
+    ].filter(Boolean));
+  }
+
+  function traceField(label, value, options = {}) {
+    const field = make("div", { className: "trace-field" });
+    field.append(make("span", { className: "trace-label", text: label }));
+    const content = make(options.code ? "pre" : "p", { className: options.code ? "trace-code" : "trace-value", text: value || "Not recorded" });
+    field.append(content);
+    return field;
+  }
+
+  function traceSection(title, value, options = {}) {
+    const section = document.createElement("details");
+    section.className = "trace-section";
+    const summary = document.createElement("summary");
+    summary.append(make("span", { className: "trace-section-title", text: title }));
+    if (options.meta) summary.append(make("span", { className: "trace-section-meta", text: options.meta }));
+    section.append(summary);
+    const body = make("div", { className: "trace-section-body" });
+    if (Array.isArray(options.fields)) {
+      options.fields.forEach((field) => body.append(traceField(field.label, traceText(field.value), { code: Boolean(field.code) })));
+    } else {
+      body.append(traceField(options.label || title, options.json ? traceJSON(value) : traceText(value), { code: options.code !== false }));
+    }
+    section.append(body);
+    return section;
+  }
+
+  function renderProjectPipeline(project, scenes, status) {
+    const events = projectPipelineEvents(project, scenes, status);
+    elements.projectPipelineList.replaceChildren();
+    events.forEach((event) => {
+      const item = make("li", { className: `pipeline-item pipeline-${event.status}` });
+      const marker = make("span", { className: "pipeline-marker", text: event.status === "completed" ? "✓" : event.status === "failed" ? "!" : "•" });
+      marker.setAttribute("aria-hidden", "true");
+      const body = make("div", { className: "pipeline-copy" });
+      const title = make("div", { className: "pipeline-title" });
+      title.append(make("strong", { text: event.stage }), statusBadge(event.status));
+      body.append(title);
+      if (event.message) body.append(make("p", { text: event.message }));
+      const meta = [];
+      const timestamp = formatTraceDate(event.timestamp);
+      if (timestamp) meta.push(timestamp);
+      if (event.attempt !== "" && event.attempt !== undefined) meta.push(`Attempt ${event.attempt}`);
+      if (event.retries !== "" && event.retries !== undefined) meta.push(`${event.retries} retr${Number(event.retries) === 1 ? "y" : "ies"}`);
+      if (event.derived) meta.push("Derived from current state");
+      if (meta.length) body.append(make("span", { className: "pipeline-meta", text: meta.join(" · ") }));
+      if (event.error && event.error !== event.message) body.append(make("div", { className: "pipeline-error", text: event.error }));
+      if (event.details !== undefined && event.details !== null && event.details !== "") {
+        const detail = document.createElement("details");
+        detail.className = "pipeline-event-details";
+        detail.append(make("summary", { text: "Event details" }));
+        detail.append(make("pre", { className: "trace-code", text: traceText(event.details) }));
+        body.append(detail);
+      }
+      item.append(marker, body);
+      elements.projectPipelineList.append(item);
+    });
+  }
+
+  function renderProjectTrace(project, scenes, status) {
+    const textGeneration = projectValue(project, "text_generation", "textGeneration", "generation_details");
+    const generation = textGeneration && typeof textGeneration === "object" ? textGeneration : {};
+    const modelMetadata = firstTraceValue(generation, "model_metadata", "modelMetadata", "model_info", "metadata");
+    const modelInfo = modelMetadata && typeof modelMetadata === "object" ? modelMetadata : {};
+    const modelFields = [
+      { label: "Router", value: firstTraceValue(generation, "router_model", "routerModel", "router", "route", "provider_route") || firstTraceValue(modelInfo, "router_model", "router", "route") },
+      { label: "Selected model", value: firstTraceValue(generation, "actual_model", "actualModel", "selected_model", "selectedModel", "model", "model_id", "modelID") || firstTraceValue(modelInfo, "actual_model", "selected_model", "model", "model_id") },
+      { label: "Model provider", value: firstTraceValue(generation, "provider", "provider_name") || firstTraceValue(modelInfo, "provider", "provider_name") },
+      { label: "Request id", value: firstTraceValue(generation, "request_id", "requestID", "response_id", "responseID") || firstTraceValue(modelInfo, "request_id", "response_id") },
+      { label: "Text-generation status", value: firstTraceValue(generation, "status", "state") },
+      { label: "Text-generation error", value: firstTraceValue(generation, "error", "error_message", "failure") },
+      { label: "Started", value: formatTraceDate(firstTraceValue(generation, "started_at", "startedAt", "created_at", "createdAt")) },
+      { label: "Completed", value: formatTraceDate(firstTraceValue(generation, "completed_at", "completedAt", "updated_at", "updatedAt")) }
+    ].filter((field) => field.value !== "" && field.value !== undefined && field.value !== null);
+    if (!modelFields.length) modelFields.push({ label: "Status", value: "Text-generation model metadata was not recorded." });
+
+    const story = projectValue(project, "story", "story_text", "storyText") || firstTraceValue(generation, "story", "story_text", "storyText");
+    const script = projectValue(project, "script", "full_script", "fullScript") || firstTraceValue(generation, "script", "full_script", "fullScript");
+    const continuity = projectValue(project, "continuity", "continuity_bible", "continuityBible", "bible") || firstTraceValue(generation, "continuity", "continuity_bible", "continuityBible", "bible");
+    const systemPrompt = firstTraceValue(generation, "system_prompt", "systemPrompt", "prompt_system");
+    const userPrompt = firstTraceValue(generation, "user_prompt", "userPrompt", "prompt_user", "input_prompt");
+    const schema = firstTraceValue(generation, "response_schema", "responseSchema", "json_schema", "jsonSchema", "schema", "output_schema", "outputSchema");
+    const rawResponse = firstTraceValue(generation, "raw_response", "rawResponse", "response_raw", "response", "raw");
+    const retryCount = firstTraceValue(project, "retry_count", "retries", "attempts", "attempt");
+    const runFields = [
+      { label: "Project status", value: String(status || "queued").replaceAll("_", " ") },
+      { label: "Created", value: formatTraceDate(projectValue(project, "created_at", "createdAt", "created")) },
+      { label: "Updated", value: formatTraceDate(projectValue(project, "updated_at", "updatedAt", "updated")) },
+      { label: "Retries", value: retryCount },
+      { label: "Error", value: projectValue(project, "error", "message") }
+    ].filter((field) => field.value !== "" && field.value !== undefined && field.value !== null);
+    if (!runFields.length) runFields.push({ label: "Record", value: "No run metadata was recorded." });
+
+    elements.projectTraceSections.replaceChildren(
+      traceSection("Text model", "", { fields: modelFields, meta: traceText(modelFields.find((field) => field.label === "Selected model")?.value) || "Audit metadata" }),
+      traceSection("System prompt", systemPrompt, { code: false }),
+      traceSection("User prompt", userPrompt, { code: false }),
+      traceSection("JSON schema", schema, { json: true }),
+      traceSection("Raw model response", rawResponse, { json: true }),
+      traceSection("Story", story, { code: false }),
+      traceSection("Full script", script, { code: false }),
+      traceSection("Continuity bible", continuity, { code: false }),
+      traceSection("Run record", "", { fields: runFields, meta: status === "failed" ? "Contains failure state" : "Timestamps and retries" })
+    );
+
+    scenes.forEach((scene, index) => {
+      const number = Number(projectValue(scene, "scene_number", "number", "scene")) || index + 1;
+      const finalPrompt = projectValue(scene, "final_video_prompt", "finalVideoPrompt", "final_prompt", "finalPrompt", "video_prompt", "prompt", "generation_prompt");
+      elements.projectTraceSections.append(traceSection(`Scene ${number} final video prompt`, finalPrompt, { code: false }));
+    });
+    elements.projectTrace.hidden = false;
+  }
+
   function renderProject(project) {
     if (!project) return;
     const scenes = projectScenes(project);
@@ -995,12 +1249,11 @@
     const hasFailedScene = scenes.some((scene) => ["failed", "error"].includes(String(projectValue(scene, "status")).toLowerCase()));
     elements.retryProject.hidden = status !== "failed" || hasFailedScene;
 
-    const story = projectValue(project, "story", "story_text");
-    const script = projectValue(project, "script", "full_script", "fullScript");
-    elements.projectStory.hidden = !story && !script;
+    renderProjectPipeline(project, scenes, status);
+    renderProjectTrace(project, scenes, status);
+
+    elements.projectStory.hidden = true;
     elements.projectStory.replaceChildren();
-    if (story) elements.projectStory.append(make("strong", { text: "Story" }), make("div", { text: story }));
-    if (script) elements.projectStory.append(make("strong", { text: "Full script" }), make("div", { text: script }));
 
     elements.projectScenes.replaceChildren();
     scenes.forEach((scene, index) => {
