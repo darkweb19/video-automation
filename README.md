@@ -2,6 +2,8 @@
 
 A self-hosted dashboard for submitting OpenRouter video jobs, tracking their status after the browser closes, and storing completed MP4 files locally in a Docker-managed volume. It uses SQLite for metadata and no external storage service.
 
+The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's free-model router generates the story, full script, continuity bible, and five scene prompts. The selected video model then generates five independent six-second vertical clips. FFmpeg normalizes and joins them into one silent 1080×1920 MP4. The original single-clip workflow remains available.
+
 ## Docker quick start
 
 Install Docker Desktop (or Docker Engine with Compose), then run:
@@ -61,6 +63,20 @@ Within that volume:
 | `/data/app.db` | SQLite users, encrypted API-key setting, jobs, statuses, and cost records |
 | `/data/secret.key` | Encryption key for the API-key setting |
 | `/data/videos/` | Downloaded completed MP4 files |
+| `/data/projects/` | Per-project scene clips and final 30-second MP4 files |
+
+## Thirty-second project workflow
+
+1. Open **Generate** and leave **30-second project** selected.
+2. Enter a topic or story idea.
+3. Select a model that supports six-second clips and the 9:16 aspect ratio. MiniMax K3 Pro is selected by default when OpenRouter returns a compatible model with that name; otherwise the first compatible model is shown as the fallback.
+4. Submit the project. Story and script generation uses `openrouter/free`; video generation uses the selected paid video model.
+5. Follow overall progress and each scene independently. A failed scene can be retried without regenerating successful scenes.
+6. When all five scene files are stored, FFmpeg creates the final video automatically.
+
+Projects, scene prompts, provider job IDs, statuses, errors, costs, and file paths are stored in SQLite. The background worker resumes unfinished planning, polling, downloading, and combining work after a restart. If the process stops while a paid scene submission is in flight, that scene is marked failed instead of being silently resubmitted; use **Retry scene** after checking OpenRouter activity because the interrupted request may already have been accepted upstream.
+
+The displayed project estimate covers five video generations. Provider pricing and capabilities can change, so confirm the estimate and account balance before starting a project.
 
 Back up the whole volume, including `secret.key`; the database cannot decrypt a stored API key without it. This command writes a portable archive to the current directory:
 
