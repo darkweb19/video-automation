@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validStoryPlan() StoryPlan {
@@ -112,6 +113,101 @@ func TestProjectStoragePersistsAndRetriesOnlyFailedScene(t *testing.T) {
 	if loaded.Scenes[2].Status != "failed" || !strings.Contains(loaded.Scenes[2].Error, "interrupted") {
 		t.Fatalf("interrupted submission was not recovered safely: %+v", loaded.Scenes[2])
 	}
+}
+
+func TestSaveStoryPlanPersistsContinuityInEveryScenePromptAndProgress(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("fox story", "minimax/k3-pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := validStoryPlan()
+	for index := range plan.Scenes {
+		plan.Scenes[index].VideoPrompt = "A standalone shot."
+	}
+	if err := store.SaveStoryPlan(project.ID, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSceneSubmitting(project.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	progress := 67
+	if err := store.SetSceneGeneration(project.ID, 1, Generation{ID: "scene_one", Status: "processing", Progress: &progress}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scene := range loaded.Scenes {
+		if !strings.Contains(scene.Prompt, "Continuity bible - apply exactly in this scene:") || !strings.Contains(scene.Prompt, plan.Continuity) {
+			t.Fatalf("scene %d prompt lost continuity bible: %q", scene.Number, scene.Prompt)
+		}
+	}
+	if loaded.Scenes[0].Progress != progress {
+		t.Fatalf("provider progress = %d, want %d", loaded.Scenes[0].Progress, progress)
+	}
+}
+
+func TestSaveStoryPlanRejectsPromptOverLimitAfterContinuity(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("long story", "minimax/k3-pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := validStoryPlan()
+	plan.Scenes[0].VideoPrompt = strings.Repeat("x", MaxPromptLength)
+	if err := store.SaveStoryPlan(project.ID, plan); err == nil || !strings.Contains(err.Error(), "after continuity rules") {
+		t.Fatalf("expected post-continuity prompt limit error, got %v", err)
+	}
+}
+
+func TestProcessorCombinesWithoutOpenRouterKey(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("offline combine", "minimax/k3-pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := validStoryPlan()
+	if err := store.SaveStoryPlan(project.ID, plan); err != nil {
+		t.Fatal(err)
+	}
+	for number := 1; number <= ProjectSceneCount; number++ {
+		path := store.SceneVideoPath(project.ID, number)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("clip"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.MarkSceneVideoReady(project.ID, number, path, 4); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.UpdateProjectStatus(project.ID, "combining", ""); err != nil {
+		t.Fatal(err)
+	}
+	processor := NewProcessor(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.combineRunner = func(_ context.Context, name string, args ...string) error {
+		if name != "ffmpeg" {
+			t.Fatalf("runner = %s", name)
+		}
+		return os.WriteFile(args[len(args)-1], []byte("final"), 0o600)
+	}
+	processor.process(context.Background())
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		loaded, loadErr := store.Project(project.ID)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if loaded.Status == "completed" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	loaded, _ := store.Project(project.ID)
+	t.Fatalf("combine-only project did not complete without API key: status=%s error=%s", loaded.Status, loaded.Error)
 }
 
 func TestCombineProjectVideoBuildsNormalizedThirtySecondOutput(t *testing.T) {

@@ -57,6 +57,10 @@ func (s *Store) SaveStoryPlan(projectID string, plan StoryPlan) error {
 	if err := validateStoryPlan(plan); err != nil {
 		return err
 	}
+	plan.Scenes = append([]StoryPlanScene(nil), plan.Scenes...)
+	if err := appendContinuityBible(&plan); err != nil {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -80,7 +84,7 @@ func (s *Store) SaveStoryPlan(projectID string, plan StoryPlan) error {
 }
 
 const projectColumns = `id,topic,title,story,script,continuity,model,status,error,final_video_path,final_size_bytes,created_at,updated_at`
-const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,created_at,updated_at`
+const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,progress,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,created_at,updated_at`
 
 func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) {
 	var project VideoProject
@@ -91,7 +95,7 @@ func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) 
 
 func scanScene(scanner interface{ Scan(...any) error }) (ProjectScene, error) {
 	var scene ProjectScene
-	err := scanner.Scan(&scene.ProjectID, &scene.Number, &scene.Title, &scene.Script, &scene.Prompt, &scene.Status, &scene.Attempts, &scene.ProviderGenerationID, &scene.CostUSD, &scene.VideoPath, &scene.SizeBytes, &scene.Error, &scene.DownloadAttempts, &scene.NextAttemptAt, &scene.CreatedAt, &scene.UpdatedAt)
+	err := scanner.Scan(&scene.ProjectID, &scene.Number, &scene.Title, &scene.Script, &scene.Prompt, &scene.Status, &scene.Progress, &scene.Attempts, &scene.ProviderGenerationID, &scene.CostUSD, &scene.VideoPath, &scene.SizeBytes, &scene.Error, &scene.DownloadAttempts, &scene.NextAttemptAt, &scene.CreatedAt, &scene.UpdatedAt)
 	scene.VideoReady = scene.VideoPath != ""
 	return scene, err
 }
@@ -228,7 +232,11 @@ func (s *Store) SetSceneGeneration(projectID string, number int, generation Gene
 	if status == "completed" {
 		status = "downloading"
 	}
-	result, err := s.db.Exec(`UPDATE project_scenes SET provider_generation_id=?,status=?,cost_usd=?,error=?,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='submitting'`, generation.ID, status, generation.CostUSD, generation.Error, time.Now().Unix(), projectID, number)
+	progress := 10
+	if generation.Progress != nil {
+		progress = min(100, max(0, *generation.Progress))
+	}
+	result, err := s.db.Exec(`UPDATE project_scenes SET provider_generation_id=?,status=?,progress=?,cost_usd=?,error=?,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='submitting'`, generation.ID, status, progress, generation.CostUSD, generation.Error, time.Now().Unix(), projectID, number)
 	if err != nil {
 		return err
 	}
@@ -239,7 +247,7 @@ func (s *Store) SetSceneGeneration(projectID string, number int, generation Gene
 }
 
 func (s *Store) UpdateScene(projectID string, number int, status, cost, message string) error {
-	result, err := s.db.Exec(`UPDATE project_scenes SET status=?,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error=?,updated_at=? WHERE project_id=? AND scene_number=?`, status, cost, cost, message, time.Now().Unix(), projectID, number)
+	result, err := s.db.Exec(`UPDATE project_scenes SET status=?,progress=CASE WHEN ?='completed' THEN 100 WHEN ?='downloading' THEN MAX(progress,90) WHEN ?='processing' THEN MAX(progress,25) WHEN ?='queued' THEN MAX(progress,10) ELSE progress END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error=?,updated_at=? WHERE project_id=? AND scene_number=?`, status, status, status, status, status, cost, cost, message, time.Now().Unix(), projectID, number)
 	if err != nil {
 		return err
 	}
@@ -247,6 +255,12 @@ func (s *Store) UpdateScene(projectID string, number int, status, cost, message 
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (s *Store) SetSceneProgress(projectID string, number, progress int) error {
+	progress = min(100, max(0, progress))
+	_, err := s.db.Exec(`UPDATE project_scenes SET progress=?,updated_at=? WHERE project_id=? AND scene_number=?`, progress, time.Now().Unix(), projectID, number)
+	return err
 }
 
 func (s *Store) ScheduleSceneDownloadRetry(projectID string, number int) error {
@@ -264,7 +278,7 @@ func (s *Store) ScheduleSceneDownloadRetry(projectID string, number int) error {
 }
 
 func (s *Store) MarkSceneVideoReady(projectID string, number int, path string, size int64) error {
-	result, err := s.db.Exec(`UPDATE project_scenes SET status='completed',video_path=?,size_bytes=?,error='',next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=?`, path, size, time.Now().Unix(), projectID, number)
+	result, err := s.db.Exec(`UPDATE project_scenes SET status='completed',progress=100,video_path=?,size_bytes=?,error='',next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=?`, path, size, time.Now().Unix(), projectID, number)
 	if err != nil {
 		return err
 	}
@@ -275,7 +289,7 @@ func (s *Store) MarkSceneVideoReady(projectID string, number int, path string, s
 }
 
 func (s *Store) RetryScene(projectID string, number int) error {
-	result, err := s.db.Exec(`UPDATE project_scenes SET status='pending',provider_generation_id='',cost_usd='',video_path='',size_bytes=0,error='',download_attempts=0,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='failed'`, time.Now().Unix(), projectID, number)
+	result, err := s.db.Exec(`UPDATE project_scenes SET status='pending',progress=0,provider_generation_id='',cost_usd='',video_path='',size_bytes=0,error='',download_attempts=0,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='failed'`, time.Now().Unix(), projectID, number)
 	if err != nil {
 		return err
 	}

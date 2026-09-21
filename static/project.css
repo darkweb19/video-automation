@@ -1,0 +1,20 @@
+.scene-progress-label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.scene-progress {
+  height: 5px;
+  margin-top: 9px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #eceef3;
+}
+
+.scene-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #7766ee, #9a8cff);
+  transition: width 0.25s ease;
+}

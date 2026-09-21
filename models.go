@@ -12,11 +12,13 @@ const (
 
 // GenerateRequest is the application's provider-independent video request.
 type GenerateRequest struct {
-	Prompt        string `json:"prompt"`
-	Model         string `json:"model"`
-	Duration      int    `json:"duration,omitempty"`
-	AspectRatio   string `json:"aspect_ratio,omitempty"`
-	GenerateAudio *bool  `json:"generate_audio,omitempty"`
+	Prompt      string `json:"prompt"`
+	Model       string `json:"model"`
+	Duration    int    `json:"duration,omitempty"`
+	AspectRatio string `json:"aspect_ratio,omitempty"`
+	// GenerateAudio is intentionally never sent. Audio is removed during the
+	// final FFmpeg assembly for compatibility across video models.
+	GenerateAudio *bool `json:"-"`
 }
 
 // Generation is the normalized state returned to the browser.
@@ -92,6 +94,7 @@ type ProjectScene struct {
 	Script               string `json:"script"`
 	Prompt               string `json:"prompt"`
 	Status               string `json:"status"`
+	Progress             int    `json:"progress"`
 	Attempts             int    `json:"attempts"`
 	ProviderGenerationID string `json:"provider_generation_id,omitempty"`
 	CostUSD              string `json:"cost_usd,omitempty"`

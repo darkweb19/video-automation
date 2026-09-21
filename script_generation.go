@@ -41,6 +41,31 @@ func storyPlanSchema() map[string]any {
 	}
 }
 
+const continuityPromptSuffix = "\n\nContinuity bible - apply exactly in this scene:\n"
+
+// appendContinuityBible normalizes scene prompts at the storage boundary. The
+// provider response is not the only possible source of a plan, so persisted
+// prompts must always carry the same continuity bible and remain within the
+// provider's prompt limit.
+func appendContinuityBible(plan *StoryPlan) error {
+	continuity := strings.TrimSpace(plan.Continuity)
+	if continuity == "" {
+		return errors.New("script plan is missing continuity rules")
+	}
+	for index := range plan.Scenes {
+		prompt := strings.TrimSpace(plan.Scenes[index].VideoPrompt)
+		if marker := strings.Index(prompt, "\n\nContinuity bible"); marker >= 0 {
+			prompt = strings.TrimSpace(prompt[:marker])
+		}
+		prompt += continuityPromptSuffix + continuity
+		if utf8.RuneCountInString(prompt) > MaxPromptLength {
+			return fmt.Errorf("scene %d prompt exceeds %d characters after continuity rules", plan.Scenes[index].Number, MaxPromptLength)
+		}
+		plan.Scenes[index].VideoPrompt = prompt
+	}
+	return nil
+}
+
 func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) (StoryPlan, error) {
 	topic = strings.TrimSpace(topic)
 	if topic == "" {
@@ -82,10 +107,14 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 	if utf8.RuneCountInString(plan.Script) > 12000 || utf8.RuneCountInString(plan.Continuity) > 8000 {
 		return StoryPlan{}, errors.New("generated script exceeded the storage limit")
 	}
-	for _, scene := range plan.Scenes {
-		if utf8.RuneCountInString(scene.VideoPrompt) > MaxPromptLength {
-			return StoryPlan{}, fmt.Errorf("scene %d prompt exceeds %d characters", scene.Number, MaxPromptLength)
+	for index := range plan.Scenes {
+		plan.Scenes[index].VideoPrompt = strings.TrimSpace(plan.Scenes[index].VideoPrompt) + "\n\nContinuity bible — apply exactly in this scene:\n" + strings.TrimSpace(plan.Continuity)
+		if utf8.RuneCountInString(plan.Scenes[index].VideoPrompt) > MaxPromptLength {
+			return StoryPlan{}, fmt.Errorf("scene %d prompt exceeds %d characters after continuity rules", plan.Scenes[index].Number, MaxPromptLength)
 		}
+	}
+	if err := appendContinuityBible(&plan); err != nil {
+		return StoryPlan{}, err
 	}
 	return plan, nil
 }

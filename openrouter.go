@@ -278,6 +278,7 @@ type openRouterGeneration struct {
 	Status       string   `json:"status"`
 	Model        string   `json:"model"`
 	Error        string   `json:"error"`
+	Progress     *int     `json:"progress"`
 	UnsignedURLs []string `json:"unsigned_urls"`
 	Usage        struct {
 		Cost json.Number `json:"cost"`
@@ -309,7 +310,7 @@ func (c *OpenRouterClient) normalizeGeneration(source openRouterGeneration) (*Ge
 	default:
 		return nil, fmt.Errorf("OpenRouter returned an unsupported video status %q", source.Status)
 	}
-	generation := &Generation{ID: source.ID, Status: status, Model: source.Model, Error: source.Error, CostUSD: string(source.Usage.Cost)}
+	generation := &Generation{ID: source.ID, Status: status, Model: source.Model, Progress: source.Progress, Error: source.Error, CostUSD: string(source.Usage.Cost)}
 	if generation.Status == "completed" && generation.ID != "" {
 		generation.OutputURL = "/video?id=" + url.QueryEscape(generation.ID)
 	}

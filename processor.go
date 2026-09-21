@@ -55,7 +55,14 @@ func (p *Processor) process(ctx context.Context) {
 		p.logger.Error("load pending projects failed")
 		return
 	}
-	if len(records) == 0 && len(projects) == 0 {
+	p.processCombiningProjects(ctx, projects)
+	remoteProjects := make([]VideoProject, 0, len(projects))
+	for _, project := range projects {
+		if project.Status != "combining" {
+			remoteProjects = append(remoteProjects, project)
+		}
+	}
+	if len(records) == 0 && len(remoteProjects) == 0 {
 		return
 	}
 	provider, err := p.app.provider()
@@ -91,7 +98,39 @@ func (p *Processor) process(ctx context.Context) {
 			p.startDownload(ctx, provider, record)
 		}
 	}
-	p.processProjects(ctx, provider, projects)
+	p.processProjects(ctx, provider, remoteProjects)
+}
+
+func (p *Processor) processCombiningProjects(ctx context.Context, projects []VideoProject) {
+	for _, project := range projects {
+		if project.Status != "combining" {
+			continue
+		}
+		projectCopy := project
+		p.startProjectTask(ctx, project.ID+":combine", func(taskCtx context.Context) {
+			inputs := make([]string, 0, ProjectSceneCount)
+			for _, scene := range projectCopy.Scenes {
+				if !scene.VideoReady {
+					_ = p.app.store.UpdateProjectStatus(projectCopy.ID, "failed", "A scene file is missing; retry that scene.")
+					return
+				}
+				inputs = append(inputs, scene.VideoPath)
+			}
+			combineCtx, cancel := context.WithTimeout(taskCtx, 15*time.Minute)
+			defer cancel()
+			finalPath := p.app.store.ProjectFinalPath(projectCopy.ID)
+			size, err := combineProjectVideo(combineCtx, p.combineRunner, inputs, finalPath)
+			if err != nil {
+				_ = p.app.store.UpdateProjectStatus(projectCopy.ID, "failed", "Unable to combine the scene clips.")
+				p.logger.Error("combine project failed", "project_id", projectCopy.ID)
+				return
+			}
+			if err := p.app.store.MarkProjectReady(projectCopy.ID, finalPath, size); err != nil {
+				_ = os.Remove(finalPath)
+				p.logger.Error("save final project failed", "project_id", projectCopy.ID)
+			}
+		})
+	}
 }
 
 func (p *Processor) processProjects(ctx context.Context, provider *OpenRouterClient, projects []VideoProject) {
@@ -114,30 +153,6 @@ func (p *Processor) processProjects(ctx context.Context, provider *OpenRouterCli
 			})
 		case "generating":
 			p.processProjectScenes(ctx, provider, project)
-		case "combining":
-			p.startProjectTask(ctx, project.ID+":combine", func(taskCtx context.Context) {
-				inputs := make([]string, 0, ProjectSceneCount)
-				for _, scene := range project.Scenes {
-					if !scene.VideoReady {
-						_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "A scene file is missing; retry that scene.")
-						return
-					}
-					inputs = append(inputs, scene.VideoPath)
-				}
-				combineCtx, cancel := context.WithTimeout(taskCtx, 15*time.Minute)
-				defer cancel()
-				finalPath := p.app.store.ProjectFinalPath(project.ID)
-				size, err := combineProjectVideo(combineCtx, p.combineRunner, inputs, finalPath)
-				if err != nil {
-					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "Unable to combine the scene clips.")
-					p.logger.Error("combine project failed", "project_id", project.ID)
-					return
-				}
-				if err := p.app.store.MarkProjectReady(project.ID, finalPath, size); err != nil {
-					_ = os.Remove(finalPath)
-					p.logger.Error("save final project failed", "project_id", project.ID)
-				}
-			})
 		}
 	}
 }
@@ -158,22 +173,10 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider *OpenRout
 			})
 		case "queued", "processing":
 			active++
-			requestContext, cancel := context.WithTimeout(ctx, 60*time.Second)
-			generation, err := provider.GetGeneration(requestContext, scene.ProviderGenerationID)
-			cancel()
-			if err != nil || generation == nil {
-				continue
-			}
-			status := generation.Status
-			if status == "completed" {
-				status = "downloading"
-			}
-			_ = p.app.store.UpdateScene(project.ID, scene.Number, status, generation.CostUSD, generation.Error)
-			if status == "downloading" {
-				scene.Status = status
-				scene.CostUSD = generation.CostUSD
-				p.startSceneDownload(ctx, provider, scene)
-			}
+			sceneCopy := scene
+			p.startProjectTask(ctx, fmt.Sprintf("%s:poll:%d", project.ID, scene.Number), func(taskCtx context.Context) {
+				p.pollScene(taskCtx, provider, sceneCopy)
+			})
 		case "downloading", "download_failed":
 			active++
 			if scene.NextAttemptAt <= time.Now().Unix() {
@@ -194,10 +197,9 @@ func (p *Processor) submitScene(ctx context.Context, provider *OpenRouterClient,
 	if err := p.app.store.MarkSceneSubmitting(project.ID, scene.Number); err != nil {
 		return
 	}
-	noAudio := false
 	requestContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	generation, err := provider.GenerateVideo(requestContext, GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, AspectRatio: ProjectAspectRatio, GenerateAudio: &noAudio})
+	generation, err := provider.GenerateVideo(requestContext, GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, AspectRatio: ProjectAspectRatio})
 	if err != nil || generation == nil || !safeID(generation.ID) {
 		_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", "Scene submission failed. Retrying this scene may create a duplicate if OpenRouter accepted the interrupted request.")
 		p.logger.Warn("scene submission failed", "project_id", project.ID, "scene", scene.Number)
@@ -208,6 +210,28 @@ func (p *Processor) submitScene(ctx context.Context, provider *OpenRouterClient,
 	}
 	if err := p.app.store.SetSceneGeneration(project.ID, scene.Number, *generation); err != nil {
 		p.logger.Error("save scene generation failed", "project_id", project.ID, "scene", scene.Number)
+	}
+}
+
+func (p *Processor) pollScene(ctx context.Context, provider *OpenRouterClient, scene ProjectScene) {
+	requestContext, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	generation, err := provider.GetGeneration(requestContext, scene.ProviderGenerationID)
+	if err != nil || generation == nil {
+		return
+	}
+	status := generation.Status
+	if status == "completed" {
+		status = "downloading"
+	}
+	_ = p.app.store.UpdateScene(scene.ProjectID, scene.Number, status, generation.CostUSD, generation.Error)
+	if generation.Progress != nil {
+		_ = p.app.store.SetSceneProgress(scene.ProjectID, scene.Number, *generation.Progress)
+	}
+	if status == "downloading" {
+		scene.Status = status
+		scene.CostUSD = generation.CostUSD
+		p.startSceneDownload(ctx, provider, scene)
 	}
 }
 

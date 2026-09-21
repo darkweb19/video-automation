@@ -225,7 +225,7 @@
     elements.prompt.closest(".field").hidden = project;
     elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
     elements.statusActive.hidden = project;
-    elements.projectStatus.hidden = !project;
+    elements.projectStatus.hidden = !project || !state.currentProjectID;
     if (project) {
       const selected = state.models.find((model) => model.id === elements.model.value);
       if (state.models.length && !supportsProject(selected)) {
@@ -289,7 +289,9 @@
     stopHistoryRefresh();
     state.authenticated = false;
     state.currentGenerationID = "";
+    state.currentProjectID = "";
     state.generations = [];
+    state.projects = [];
     state.stats = null;
     state.historyHasMore = false;
     state.historyNextOffset = 0;
@@ -1006,8 +1008,16 @@
       const sceneStatus = String(projectValue(scene, "status") || "queued").toLowerCase();
       const card = make("article", { className: `scene-card scene-${statusClass(sceneStatus)}` });
       const head = make("div", { className: "scene-head" });
-      head.append(make("strong", { text: `Scene ${number}` }), statusBadge(sceneStatus));
+      const suppliedProgress = Number(projectValue(scene, "progress"));
+      const defaults = { pending: 0, submitting: 5, queued: 10, processing: 40, downloading: 90, download_failed: 90, completed: 100, complete: 100, ready: 100 };
+      const sceneProgress = Number.isFinite(suppliedProgress) ? Math.max(0, Math.min(100, suppliedProgress)) : (defaults[sceneStatus] || 0);
+      head.append(make("strong", { text: `Scene ${number}` }), make("span", { className: "scene-progress-label", text: `${sceneProgress}%` }), statusBadge(sceneStatus));
       card.append(head);
+      const sceneProgressTrack = make("div", { className: "scene-progress" });
+      const sceneProgressBar = make("div", { className: "scene-progress-bar" });
+      sceneProgressBar.style.width = `${sceneProgress}%`;
+      sceneProgressTrack.append(sceneProgressBar);
+      card.append(sceneProgressTrack);
       const sceneScript = projectValue(scene, "script", "scene_script", "description");
       const prompt = projectValue(scene, "prompt", "video_prompt", "generation_prompt");
       if (sceneScript) card.append(make("p", { className: "scene-copy", text: sceneScript }));
@@ -1089,10 +1099,13 @@
     try {
       const payload = await request("/api/projects");
       state.projects = Array.isArray(payload) ? payload : (Array.isArray(payload && payload.projects) ? payload.projects : []);
-      if (!state.currentProjectID) {
-        const active = state.projects.find((project) => !["completed", "complete", "failed", "error"].includes(String(projectValue(project, "status")).toLowerCase()));
-        if (active) state.currentProjectID = projectID(active);
+      const terminal = (project) => ["completed", "complete", "failed", "error"].includes(String(projectValue(project, "status")).toLowerCase());
+      const current = state.projects.find((project) => projectID(project) === state.currentProjectID);
+      if (!current || terminal(current)) {
+        const active = state.projects.find((project) => !terminal(project));
+        state.currentProjectID = active ? projectID(active) : "";
       }
+      setGenerationMode(state.mode);
       elements.projectHistory.replaceChildren();
       if (state.projects.length) {
         elements.projectHistory.append(make("h3", { className: "project-history-title", text: "30-second projects" }));

@@ -139,6 +139,7 @@ func (s *Store) migrate() error {
 			scene_script TEXT NOT NULL,
 			prompt TEXT NOT NULL,
 			status TEXT NOT NULL,
+			progress INTEGER NOT NULL DEFAULT 0,
 			attempts INTEGER NOT NULL DEFAULT 0,
 			provider_generation_id TEXT NOT NULL DEFAULT '',
 			cost_usd TEXT NOT NULL DEFAULT '',
@@ -169,6 +170,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfMissing("generations", "next_download_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("project_scenes", "progress", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
