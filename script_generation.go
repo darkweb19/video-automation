@@ -13,7 +13,11 @@ import (
 	"unicode/utf8"
 )
 
-const MaxScriptRawResponseBytes = 1 << 20
+const (
+	MaxScriptRawResponseBytes  = 1 << 20
+	maxRandomPromptResponse    = 32 << 10
+	maxRandomProjectTopicRunes = 280
+)
 
 const scriptSystemPrompt = `You are a short-form visual storyteller and video prompt director. Create a complete silent 30-second vertical video plan from the user's topic. The final video has exactly five sequential scenes, each exactly six seconds. There is no narration, dialogue, subtitles, music, logos, or on-screen text. Tell the story only through visible action.
 
@@ -157,4 +161,89 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 	trace.Status = "completed"
 	trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
 	return plan, trace, nil
+}
+
+// GenerateRandomPrompt uses the same OpenRouter free-text route as project
+// planning. It deliberately returns only usable browser text: the API key,
+// routed model, and provider response remain server-side.
+func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input RandomPromptRequest) (string, error) {
+	input.Category = strings.TrimSpace(input.Category)
+	if !validRandomPromptCategory(input.Category) {
+		return "", errors.New("unsupported prompt category")
+	}
+	if !validRandomPromptMode(input.Mode) {
+		return "", errors.New("unsupported prompt mode")
+	}
+
+	systemPrompt, userPrompt, maxTokens := randomPromptInstructions(input.Mode, input.Category)
+	request := map[string]any{
+		"model":       ScriptModel,
+		"messages":    []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
+		"temperature": 1,
+		"max_tokens":  maxTokens,
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return "", fmt.Errorf("encode OpenRouter random prompt request: %w", err)
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(encoded))
+	if err != nil {
+		return "", err
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+c.APIKey)
+	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpResponse, err := c.client().Do(httpRequest)
+	if err != nil {
+		return "", fmt.Errorf("OpenRouter random prompt request: %w", err)
+	}
+	defer httpResponse.Body.Close()
+	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
+		return "", readUpstreamError(httpResponse)
+	}
+	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxRandomPromptResponse+1))
+	if err != nil {
+		return "", fmt.Errorf("read OpenRouter random prompt response: %w", err)
+	}
+	if len(body) > maxRandomPromptResponse {
+		return "", errors.New("OpenRouter random prompt response exceeds the allowed size")
+	}
+	var response struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("decode OpenRouter random prompt response: %w", err)
+	}
+	if len(response.Choices) == 0 {
+		return "", errors.New("OpenRouter returned an empty random prompt")
+	}
+	prompt := strings.TrimSpace(response.Choices[0].Message.Content)
+	if len(prompt) >= 2 && prompt[0] == '"' && prompt[len(prompt)-1] == '"' {
+		prompt = strings.TrimSpace(prompt[1 : len(prompt)-1])
+	}
+	if prompt == "" {
+		return "", errors.New("OpenRouter returned an empty random prompt")
+	}
+	if utf8.RuneCountInString(prompt) > MaxPromptLength {
+		return "", fmt.Errorf("OpenRouter random prompt exceeds %d characters", MaxPromptLength)
+	}
+	if input.Mode == RandomPromptModeProject && utf8.RuneCountInString(prompt) > maxRandomProjectTopicRunes {
+		return "", fmt.Errorf("OpenRouter random project topic exceeds %d characters", maxRandomProjectTopicRunes)
+	}
+	return prompt, nil
+}
+
+func randomPromptInstructions(mode RandomPromptMode, category string) (systemPrompt, userPrompt string, maxTokens int) {
+	if mode == RandomPromptModeProject {
+		return "You create original short-form video ideas. Return only one concise topic or story idea with no title, list, quotation marks, or explanation. It must be suitable for a silent 30-second vertical video with five connected six-second scenes. Keep every person clearly adult. Do not include brand names, logos, subtitles, or on-screen text.",
+			"Generate one original topic in this category: " + category,
+			120
+	}
+	return "You are a production-ready text-to-video prompt writer. Return only one standalone prompt with no title, list, quotation marks, or explanation. Include a clearly adult subject, setting, visual style, lighting, camera movement, six-second visible action, ending frame, and vertical 9:16 composition. Do not include brand names, logos, subtitles, or on-screen text.",
+		"Generate one original single-clip video prompt in this category: " + category,
+		700
 }

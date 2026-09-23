@@ -12,13 +12,12 @@ const (
 
 // GenerateRequest is the application's provider-independent video request.
 type GenerateRequest struct {
-	Prompt      string `json:"prompt"`
-	Model       string `json:"model"`
-	Duration    int    `json:"duration,omitempty"`
-	AspectRatio string `json:"aspect_ratio,omitempty"`
-	// GenerateAudio is intentionally never sent. Audio is removed during the
-	// final FFmpeg assembly for compatibility across video models.
-	GenerateAudio *bool `json:"-"`
+	Prompt        string `json:"prompt"`
+	Model         string `json:"model"`
+	Duration      int    `json:"duration,omitempty"`
+	Resolution    string `json:"resolution,omitempty"`
+	AspectRatio   string `json:"aspect_ratio,omitempty"`
+	GenerateAudio *bool  `json:"generate_audio,omitempty"`
 }
 
 // Generation is the normalized state returned to the browser.
@@ -38,6 +37,7 @@ type VideoModel struct {
 	Name           string            `json:"name"`
 	Provider       string            `json:"provider,omitempty"`
 	Durations      []int             `json:"durations,omitempty"`
+	Resolutions    []string          `json:"resolutions,omitempty"`
 	AspectRatios   []string          `json:"aspect_ratios,omitempty"`
 	Audio          *bool             `json:"audio,omitempty"`
 	PricingSKUs    map[string]string `json:"pricing_skus,omitempty"`
@@ -60,12 +60,75 @@ type VideoContentProvider interface {
 	GetVideoContent(context.Context, string, string) (*http.Response, error)
 }
 
+// VideoService is the complete provider-neutral contract consumed by the
+// dashboard and durable processor.
+type VideoService interface {
+	VideoProvider
+	VideoContentProvider
+}
+
+type VideoProviderID string
+
+const (
+	VideoProviderOpenRouter VideoProviderID = "openrouter"
+	VideoProviderModal      VideoProviderID = "modal"
+)
+
+func validVideoProvider(id VideoProviderID) bool {
+	return id == VideoProviderOpenRouter || id == VideoProviderModal
+}
+
 const (
 	ProjectSceneCount   = 5
 	ProjectSceneSeconds = 6
 	ProjectAspectRatio  = "9:16"
 	ScriptModel         = "openrouter/free"
+	ProjectResolution   = "480p"
 )
+
+// RandomPromptMode controls the kind of text returned by the random prompt
+// helper. Project mode returns a concise story idea; single mode returns a
+// complete text-to-video prompt.
+type RandomPromptMode string
+
+const (
+	RandomPromptModeProject RandomPromptMode = "project"
+	RandomPromptModeSingle  RandomPromptMode = "single"
+)
+
+const (
+	RandomPromptCategoryKidAnimation  = "Kid Animation"
+	RandomPromptCategoryHorrorStory   = "Horror Story"
+	RandomPromptCategoryNature        = "Nature"
+	RandomPromptCategorySeduction     = "Seduction"
+	RandomPromptCategoryMatureContent = "Mature Content"
+	RandomPromptCategorySoftCorn      = "Soft Corn"
+)
+
+func validRandomPromptMode(mode RandomPromptMode) bool {
+	return mode == RandomPromptModeProject || mode == RandomPromptModeSingle
+}
+
+func validRandomPromptCategory(category string) bool {
+	switch category {
+	case RandomPromptCategoryKidAnimation,
+		RandomPromptCategoryHorrorStory,
+		RandomPromptCategoryNature,
+		RandomPromptCategorySeduction,
+		RandomPromptCategoryMatureContent,
+		RandomPromptCategorySoftCorn:
+		return true
+	default:
+		return false
+	}
+}
+
+// RandomPromptRequest is the validated browser input for a generated idea or
+// single-clip video prompt.
+type RandomPromptRequest struct {
+	Category string           `json:"category"`
+	Mode     RandomPromptMode `json:"mode"`
+}
 
 type ProjectRequest struct {
 	Topic string `json:"topic"`
@@ -109,21 +172,23 @@ type ProjectScene struct {
 }
 
 type VideoProject struct {
-	ID              string         `json:"id"`
-	Topic           string         `json:"topic"`
-	Title           string         `json:"title,omitempty"`
-	Story           string         `json:"story,omitempty"`
-	Script          string         `json:"script,omitempty"`
-	Continuity      string         `json:"continuity,omitempty"`
-	Model           string         `json:"model"`
-	Status          string         `json:"status"`
-	Progress        int            `json:"progress"`
-	Error           string         `json:"error,omitempty"`
-	FinalVideoPath  string         `json:"-"`
-	FinalVideoReady bool           `json:"final_video_ready"`
-	FinalSizeBytes  int64          `json:"final_size_bytes,omitempty"`
-	TotalCostUSD    string         `json:"total_cost_usd,omitempty"`
-	Scenes          []ProjectScene `json:"scenes"`
+	ID               string         `json:"id"`
+	Topic            string         `json:"topic"`
+	Title            string         `json:"title,omitempty"`
+	Story            string         `json:"story,omitempty"`
+	Script           string         `json:"script,omitempty"`
+	Continuity       string         `json:"continuity,omitempty"`
+	Model            string         `json:"model"`
+	VideoProvider    string         `json:"video_provider"`
+	ProviderConfigID string         `json:"-"`
+	Status           string         `json:"status"`
+	Progress         int            `json:"progress"`
+	Error            string         `json:"error,omitempty"`
+	FinalVideoPath   string         `json:"-"`
+	FinalVideoReady  bool           `json:"final_video_ready"`
+	FinalSizeBytes   int64          `json:"final_size_bytes,omitempty"`
+	TotalCostUSD     string         `json:"total_cost_usd,omitempty"`
+	Scenes           []ProjectScene `json:"scenes"`
 	// TextGeneration contains auditable request/response artifacts for the
 	// script planner. It never includes credentials or provider headers.
 	TextGeneration TextGenerationTrace `json:"text_generation"`

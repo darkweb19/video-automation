@@ -1,28 +1,29 @@
-# Session handoff — 2026-09-21
+# Session handoff — 2026-09-23
 
 ## What was done
-- Delivered the durable project pipeline and generation audit trace in `3158fb0` (`feat: expose permanent generation pipeline trace`).
-- Added README documentation for prompts, schema, raw response, model metadata, normalized outputs, events, timestamps, and retries in `c6c4ea2` (`docs: document generation trace`).
-- Current verification: `go test ./...`, `node --check static/app.js`, and `git diff --check` pass.
-- No paid generation was performed; browser visual QA was unavailable.
+- Added an authenticated random-prompt endpoint using OpenRouter's `openrouter/free` text model.
+- Added six category choices and a category slider; prompt generation fills the active project-topic or single-prompt field.
+- Updated history cards to show full prompts/topics with the associated playable video and clear unavailable-video states.
+- Added mock-server coverage for both prompt modes, validation, authentication, cross-origin rejection, and secret handling.
+- Verified `go test ./...`, `go vet ./...`, `node --check static/app.js`, and `git diff --check`.
 
 ## Decisions locked
-- Script generation uses `openrouter/free`; video scenes use the selected compatible six-second vertical model.
-- Every project has five independent six-second scenes and a combined 30-second vertical MP4.
-- The trace is an operational process/audit record, not hidden chain-of-thought or private reasoning.
-- Failed scenes can be retried without regenerating successful scenes; final video remains authenticated.
+- OpenRouter remains the story/script text provider regardless of video provider selection.
+- The selected random-prompt category labels are Kid Animation, Horror Story, Nature, Seduction, Mature Content, and Soft Corn.
+- Project random prompts fill the project topic; single-clip random prompts fill the video prompt field.
+- Prompt generation is not persisted until the user submits the resulting project or video generation.
 
 ## Open questions
-1. Sujan: configure a valid OpenRouter key and review the selected model price/balance.
-2. Sujan: perform a paid end-to-end generation after browser visual QA.
+1. Sujan: complete browser visual QA for the category slider, prompt field, and history cards.
+2. Sujan: configure OpenRouter credentials and perform any desired live generation/account check.
 
 ## Next steps
-1. Rebuild the Docker app from current `main` and open the dashboard.
-2. Verify the pipeline timeline and collapsed generation details in a browser.
-3. Submit one low-cost project and inspect the resulting vertical MP4.
+1. Review the pushed branch in the browser, including both project and single-clip prompt flows.
+2. Configure OpenRouter in Settings and run a low-cost generation if live provider validation is desired.
 
 ## Gotchas
-- Local Docker and FFmpeg are unavailable; FFmpeg is installed in the Docker image.
-- `openrouter/free` availability can vary, so text-generation failures remain retryable.
-- Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` for Go checks.
-- Back up `/data/secret.key` with the database; it is required to decrypt the stored API key.
+- No paid OpenRouter or video-provider calls were made; mock HTTP tests covered prompt generation.
+- Project history associates the final merged video with its submitted topic; scene prompts remain available in project details.
+- Browser visual QA has not been performed.
+- Docker and host `ffmpeg` are unavailable on this workstation; FFmpeg is included in the application Docker image.
+- Keep Go caches workspace-local with `.gocache` and `.gomodcache`.

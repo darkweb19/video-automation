@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FrameVault — Video dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260921-1">
-  <link rel="stylesheet" href="/static/model-picker.css?v=20260921-1">
-  <link rel="stylesheet" href="/static/project.css?v=20260921-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260923-3">
+  <link rel="stylesheet" href="/static/model-picker.css?v=20260923-1">
+  <link rel="stylesheet" href="/static/project.css?v=20260923-1">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -93,8 +93,13 @@
                   <p class="field-hint">We generate the story, full script, and five connected six-second scenes automatically.</p>
                 </div>
                 <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" required></textarea><p id="prompt-error" class="form-error"></p></div>
+                <div class="random-prompt-controls field">
+                  <label for="prompt-category">Category: <strong id="prompt-category-name" aria-live="polite">Kid Animation</strong></label>
+                  <input id="prompt-category" type="range" min="0" max="5" step="1" value="0" aria-valuetext="Kid Animation">
+                  <button id="random-prompt" class="button secondary" type="button">Generate random prompt</button>
+                </div>
                 <div class="field model-field">
-                  <label id="model-label" for="model-trigger">Model and price</label>
+                  <label id="model-label" for="model-trigger">Video model and price</label>
                   <div id="model-picker" class="model-picker">
                     <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
                       <span id="model-trigger-content" class="model-trigger-content"><span class="model-placeholder">Loading models…</span></span>
@@ -103,11 +108,17 @@
                     <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
                   </div>
                   <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models…</option></select>
-                  <small id="project-model-note">MiniMax K3 Pro is preferred when it is available with 6-second vertical output.</small>
+                  <small id="project-model-note">Choose a model that supports six-second clips and 9:16 output.</small>
                 </div>
-                <div id="single-options" class="form-grid"><div class="field"><label for="duration">Duration</label><select id="duration"></select></div><div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div></div>
+                <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
+                <div id="single-options" class="form-grid">
+                  <div class="field"><label for="duration">Duration</label><select id="duration"></select></div>
+                  <div id="resolution-field" class="field"><label for="resolution">Resolution</label><select id="resolution"></select></div>
+                  <div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div>
+                  <div id="audio-option" class="field audio-option" hidden><label class="checkbox-label" for="generate-audio"><input id="generate-audio" type="checkbox"> Generate audio</label></div>
+                </div>
                 <div id="project-options" class="project-options"><span>Output</span><strong>Vertical 9:16 · 30 seconds · 5 scenes</strong></div>
-                <div class="estimate"><span>Estimated generation cost</span><strong id="cost-estimate">Unavailable</strong><small>Final cost comes directly from OpenRouter.</small></div>
+                <div class="estimate"><span>Estimated generation cost</span><strong id="cost-estimate">Unavailable</strong><small>Costs are shown when the selected video provider supplies pricing.</small></div>
                 <button id="generate" class="button primary full" type="submit" disabled>Generate 30-second project</button>
               </form>
             </section>
@@ -154,11 +165,24 @@
         <section class="view" data-page="settings">
           <div class="settings-grid">
             <section class="panel">
-              <div class="panel-head"><div><h2>OpenRouter API key</h2><p>Encrypted before it is written to the Docker volume</p></div><span id="key-state" class="badge neutral">Checking</span></div>
-              <div class="key-display"><span>Current key</span><strong id="masked-key">Not configured</strong></div>
+              <div class="panel-head"><div><h2>Video generation</h2><p>Select the provider used for new video jobs.</p></div></div>
+              <div class="field"><label for="video-provider">Video provider</label><select id="video-provider"><option value="modal">Modal</option><option value="openrouter">OpenRouter</option></select><small id="provider-help">Model options and capabilities follow the selected provider.</small></div>
+              <div class="provider-actions"><span id="video-provider-state" class="badge neutral">Checking</span><button id="test-video-provider" class="button secondary" type="button">Test video provider</button></div>
+            </section>
+            <section id="openrouter-settings" class="panel">
+              <div class="panel-head"><div><h2>OpenRouter API key</h2><p>Used for story generation and OpenRouter video. Encrypted at rest.</p></div><span id="key-state" class="badge neutral">Checking</span></div>
+              <div class="key-display"><span>Saved key status</span><strong id="masked-key">Not configured</strong></div>
               <form id="api-key-form" class="stack">
                 <div class="field"><label for="api-key">Replace API key</label><input id="api-key" type="password" autocomplete="off" placeholder="sk-or-v1-…" required><small>The key is tested before it is saved.</small></div>
                 <button class="button primary" type="submit">Test and save key</button>
+              </form>
+            </section>
+            <section id="modal-settings" class="panel" hidden>
+              <div class="panel-head"><div><h2>Modal video API</h2><p>The API key is encrypted before it is stored.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
+              <form id="modal-config-form" class="stack">
+                <div class="field"><label for="modal-base-url">Modal Video Base URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
+                <div class="field"><label for="modal-api-key">Modal Video API Key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key"><small id="modal-key-help">The saved key is never returned to the browser.</small></div>
+                <button class="button primary" type="submit">Test and save Modal settings</button>
               </form>
             </section>
             <section class="panel">
@@ -175,6 +199,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260921-1" defer></script>
+  <script src="/static/app.js?v=20260923-3" defer></script>
 </body>
 </html>

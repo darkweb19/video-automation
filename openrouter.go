@@ -144,7 +144,7 @@ func (c *OpenRouterClient) ListVideoModels(ctx context.Context) ([]VideoModel, e
 		}
 		models = append(models, VideoModel{
 			ID: model.ID, Name: model.Name, Provider: providerFromModelID(model.ID),
-			Durations: model.SupportedDurations, AspectRatios: model.SupportedAspectRatios,
+			Durations: model.SupportedDurations, Resolutions: model.SupportedResolutions, AspectRatios: model.SupportedAspectRatios,
 			Audio: model.GenerateAudio, PricingSKUs: model.PricingSKUs,
 			PricePerSecond: pricePerSecond, PricePerGeneration: pricePerGeneration, PriceUnit: priceUnit,
 		})
@@ -289,12 +289,17 @@ type openRouterVideoModel struct {
 	ID                    string            `json:"id"`
 	Name                  string            `json:"name"`
 	SupportedDurations    []int             `json:"supported_durations"`
+	SupportedResolutions  []string          `json:"supported_resolutions"`
 	SupportedAspectRatios []string          `json:"supported_aspect_ratios"`
 	GenerateAudio         *bool             `json:"generate_audio"`
 	PricingSKUs           map[string]string `json:"pricing_skus"`
 }
 
 func (c *OpenRouterClient) normalizeGeneration(source openRouterGeneration) (*Generation, error) {
+	return normalizeVideoGeneration(source, "OpenRouter")
+}
+
+func normalizeVideoGeneration(source openRouterGeneration, provider string) (*Generation, error) {
 	status := source.Status
 	switch status {
 	case "pending":
@@ -308,7 +313,7 @@ func (c *OpenRouterClient) normalizeGeneration(source openRouterGeneration) (*Ge
 		}
 	case "completed", "failed", "queued", "processing":
 	default:
-		return nil, fmt.Errorf("OpenRouter returned an unsupported video status %q", source.Status)
+		return nil, fmt.Errorf("%s returned an unsupported video status %q", provider, source.Status)
 	}
 	generation := &Generation{ID: source.ID, Status: status, Model: source.Model, Progress: source.Progress, Error: source.Error, CostUSD: string(source.Usage.Cost)}
 	if generation.Status == "completed" && generation.ID != "" {

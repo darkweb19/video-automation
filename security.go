@@ -201,21 +201,50 @@ func (s *Security) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Security) Encrypt(value string) (string, error) {
+	return s.encrypt(value, []byte("openrouter-api-key"), "")
+}
+
+// EncryptSetting binds an encrypted value to its persistent setting name.
+// Versioning keeps existing OpenRouter ciphertext readable during upgrades.
+func (s *Security) EncryptSetting(key, value string) (string, error) {
+	if strings.TrimSpace(key) == "" {
+		return "", errors.New("setting key is required")
+	}
+	return s.encrypt(value, []byte("setting:"+key), "v1:")
+}
+
+func (s *Security) encrypt(value string, additionalData []byte, prefix string) (string, error) {
 	nonce := make([]byte, s.aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
 	}
-	sealed := s.aead.Seal(nonce, nonce, []byte(value), []byte("openrouter-api-key"))
-	return base64.RawStdEncoding.EncodeToString(sealed), nil
+	sealed := s.aead.Seal(nonce, nonce, []byte(value), additionalData)
+	return prefix + base64.RawStdEncoding.EncodeToString(sealed), nil
 }
 
 func (s *Security) Decrypt(encoded string) (string, error) {
+	return s.decrypt(encoded, []byte("openrouter-api-key"))
+}
+
+// DecryptSetting accepts versioned keyed ciphertext. The one legacy setting
+// is deliberately supported so upgrades do not strand an existing key.
+func (s *Security) DecryptSetting(key, encoded string) (string, error) {
+	if strings.HasPrefix(encoded, "v1:") {
+		return s.decrypt(strings.TrimPrefix(encoded, "v1:"), []byte("setting:"+key))
+	}
+	if key == apiKeySetting {
+		return s.Decrypt(encoded)
+	}
+	return "", errors.New("invalid encrypted setting")
+}
+
+func (s *Security) decrypt(encoded string, additionalData []byte) (string, error) {
 	data, err := base64.RawStdEncoding.DecodeString(encoded)
 	if err != nil || len(data) < s.aead.NonceSize() {
 		return "", errors.New("invalid encrypted API key")
 	}
 	nonce := data[:s.aead.NonceSize()]
-	plain, err := s.aead.Open(nil, nonce, data[s.aead.NonceSize():], []byte("openrouter-api-key"))
+	plain, err := s.aead.Open(nil, nonce, data[s.aead.NonceSize():], additionalData)
 	if err != nil {
 		return "", errors.New("unable to decrypt API key")
 	}
