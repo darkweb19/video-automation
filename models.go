@@ -86,6 +86,50 @@ const (
 	ProjectResolution   = "480p"
 )
 
+// RandomPromptMode controls the kind of text returned by the random prompt
+// helper. Project mode returns a concise story idea; single mode returns a
+// complete text-to-video prompt.
+type RandomPromptMode string
+
+const (
+	RandomPromptModeProject RandomPromptMode = "project"
+	RandomPromptModeSingle  RandomPromptMode = "single"
+)
+
+const (
+	RandomPromptCategoryKidAnimation  = "Kid Animation"
+	RandomPromptCategoryHorrorStory   = "Horror Story"
+	RandomPromptCategoryNature        = "Nature"
+	RandomPromptCategorySeduction     = "Seduction"
+	RandomPromptCategoryMatureContent = "Mature Content"
+	RandomPromptCategorySoftCorn      = "Soft Corn"
+)
+
+func validRandomPromptMode(mode RandomPromptMode) bool {
+	return mode == RandomPromptModeProject || mode == RandomPromptModeSingle
+}
+
+func validRandomPromptCategory(category string) bool {
+	switch category {
+	case RandomPromptCategoryKidAnimation,
+		RandomPromptCategoryHorrorStory,
+		RandomPromptCategoryNature,
+		RandomPromptCategorySeduction,
+		RandomPromptCategoryMatureContent,
+		RandomPromptCategorySoftCorn:
+		return true
+	default:
+		return false
+	}
+}
+
+// RandomPromptRequest is the validated browser input for a generated idea or
+// single-clip video prompt.
+type RandomPromptRequest struct {
+	Category string           `json:"category"`
+	Mode     RandomPromptMode `json:"mode"`
+}
+
 type ProjectRequest struct {
 	Topic string `json:"topic"`
 	Model string `json:"model"`
