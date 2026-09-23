@@ -505,12 +505,6 @@ func compatibleProjectModel(model VideoModel) bool {
 
 func preferredProjectModel(models []VideoModel) (VideoModel, bool) {
 	for _, model := range models {
-		name := strings.ToLower(model.ID + " " + model.Name)
-		if compatibleProjectModel(model) && strings.Contains(name, "minimax") && strings.Contains(name, "k3") && strings.Contains(name, "pro") {
-			return model, true
-		}
-	}
-	for _, model := range models {
 		if compatibleProjectModel(model) {
 			return model, true
 		}

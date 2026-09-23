@@ -412,8 +412,8 @@ func TestCombineProjectVideoBuildsNormalizedThirtySecondOutput(t *testing.T) {
 
 func TestPreferredProjectModelRequiresVerticalSixSeconds(t *testing.T) {
 	models := []VideoModel{
-		{ID: "minimax/k3-pro", Name: "MiniMax K3 Pro", Durations: []int{5}, AspectRatios: []string{"9:16"}},
 		{ID: "other/vertical", Name: "Other", Durations: []int{6}, AspectRatios: []string{"9:16"}},
+		{ID: "minimax/k3-pro", Name: "MiniMax K3 Pro", Durations: []int{6}, AspectRatios: []string{"9:16"}},
 	}
 	model, ok := preferredProjectModel(models)
 	if !ok || model.ID != "other/vertical" {
@@ -421,12 +421,12 @@ func TestPreferredProjectModelRequiresVerticalSixSeconds(t *testing.T) {
 	}
 }
 
-func TestCreateProjectDefaultsToCompatibleMiniMaxK3Pro(t *testing.T) {
+func TestCreateProjectDefaultsToFirstCompatibleModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/videos/models" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"data":[{"id":"minimax/k3-pro","name":"MiniMax K3 Pro","supported_durations":[6],"supported_aspect_ratios":["9:16"]}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"provider/compatible","name":"Compatible","supported_durations":[6],"supported_aspect_ratios":["9:16"]},{"id":"minimax/k3-pro","name":"MiniMax K3 Pro","supported_durations":[6],"supported_aspect_ratios":["9:16"]}]}`))
 	}))
 	defer server.Close()
 	store := newTestStore(t)
@@ -450,7 +450,7 @@ func TestCreateProjectDefaultsToCompatibleMiniMaxK3Pro(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&project); err != nil {
 		t.Fatal(err)
 	}
-	if project.Model != "minimax/k3-pro" || project.Status != "planning" {
+	if project.Model != "provider/compatible" || project.Status != "planning" {
 		t.Fatalf("project = %+v", project)
 	}
 }
