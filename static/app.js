@@ -33,7 +33,12 @@
     modelTriggerContent: $("#model-trigger-content"),
     modelMenu: $("#model-menu"),
     duration: $("#duration"),
+    resolution: $("#resolution"),
+    resolutionField: $("#resolution-field"),
     aspectRatio: $("#aspect-ratio"),
+    audioOption: $("#audio-option"),
+    generateAudio: $("#generate-audio"),
+    activeVideoProvider: $("#active-video-provider"),
     prompt: $("#prompt"),
     projectTopic: $("#project-topic"),
     projectTopicError: $("#project-topic-error"),
@@ -83,6 +88,15 @@
     maskedKey: $("#masked-key"),
     apiKeyForm: $("#api-key-form"),
     apiKey: $("#api-key"),
+    videoProvider: $("#video-provider"),
+    videoProviderState: $("#video-provider-state"),
+    testVideoProvider: $("#test-video-provider"),
+    modalSettings: $("#modal-settings"),
+    modalKeyState: $("#modal-key-state"),
+    modalConfigForm: $("#modal-config-form"),
+    modalBaseURL: $("#modal-base-url"),
+    modalAPIKey: $("#modal-api-key"),
+    modalKeyHelp: $("#modal-key-help"),
     passwordForm: $("#password-form"),
     currentPassword: $("#current-password"),
     newPassword: $("#new-password"),
@@ -93,11 +107,12 @@
     overview: { title: "Overview", kicker: "Workspace" },
     generate: { title: "Generate", kicker: "Create" },
     history: { title: "History", kicker: "Library" },
-    settings: { title: "Settings", kicker: "Security" }
+    settings: { title: "Settings", kicker: "AI providers" }
   };
 
   const state = {
     models: [],
+    videoProvider: "openrouter",
     generations: [],
     stats: null,
     historyHasMore: false,
@@ -118,6 +133,12 @@
     authenticated: false,
     mustChangePassword: false
   };
+
+  const VIDEO_PROVIDER_NAMES = Object.freeze({ modal: "Modal", openrouter: "OpenRouter" });
+
+  function videoProviderName(provider = state.videoProvider) {
+    return VIDEO_PROVIDER_NAMES[provider] || provider;
+  }
 
   class APIError extends Error {
     constructor(message, status) {
@@ -233,25 +254,19 @@
     if (project) {
       const selected = state.models.find((model) => model.id === elements.model.value);
       if (state.models.length && !supportsProject(selected)) {
-        const preferred = state.models.find((model) => supportsProject(model) && isMiniMaxK3Pro(model));
         const fallback = state.models.find(supportsProject);
-        if (preferred || fallback) selectModel((preferred || fallback).id);
+        if (fallback) selectModel(fallback.id);
       }
       elements.statusEmpty.hidden = Boolean(state.currentProjectID);
     } else {
       elements.statusEmpty.hidden = false;
     }
-    updateEstimate();
+    updateModelOptions();
   }
 
   function supportsProject(model) {
     return Array.isArray(model && model.durations) && model.durations.includes(6)
       && Array.isArray(model.aspect_ratios) && model.aspect_ratios.includes("9:16");
-  }
-
-  function isMiniMaxK3Pro(model) {
-    const label = `${model && model.name || ""} ${model && model.id || ""}`.toLowerCase();
-    return label.includes("minimax") && label.includes("k3") && label.includes("pro");
   }
 
   function stopHistoryRefresh() {
@@ -542,15 +557,26 @@
     renderModelPicker();
     if (!model) {
       fillSelect(elements.duration, [], String, "Provider default");
+      fillSelect(elements.resolution, [], String, "Provider default");
       fillSelect(elements.aspectRatio, [], String, "Provider default");
+      elements.resolutionField.hidden = true;
+      elements.audioOption.hidden = true;
       elements.generate.disabled = true;
       updateEstimate();
       return;
     }
 
     fillSelect(elements.duration, model.durations, (value) => `${value} seconds`, "Provider default");
+    fillSelect(elements.resolution, model.resolutions, String, "Provider default");
     fillSelect(elements.aspectRatio, model.aspect_ratios, String, "Provider default");
-    elements.generate.disabled = false;
+    elements.resolutionField.hidden = !Array.isArray(model.resolutions) || model.resolutions.length === 0;
+    elements.audioOption.hidden = model.audio !== true;
+    if (model.audio !== true) elements.generateAudio.checked = false;
+    const projectCompatible = supportsProject(model);
+    elements.generate.disabled = state.mode === "project" && !projectCompatible;
+    elements.projectModelNote.textContent = projectCompatible
+      ? "This model supports the five-scene 6-second, 9:16 project preset."
+      : "This model does not support the fixed 6-second, 9:16 project preset. Choose another model or switch to Single clip.";
     updateEstimate();
   }
 
@@ -558,7 +584,7 @@
     const model = selectedModel();
     const pricing = modelPricing(model);
     if (!model || pricing.price === null) {
-      elements.costEstimate.textContent = "Unavailable";
+      elements.costEstimate.textContent = model ? "Not supplied by selected provider" : "Unavailable";
       return;
     }
     if (pricing.unit === "generation") {
@@ -588,7 +614,7 @@
     elements.model.append(loadingOption);
     renderModelPicker("Loading models…");
     try {
-      const payload = await request("/models");
+      const payload = await request(`/models?provider=${encodeURIComponent(state.videoProvider)}`);
       state.models = Array.isArray(payload && payload.models) ? payload.models : [];
       elements.model.replaceChildren();
       if (!state.models.length) {
@@ -608,34 +634,30 @@
         option.value = model.id;
         elements.model.append(option);
       });
-      if (!elements.model.value) {
-        const preferred = state.models.find((model) => supportsProject(model) && isMiniMaxK3Pro(model));
-        const fallback = state.models.find(supportsProject);
-        const selected = preferred || fallback;
-        if (selected) elements.model.value = selected.id;
-        elements.projectModelNote.textContent = preferred
-          ? "MiniMax K3 Pro selected by default."
-          : fallback
-            ? `MiniMax K3 Pro is unavailable; ${fallback.name || fallback.id} is the compatible default.`
-            : "No available model currently supports both 6-second clips and vertical 9:16 output.";
-      }
+      const requestedModel = payload && payload.selected_model;
+      const savedModel = state.models.find((model) => model.id === requestedModel);
+      const selected = (savedModel && (state.mode !== "project" || supportsProject(savedModel)))
+        || (state.mode === "project" ? state.models.find(supportsProject) : null)
+        || savedModel
+        || state.models[0];
+      if (selected) elements.model.value = selected.id;
+      elements.activeVideoProvider.textContent = `Video provider: ${videoProviderName(payload && payload.provider || state.videoProvider)}`;
       elements.model.disabled = false;
       elements.modelTrigger.disabled = false;
       renderModelMenu();
       updateModelOptions();
+      if (selected && selected.id !== requestedModel) void persistVideoModel(selected.id, false);
       renderHistory();
       renderRecent();
     } catch (error) {
       state.models = [];
       elements.model.replaceChildren();
-      const option = make("option", {
-        text: error.status === 422 ? "Configure an API key in Settings" : "Models unavailable"
-      });
+      const option = make("option", { text: error.status === 422 ? "Configure provider credentials in Settings" : "Models unavailable" });
       option.value = "";
       elements.model.append(option);
       elements.modelMenu.replaceChildren();
       updateModelOptions();
-      renderModelPicker(error.status === 422 ? "Configure an API key in Settings" : "Models unavailable");
+      renderModelPicker(error.status === 422 ? "Configure provider credentials in Settings" : "Models unavailable");
       if (notify && error.status !== 422 && error.status !== 401) toast(error.message, true);
     }
   }
@@ -919,8 +941,8 @@
     const pending = ["queued", "processing", "downloading", "download_failed"].includes(status);
     elements.progressWrap.hidden = !pending;
     const details = {
-      queued: "Your request is queued with OpenRouter.",
-      processing: "OpenRouter is generating your video.",
+      queued: "Your request is queued with the selected video provider.",
+      processing: "Your video provider is generating the video.",
       downloading: "Generation complete. Saving the video to Docker storage.",
       download_failed: "The video is ready upstream. Storage download will be retried.",
       completed: "Video complete and saved in Docker storage.",
@@ -1459,7 +1481,9 @@
 
     const requestBody = { prompt, model: elements.model.value };
     if (elements.duration.value) requestBody.duration = Number(elements.duration.value);
+    if (elements.resolution.value) requestBody.resolution = elements.resolution.value;
     if (elements.aspectRatio.value) requestBody.aspect_ratio = elements.aspectRatio.value;
+    if (elements.generateAudio.checked) requestBody.generate_audio = true;
 
     setButtonBusy(elements.generate, true, "Submitting…");
     elements.statusEmpty.hidden = true;
@@ -1467,7 +1491,7 @@
     elements.statusBadge.className = "badge queued";
     elements.statusBadge.textContent = "Submitting";
     elements.progressWrap.hidden = false;
-    elements.statusDetail.textContent = "Sending your request to OpenRouter…";
+    elements.statusDetail.textContent = "Sending your request to the selected video provider…";
     elements.statusError.hidden = true;
     elements.generatedVideo.hidden = true;
     elements.generatedVideo.removeAttribute("src");
@@ -1498,14 +1522,30 @@
     }
   }
 
+  function renderProviderSettings(settings) {
+    state.videoProvider = settings.video_provider === "modal" ? "modal" : "openrouter";
+    elements.videoProvider.value = state.videoProvider;
+    elements.modalSettings.hidden = state.videoProvider !== "modal";
+    elements.videoProviderState.className = "badge completed";
+    elements.videoProviderState.textContent = `Active: ${videoProviderName()}`;
+    elements.modalBaseURL.value = settings.modal_video_base_url || "";
+    const openRouterConfigured = Boolean(settings.openrouter_api_key_configured);
+    elements.keyState.className = `badge ${openRouterConfigured ? "completed" : "neutral"}`;
+    elements.keyState.textContent = openRouterConfigured ? "Configured" : "Not configured";
+    elements.maskedKey.textContent = openRouterConfigured ? "Configured" : "Not configured";
+    const modalConfigured = Boolean(settings.modal_video_api_key_configured);
+    elements.modalKeyState.className = `badge ${modalConfigured ? "completed" : "neutral"}`;
+    elements.modalKeyState.textContent = modalConfigured ? "Configured" : "Not configured";
+    elements.modalKeyHelp.textContent = modalConfigured
+      ? "A key is saved securely. Leave this field blank to keep it while changing the URL."
+      : "A key is required for the first save. The saved key is never returned to the browser.";
+  }
+
   async function loadSettings(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
     try {
       const settings = await request("/api/settings");
-      const configured = Boolean(settings && settings.api_key_configured);
-      elements.keyState.className = `badge ${configured ? "completed" : "neutral"}`;
-      elements.keyState.textContent = configured ? "Configured" : "Not configured";
-      elements.maskedKey.textContent = configured ? (settings.api_key_masked || "Configured") : "Not configured";
+      renderProviderSettings(settings || {});
     } catch (error) {
       elements.keyState.className = "badge failed";
       elements.keyState.textContent = "Unavailable";
@@ -1528,16 +1568,85 @@
     const button = $("button[type='submit']", elements.apiKeyForm);
     setButtonBusy(button, true, "Testing key…");
     try {
-      const settings = await request("/api/settings/api-key", {
+      await request("/api/settings/api-key", {
         method: "PUT",
         body: JSON.stringify({ api_key: key })
       });
       elements.apiKey.value = "";
       elements.keyState.className = "badge completed";
       elements.keyState.textContent = "Configured";
-      elements.maskedKey.textContent = settings.api_key_masked || "Configured";
+      elements.maskedKey.textContent = "Configured";
       toast("API key tested and saved.");
+      if (state.videoProvider === "openrouter") await loadModels(false);
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function changeVideoProvider() {
+    const requestedProvider = elements.videoProvider.value;
+    elements.videoProvider.disabled = true;
+    try {
+      const settings = await request("/api/settings/video-provider", {
+        method: "PUT",
+        body: JSON.stringify({ video_provider: requestedProvider })
+      });
+      state.videoProvider = (settings && settings.video_provider) || requestedProvider;
+      await loadSettings(false);
       await loadModels(false);
+      toast(`Video provider changed to ${videoProviderName()}.`);
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+      await loadSettings(false);
+    } finally {
+      elements.videoProvider.disabled = false;
+    }
+  }
+
+  async function persistVideoModel(modelID, notify = false) {
+    if (!modelID || !state.videoProvider) return;
+    try {
+      await request("/api/settings/video-model", {
+        method: "PUT",
+        body: JSON.stringify({ provider: state.videoProvider, model: modelID })
+      });
+    } catch (error) {
+      if (notify && error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function saveModalConfig(event) {
+    event.preventDefault();
+    const button = $("button[type='submit']", elements.modalConfigForm);
+    setButtonBusy(button, true, "Testing Modal…");
+    try {
+      await request("/api/settings/modal", {
+        method: "PUT",
+        body: JSON.stringify({
+          base_url: elements.modalBaseURL.value.trim(),
+          api_key: elements.modalAPIKey.value
+        })
+      });
+      elements.modalAPIKey.value = "";
+      await loadSettings(false);
+      toast("Modal settings tested and saved.");
+      if (state.videoProvider === "modal") await loadModels(false);
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function testVideoProvider() {
+    const button = elements.testVideoProvider;
+    setButtonBusy(button, true, "Testing…");
+    try {
+      const result = await request("/api/settings/video-provider/test", { method: "POST" });
+      const provider = videoProviderName(result && result.provider || state.videoProvider);
+      toast(`${provider} connection succeeded (${Number(result && result.model_count) || 0} models).`);
     } catch (error) {
       if (error.status !== 401) toast(error.message, true);
     } finally {
@@ -1592,7 +1701,8 @@
       elements.loginForm.reset();
       showAuthenticated(session.username, session.must_change_password);
       if (!state.mustChangePassword) {
-        await Promise.allSettled([loadHistory(false, false), loadModels(false), loadSettings(false)]);
+        await loadSettings(false);
+        await Promise.allSettled([loadHistory(false, false), loadModels(false)]);
       }
     } catch (error) {
       elements.loginError.textContent = error.message;
@@ -1664,9 +1774,15 @@
     elements.retryProject.addEventListener("click", retryCurrentProject);
     elements.modeOptions.forEach((button) => button.addEventListener("click", () => setGenerationMode(button.dataset.mode)));
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
+    elements.modalConfigForm.addEventListener("submit", saveModalConfig);
+    elements.videoProvider.addEventListener("change", changeVideoProvider);
+    elements.testVideoProvider.addEventListener("click", testVideoProvider);
     elements.passwordForm.addEventListener("submit", updatePassword);
     elements.refreshHistory.addEventListener("click", () => { loadHistory(true); loadProjects(true); });
-    elements.model.addEventListener("change", updateModelOptions);
+    elements.model.addEventListener("change", () => {
+      updateModelOptions();
+      void persistVideoModel(elements.model.value, true);
+    });
     elements.modelTrigger.addEventListener("click", () => {
       if (elements.modelMenu.hidden) openModelMenu();
       else closeModelMenu();
@@ -1687,6 +1803,7 @@
       if (!elements.modelPicker.contains(event.target)) closeModelMenu();
     });
     elements.duration.addEventListener("change", updateEstimate);
+    elements.resolution.addEventListener("change", updateEstimate);
     elements.prompt.addEventListener("input", () => {
       const count = Array.from(elements.prompt.value).length;
       elements.promptCount.textContent = `${count.toLocaleString()} / 4000`;
@@ -1725,7 +1842,8 @@
       const session = await request("/api/session", {}, true);
       showAuthenticated(session.username, session.must_change_password);
       if (!state.mustChangePassword) {
-        await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false), loadSettings(false)]);
+        await loadSettings(false);
+        await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false)]);
       }
     } catch (error) {
       showLoggedOut();
