@@ -83,6 +83,22 @@ func (s *Store) ProviderConfig(id string) (ProviderConfig, error) {
 	return config, err
 }
 
+// DeleteProviderConfigIfUnused removes a snapshot only when no durable job or
+// project still references it. Completed records intentionally retain their
+// snapshot so content/download recovery remains possible.
+func (s *Store) DeleteProviderConfigIfUnused(id string) error {
+	if id == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM video_provider_configs WHERE id=? AND NOT EXISTS (SELECT 1 FROM generations WHERE provider_config_id=?) AND NOT EXISTS (SELECT 1 FROM video_projects WHERE provider_config_id=?)`, id, id, id)
+	return err
+}
+
+func (s *Store) GarbageCollectProviderConfigs() error {
+	_, err := s.db.Exec(`DELETE FROM video_provider_configs WHERE NOT EXISTS (SELECT 1 FROM generations WHERE generations.provider_config_id=video_provider_configs.id) AND NOT EXISTS (SELECT 1 FROM video_projects WHERE video_projects.provider_config_id=video_provider_configs.id)`)
+	return err
+}
+
 func (s *Store) LegacyPendingProviderIDs() ([]VideoProviderID, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT video_provider FROM (
 		SELECT video_provider FROM generations WHERE provider_config_id='' AND status IN ('queued','processing','downloading','download_failed')
@@ -641,6 +657,10 @@ func (s *Store) CancelDelete(id, status string) {
 }
 
 func (s *Store) FinishDelete(id string) error {
+	record, err := s.Generation(id)
+	if err != nil {
+		return err
+	}
 	result, err := s.db.Exec(`DELETE FROM generations WHERE id=? AND status='deleting'`, id)
 	if err != nil {
 		return err
@@ -649,7 +669,7 @@ func (s *Store) FinishDelete(id string) error {
 	if count != 1 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return s.DeleteProviderConfigIfUnused(record.ProviderConfigID)
 }
 
 func (s *Store) DeleteGeneration(id string) (GenerationRecord, error) {
@@ -658,5 +678,8 @@ func (s *Store) DeleteGeneration(id string) (GenerationRecord, error) {
 		return record, err
 	}
 	_, err = s.db.Exec(`DELETE FROM generations WHERE id=?`, id)
+	if err == nil {
+		err = s.DeleteProviderConfigIfUnused(record.ProviderConfigID)
+	}
 	return record, err
 }

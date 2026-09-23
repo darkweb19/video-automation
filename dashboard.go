@@ -24,12 +24,13 @@ const (
 )
 
 type dashboardApp struct {
-	store           *Store
-	security        *Security
-	logger          *slog.Logger
-	baseURL         string
-	limiter         *loginThrottle
-	recoveryLimiter *loginThrottle
+	store                     *Store
+	security                  *Security
+	logger                    *slog.Logger
+	baseURL                   string
+	limiter                   *loginThrottle
+	recoveryLimiter           *loginThrottle
+	legacySnapshotBackfillErr error
 }
 
 func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) http.Handler {
@@ -375,8 +376,7 @@ func (a *dashboardApp) videoProviderSnapshot(provider VideoProviderID) (VideoSer
 
 // BackfillLegacyProviderSnapshots runs once when the worker starts after an
 // upgrade. It captures existing mutable settings before a future account
-// switch. Rows that cannot be configured remain untouched and are handled by
-// the provider-scoped compatibility fallback below.
+// switch. Unbackfilled legacy rows are deliberately fail-safe skipped.
 func (a *dashboardApp) backfillLegacyProviderSnapshots() error {
 	providers, err := a.store.LegacyPendingProviderIDs()
 	if err != nil {
@@ -385,7 +385,7 @@ func (a *dashboardApp) backfillLegacyProviderSnapshots() error {
 	for _, provider := range providers {
 		_, _, configID, err := a.videoProviderSnapshot(provider)
 		if err != nil {
-			continue
+			return fmt.Errorf("snapshot legacy %s provider work: %w", provider, err)
 		}
 		if err := a.store.AssignLegacyProviderConfig(provider, configID); err != nil {
 			return err
@@ -394,13 +394,12 @@ func (a *dashboardApp) backfillLegacyProviderSnapshots() error {
 	return nil
 }
 
-// videoProviderForSnapshot uses immutable request-time configuration. Legacy
-// rows created before snapshots are deliberately routed by their persisted
-// provider (never the active selection); their current provider settings are
-// the only available compatibility fallback.
+// videoProviderForSnapshot uses immutable request-time configuration. A
+// legacy row without a completed migration is never sent with mutable current
+// credentials because that could target a different account after a switch.
 func (a *dashboardApp) videoProviderForSnapshot(configID string, legacyProvider VideoProviderID) (VideoService, error) {
 	if configID == "" {
-		return a.videoProvider(legacyProvider)
+		return nil, errors.New("legacy video work is waiting for a provider configuration snapshot; retry after configuring the original provider")
 	}
 	config, err := a.store.ProviderConfig(configID)
 	if err != nil {
@@ -489,7 +488,7 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a valid prompt is required")
 		return
 	}
-	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
+	provider, providerID, err := a.activeVideoProvider()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -508,6 +507,17 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	persisted := false
+	defer func() {
+		if !persisted {
+			_ = a.store.DeleteProviderConfigIfUnused(providerConfigID)
+		}
+	}()
 	generation, err := provider.GenerateVideo(r.Context(), request)
 	if err != nil {
 		a.logger.Error("generation submission failed", "model", request.Model)
@@ -544,6 +554,7 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "unable to save generation")
 		return
 	}
+	persisted = true
 	writeJSON(w, http.StatusAccepted, record)
 }
 
@@ -632,7 +643,7 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a topic or story idea of at most 4,000 characters is required")
 		return
 	}
-	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
+	provider, providerID, err := a.activeVideoProvider()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -656,15 +667,27 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		ok = ok && compatibleProjectModel(model)
 	}
 	if !ok {
-		writeError(w, http.StatusBadRequest, "select a video model that supports 6-second clips in 9:16")
+		writeError(w, http.StatusBadRequest, "select a video model that supports 6-second clips at 480p in 9:16")
 		return
 	}
+	_, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	persisted := false
+	defer func() {
+		if !persisted {
+			_ = a.store.DeleteProviderConfigIfUnused(providerConfigID)
+		}
+	}()
 	project, err := a.store.InsertProjectWithProviderConfig(input.Topic, string(providerID), providerConfigID, model.ID)
 	if err != nil {
 		a.logger.Error("create project failed")
 		writeError(w, http.StatusInternalServerError, "unable to create project")
 		return
 	}
+	persisted = true
 	writeJSON(w, http.StatusAccepted, project)
 }
 

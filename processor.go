@@ -29,7 +29,10 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 	}
 	app := &dashboardApp{store: store, security: security, logger: logger}
 	if security != nil {
-		_ = app.backfillLegacyProviderSnapshots()
+		if err := app.backfillLegacyProviderSnapshots(); err != nil {
+			app.legacySnapshotBackfillErr = err
+			logger.Error("legacy provider snapshot backfill failed; legacy work will be skipped", "error", err)
+		}
 	}
 	return &Processor{app: app, interval: 5 * time.Second, logger: logger, downloadTimeout: 5 * time.Minute, downloadSem: make(chan struct{}, 2), projectSem: make(chan struct{}, 3), combineRunner: runCommand, inFlight: make(map[string]struct{})}
 }
@@ -75,7 +78,7 @@ func (p *Processor) process(ctx context.Context) {
 		}
 		provider, err := p.app.videoProviderForSnapshot(record.ProviderConfigID, VideoProviderID(record.VideoProvider))
 		if err != nil {
-			p.logger.Warn("generation processor waiting for video provider", "provider", record.VideoProvider)
+			p.logger.Warn("generation processor waiting for immutable video provider configuration", "provider", record.VideoProvider, "error", err)
 			continue
 		}
 		if record.Status == "downloading" || record.Status == "download_failed" {
@@ -191,7 +194,7 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 		case "generating":
 			provider, err := p.app.videoProviderForSnapshot(project.ProviderConfigID, VideoProviderID(project.VideoProvider))
 			if err != nil {
-				p.logger.Warn("project processor waiting for video provider", "provider", project.VideoProvider)
+				p.logger.Warn("project processor waiting for immutable video provider configuration", "provider", project.VideoProvider, "error", err)
 				continue
 			}
 			p.processProjectScenes(ctx, provider, project)
@@ -244,7 +247,7 @@ func (p *Processor) submitScene(ctx context.Context, provider VideoService, proj
 	generation, err := provider.GenerateVideo(requestContext, GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, Resolution: ProjectResolution, AspectRatio: ProjectAspectRatio})
 	if err != nil || generation == nil || !safeID(generation.ID) {
 		_ = p.app.store.AppendPipelineEvent(project.ID, "scene_submission", "failed", "Video generation submission failed.", scene.Number, 0)
-		_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", "Scene submission failed. Retrying this scene may create a duplicate if OpenRouter accepted the interrupted request.")
+		_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", "Scene submission failed. Retrying this scene may create a duplicate if the video provider accepted the interrupted request.")
 		p.logger.Warn("scene submission failed", "project_id", project.ID, "scene", scene.Number)
 		return
 	}
