@@ -408,11 +408,11 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 	generation, err := provider.GenerateVideo(r.Context(), request)
 	if err != nil {
 		a.logger.Error("generation submission failed", "model", request.Model)
-		writeError(w, http.StatusBadGateway, "OpenRouter rejected the generation request")
+		writeError(w, http.StatusBadGateway, "video provider rejected the generation request")
 		return
 	}
 	if generation == nil || !safeID(generation.ID) {
-		writeError(w, http.StatusBadGateway, "OpenRouter returned an invalid generation response")
+		writeError(w, http.StatusBadGateway, "video provider returned an invalid generation response")
 		return
 	}
 	if generation.Status == "" {
@@ -547,7 +547,12 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 	var model VideoModel
 	var ok bool
 	if input.Model == "" {
-		model, ok = preferredProjectModel(models)
+		if selected := a.selectedVideoModel(providerID); selected != "" {
+			model, ok = findModel(models, selected)
+			ok = ok && compatibleProjectModel(model)
+		} else {
+			model, ok = preferredProjectModel(models)
+		}
 	} else {
 		model, ok = findModel(models, input.Model)
 		ok = ok && compatibleProjectModel(model)

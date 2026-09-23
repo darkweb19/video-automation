@@ -65,14 +65,14 @@ func (p *Processor) process(ctx context.Context) {
 	if len(records) == 0 && len(remoteProjects) == 0 {
 		return
 	}
-	provider, err := p.app.provider()
-	if err != nil {
-		p.logger.Warn("generation processor waiting for API key")
-		return
-	}
 	for _, record := range records {
 		if ctx.Err() != nil {
 			return
+		}
+		provider, err := p.app.videoProvider(VideoProviderID(record.VideoProvider))
+		if err != nil {
+			p.logger.Warn("generation processor waiting for video provider", "provider", record.VideoProvider)
+			continue
 		}
 		if record.Status == "downloading" || record.Status == "download_failed" {
 			p.startDownload(ctx, provider, record)
@@ -98,7 +98,7 @@ func (p *Processor) process(ctx context.Context) {
 			p.startDownload(ctx, provider, record)
 		}
 	}
-	p.processProjects(ctx, provider, remoteProjects)
+	p.processProjects(ctx, remoteProjects)
 }
 
 func (p *Processor) processCombiningProjects(ctx context.Context, projects []VideoProject) {
@@ -136,7 +136,7 @@ func (p *Processor) processCombiningProjects(ctx context.Context, projects []Vid
 	}
 }
 
-func (p *Processor) processProjects(ctx context.Context, provider *OpenRouterClient, projects []VideoProject) {
+func (p *Processor) processProjects(ctx context.Context, projects []VideoProject) {
 	for _, project := range projects {
 		if ctx.Err() != nil {
 			return
@@ -152,7 +152,12 @@ func (p *Processor) processProjects(ctx context.Context, provider *OpenRouterCli
 				}
 				_ = p.app.store.AppendPipelineEvent(project.ID, "text_request", "started", "Structured script-generation request built.", 0, 0)
 				_ = p.app.store.AppendPipelineEvent(project.ID, "text_generation", "started", "OpenRouter text generation started.", 0, 0)
-				plan, trace, err := provider.GenerateStoryPlan(taskCtx, project.Topic)
+				textProvider, providerErr := p.app.openRouterTextProvider()
+				if providerErr != nil {
+					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "OpenRouter text generation is not configured. Retry the project.")
+					return
+				}
+				plan, trace, err := textProvider.GenerateStoryPlan(taskCtx, project.Topic)
 				if persistErr := p.app.store.SaveTextGenerationTrace(project.ID, trace); persistErr != nil {
 					p.logger.Error("save project text trace failed", "project_id", project.ID)
 				}
@@ -180,12 +185,17 @@ func (p *Processor) processProjects(ctx context.Context, provider *OpenRouterCli
 				_ = p.app.store.AppendPipelineEvent(project.ID, "continuity", "completed", "Continuity applied; final scene prompts are ready.", 0, 0)
 			})
 		case "generating":
+			provider, err := p.app.videoProvider(VideoProviderID(project.VideoProvider))
+			if err != nil {
+				p.logger.Warn("project processor waiting for video provider", "provider", project.VideoProvider)
+				continue
+			}
 			p.processProjectScenes(ctx, provider, project)
 		}
 	}
 }
 
-func (p *Processor) processProjectScenes(ctx context.Context, provider *OpenRouterClient, project VideoProject) {
+func (p *Processor) processProjectScenes(ctx context.Context, provider VideoService, project VideoProject) {
 	complete, failed, active := 0, 0, 0
 	for _, scene := range project.Scenes {
 		switch scene.Status {
@@ -221,7 +231,7 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider *OpenRout
 	}
 }
 
-func (p *Processor) submitScene(ctx context.Context, provider *OpenRouterClient, project VideoProject, scene ProjectScene) {
+func (p *Processor) submitScene(ctx context.Context, provider VideoService, project VideoProject, scene ProjectScene) {
 	if err := p.app.store.MarkSceneSubmitting(project.ID, scene.Number); err != nil {
 		return
 	}
@@ -242,7 +252,7 @@ func (p *Processor) submitScene(ctx context.Context, provider *OpenRouterClient,
 	}
 }
 
-func (p *Processor) pollScene(ctx context.Context, provider *OpenRouterClient, scene ProjectScene) {
+func (p *Processor) pollScene(ctx context.Context, provider VideoService, scene ProjectScene) {
 	requestContext, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	generation, err := provider.GetGeneration(requestContext, scene.ProviderGenerationID)
@@ -265,7 +275,7 @@ func (p *Processor) pollScene(ctx context.Context, provider *OpenRouterClient, s
 	}
 }
 
-func (p *Processor) startSceneDownload(ctx context.Context, provider *OpenRouterClient, scene ProjectScene) {
+func (p *Processor) startSceneDownload(ctx context.Context, provider VideoService, scene ProjectScene) {
 	key := fmt.Sprintf("%s:download:%d", scene.ProjectID, scene.Number)
 	p.startProjectTask(ctx, key, func(taskCtx context.Context) {
 		_ = p.app.store.AppendPipelineEvent(scene.ProjectID, "scene_download", "started", "Downloading completed scene video.", scene.Number, scene.DownloadAttempts)
@@ -341,7 +351,7 @@ func (p *Processor) startProjectTask(ctx context.Context, key string, task func(
 	}()
 }
 
-func (p *Processor) startDownload(ctx context.Context, provider *OpenRouterClient, record GenerationRecord) {
+func (p *Processor) startDownload(ctx context.Context, provider VideoService, record GenerationRecord) {
 	p.mu.Lock()
 	if _, exists := p.inFlight[record.ID]; exists {
 		p.mu.Unlock()
@@ -369,7 +379,7 @@ func (p *Processor) startDownload(ctx context.Context, provider *OpenRouterClien
 	}()
 }
 
-func (p *Processor) download(ctx context.Context, provider *OpenRouterClient, record GenerationRecord) {
+func (p *Processor) download(ctx context.Context, provider VideoService, record GenerationRecord) {
 	response, err := provider.GetVideoContent(ctx, record.ID, "")
 	if err != nil {
 		p.downloadFailed(record.ID, err)
