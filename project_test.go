@@ -487,6 +487,33 @@ func TestCreateProjectDefaultsToFirstCompatibleModel(t *testing.T) {
 	}
 }
 
+func TestCreateProjectCompatibilityErrorIncludesFixedResolution(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/videos/models" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"provider/no-480p","name":"No 480p","supported_durations":[6],"supported_resolutions":["720p"],"supported_aspect_ratios":["9:16"]}]}`))
+	}))
+	defer server.Close()
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := security.EncryptSetting(apiKeySetting, "test-openrouter-key")
+	if err != nil || store.SetSetting(apiKeySetting, encrypted) != nil {
+		t.Fatal("save test key")
+	}
+	app := &dashboardApp{store: store, security: security, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), baseURL: server.URL}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/projects", strings.NewReader(`{"topic":"A fox finds a star"}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.createProject(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "480p") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestProjectFinalVideoIsServedFromProjectStorage(t *testing.T) {
 	store := newTestStore(t)
 	project, err := store.InsertProject("topic", "minimax/k3-pro")

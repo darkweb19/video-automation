@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -211,6 +213,88 @@ func TestProcessorBackfillsLegacyPendingProviderSnapshots(t *testing.T) {
 	}
 	if _, err := store.ProviderConfig(record.ProviderConfigID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func providerConfigCount(t *testing.T, store *Store) int {
+	t.Helper()
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM video_provider_configs`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func TestRejectedSubmissionsDoNotRetainProviderSnapshots(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := security.EncryptSetting(apiKeySetting, "test-openrouter-key")
+	if err != nil || store.SetSetting(apiKeySetting, key) != nil {
+		t.Fatal("save API key")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/videos/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"provider/model","name":"Model","supported_durations":[6],"supported_resolutions":["480p"],"supported_aspect_ratios":["9:16"]}]}`))
+		case "/videos":
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	app := &dashboardApp{store: store, security: security, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), baseURL: server.URL}
+	for _, body := range []string{
+		`{"prompt":"test","model":"missing"}`,
+		`{"prompt":"test","model":"provider/model"}`,
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		app.generate(recorder, request)
+		if providerConfigCount(t, store) != 0 {
+			t.Fatalf("snapshot leaked after status=%d", recorder.Code)
+		}
+	}
+}
+
+func TestProviderConfigGarbageCollectionKeepsReferencedSnapshots(t *testing.T) {
+	store := newTestStore(t)
+	configs := []ProviderConfig{{ID: "orphan_config", Provider: string(VideoProviderOpenRouter), EncryptedAPIKey: "ciphertext"}, {ID: "referenced_config", Provider: string(VideoProviderOpenRouter), EncryptedAPIKey: "ciphertext"}}
+	for _, config := range configs {
+		if _, err := store.InsertProviderConfig(config); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.InsertGeneration(GenerationRecord{ID: "completed_reference", VideoProvider: string(VideoProviderOpenRouter), ProviderConfigID: "referenced_config", Prompt: "test", Model: "model", Status: "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GarbageCollectProviderConfigs(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ProviderConfig("orphan_config"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("orphan lookup err=%v", err)
+	}
+	if _, err := store.ProviderConfig("referenced_config"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyWorkWithoutSnapshotFailsSafe(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := NewProcessor(store, security, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if processor.app.legacySnapshotBackfillErr != nil {
+		t.Fatalf("unexpected empty-work backfill failure: %v", processor.app.legacySnapshotBackfillErr)
+	}
+	if _, err := processor.app.videoProviderForSnapshot("", VideoProviderOpenRouter); err == nil {
+		t.Fatal("legacy work without a snapshot must not use mutable credentials")
 	}
 }
 
