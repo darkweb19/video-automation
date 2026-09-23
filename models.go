@@ -12,13 +12,12 @@ const (
 
 // GenerateRequest is the application's provider-independent video request.
 type GenerateRequest struct {
-	Prompt      string `json:"prompt"`
-	Model       string `json:"model"`
-	Duration    int    `json:"duration,omitempty"`
-	AspectRatio string `json:"aspect_ratio,omitempty"`
-	// GenerateAudio is intentionally never sent. Audio is removed during the
-	// final FFmpeg assembly for compatibility across video models.
-	GenerateAudio *bool `json:"-"`
+	Prompt        string `json:"prompt"`
+	Model         string `json:"model"`
+	Duration      int    `json:"duration,omitempty"`
+	Resolution    string `json:"resolution,omitempty"`
+	AspectRatio   string `json:"aspect_ratio,omitempty"`
+	GenerateAudio *bool  `json:"generate_audio,omitempty"`
 }
 
 // Generation is the normalized state returned to the browser.
@@ -38,6 +37,7 @@ type VideoModel struct {
 	Name           string            `json:"name"`
 	Provider       string            `json:"provider,omitempty"`
 	Durations      []int             `json:"durations,omitempty"`
+	Resolutions    []string          `json:"resolutions,omitempty"`
 	AspectRatios   []string          `json:"aspect_ratios,omitempty"`
 	Audio          *bool             `json:"audio,omitempty"`
 	PricingSKUs    map[string]string `json:"pricing_skus,omitempty"`
@@ -60,11 +60,30 @@ type VideoContentProvider interface {
 	GetVideoContent(context.Context, string, string) (*http.Response, error)
 }
 
+// VideoService is the complete provider-neutral contract consumed by the
+// dashboard and durable processor.
+type VideoService interface {
+	VideoProvider
+	VideoContentProvider
+}
+
+type VideoProviderID string
+
+const (
+	VideoProviderOpenRouter VideoProviderID = "openrouter"
+	VideoProviderModal      VideoProviderID = "modal"
+)
+
+func validVideoProvider(id VideoProviderID) bool {
+	return id == VideoProviderOpenRouter || id == VideoProviderModal
+}
+
 const (
 	ProjectSceneCount   = 5
 	ProjectSceneSeconds = 6
 	ProjectAspectRatio  = "9:16"
 	ScriptModel         = "openrouter/free"
+	ProjectResolution   = "480p"
 )
 
 type ProjectRequest struct {
@@ -116,6 +135,7 @@ type VideoProject struct {
 	Script          string         `json:"script,omitempty"`
 	Continuity      string         `json:"continuity,omitempty"`
 	Model           string         `json:"model"`
+	VideoProvider   string         `json:"video_provider"`
 	Status          string         `json:"status"`
 	Progress        int            `json:"progress"`
 	Error           string         `json:"error,omitempty"`
