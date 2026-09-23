@@ -16,7 +16,12 @@ import (
 	"time"
 )
 
-const apiKeySetting = "openrouter_api_key"
+const (
+	apiKeySetting            = "openrouter_api_key"
+	videoProviderSetting     = "video_provider"
+	modalVideoBaseURLSetting = "modal_video_base_url"
+	modalVideoAPIKeySetting  = "modal_video_api_key"
+)
 
 type dashboardApp struct {
 	store           *Store
@@ -44,6 +49,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.HandleFunc("GET /api/session", app.session)
 	mux.Handle("POST /api/logout", app.requireAuth(http.HandlerFunc(app.logout)))
 	mux.Handle("GET /models", app.requirePasswordChanged(http.HandlerFunc(app.models)))
+	mux.Handle("GET /api/video-models", app.requirePasswordChanged(http.HandlerFunc(app.models)))
 	mux.Handle("POST /generate", app.requirePasswordChanged(http.HandlerFunc(app.generate)))
 	mux.Handle("GET /status", app.requirePasswordChanged(http.HandlerFunc(app.status)))
 	mux.Handle("GET /api/generations", app.requirePasswordChanged(http.HandlerFunc(app.history)))
@@ -57,6 +63,10 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("GET /video", app.requirePasswordChanged(http.HandlerFunc(app.video)))
 	mux.Handle("GET /api/settings", app.requirePasswordChanged(http.HandlerFunc(app.settings)))
 	mux.Handle("PUT /api/settings/api-key", app.requirePasswordChanged(http.HandlerFunc(app.updateAPIKey)))
+	mux.Handle("PUT /api/settings/video-provider", app.requirePasswordChanged(http.HandlerFunc(app.updateVideoProvider)))
+	mux.Handle("PUT /api/settings/modal", app.requirePasswordChanged(http.HandlerFunc(app.updateModalSettings)))
+	mux.Handle("PUT /api/settings/video-model", app.requirePasswordChanged(http.HandlerFunc(app.updateVideoModel)))
+	mux.Handle("POST /api/settings/video-provider/test", app.requirePasswordChanged(http.HandlerFunc(app.testVideoProvider)))
 	mux.Handle("PUT /api/settings/password", app.requireAuth(http.HandlerFunc(app.updatePassword)))
 	return securityHeaders(mux)
 }
@@ -242,12 +252,12 @@ func (a *dashboardApp) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *dashboardApp) provider() (*OpenRouterClient, error) {
+func (a *dashboardApp) openRouterTextProvider() (*OpenRouterClient, error) {
 	encrypted, err := a.store.Setting(apiKeySetting)
 	if err != nil {
 		return nil, errors.New("OpenRouter API key is not configured")
 	}
-	key, err := a.security.Decrypt(encrypted)
+	key, err := a.security.DecryptSetting(apiKeySetting, encrypted)
 	if err != nil {
 		return nil, err
 	}
@@ -258,8 +268,67 @@ func (a *dashboardApp) provider() (*OpenRouterClient, error) {
 	return client, nil
 }
 
+func (a *dashboardApp) selectedVideoProvider() (VideoProviderID, error) {
+	value, err := a.store.Setting(videoProviderSetting)
+	if errors.Is(err, sql.ErrNoRows) {
+		return VideoProviderOpenRouter, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	provider := VideoProviderID(value)
+	if !validVideoProvider(provider) {
+		return "", errors.New("unsupported video provider")
+	}
+	return provider, nil
+}
+
+func (a *dashboardApp) videoProvider(provider VideoProviderID) (VideoService, error) {
+	switch provider {
+	case VideoProviderOpenRouter:
+		return a.openRouterTextProvider()
+	case VideoProviderModal:
+		baseURL, err := a.store.Setting(modalVideoBaseURLSetting)
+		if err != nil {
+			return nil, errors.New("Modal video base URL is not configured")
+		}
+		key, err := a.store.Setting(modalVideoAPIKeySetting)
+		if err != nil {
+			return nil, errors.New("Modal video API key is not configured")
+		}
+		plain, err := a.security.DecryptSetting(modalVideoAPIKeySetting, key)
+		if err != nil {
+			return nil, err
+		}
+		return NewModalVideoClient(baseURL, plain), nil
+	default:
+		return nil, errors.New("unsupported video provider")
+	}
+}
+
+func (a *dashboardApp) activeVideoProvider() (VideoService, VideoProviderID, error) {
+	provider, err := a.selectedVideoProvider()
+	if err != nil {
+		return nil, "", err
+	}
+	service, err := a.videoProvider(provider)
+	return service, provider, err
+}
+
 func (a *dashboardApp) models(w http.ResponseWriter, r *http.Request) {
-	provider, err := a.provider()
+	requested := VideoProviderID(r.URL.Query().Get("provider"))
+	var err error
+	if requested == "" {
+		requested, err = a.selectedVideoProvider()
+	} else if !validVideoProvider(requested) {
+		writeError(w, http.StatusBadRequest, "unsupported video provider")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to load video provider")
+		return
+	}
+	provider, err := a.videoProvider(requested)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -276,7 +345,17 @@ func (a *dashboardApp) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Models          []VideoModel `json:"models"`
 		MaxPromptLength int          `json:"max_prompt_length"`
-	}{models, MaxPromptLength})
+		Provider        string       `json:"provider"`
+		SelectedModel   string       `json:"selected_model,omitempty"`
+	}{models, MaxPromptLength, string(requested), a.selectedVideoModel(requested)})
+}
+
+func (a *dashboardApp) selectedVideoModel(provider VideoProviderID) string {
+	model, err := a.store.Setting("video_model." + string(provider))
+	if err != nil {
+		return ""
+	}
+	return model
 }
 
 func estimateCost(duration int, price string) string {
@@ -307,7 +386,7 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a valid prompt is required")
 		return
 	}
-	provider, err := a.provider()
+	provider, providerID, err := a.activeVideoProvider()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -347,6 +426,7 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 	}
 	record := GenerationRecord{
 		ID:               generation.ID,
+		VideoProvider:    string(providerID),
 		Prompt:           request.Prompt,
 		Model:            request.Model,
 		Duration:         request.Duration,
@@ -454,7 +534,7 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a topic or story idea of at most 4,000 characters is required")
 		return
 	}
-	provider, err := a.provider()
+	provider, providerID, err := a.activeVideoProvider()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -476,7 +556,7 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select a video model that supports 6-second clips in 9:16")
 		return
 	}
-	project, err := a.store.InsertProject(input.Topic, model.ID)
+	project, err := a.store.InsertProjectForProvider(input.Topic, string(providerID), model.ID)
 	if err != nil {
 		a.logger.Error("create project failed")
 		writeError(w, http.StatusInternalServerError, "unable to create project")
@@ -684,21 +764,21 @@ func (a *dashboardApp) video(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *dashboardApp) settings(w http.ResponseWriter, _ *http.Request) {
-	encrypted, err := a.store.Setting(apiKeySetting)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeJSON(w, http.StatusOK, map[string]any{"api_key_configured": false})
-		return
-	}
+	provider, err := a.selectedVideoProvider()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "unable to load settings")
 		return
 	}
-	key, err := a.security.Decrypt(encrypted)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "unable to load API key")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"api_key_configured": true, "api_key_masked": maskSecret(key)})
+	_, openRouterErr := a.store.Setting(apiKeySetting)
+	modalBaseURL, _ := a.store.Setting(modalVideoBaseURLSetting)
+	_, modalKeyErr := a.store.Setting(modalVideoAPIKeySetting)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"video_provider":                 string(provider),
+		"openrouter_api_key_configured":  openRouterErr == nil,
+		"modal_video_base_url":           modalBaseURL,
+		"modal_video_api_key_configured": modalKeyErr == nil,
+		"video_models":                   map[string]string{"openrouter": a.selectedVideoModel(VideoProviderOpenRouter), "modal": a.selectedVideoModel(VideoProviderModal)},
+	})
 }
 
 func (a *dashboardApp) updateAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -733,12 +813,149 @@ func (a *dashboardApp) updateAPIKey(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	encrypted, err := a.security.Encrypt(input.APIKey)
+	encrypted, err := a.security.EncryptSetting(apiKeySetting, input.APIKey)
 	if err != nil || a.store.SetSetting(apiKeySetting, encrypted) != nil {
 		writeError(w, http.StatusInternalServerError, "unable to save API key")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"api_key_configured": true, "api_key_masked": maskSecret(input.APIKey)})
+	writeJSON(w, http.StatusOK, map[string]any{"openrouter_api_key_configured": true})
+}
+
+func (a *dashboardApp) updateVideoProvider(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) || !isJSON(r.Header.Get("Content-Type")) {
+		if !isJSON(r.Header.Get("Content-Type")) {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		}
+		return
+	}
+	var input struct {
+		Provider VideoProviderID `json:"video_provider"`
+	}
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	if !validVideoProvider(input.Provider) {
+		writeError(w, http.StatusBadRequest, "unsupported video provider")
+		return
+	}
+	if err := a.store.SetSetting(videoProviderSetting, string(input.Provider)); err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to save video provider")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"video_provider": string(input.Provider)})
+}
+
+func (a *dashboardApp) updateModalSettings(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) || !isJSON(r.Header.Get("Content-Type")) {
+		if !isJSON(r.Header.Get("Content-Type")) {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		}
+		return
+	}
+	var input struct {
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	}
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	baseURL, err := validateModalBaseURL(input.BaseURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	key := strings.TrimSpace(input.APIKey)
+	if key == "" {
+		encrypted, settingErr := a.store.Setting(modalVideoAPIKeySetting)
+		if settingErr != nil {
+			writeError(w, http.StatusBadRequest, "enter a Modal video API key")
+			return
+		}
+		key, err = a.security.DecryptSetting(modalVideoAPIKeySetting, encrypted)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "unable to load Modal API key")
+			return
+		}
+	}
+	if len(key) < 10 || len(key) > 500 {
+		writeError(w, http.StatusBadRequest, "enter a valid Modal video API key")
+		return
+	}
+	if _, err := NewModalVideoClient(baseURL, key).ListVideoModels(r.Context()); err != nil {
+		writeError(w, http.StatusBadGateway, "unable to test Modal video connection")
+		return
+	}
+	if err := a.store.SetSetting(modalVideoBaseURLSetting, baseURL); err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to save Modal settings")
+		return
+	}
+	if strings.TrimSpace(input.APIKey) != "" {
+		encrypted, err := a.security.EncryptSetting(modalVideoAPIKeySetting, key)
+		if err != nil || a.store.SetSetting(modalVideoAPIKeySetting, encrypted) != nil {
+			writeError(w, http.StatusInternalServerError, "unable to save Modal API key")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"modal_video_base_url": baseURL, "modal_video_api_key_configured": true})
+}
+
+func (a *dashboardApp) updateVideoModel(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) || !isJSON(r.Header.Get("Content-Type")) {
+		if !isJSON(r.Header.Get("Content-Type")) {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		}
+		return
+	}
+	var input struct {
+		Provider VideoProviderID `json:"provider"`
+		Model    string          `json:"model"`
+	}
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	if input.Provider == "" {
+		input.Provider, _ = a.selectedVideoProvider()
+	}
+	if !validVideoProvider(input.Provider) || strings.TrimSpace(input.Model) == "" {
+		writeError(w, http.StatusBadRequest, "a supported provider and model are required")
+		return
+	}
+	service, err := a.videoProvider(input.Provider)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	models, err := service.ListVideoModels(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "unable to validate video model")
+		return
+	}
+	if _, ok := findModel(models, strings.TrimSpace(input.Model)); !ok {
+		writeError(w, http.StatusBadRequest, "selected model is unavailable")
+		return
+	}
+	if err := a.store.SetSetting("video_model."+string(input.Provider), strings.TrimSpace(input.Model)); err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to save video model")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"provider": string(input.Provider), "model": strings.TrimSpace(input.Model)})
+}
+
+func (a *dashboardApp) testVideoProvider(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	service, provider, err := a.activeVideoProvider()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	models, err := service.ListVideoModels(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "unable to test video provider")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"provider": string(provider), "model_count": len(models)})
 }
 
 func (a *dashboardApp) updatePassword(w http.ResponseWriter, r *http.Request) {

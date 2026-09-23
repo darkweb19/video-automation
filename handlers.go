@@ -225,6 +225,17 @@ func validateOptions(request GenerateRequest, model VideoModel) error {
 			return errors.New("aspect_ratio is not supported by the selected model")
 		}
 	}
+	if request.Resolution != "" {
+		if len(model.Resolutions) == 0 {
+			return errors.New("the selected model does not advertise supported resolutions")
+		}
+		if !containsString(model.Resolutions, request.Resolution) {
+			return errors.New("resolution is not supported by the selected model")
+		}
+	}
+	if request.GenerateAudio != nil && model.Audio != nil && *request.GenerateAudio && !*model.Audio {
+		return errors.New("audio generation is not supported by the selected model")
+	}
 	return nil
 }
 
