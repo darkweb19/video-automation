@@ -1,10 +1,15 @@
 import json
+import logging
 import os
 import secrets
+import subprocess
 import sys
+import threading
 import time
 import traceback
 import uuid
+import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 
 import modal
@@ -34,7 +39,22 @@ FPS = 16
 MIN_DURATION = 1
 MAX_DURATION = 15
 
-KEEP_WARM_SECONDS = 600
+KEEP_WARM_SECONDS = 120
+
+# Keep model components resident on the A100 between requests.
+# Set this to True only if you run into CUDA OOM errors.
+OFFLOAD_MODEL = False
+MODEL_DOWNLOAD_SENTINEL = f"{MODEL_CACHE}/.wan22_download_complete"
+
+# Runtime telemetry cadence while a job is active.
+TELEMETRY_INTERVAL_SECONDS = 10
+
+# Modal public A100 80 GB rate as of 2026-09-23.
+# usage.cost is calculated from measured generation runtime.
+# Modal workspace billing is aggregated and is not available as an exact
+# per-request live invoice amount at completion time.
+A100_80GB_USD_PER_SECOND = 0.000694
+STATUS_POLL_RETRY_SECONDS = 2
 
 
 # ============================================================
@@ -120,6 +140,7 @@ gpu_image = (
         "tqdm",
         "imageio",
         "imageio-ffmpeg",
+        "psutil",
         FLASH_ATTN_WHEEL,
     )
     .run_commands(
@@ -143,6 +164,151 @@ api_image = (
 # ============================================================
 # HELPERS
 # ============================================================
+
+# This warning originates inside the upstream Wan VAE implementation and
+# does not affect generation. Hide only this specific deprecation warning
+# so application logs stay readable.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch\.cuda\.amp\.autocast.*is deprecated.*",
+    category=FutureWarning,
+)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def log_event(level: str, event: str, **fields):
+    """Emit one compact, searchable application log line."""
+    pieces = [
+        utc_now(),
+        level.upper(),
+        event,
+    ]
+
+    for key, value in fields.items():
+        if value is None:
+            continue
+        pieces.append(f"{key}={value}")
+
+    print(" | ".join(pieces), flush=True)
+
+
+def collect_runtime_metrics() -> dict:
+    """Best-effort CPU, RAM and NVIDIA GPU telemetry."""
+    metrics = {
+        "cpu_percent": None,
+        "cpu_cores_percent": [],
+        "cpu_temp_c": None,
+        "ram_used_gb": None,
+        "ram_total_gb": None,
+        "ram_percent": None,
+        "gpu_util_percent": None,
+        "gpu_mem_used_mb": None,
+        "gpu_mem_total_mb": None,
+        "gpu_mem_percent": None,
+        "gpu_temp_c": None,
+        "gpu_power_w": None,
+    }
+
+    try:
+        import psutil
+
+        metrics["cpu_percent"] = round(psutil.cpu_percent(interval=None), 1)
+        metrics["cpu_cores_percent"] = [
+            round(value, 1)
+            for value in psutil.cpu_percent(interval=None, percpu=True)
+        ]
+
+        memory = psutil.virtual_memory()
+        metrics["ram_used_gb"] = round(memory.used / (1024 ** 3), 2)
+        metrics["ram_total_gb"] = round(memory.total / (1024 ** 3), 2)
+        metrics["ram_percent"] = round(memory.percent, 1)
+
+        # Cloud containers often do not expose host CPU thermal sensors.
+        try:
+            temperatures = psutil.sensors_temperatures()
+            readings = [
+                reading.current
+                for entries in temperatures.values()
+                for reading in entries
+                if reading.current is not None
+            ]
+            if readings:
+                metrics["cpu_temp_c"] = round(max(readings), 1)
+        except (AttributeError, OSError):
+            pass
+
+    except Exception:
+        pass
+
+    try:
+        query = [
+            "nvidia-smi",
+            "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ]
+        raw = subprocess.check_output(
+            query,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).strip().splitlines()[0]
+
+        values = [part.strip() for part in raw.split(",")]
+        gpu_util, mem_used, mem_total, gpu_temp, gpu_power = map(float, values)
+
+        metrics["gpu_util_percent"] = round(gpu_util, 1)
+        metrics["gpu_mem_used_mb"] = round(mem_used, 1)
+        metrics["gpu_mem_total_mb"] = round(mem_total, 1)
+        metrics["gpu_mem_percent"] = round(
+            100.0 * mem_used / mem_total,
+            1,
+        ) if mem_total else None
+        metrics["gpu_temp_c"] = round(gpu_temp, 1)
+        metrics["gpu_power_w"] = round(gpu_power, 1)
+    except Exception:
+        pass
+
+    return metrics
+
+
+def log_runtime_metrics(job_id: str, stage: str, metrics: dict):
+    cores = metrics.get("cpu_cores_percent") or []
+    core_text = "[" + ",".join(f"{value:.0f}" for value in cores) + "]%"
+
+    gpu_memory = "n/a"
+    if metrics.get("gpu_mem_used_mb") is not None:
+        gpu_memory = (
+            f"{metrics['gpu_mem_used_mb']:.0f}/"
+            f"{metrics['gpu_mem_total_mb']:.0f}MB"
+            f"({metrics['gpu_mem_percent']:.1f}%)"
+        )
+
+    log_event(
+        "INFO",
+        "telemetry",
+        job=job_id,
+        stage=stage,
+        gpu=f"{metrics.get('gpu_util_percent')}%",
+        vram=gpu_memory,
+        gpu_temp=f"{metrics.get('gpu_temp_c')}C",
+        gpu_power=f"{metrics.get('gpu_power_w')}W",
+        cpu=f"{metrics.get('cpu_percent')}%",
+        cores=core_text,
+        cpu_temp=(
+            f"{metrics.get('cpu_temp_c')}C"
+            if metrics.get("cpu_temp_c") is not None
+            else "n/a"
+        ),
+        ram=(
+            f"{metrics.get('ram_used_gb')}/"
+            f"{metrics.get('ram_total_gb')}GB"
+            f"({metrics.get('ram_percent')}%)"
+        ),
+    )
+
 
 def duration_to_frames(
     duration: int,
@@ -190,61 +356,45 @@ def job_video_path(
     )
 
 
-def write_job(
-    job_id: str,
-    data: dict,
-):
-    """
-    Write job metadata atomically and commit it
-    so other Modal containers can see it.
-    """
-
-    path = job_json_path(
-        job_id
-    )
-
-    temp = Path(
-        f"{path}.tmp"
-    )
-
+def _write_job_file(job_id: str, data: dict):
+    path = job_json_path(job_id)
+    temp = Path(f"{path}.tmp")
     temp.write_text(
-        json.dumps(
-            data,
-            indent=2,
-        ),
+        json.dumps(data, indent=2),
         encoding="utf-8",
     )
+    os.replace(temp, path)
 
-    os.replace(
-        temp,
-        path,
-    )
 
+def write_job(job_id: str, data: dict):
+    """Synchronous worker-side job persistence."""
+    _write_job_file(job_id, data)
     jobs_volume.commit()
 
 
-def read_job(
-    job_id: str,
-):
-    """
-    Reload the shared volume before reading because
-    generation may be happening in another container.
-    """
+async def write_job_async(job_id: str, data: dict):
+    """Async API-side job persistence; never blocks FastAPI's event loop."""
+    _write_job_file(job_id, data)
+    await jobs_volume.commit.aio()
 
-    jobs_volume.reload()
 
-    path = job_json_path(
-        job_id
-    )
-
+def _read_job_file(job_id: str):
+    path = job_json_path(job_id)
     if not path.exists():
         return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
-    return json.loads(
-        path.read_text(
-            encoding="utf-8"
-        )
-    )
+
+def read_job(job_id: str):
+    """Synchronous worker-side read."""
+    jobs_volume.reload()
+    return _read_job_file(job_id)
+
+
+async def read_job_async(job_id: str):
+    """Async API-side read; fixes Modal AsyncUsageWarning."""
+    await jobs_volume.reload.aio()
+    return _read_job_file(job_id)
 
 
 # ============================================================
@@ -261,11 +411,19 @@ def read_job(
         JOBS_DIR: jobs_volume,
     },
 
-    # Only one A100 worker for now.
+    # Scale fully to zero: no A100 is kept running permanently.
+    min_containers=0,
     max_containers=1,
 
-    # Keep model alive for 10 minutes after last job.
+    # Keep the live GPU only 2 minutes after the last request.
     scaledown_window=KEEP_WARM_SECONDS,
+
+    # Snapshot the initialized Python/CUDA state so future cold starts can
+    # restore rather than reconstruct the full Wan pipeline from scratch.
+    enable_memory_snapshot=True,
+    experimental_options={
+        "enable_gpu_snapshot": True,
+    },
 
     timeout=3600,
 
@@ -277,24 +435,19 @@ class VideoGenerator:
     # LOAD MODEL ONCE
     # ========================================================
 
-    @modal.enter()
+    @modal.enter(snap=True)
     def load_model(self):
 
         from huggingface_hub import snapshot_download
 
-        print(
-            "=" * 70,
-            flush=True,
-        )
-
-        print(
-            "[STARTUP] Wan2.2 worker starting",
-            flush=True,
-        )
-
-        print(
-            "=" * 70,
-            flush=True,
+        startup_started = time.time()
+        log_event(
+            "INFO",
+            "worker_starting",
+            model=MODEL_NAME,
+            gpu="A100-80GB",
+            gpu_snapshot=True,
+            offload_model=OFFLOAD_MODEL,
         )
 
         self.base_model_path = os.path.join(
@@ -313,41 +466,38 @@ class VideoGenerator:
         )
 
         # ----------------------------------------------------
-        # Download/cache base model
+        # Download/cache model files once
         # ----------------------------------------------------
 
-        print(
-            "[STARTUP] Checking base model...",
-            flush=True,
-        )
+        if os.path.exists(MODEL_DOWNLOAD_SENTINEL):
+            log_event("INFO", "model_cache_hit", path=MODEL_CACHE)
+        else:
+            log_event("INFO", "model_cache_miss", component="base_model")
+            snapshot_download(
+                repo_id=BASE_MODEL_REPO,
+                local_dir=self.base_model_path,
+            )
 
-        snapshot_download(
-            repo_id=BASE_MODEL_REPO,
-            local_dir=self.base_model_path,
-        )
+            log_event("INFO", "model_cache_miss", component="lightning_lora")
+            snapshot_download(
+                repo_id=LIGHTNING_REPO,
+                local_dir=self.lightning_path,
+            )
 
-        # ----------------------------------------------------
-        # Download/cache Lightning LoRA
-        # ----------------------------------------------------
+            if not os.path.exists(self.lora_path):
+                raise RuntimeError(
+                    f"Lightning LoRA not found: {self.lora_path}"
+                )
 
-        print(
-            "[STARTUP] Checking Lightning model...",
-            flush=True,
-        )
+            Path(MODEL_DOWNLOAD_SENTINEL).write_text(
+                "download complete\n",
+                encoding="utf-8",
+            )
+            model_volume.commit()
 
-        snapshot_download(
-            repo_id=LIGHTNING_REPO,
-            local_dir=self.lightning_path,
-        )
-
-        model_volume.commit()
-
-        if not os.path.exists(
-            self.lora_path
-        ):
+        if not os.path.exists(self.lora_path):
             raise RuntimeError(
-                f"Lightning LoRA not found: "
-                f"{self.lora_path}"
+                f"Lightning LoRA not found: {self.lora_path}"
             )
 
         # ----------------------------------------------------
@@ -388,10 +538,7 @@ class VideoGenerator:
 
         start = time.time()
 
-        print(
-            "[STARTUP] Loading WanT2V pipeline...",
-            flush=True,
-        )
+        log_event("INFO", "model_loading", component="WanT2V")
 
         self.pipe = wan.WanT2V(
             config=self.cfg,
@@ -419,15 +566,18 @@ class VideoGenerator:
             convert_model_dtype=False,
         )
 
-        print(
-            f"[STARTUP] Model ready in "
-            f"{time.time() - start:.1f}s",
-            flush=True,
-        )
-
-        print(
-            "[STARTUP] Worker ready",
-            flush=True,
+        model_load_seconds = time.time() - start
+        metrics = collect_runtime_metrics()
+        log_event(
+            "INFO",
+            "model_ready",
+            model_load_s=f"{model_load_seconds:.1f}",
+            startup_total_s=f"{time.time() - startup_started:.1f}",
+            vram_mb=(
+                f"{metrics.get('gpu_mem_used_mb')}/"
+                f"{metrics.get('gpu_mem_total_mb')}"
+            ),
+            gpu_temp_c=metrics.get("gpu_temp_c"),
         )
 
     # ========================================================
@@ -451,8 +601,9 @@ class VideoGenerator:
         job = {
             "id": job_id,
             "status": "in_progress",
+            "stage": "preparing",
             "model": model,
-            "progress": 0,
+            "progress": 5,
             "prompt": prompt,
             "duration": duration,
             "resolution": resolution,
@@ -508,60 +659,58 @@ class VideoGenerator:
                 )
             )
 
-            print(
-                "=" * 70,
-                flush=True,
+            log_event(
+                "INFO",
+                "job_started",
+                job=job_id,
+                duration=f"{duration}s",
+                frames=frame_count,
+                resolution=resolution,
+                aspect=aspect_ratio,
+                wan_size=size_name,
+                seed=seed,
+                persistent_pipeline=True,
+                offload_model=OFFLOAD_MODEL,
             )
 
-            print(
-                f"[JOB] ID: {job_id}",
-                flush=True,
-            )
+            job["stage"] = "inference"
+            job["progress"] = 20
+            job["telemetry"] = collect_runtime_metrics()
+            write_job(job_id, job)
 
-            print(
-                f"[JOB] Prompt: {prompt}",
-                flush=True,
-            )
+            telemetry_stop = threading.Event()
 
-            print(
-                f"[JOB] Duration: "
-                f"{duration}s",
-                flush=True,
-            )
+            def telemetry_loop():
+                # Prime psutil's CPU counters, then report throughout inference.
+                try:
+                    import psutil
+                    psutil.cpu_percent(interval=None)
+                    psutil.cpu_percent(interval=None, percpu=True)
+                except Exception:
+                    pass
 
-            print(
-                f"[JOB] Frames: "
-                f"{frame_count}",
-                flush=True,
-            )
+                while not telemetry_stop.wait(TELEMETRY_INTERVAL_SECONDS):
+                    current = collect_runtime_metrics()
+                    job["telemetry"] = current
+                    log_runtime_metrics(job_id, job.get("stage", "unknown"), current)
+                    try:
+                        write_job(job_id, job)
+                    except Exception as telemetry_error:
+                        log_event(
+                            "WARNING",
+                            "telemetry_persist_failed",
+                            job=job_id,
+                            error=repr(telemetry_error),
+                        )
 
-            print(
-                f"[JOB] Resolution: "
-                f"{resolution}",
-                flush=True,
+            telemetry_thread = threading.Thread(
+                target=telemetry_loop,
+                name=f"telemetry-{job_id}",
+                daemon=True,
             )
+            telemetry_thread.start()
 
-            print(
-                f"[JOB] Aspect ratio: "
-                f"{aspect_ratio}",
-                flush=True,
-            )
-
-            print(
-                f"[JOB] Wan size: "
-                f"{size_name}",
-                flush=True,
-            )
-
-            print(
-                f"[JOB] Seed: {seed}",
-                flush=True,
-            )
-
-            print(
-                "[JOB] Using persistent pipeline",
-                flush=True,
-            )
+            log_runtime_metrics(job_id, "inference", job["telemetry"])
 
             generation_start = (
                 time.time()
@@ -597,7 +746,7 @@ class VideoGenerator:
 
                 seed=seed,
 
-                offload_model=True,
+                offload_model=OFFLOAD_MODEL,
             )
 
             self.torch.cuda.synchronize()
@@ -607,11 +756,19 @@ class VideoGenerator:
                 - generation_start
             )
 
-            print(
-                f"[JOB] Inference: "
-                f"{inference_seconds:.1f}s",
-                flush=True,
+            job["stage"] = "encoding"
+            job["progress"] = 90
+            job["inference_seconds"] = inference_seconds
+            job["telemetry"] = collect_runtime_metrics()
+            write_job(job_id, job)
+
+            log_event(
+                "INFO",
+                "inference_complete",
+                job=job_id,
+                inference_s=f"{inference_seconds:.1f}",
             )
+            log_runtime_metrics(job_id, "encoding", job["telemetry"])
 
             # ------------------------------------------------
             # SAVE
@@ -644,9 +801,13 @@ class VideoGenerator:
                 - encode_start
             )
 
+            telemetry_stop.set()
+            telemetry_thread.join(timeout=2)
+
             del video
 
-            self.torch.cuda.empty_cache()
+            if OFFLOAD_MODEL:
+                self.torch.cuda.empty_cache()
 
             if not output_path.exists():
                 raise RuntimeError(
@@ -673,6 +834,15 @@ class VideoGenerator:
                 - started_at
             )
 
+            # Per-request GPU generation cost. This uses the measured time
+            # spent inside generate() and Modal's current published A100-80GB
+            # per-second rate. It intentionally does not claim to include
+            # later warm-idle time or workspace-level credits/adjustments.
+            usage_cost_usd = round(
+                total_seconds * A100_80GB_USD_PER_SECOND,
+                6,
+            )
+
             # ------------------------------------------------
             # COMPLETE
             # ------------------------------------------------
@@ -680,7 +850,9 @@ class VideoGenerator:
             job.update(
                 {
                     "status": "completed",
+                    "stage": "completed",
                     "progress": 100,
+                    "telemetry": collect_runtime_metrics(),
 
                     "filename":
                         output_path.name,
@@ -697,6 +869,15 @@ class VideoGenerator:
                     "total_seconds":
                         total_seconds,
 
+                    "usage_cost_usd":
+                        usage_cost_usd,
+
+                    "gpu_billed_seconds":
+                        total_seconds,
+
+                    "gpu_rate_usd_per_second":
+                        A100_80GB_USD_PER_SECOND,
+
                     "completed_at":
                         int(time.time()),
 
@@ -710,45 +891,48 @@ class VideoGenerator:
                 job,
             )
 
-            print(
-                f"[SUCCESS] {job_id}",
-                flush=True,
+            log_event(
+                "INFO",
+                "job_completed",
+                job=job_id,
+                file=output_path.name,
+                size_mb=f"{file_size / 1024 / 1024:.2f}",
+                inference_s=f"{inference_seconds:.1f}",
+                encode_s=f"{encode_seconds:.1f}",
+                total_s=f"{total_seconds:.1f}",
+                cost_usd=f"{usage_cost_usd:.6f}",
             )
-
-            print(
-                f"[SUCCESS] File: "
-                f"{output_path.name}",
-                flush=True,
-            )
-
-            print(
-                f"[SUCCESS] Size: "
-                f"{file_size / 1024 / 1024:.2f} MB",
-                flush=True,
-            )
-
-            print(
-                f"[SUCCESS] Total: "
-                f"{total_seconds:.1f}s",
-                flush=True,
-            )
-
-            print(
-                "=" * 70,
-                flush=True,
-            )
+            log_runtime_metrics(job_id, "completed", job["telemetry"])
 
         except Exception as error:
 
+            if "telemetry_stop" in locals():
+                telemetry_stop.set()
+            if "telemetry_thread" in locals():
+                telemetry_thread.join(timeout=2)
+
             traceback.print_exc()
+            log_event(
+                "ERROR",
+                "job_failed",
+                job=job_id,
+                stage=job.get("stage"),
+                error=repr(error),
+            )
 
             job.update(
                 {
                     "status":
                         "failed",
 
+                    "stage":
+                        "failed",
+
                     "progress":
-                        0,
+                        job.get("progress", 0),
+
+                    "telemetry":
+                        collect_runtime_metrics(),
 
                     "error":
                         str(error),
@@ -792,11 +976,19 @@ def api():
         FastAPI,
         HTTPException,
         Request,
+        Response,
     )
 
     from fastapi.responses import (
         FileResponse,
     )
+
+    # Silence framework-level access logging where possible. Modal's own
+    # edge/router request lines are platform logs and cannot be fully disabled
+    # from inside FastAPI. The Retry-After response below lets pollers back off.
+    logging.getLogger("uvicorn.access").disabled = True
+    logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+    logging.getLogger("fastapi").setLevel(logging.WARNING)
 
     api_app = FastAPI(
         title=(
@@ -1151,6 +1343,9 @@ def api():
             "status":
                 "pending",
 
+            "stage":
+                "queued",
+
             "model":
                 model,
 
@@ -1179,7 +1374,7 @@ def api():
                 "",
         }
 
-        write_job(
+        await write_job_async(
             job_id,
             job,
         )
@@ -1190,10 +1385,10 @@ def api():
 
         try:
 
-            (
+            await (
                 VideoGenerator()
                 .generate
-                .spawn(
+                .spawn.aio(
                     job_id=job_id,
 
                     prompt=prompt,
@@ -1219,7 +1414,7 @@ def api():
                 }
             )
 
-            write_job(
+            await write_job_async(
                 job_id,
                 job,
             )
@@ -1243,11 +1438,17 @@ def api():
             "status":
                 "pending",
 
+            "stage":
+                "queued",
+
             "model":
                 model,
 
             "progress":
                 0,
+
+            "poll_after_seconds":
+                STATUS_POLL_RETRY_SECONDS,
         }
 
     # ========================================================
@@ -1262,13 +1463,14 @@ def api():
     async def get_video(
         job_id: str,
         request: Request,
+        response: Response,
     ):
 
         authenticate(
             request
         )
 
-        job = read_job(
+        job = await read_job_async(
             job_id
         )
 
@@ -1279,6 +1481,9 @@ def api():
                     "Generation not found"
                 ),
             )
+
+        if job.get("status") not in {"completed", "failed"}:
+            response.headers["Retry-After"] = str(STATUS_POLL_RETRY_SECONDS)
 
         response = {
             "id":
@@ -1298,7 +1503,22 @@ def api():
                     "progress",
                     0,
                 ),
+
+            "stage":
+                job.get(
+                    "stage",
+                    "unknown",
+                ),
+
+            "telemetry":
+                job.get(
+                    "telemetry",
+                    {},
+                ),
         }
+
+        if job.get("status") not in {"completed", "failed"}:
+            response["poll_after_seconds"] = STATUS_POLL_RETRY_SECONDS
 
         # ----------------------------------------------------
         # COMPLETED
@@ -1329,7 +1549,20 @@ def api():
             response[
                 "usage"
             ] = {
-                "cost": 0
+                "cost": job.get("usage_cost_usd", 0.0),
+                "currency": "USD",
+                "gpu_seconds": job.get("gpu_billed_seconds"),
+                "gpu_rate_usd_per_second": job.get(
+                    "gpu_rate_usd_per_second",
+                    A100_80GB_USD_PER_SECOND,
+                ),
+                "basis": "measured_generation_runtime",
+            }
+
+            response["timings"] = {
+                "inference_seconds": job.get("inference_seconds"),
+                "encode_seconds": job.get("encode_seconds"),
+                "total_seconds": job.get("total_seconds"),
             }
 
         # ----------------------------------------------------
@@ -1377,7 +1610,7 @@ def api():
                 ),
             )
 
-        job = read_job(
+        job = await read_job_async(
             job_id
         )
 
@@ -1400,8 +1633,6 @@ def api():
                     "completed yet"
                 ),
             )
-
-        jobs_volume.reload()
 
         path = job_video_path(
             job_id
