@@ -261,6 +261,51 @@ func TestRejectedSubmissionsDoNotRetainProviderSnapshots(t *testing.T) {
 	}
 }
 
+func TestGenerationUsesOneSnapshotWhenSettingsChangeMidRequest(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := security.EncryptSetting(apiKeySetting, "initial-account-key")
+	if err != nil || store.SetSetting(apiKeySetting, initial) != nil {
+		t.Fatal("save initial key")
+	}
+	modelsCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/videos/models":
+			modelsCalled = true
+			replacement, encryptErr := security.EncryptSetting(apiKeySetting, "replacement-account-key")
+			if encryptErr != nil || store.SetSetting(apiKeySetting, replacement) != nil {
+				t.Fatal("switch configured key")
+			}
+			_, _ = w.Write([]byte(`{"data":[{"id":"provider/model","name":"Model"}]}`))
+		case "/videos":
+			if !modelsCalled || r.Header.Get("Authorization") != "Bearer initial-account-key" {
+				t.Fatalf("submission authorization=%q", r.Header.Get("Authorization"))
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"gen_snapshot_once","status":"pending","model":"provider/model"}`))
+		default:
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	app := &dashboardApp{store: store, security: security, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), baseURL: server.URL}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"test","model":"provider/model"}`))
+	request.Header.Set("Content-Type", "application/json")
+	app.generate(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	record, err := store.Generation("gen_snapshot_once")
+	if err != nil || record.ProviderConfigID == "" {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+}
+
 func TestProviderConfigGarbageCollectionKeepsReferencedSnapshots(t *testing.T) {
 	store := newTestStore(t)
 	configs := []ProviderConfig{{ID: "orphan_config", Provider: string(VideoProviderOpenRouter), EncryptedAPIKey: "ciphertext"}, {ID: "referenced_config", Provider: string(VideoProviderOpenRouter), EncryptedAPIKey: "ciphertext"}}

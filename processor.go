@@ -29,6 +29,9 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 	}
 	app := &dashboardApp{store: store, security: security, logger: logger}
 	if security != nil {
+		if err := store.GarbageCollectProviderConfigs(); err != nil {
+			logger.Error("provider configuration garbage collection failed", "error", err)
+		}
 		if err := app.backfillLegacyProviderSnapshots(); err != nil {
 			app.legacySnapshotBackfillErr = err
 			logger.Error("legacy provider snapshot backfill failed; legacy work will be skipped", "error", err)

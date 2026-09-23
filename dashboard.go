@@ -488,11 +488,17 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a valid prompt is required")
 		return
 	}
-	provider, providerID, err := a.activeVideoProvider()
+	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	persisted := false
+	defer func() {
+		if !persisted {
+			_ = a.store.DeleteProviderConfigIfUnused(providerConfigID)
+		}
+	}()
 	models, err := provider.ListVideoModels(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "unable to validate model")
@@ -507,17 +513,6 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-	persisted := false
-	defer func() {
-		if !persisted {
-			_ = a.store.DeleteProviderConfigIfUnused(providerConfigID)
-		}
-	}()
 	generation, err := provider.GenerateVideo(r.Context(), request)
 	if err != nil {
 		a.logger.Error("generation submission failed", "model", request.Model)
@@ -643,11 +638,17 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a topic or story idea of at most 4,000 characters is required")
 		return
 	}
-	provider, providerID, err := a.activeVideoProvider()
+	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	persisted := false
+	defer func() {
+		if !persisted {
+			_ = a.store.DeleteProviderConfigIfUnused(providerConfigID)
+		}
+	}()
 	models, err := provider.ListVideoModels(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "unable to validate video models")
@@ -670,17 +671,6 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select a video model that supports 6-second clips at 480p in 9:16")
 		return
 	}
-	_, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-	persisted := false
-	defer func() {
-		if !persisted {
-			_ = a.store.DeleteProviderConfigIfUnused(providerConfigID)
-		}
-	}()
 	project, err := a.store.InsertProjectWithProviderConfig(input.Topic, string(providerID), providerConfigID, model.ID)
 	if err != nil {
 		a.logger.Error("create project failed")
