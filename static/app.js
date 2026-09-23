@@ -266,6 +266,7 @@
 
   function supportsProject(model) {
     return Array.isArray(model && model.durations) && model.durations.includes(6)
+      && Array.isArray(model.resolutions) && model.resolutions.includes("480p")
       && Array.isArray(model.aspect_ratios) && model.aspect_ratios.includes("9:16");
   }
 
@@ -575,8 +576,8 @@
     const projectCompatible = supportsProject(model);
     elements.generate.disabled = state.mode === "project" && !projectCompatible;
     elements.projectModelNote.textContent = projectCompatible
-      ? "This model supports the five-scene 6-second, 9:16 project preset."
-      : "This model does not support the fixed 6-second, 9:16 project preset. Choose another model or switch to Single clip.";
+      ? "This model supports the five-scene 6-second, 480p, 9:16 project preset."
+      : "This model does not support the fixed 6-second, 480p, 9:16 project preset. Choose another model or switch to Single clip.";
     updateEstimate();
   }
 

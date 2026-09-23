@@ -2,7 +2,7 @@
 
 A self-hosted dashboard for generating video with a selectable Modal or OpenRouter provider, tracking jobs after the browser closes, and storing completed MP4 files locally in a Docker-managed volume. It uses SQLite for metadata and no external storage service. OpenRouter remains the separate provider for story and script generation.
 
-The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's free-model router generates the story, full script, continuity bible, and five scene prompts. The selected video provider generates five independent six-second vertical clips. FFmpeg normalizes and joins them into one silent 1080×1920 MP4. The original single-clip workflow remains available.
+The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's free-model router generates the story, full script, continuity bible, and five scene prompts. The selected video provider generates five independent six-second 480p clips in 9:16. FFmpeg normalizes and joins them into one silent 1080×1920 MP4. The original single-clip workflow remains available.
 
 ## Docker quick start
 
@@ -69,7 +69,7 @@ Within that volume:
 
 1. Open **Generate** and leave **30-second project** selected.
 2. Enter a topic or story idea.
-3. Select a model that supports six-second clips and the 9:16 aspect ratio. The model list comes from the selected video provider and its capabilities determine which requests are accepted.
+3. Select a model that supports six-second clips, 480p resolution, and the 9:16 aspect ratio. The model list comes from the selected video provider and its capabilities determine which requests are accepted.
 4. Submit the project. Story and script generation always uses OpenRouter's `openrouter/free` router; video generation uses the selected video provider and its provider-specific model.
 5. Follow overall progress and each scene independently. A failed scene can be retried without regenerating successful scenes.
 6. When all five scene files are stored, FFmpeg creates the final video automatically.
@@ -124,7 +124,7 @@ Do not place secrets in source control, logs, images, or a committed `.env` file
 
 ## Video providers and Modal setup
 
-Choose **Modal** or **OpenRouter** in **Settings → Video generation**. The provider choice and each provider's selected video model are stored in the app database. Model choices and the duration, resolution, aspect-ratio, and audio controls are based on the selected model's reported capabilities. The 30-second project remains a fixed preset of five six-second scenes in 9:16; models must support those values to run that workflow.
+Choose **Modal** or **OpenRouter** in **Settings → Video generation**. The provider choice and each provider's selected video model are stored in the app database. Model choices and the duration, resolution, aspect-ratio, and audio controls are based on the selected model's reported capabilities. The 30-second project remains a fixed preset of five six-second scenes at 480p in 9:16; models must report support for all three values to run that workflow.
 
 OpenRouter's API key is shared between story/script generation and OpenRouter video generation. It remains configured when Modal is selected, because story/script generation continues to use OpenRouter.
 
