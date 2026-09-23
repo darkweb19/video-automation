@@ -21,6 +21,7 @@ type mockProvider struct {
 	status        *Generation
 	statusErr     error
 	generateCalls int
+	request       GenerateRequest
 	statusID      string
 	content       *http.Response
 	contentErr    error
@@ -36,6 +37,7 @@ func (m *mockProvider) GetVideoContent(_ context.Context, id, rangeHeader string
 
 func (m *mockProvider) GenerateVideo(_ context.Context, request GenerateRequest) (*Generation, error) {
 	m.generateCalls++
+	m.request = request
 	return m.generation, m.generateErr
 }
 

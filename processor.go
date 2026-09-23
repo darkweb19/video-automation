@@ -27,7 +27,11 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Processor{app: &dashboardApp{store: store, security: security, logger: logger}, interval: 5 * time.Second, logger: logger, downloadTimeout: 5 * time.Minute, downloadSem: make(chan struct{}, 2), projectSem: make(chan struct{}, 3), combineRunner: runCommand, inFlight: make(map[string]struct{})}
+	app := &dashboardApp{store: store, security: security, logger: logger}
+	if security != nil {
+		_ = app.backfillLegacyProviderSnapshots()
+	}
+	return &Processor{app: app, interval: 5 * time.Second, logger: logger, downloadTimeout: 5 * time.Minute, downloadSem: make(chan struct{}, 2), projectSem: make(chan struct{}, 3), combineRunner: runCommand, inFlight: make(map[string]struct{})}
 }
 
 func (p *Processor) Run(ctx context.Context) {

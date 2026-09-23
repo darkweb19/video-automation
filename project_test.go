@@ -412,12 +412,44 @@ func TestCombineProjectVideoBuildsNormalizedThirtySecondOutput(t *testing.T) {
 
 func TestPreferredProjectModelRequiresVerticalSixSeconds(t *testing.T) {
 	models := []VideoModel{
-		{ID: "other/vertical", Name: "Other", Durations: []int{6}, AspectRatios: []string{"9:16"}},
-		{ID: "minimax/k3-pro", Name: "MiniMax K3 Pro", Durations: []int{6}, AspectRatios: []string{"9:16"}},
+		{ID: "other/vertical", Name: "Other", Durations: []int{6}, Resolutions: []string{"480p"}, AspectRatios: []string{"9:16"}},
+		{ID: "minimax/k3-pro", Name: "MiniMax K3 Pro", Durations: []int{6}, Resolutions: []string{"480p"}, AspectRatios: []string{"9:16"}},
 	}
 	model, ok := preferredProjectModel(models)
 	if !ok || model.ID != "other/vertical" {
 		t.Fatalf("unexpected preferred model: %+v, %v", model, ok)
+	}
+}
+
+func TestProjectModelRequiresConfiguredResolution(t *testing.T) {
+	model := VideoModel{ID: "provider/no-resolution", Durations: []int{ProjectSceneSeconds}, AspectRatios: []string{ProjectAspectRatio}}
+	if compatibleProjectModel(model) {
+		t.Fatal("project model without 480p capability must be rejected")
+	}
+}
+
+func TestProjectSceneSendsFixedResolution(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("topic", "provider/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := StoryPlan{Title: "title", Story: "story", Script: "script", Continuity: "continuity"}
+	for number := 1; number <= ProjectSceneCount; number++ {
+		plan.Scenes = append(plan.Scenes, StoryPlanScene{Number: number, Title: "scene", Script: "script", VideoPrompt: "prompt"})
+	}
+	if err := store.SaveStoryPlan(project.ID, plan); err != nil {
+		t.Fatal(err)
+	}
+	project, err = store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &mockProvider{generation: &Generation{ID: "gen_resolution", Status: "queued"}}
+	processor := NewProcessor(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.submitScene(context.Background(), provider, project, project.Scenes[0])
+	if provider.request.Resolution != ProjectResolution || provider.request.Duration != ProjectSceneSeconds || provider.request.AspectRatio != ProjectAspectRatio {
+		t.Fatalf("request = %#v", provider.request)
 	}
 }
 
@@ -426,7 +458,7 @@ func TestCreateProjectDefaultsToFirstCompatibleModel(t *testing.T) {
 		if r.URL.Path != "/videos/models" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"data":[{"id":"provider/compatible","name":"Compatible","supported_durations":[6],"supported_aspect_ratios":["9:16"]},{"id":"minimax/k3-pro","name":"MiniMax K3 Pro","supported_durations":[6],"supported_aspect_ratios":["9:16"]}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"provider/compatible","name":"Compatible","supported_durations":[6],"supported_resolutions":["480p"],"supported_aspect_ratios":["9:16"]},{"id":"minimax/k3-pro","name":"MiniMax K3 Pro","supported_durations":[6],"supported_resolutions":["480p"],"supported_aspect_ratios":["9:16"]}]}`))
 	}))
 	defer server.Close()
 	store := newTestStore(t)

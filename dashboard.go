@@ -334,7 +334,12 @@ func (a *dashboardApp) activeVideoProviderSnapshot() (VideoService, VideoProvide
 	if err != nil {
 		return nil, "", "", err
 	}
+	return a.videoProviderSnapshot(provider)
+}
+
+func (a *dashboardApp) videoProviderSnapshot(provider VideoProviderID) (VideoService, VideoProviderID, string, error) {
 	var baseURL, encryptedSetting string
+	var err error
 	switch provider {
 	case VideoProviderOpenRouter:
 		encryptedSetting, err = a.store.Setting(apiKeySetting)
@@ -366,6 +371,27 @@ func (a *dashboardApp) activeVideoProviderSnapshot() (VideoService, VideoProvide
 	}
 	service, err := a.videoProviderFromConfig(config)
 	return service, provider, config.ID, err
+}
+
+// BackfillLegacyProviderSnapshots runs once when the worker starts after an
+// upgrade. It captures existing mutable settings before a future account
+// switch. Rows that cannot be configured remain untouched and are handled by
+// the provider-scoped compatibility fallback below.
+func (a *dashboardApp) backfillLegacyProviderSnapshots() error {
+	providers, err := a.store.LegacyPendingProviderIDs()
+	if err != nil {
+		return err
+	}
+	for _, provider := range providers {
+		_, _, configID, err := a.videoProviderSnapshot(provider)
+		if err != nil {
+			continue
+		}
+		if err := a.store.AssignLegacyProviderConfig(provider, configID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // videoProviderForSnapshot uses immutable request-time configuration. Legacy

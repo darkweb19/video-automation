@@ -83,6 +83,44 @@ func (s *Store) ProviderConfig(id string) (ProviderConfig, error) {
 	return config, err
 }
 
+func (s *Store) LegacyPendingProviderIDs() ([]VideoProviderID, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT video_provider FROM (
+		SELECT video_provider FROM generations WHERE provider_config_id='' AND status IN ('queued','processing','downloading','download_failed')
+		UNION
+		SELECT video_provider FROM video_projects WHERE provider_config_id='' AND status IN ('planning','generating')
+	)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var providers []VideoProviderID
+	for rows.Next() {
+		var provider string
+		if err := rows.Scan(&provider); err != nil {
+			return nil, err
+		}
+		if validVideoProvider(VideoProviderID(provider)) {
+			providers = append(providers, VideoProviderID(provider))
+		}
+	}
+	return providers, rows.Err()
+}
+
+func (s *Store) AssignLegacyProviderConfig(provider VideoProviderID, configID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE generations SET provider_config_id=? WHERE provider_config_id='' AND video_provider=? AND status IN ('queued','processing','downloading','download_failed')`, configID, provider); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE video_projects SET provider_config_id=? WHERE provider_config_id='' AND video_provider=? AND status IN ('planning','generating')`, configID, provider); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func OpenStore(dataDir string) (*Store, error) {
 	if dataDir == "" {
 		return nil, errors.New("data directory is required")

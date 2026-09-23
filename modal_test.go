@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -115,5 +116,123 @@ func TestSettingsDoNotExposeSavedKeyCharacters(t *testing.T) {
 	}
 	if response["openrouter_api_key_configured"] != true || response["modal_video_api_key_configured"] != true {
 		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestProviderConfigSnapshotSurvivesAccountChangesAndRestart(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer original-account-key" {
+			t.Fatalf("authorization=%q", r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+	configID := "provider_config_restart_test"
+	ciphertext, err := security.EncryptSetting("video_provider_config."+configID, "original-account-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertProviderConfig(ProviderConfig{ID: configID, Provider: string(VideoProviderModal), BaseURL: server.URL, EncryptedAPIKey: ciphertext}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := security.EncryptSetting(modalVideoAPIKeySetting, "new-account-key")
+	if err != nil || store.SetSetting(modalVideoAPIKeySetting, changed) != nil || store.SetSetting(modalVideoBaseURLSetting, "https://new-account.example/api/v1") != nil {
+		t.Fatal("change mutable account settings")
+	}
+	// A fresh app instance simulates a process restart; it must use the saved
+	// snapshot, not mutable settings.
+	restarted := &dashboardApp{store: store, security: security}
+	service, err := restarted.videoProviderForSnapshot(configID, VideoProviderModal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ListVideoModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenRouterProviderConfigSnapshotSurvivesKeyChange(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer original-openrouter-key" {
+			t.Fatalf("authorization=%q", r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+	configID := "provider_config_openrouter_restart_test"
+	ciphertext, err := security.EncryptSetting("video_provider_config."+configID, "original-openrouter-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertProviderConfig(ProviderConfig{ID: configID, Provider: string(VideoProviderOpenRouter), BaseURL: server.URL, EncryptedAPIKey: ciphertext}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := security.EncryptSetting(apiKeySetting, "new-openrouter-key")
+	if err != nil || store.SetSetting(apiKeySetting, changed) != nil {
+		t.Fatal("change mutable OpenRouter setting")
+	}
+	restarted := &dashboardApp{store: store, security: security}
+	service, err := restarted.videoProviderForSnapshot(configID, VideoProviderOpenRouter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ListVideoModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProcessorBackfillsLegacyPendingProviderSnapshots(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := security.EncryptSetting(apiKeySetting, "legacy-openrouter-key")
+	if err != nil || store.SetSetting(apiKeySetting, key) != nil {
+		t.Fatal("save legacy provider configuration")
+	}
+	if err := store.InsertGeneration(GenerationRecord{ID: "legacy_pending", VideoProvider: string(VideoProviderOpenRouter), Prompt: "test", Model: "provider/model", Status: "queued"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = NewProcessor(store, security, nil)
+	record, err := store.Generation("legacy_pending")
+	if err != nil || record.ProviderConfigID == "" {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+	if _, err := store.ProviderConfig(record.ProviderConfigID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type failingRoundTripper struct{}
+
+func (failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("wrong HTTP client")
+}
+
+func TestModalContentUsesDedicatedStreamingClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("video-bytes")) }))
+	defer server.Close()
+	client := NewModalVideoClient(server.URL, "key")
+	client.HTTPClient = &http.Client{Transport: failingRoundTripper{}}
+	client.ContentHTTPClient = server.Client()
+	response, err := client.GetVideoContent(context.Background(), "gen_streaming", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || string(body) != "video-bytes" {
+		t.Fatalf("body=%q err=%v", body, err)
 	}
 }
