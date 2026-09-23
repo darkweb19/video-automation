@@ -1,8 +1,8 @@
-# OpenRouter Video Automation
+# FrameVault Video Automation
 
-A self-hosted dashboard for submitting OpenRouter video jobs, tracking their status after the browser closes, and storing completed MP4 files locally in a Docker-managed volume. It uses SQLite for metadata and no external storage service.
+A self-hosted dashboard for generating video with a selectable Modal or OpenRouter provider, tracking jobs after the browser closes, and storing completed MP4 files locally in a Docker-managed volume. It uses SQLite for metadata and no external storage service. OpenRouter remains the separate provider for story and script generation.
 
-The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's free-model router generates the story, full script, continuity bible, and five scene prompts. The selected video model then generates five independent six-second vertical clips. FFmpeg normalizes and joins them into one silent 1080×1920 MP4. The original single-clip workflow remains available.
+The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's free-model router generates the story, full script, continuity bible, and five scene prompts. The selected video provider generates five independent six-second vertical clips. FFmpeg normalizes and joins them into one silent 1080×1920 MP4. The original single-clip workflow remains available.
 
 ## Docker quick start
 
@@ -20,7 +20,7 @@ Username: sujanshrestha
 Password: Sujan@123
 ```
 
-Change this password immediately in **Settings**. Then add and test the OpenRouter API key in **Settings**. No API-key environment variable or `.env` file is required.
+Change this password immediately in **Settings**. Add and test the OpenRouter API key there; it remains necessary for story and script generation even when Modal is selected for video. In **Video generation**, choose the active video provider. For Modal, also save its deployment base URL and API key. These settings persist in SQLite, so changing providers or Modal accounts does not require rebuilding the Go application. No API-key environment variable or `.env` file is required for normal setup.
 
 The container is configured with `restart: unless-stopped`; it resumes outstanding jobs after a restart. Check its logs with:
 
@@ -60,7 +60,7 @@ Within that volume:
 
 | Path | Contents |
 | --- | --- |
-| `/data/app.db` | SQLite users, encrypted API-key setting, jobs, statuses, and cost records |
+| `/data/app.db` | SQLite users, selected video provider, encrypted OpenRouter/Modal API-key settings, Modal base URL, provider-scoped video models, jobs, statuses, and cost records |
 | `/data/secret.key` | Encryption key for the API-key setting |
 | `/data/videos/` | Downloaded completed MP4 files |
 | `/data/projects/` | Per-project scene clips and final 30-second MP4 files |
@@ -69,8 +69,8 @@ Within that volume:
 
 1. Open **Generate** and leave **30-second project** selected.
 2. Enter a topic or story idea.
-3. Select a model that supports six-second clips and the 9:16 aspect ratio. MiniMax K3 Pro is selected by default when OpenRouter returns a compatible model with that name; otherwise the first compatible model is shown as the fallback.
-4. Submit the project. Story and script generation uses `openrouter/free`; video generation uses the selected paid video model.
+3. Select a model that supports six-second clips and the 9:16 aspect ratio. The model list comes from the selected video provider and its capabilities determine which requests are accepted.
+4. Submit the project. Story and script generation always uses OpenRouter's `openrouter/free` router; video generation uses the selected video provider and its provider-specific model.
 5. Follow overall progress and each scene independently. A failed scene can be retried without regenerating successful scenes.
 6. When all five scene files are stored, FFmpeg creates the final video automatically.
 
@@ -78,7 +78,7 @@ Projects, scene prompts, provider job IDs, statuses, errors, costs, and file pat
 
 Each project also keeps a permanent process/audit trace. In **Generation details**, expandable sections retain the exact text-generation system prompt, user prompt, JSON schema, raw assistant response, router (`openrouter/free`), actual model when returned, normalized story/script/continuity, and each scene's final video prompt. The **Pipeline** timeline records stages, statuses, timestamps, errors, and attempts/retries. This is an operational audit trace, not hidden chain-of-thought or private reasoning. Raw assistant responses are capped at 1 MiB.
 
-The displayed project estimate covers five video generations. Provider pricing and capabilities can change, so confirm the estimate and account balance before starting a project.
+The displayed project estimate covers five video generations when the selected provider publishes pricing. Modal does not return per-generation pricing through this API, and its compute charges are billed separately by Modal. Provider pricing and capabilities can change, so confirm any available estimate and account balance before starting a project.
 
 Back up the whole volume, including `secret.key`; the database cannot decrypt a stored API key without it. This command writes a portable archive to the current directory:
 
@@ -122,9 +122,30 @@ OPENROUTER_API_KEY="your_key" docker compose up -d --build
 
 Do not place secrets in source control, logs, images, or a committed `.env` file. After it is saved, remove that environment variable and restart the container.
 
+## Video providers and Modal setup
+
+Choose **Modal** or **OpenRouter** in **Settings → Video generation**. The provider choice and each provider's selected video model are stored in the app database. Model choices and the duration, resolution, aspect-ratio, and audio controls are based on the selected model's reported capabilities. The 30-second project remains a fixed preset of five six-second scenes in 9:16; models must support those values to run that workflow.
+
+OpenRouter's API key is shared between story/script generation and OpenRouter video generation. It remains configured when Modal is selected, because story/script generation continues to use OpenRouter.
+
+For Modal video, deploy the supplied `video.py` service in the Modal account that will run generation. Run these commands from the directory containing `video.py`. Create the Modal secret named `video-api-secret` with its required `MODAL_VIDEO_API_KEY`, then deploy the service:
+
+```bash
+modal secret create video-api-secret MODAL_VIDEO_API_KEY="your-secret-value"
+modal deploy video.py
+```
+
+In the authenticated dashboard, select Modal and save its deployment base URL and the same API key. The base URL should end in `/api/v1`, for example:
+
+```text
+https://<your-modal-endpoint>/api/v1
+```
+
+The URL differs by Modal account and deployment. Store the API key in Settings; it is encrypted at rest and is never returned to the browser. To switch Modal accounts, deploy the service and update only the Modal base URL and API key in Settings. The Modal service currently exposes one static model, `modal/wan2.2-lightning-a14b`, with 1–15 second durations, 480p/720p, 9:16/16:9, and no generated audio. Its API does not report a video usage charge; Modal infrastructure usage is billed separately by Modal.
+
 ## Dashboard behavior
 
-The model list includes OpenRouter-provided per-second pricing where available, such as `$0.50/sec`; otherwise it shows `From …/sec` or `Price unavailable`. Before submission the dashboard may show an estimated price based on selected duration and published pricing. Once a job completes, History stores and displays OpenRouter's final reported `usage.cost`; that actual charge can differ from the estimate.
+For OpenRouter, the model list includes provider-supplied per-second pricing where available, such as `$0.50/sec`; otherwise it shows `From …/sec` or `Price unavailable`. The dashboard shows estimates only when the active provider supplies pricing. Modal's API returns no per-video price, so its compute cost is billed separately by Modal. History stores the cost value reported by the selected provider; confirm the provider's billing dashboard for actual charges.
 
 Jobs are stored before provider polling begins. The background worker keeps polling and downloads completed video into `/data/videos`, so closing the dashboard does not cancel a job. History includes the prompt, model, date, duration, job status, cost, local playback/download, and manual deletion. Deletion removes the corresponding database record and local video file. Files are retained indefinitely until deleted in History.
 
@@ -138,6 +159,6 @@ docker compose ps
 docker compose exec video-automation wget -q -O - http://127.0.0.1:8080/health
 ```
 
-`docker compose ps` should show the service as healthy. Open the dashboard in a browser, sign in, change the initial password, save and test an OpenRouter key, and create a low-cost test generation. Provider calls are paid and model availability/pricing can change.
+`docker compose ps` should show the service as healthy. Open the dashboard in a browser, sign in, change the initial password, save and test the OpenRouter key, choose a video provider, and test its connection. Configure the Modal deployment URL and key before selecting Modal. OpenRouter video calls may be paid; Modal infrastructure usage is billed separately, and model availability/pricing can change.
 
 For non-Docker development, set `DATA_DIR` to a writable directory and run `go run .`; the app listens on port 8080.
