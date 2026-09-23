@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +26,7 @@ type Store struct {
 type GenerationRecord struct {
 	ID               string `json:"id"`
 	VideoProvider    string `json:"video_provider"`
+	ProviderConfigID string `json:"-"`
 	Prompt           string `json:"prompt"`
 	Model            string `json:"model"`
 	Duration         int    `json:"duration,omitempty"`
@@ -39,6 +42,45 @@ type GenerationRecord struct {
 	NextDownloadAt   int64  `json:"next_download_at,omitempty"`
 	CreatedAt        int64  `json:"created_at"`
 	UpdatedAt        int64  `json:"updated_at"`
+}
+
+// ProviderConfig is intentionally storage-only: it contains a ciphertext and
+// must never be serialized through dashboard APIs.
+type ProviderConfig struct {
+	ID              string
+	Provider        string
+	BaseURL         string
+	EncryptedAPIKey string
+}
+
+func newProviderConfigID() (string, error) {
+	raw := make([]byte, 12)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return "provider_config_" + hex.EncodeToString(raw), nil
+}
+
+func (s *Store) CreateProviderConfig(provider, baseURL, encryptedAPIKey string) (ProviderConfig, error) {
+	id, err := newProviderConfigID()
+	if err != nil {
+		return ProviderConfig{}, err
+	}
+	return s.InsertProviderConfig(ProviderConfig{ID: id, Provider: provider, BaseURL: baseURL, EncryptedAPIKey: encryptedAPIKey})
+}
+
+func (s *Store) InsertProviderConfig(config ProviderConfig) (ProviderConfig, error) {
+	if config.ID == "" {
+		return ProviderConfig{}, errors.New("provider config id is required")
+	}
+	_, err := s.db.Exec(`INSERT INTO video_provider_configs(id,provider,base_url,encrypted_api_key,created_at) VALUES(?,?,?,?,?)`, config.ID, config.Provider, config.BaseURL, config.EncryptedAPIKey, time.Now().Unix())
+	return config, err
+}
+
+func (s *Store) ProviderConfig(id string) (ProviderConfig, error) {
+	var config ProviderConfig
+	err := s.db.QueryRow(`SELECT id,provider,base_url,encrypted_api_key FROM video_provider_configs WHERE id=?`, id).Scan(&config.ID, &config.Provider, &config.BaseURL, &config.EncryptedAPIKey)
+	return config, err
 }
 
 func OpenStore(dataDir string) (*Store, error) {
@@ -98,6 +140,13 @@ func (s *Store) migrate() error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS video_provider_configs (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			base_url TEXT NOT NULL DEFAULT '',
+			encrypted_api_key TEXT NOT NULL,
+			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS generations (
 			id TEXT PRIMARY KEY,
@@ -205,6 +254,12 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfMissing("video_projects", "video_provider", "TEXT NOT NULL DEFAULT 'openrouter'"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("generations", "provider_config_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("video_projects", "provider_config_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES('video_provider','openrouter',unixepoch()) ON CONFLICT(key) DO NOTHING`)
@@ -357,16 +412,16 @@ func (s *Store) InsertGeneration(record GenerationRecord) error {
 	if record.VideoProvider == "" {
 		record.VideoProvider = string(VideoProviderOpenRouter)
 	}
-	_, err := s.db.Exec(`INSERT INTO generations(id,video_provider,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		record.ID, record.VideoProvider, record.Prompt, record.Model, record.Duration, record.AspectRatio, record.Status, record.CostUSD, record.EstimatedCostUSD, now, now)
+	_, err := s.db.Exec(`INSERT INTO generations(id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		record.ID, record.VideoProvider, record.ProviderConfigID, record.Prompt, record.Model, record.Duration, record.AspectRatio, record.Status, record.CostUSD, record.EstimatedCostUSD, now, now)
 	return err
 }
 
-const generationColumns = `id,video_provider,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at`
+const generationColumns = `id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at`
 
 func scanGeneration(scanner interface{ Scan(...any) error }) (GenerationRecord, error) {
 	var record GenerationRecord
-	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt)
+	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.ProviderConfigID, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt)
 	record.VideoReady = record.VideoPath != ""
 	return record, err
 }

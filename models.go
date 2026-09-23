@@ -128,22 +128,23 @@ type ProjectScene struct {
 }
 
 type VideoProject struct {
-	ID              string         `json:"id"`
-	Topic           string         `json:"topic"`
-	Title           string         `json:"title,omitempty"`
-	Story           string         `json:"story,omitempty"`
-	Script          string         `json:"script,omitempty"`
-	Continuity      string         `json:"continuity,omitempty"`
-	Model           string         `json:"model"`
-	VideoProvider   string         `json:"video_provider"`
-	Status          string         `json:"status"`
-	Progress        int            `json:"progress"`
-	Error           string         `json:"error,omitempty"`
-	FinalVideoPath  string         `json:"-"`
-	FinalVideoReady bool           `json:"final_video_ready"`
-	FinalSizeBytes  int64          `json:"final_size_bytes,omitempty"`
-	TotalCostUSD    string         `json:"total_cost_usd,omitempty"`
-	Scenes          []ProjectScene `json:"scenes"`
+	ID               string         `json:"id"`
+	Topic            string         `json:"topic"`
+	Title            string         `json:"title,omitempty"`
+	Story            string         `json:"story,omitempty"`
+	Script           string         `json:"script,omitempty"`
+	Continuity       string         `json:"continuity,omitempty"`
+	Model            string         `json:"model"`
+	VideoProvider    string         `json:"video_provider"`
+	ProviderConfigID string         `json:"-"`
+	Status           string         `json:"status"`
+	Progress         int            `json:"progress"`
+	Error            string         `json:"error,omitempty"`
+	FinalVideoPath   string         `json:"-"`
+	FinalVideoReady  bool           `json:"final_video_ready"`
+	FinalSizeBytes   int64          `json:"final_size_bytes,omitempty"`
+	TotalCostUSD     string         `json:"total_cost_usd,omitempty"`
+	Scenes           []ProjectScene `json:"scenes"`
 	// TextGeneration contains auditable request/response artifacts for the
 	// script planner. It never includes credentials or provider headers.
 	TextGeneration TextGenerationTrace `json:"text_generation"`
