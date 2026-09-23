@@ -306,6 +306,83 @@ func (a *dashboardApp) videoProvider(provider VideoProviderID) (VideoService, er
 	}
 }
 
+func (a *dashboardApp) videoProviderFromConfig(config ProviderConfig) (VideoService, error) {
+	provider := VideoProviderID(config.Provider)
+	if !validVideoProvider(provider) {
+		return nil, errors.New("unsupported video provider")
+	}
+	key, err := a.security.DecryptSetting("video_provider_config."+config.ID, config.EncryptedAPIKey)
+	if err != nil {
+		return nil, err
+	}
+	switch provider {
+	case VideoProviderOpenRouter:
+		client := NewOpenRouterClient(key)
+		if config.BaseURL != "" {
+			client.BaseURL = config.BaseURL
+		}
+		return client, nil
+	case VideoProviderModal:
+		return NewModalVideoClient(config.BaseURL, key), nil
+	default:
+		return nil, errors.New("unsupported video provider")
+	}
+}
+
+func (a *dashboardApp) activeVideoProviderSnapshot() (VideoService, VideoProviderID, string, error) {
+	provider, err := a.selectedVideoProvider()
+	if err != nil {
+		return nil, "", "", err
+	}
+	var baseURL, encryptedSetting string
+	switch provider {
+	case VideoProviderOpenRouter:
+		encryptedSetting, err = a.store.Setting(apiKeySetting)
+		baseURL = a.baseURL
+	case VideoProviderModal:
+		baseURL, err = a.store.Setting(modalVideoBaseURLSetting)
+		if err == nil {
+			encryptedSetting, err = a.store.Setting(modalVideoAPIKeySetting)
+		}
+	}
+	if err != nil {
+		return nil, "", "", errors.New("selected video provider is not configured")
+	}
+	key, err := a.security.DecryptSetting(map[VideoProviderID]string{VideoProviderOpenRouter: apiKeySetting, VideoProviderModal: modalVideoAPIKeySetting}[provider], encryptedSetting)
+	if err != nil {
+		return nil, "", "", err
+	}
+	configID, err := newProviderConfigID()
+	if err != nil {
+		return nil, "", "", err
+	}
+	encrypted, err := a.security.EncryptSetting("video_provider_config."+configID, key)
+	if err != nil {
+		return nil, "", "", err
+	}
+	config, err := a.store.InsertProviderConfig(ProviderConfig{ID: configID, Provider: string(provider), BaseURL: baseURL, EncryptedAPIKey: encrypted})
+	if err != nil {
+		return nil, "", "", err
+	}
+	service, err := a.videoProviderFromConfig(config)
+	return service, provider, config.ID, err
+}
+
+// videoProviderForSnapshot uses immutable request-time configuration. Legacy
+// rows created before snapshots are deliberately routed by their persisted
+// provider (never the active selection); their current provider settings are
+// the only available compatibility fallback.
+func (a *dashboardApp) videoProviderForSnapshot(configID string, legacyProvider VideoProviderID) (VideoService, error) {
+	if configID == "" {
+		return a.videoProvider(legacyProvider)
+	}
+	config, err := a.store.ProviderConfig(configID)
+	if err != nil {
+		return nil, err
+	}
+	return a.videoProviderFromConfig(config)
+}
+
 func (a *dashboardApp) activeVideoProvider() (VideoService, VideoProviderID, error) {
 	provider, err := a.selectedVideoProvider()
 	if err != nil {
@@ -386,7 +463,7 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a valid prompt is required")
 		return
 	}
-	provider, providerID, err := a.activeVideoProvider()
+	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -427,6 +504,7 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 	record := GenerationRecord{
 		ID:               generation.ID,
 		VideoProvider:    string(providerID),
+		ProviderConfigID: providerConfigID,
 		Prompt:           request.Prompt,
 		Model:            request.Model,
 		Duration:         request.Duration,
@@ -500,7 +578,7 @@ func (a *dashboardApp) history(w http.ResponseWriter, r *http.Request) {
 }
 
 func compatibleProjectModel(model VideoModel) bool {
-	return containsInt(model.Durations, ProjectSceneSeconds) && containsString(model.AspectRatios, ProjectAspectRatio)
+	return containsInt(model.Durations, ProjectSceneSeconds) && containsString(model.Resolutions, ProjectResolution) && containsString(model.AspectRatios, ProjectAspectRatio)
 }
 
 func preferredProjectModel(models []VideoModel) (VideoModel, bool) {
@@ -528,7 +606,7 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a topic or story idea of at most 4,000 characters is required")
 		return
 	}
-	provider, providerID, err := a.activeVideoProvider()
+	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -555,7 +633,7 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select a video model that supports 6-second clips in 9:16")
 		return
 	}
-	project, err := a.store.InsertProjectForProvider(input.Topic, string(providerID), model.ID)
+	project, err := a.store.InsertProjectWithProviderConfig(input.Topic, string(providerID), providerConfigID, model.ID)
 	if err != nil {
 		a.logger.Error("create project failed")
 		writeError(w, http.StatusInternalServerError, "unable to create project")

@@ -14,13 +14,21 @@ import (
 )
 
 var defaultModalHTTPClient = &http.Client{Timeout: 45 * time.Second}
+var defaultModalContentClient = &http.Client{
+	Transport: func() http.RoundTripper {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.ResponseHeaderTimeout = 45 * time.Second
+		return transport
+	}(),
+}
 
 // ModalVideoClient implements the same OpenRouter-style API exposed by the
 // checked-in Modal service. Its base URL is intentionally runtime-configured.
 type ModalVideoClient struct {
-	APIKey     string
-	BaseURL    string
-	HTTPClient *http.Client
+	APIKey            string
+	BaseURL           string
+	HTTPClient        *http.Client
+	ContentHTTPClient *http.Client
 }
 
 func NewModalVideoClient(baseURL, apiKey string) *ModalVideoClient {
@@ -40,6 +48,13 @@ func (c *ModalVideoClient) client() *http.Client {
 		return c.HTTPClient
 	}
 	return defaultModalHTTPClient
+}
+
+func (c *ModalVideoClient) contentClient() *http.Client {
+	if c.ContentHTTPClient != nil {
+		return c.ContentHTTPClient
+	}
+	return defaultModalContentClient
 }
 
 func (c *ModalVideoClient) doJSON(ctx context.Context, method, path string, input, output any) error {
@@ -139,7 +154,7 @@ func (c *ModalVideoClient) GetVideoContent(ctx context.Context, id, rangeHeader 
 	if rangeHeader != "" {
 		req.Header.Set("Range", rangeHeader)
 	}
-	response, err := c.client().Do(req)
+	response, err := c.contentClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("Modal content request: %w", err)
 	}

@@ -69,7 +69,7 @@ func (p *Processor) process(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		provider, err := p.app.videoProvider(VideoProviderID(record.VideoProvider))
+		provider, err := p.app.videoProviderForSnapshot(record.ProviderConfigID, VideoProviderID(record.VideoProvider))
 		if err != nil {
 			p.logger.Warn("generation processor waiting for video provider", "provider", record.VideoProvider)
 			continue
@@ -185,7 +185,7 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 				_ = p.app.store.AppendPipelineEvent(project.ID, "continuity", "completed", "Continuity applied; final scene prompts are ready.", 0, 0)
 			})
 		case "generating":
-			provider, err := p.app.videoProvider(VideoProviderID(project.VideoProvider))
+			provider, err := p.app.videoProviderForSnapshot(project.ProviderConfigID, VideoProviderID(project.VideoProvider))
 			if err != nil {
 				p.logger.Warn("project processor waiting for video provider", "provider", project.VideoProvider)
 				continue
@@ -237,7 +237,7 @@ func (p *Processor) submitScene(ctx context.Context, provider VideoService, proj
 	}
 	requestContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	generation, err := provider.GenerateVideo(requestContext, GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, AspectRatio: ProjectAspectRatio})
+	generation, err := provider.GenerateVideo(requestContext, GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, Resolution: ProjectResolution, AspectRatio: ProjectAspectRatio})
 	if err != nil || generation == nil || !safeID(generation.ID) {
 		_ = p.app.store.AppendPipelineEvent(project.ID, "scene_submission", "failed", "Video generation submission failed.", scene.Number, 0)
 		_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", "Scene submission failed. Retrying this scene may create a duplicate if OpenRouter accepted the interrupted request.")
