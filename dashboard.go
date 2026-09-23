@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -54,6 +55,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("POST /generate", app.requirePasswordChanged(http.HandlerFunc(app.generate)))
 	mux.Handle("GET /status", app.requirePasswordChanged(http.HandlerFunc(app.status)))
 	mux.Handle("GET /api/generations", app.requirePasswordChanged(http.HandlerFunc(app.history)))
+	mux.Handle("POST /api/prompts/random", app.requirePasswordChanged(http.HandlerFunc(app.randomPrompt)))
 	mux.Handle("POST /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.createProject)))
 	mux.Handle("GET /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.projects)))
 	mux.Handle("GET /api/projects/{id}", app.requirePasswordChanged(http.HandlerFunc(app.project)))
@@ -607,6 +609,43 @@ func (a *dashboardApp) history(w http.ResponseWriter, r *http.Request) {
 		next = strconv.FormatInt(last.CreatedAt, 10) + ":" + last.ID
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"generations": records, "stats": stats, "next_page": next})
+}
+
+// randomPrompt creates text only. The browser never receives the OpenRouter
+// credential or any provider metadata, and the result is not persisted until
+// the user explicitly submits it as a generation or project.
+func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
+	var input RandomPromptRequest
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	input.Category = strings.TrimSpace(input.Category)
+	input.Mode = RandomPromptMode(strings.TrimSpace(string(input.Mode)))
+	if !validRandomPromptCategory(input.Category) || !validRandomPromptMode(input.Mode) {
+		writeError(w, http.StatusBadRequest, "a supported category and mode are required")
+		return
+	}
+	provider, err := a.openRouterTextProvider()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "OpenRouter text generation is not configured")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	prompt, err := provider.GenerateRandomPrompt(ctx, input)
+	if err != nil {
+		a.logger.Warn("random prompt generation failed")
+		writeError(w, http.StatusBadGateway, "unable to generate a random prompt")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"prompt": prompt})
 }
 
 func compatibleProjectModel(model VideoModel) bool {
