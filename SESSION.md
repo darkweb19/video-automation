@@ -1,34 +1,29 @@
 # Session handoff — 2026-09-23
 
 ## What was done
-- Added persisted Modal/OpenRouter video provider selection behind the shared `VideoService`; OpenRouter remains the separate story/script provider.
-- Added provider-specific dynamic models and capability-driven duration, resolution, aspect-ratio, and audio controls without returning saved API keys to the browser.
-- Copied the Modal service to `modal/video.py`; Modal URL and credentials are editable in Settings, with credentials encrypted at rest.
-- Jobs and projects pin immutable provider configuration snapshots so later account/provider changes do not redirect in-flight work.
-- Kept the project workflow fixed at five 6-second scenes, 480p, 9:16; the UI checks all three model capabilities.
-- Updated README provider/deployment guidance and added root `AGENTS.md` project instructions.
-- Final checks passed: `go test ./...`, `node --check static/app.js`, and `git diff --check`; no paid generation or live browser QA was performed.
-- Latest commits are on `feat/modal-llm-implementation`; branch is awaiting push.
+- Added an authenticated random-prompt endpoint using OpenRouter's `openrouter/free` text model.
+- Added six category choices and a category slider; prompt generation fills the active project-topic or single-prompt field.
+- Updated history cards to show full prompts/topics with the associated playable video and clear unavailable-video states.
+- Added mock-server coverage for both prompt modes, validation, authentication, cross-origin rejection, and secret handling.
+- Verified `go test ./...`, `go vet ./...`, `node --check static/app.js`, and `git diff --check`.
 
 ## Decisions locked
-- OpenRouter continues to generate project stories/scripts through `openrouter/free`, even when Modal generates video.
-- Selected provider and model persist in Settings; jobs/projects keep the provider configuration snapshot captured at submission.
-- The project preset stays five six-second clips at 480p and 9:16; provider models must report those capabilities.
-- Modal's base URL ends in `/api/v1`; Modal has no per-job API price and compute charges are billed by Modal.
+- OpenRouter remains the story/script text provider regardless of video provider selection.
+- The selected random-prompt category labels are Kid Animation, Horror Story, Nature, Seduction, Mature Content, and Soft Corn.
+- Project random prompts fill the project topic; single-clip random prompts fill the video prompt field.
+- Prompt generation is not persisted until the user submits the resulting project or video generation.
 
 ## Open questions
-1. Sujan: configure real OpenRouter and Modal credentials and confirm account balance/billing.
-2. Sujan: complete browser QA, provider connection checks, and a real end-to-end generation.
+1. Sujan: complete browser visual QA for the category slider, prompt field, and history cards.
+2. Sujan: configure OpenRouter credentials and perform any desired live generation/account check.
 
 ## Next steps
-1. After the branch is pushed, check out or pull `feat/modal-llm-implementation` in the next session.
-2. Configure the OpenRouter key and Modal base URL/key in Settings, then test the Modal connection.
-3. Review the Settings and Generate screens in a browser and verify provider/model/capability changes.
-4. Run a low-cost real generation and inspect stored output, provider cost reporting, and FFmpeg assembly.
+1. Review the pushed branch in the browser, including both project and single-clip prompt flows.
+2. Configure OpenRouter in Settings and run a low-cost generation if live provider validation is desired.
 
 ## Gotchas
-- No paid provider calls have been made; OpenRouter video can incur API charges and Modal compute is billed separately.
-- Docker and host `ffmpeg` commands are unavailable on this workstation; FFmpeg is included in the application Docker image.
-- Browser visual QA and live provider generation remain outstanding; model availability and pricing can change.
-- Use workspace-local `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` for Go checks.
-- Back up `/data/secret.key` with the database; it is required to decrypt stored API keys.
+- No paid OpenRouter or video-provider calls were made; mock HTTP tests covered prompt generation.
+- Project history associates the final merged video with its submitted topic; scene prompts remain available in project details.
+- Browser visual QA has not been performed.
+- Docker and host `ffmpeg` are unavailable on this workstation; FFmpeg is included in the application Docker image.
+- Keep Go caches workspace-local with `.gocache` and `.gomodcache`.
