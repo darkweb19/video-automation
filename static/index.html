@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FrameVault — Video dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260923-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260923-2">
   <link rel="stylesheet" href="/static/model-picker.css?v=20260923-1">
   <link rel="stylesheet" href="/static/project.css?v=20260923-1">
 </head>
@@ -93,6 +93,11 @@
                   <p class="field-hint">We generate the story, full script, and five connected six-second scenes automatically.</p>
                 </div>
                 <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" required></textarea><p id="prompt-error" class="form-error"></p></div>
+                <div class="random-prompt-controls field">
+                  <label for="prompt-category">Category: <strong id="prompt-category-name" aria-live="polite">Kid Animation</strong></label>
+                  <input id="prompt-category" type="range" min="0" max="5" step="1" value="0" aria-valuetext="Kid Animation">
+                  <button id="random-prompt" class="button secondary" type="button">Generate random prompt</button>
+                </div>
                 <div class="field model-field">
                   <label id="model-label" for="model-trigger">Video model and price</label>
                   <div id="model-picker" class="model-picker">
@@ -194,6 +199,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260923-1" defer></script>
+  <script src="/static/app.js?v=20260923-2" defer></script>
 </body>
 </html>

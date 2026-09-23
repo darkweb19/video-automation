@@ -40,6 +40,9 @@
     generateAudio: $("#generate-audio"),
     activeVideoProvider: $("#active-video-provider"),
     prompt: $("#prompt"),
+    promptCategory: $("#prompt-category"),
+    promptCategoryName: $("#prompt-category-name"),
+    randomPrompt: $("#random-prompt"),
     projectTopic: $("#project-topic"),
     projectTopicError: $("#project-topic-error"),
     projectInputs: $("#project-inputs"),
@@ -109,6 +112,8 @@
     history: { title: "History", kicker: "Library" },
     settings: { title: "Settings", kicker: "AI providers" }
   };
+
+  const promptCategories = ["Kid Animation", "Horror Story", "Nature", "Seduction", "Mature Content", "Soft Corn"];
 
   const state = {
     models: [],
@@ -262,6 +267,39 @@
       elements.statusEmpty.hidden = false;
     }
     updateModelOptions();
+  }
+
+  function selectedPromptCategory() {
+    return promptCategories[Number(elements.promptCategory.value)] || promptCategories[0];
+  }
+
+  function updatePromptCategory() {
+    const category = selectedPromptCategory();
+    elements.promptCategoryName.textContent = category;
+    elements.promptCategory.setAttribute("aria-valuetext", category);
+  }
+
+  async function generateRandomPrompt() {
+    const mode = state.mode;
+    const category = selectedPromptCategory();
+    setButtonBusy(elements.randomPrompt, true, "Generating…");
+    try {
+      const payload = await request("/api/prompts/random", {
+        method: "POST",
+        body: JSON.stringify({ category, mode })
+      });
+      const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
+      if (!prompt) throw new APIError("No prompt was returned. Try again.", 502);
+      const field = mode === "project" ? elements.projectTopic : elements.prompt;
+      field.value = prompt;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.focus();
+      if (mode === "project") elements.projectTopicError.textContent = "";
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(elements.randomPrompt, false);
+    }
   }
 
   function supportsProject(model) {
@@ -1772,6 +1810,8 @@
     });
     elements.logout.addEventListener("click", logout);
     elements.generatorForm.addEventListener("submit", submitGeneration);
+    elements.promptCategory.addEventListener("input", updatePromptCategory);
+    elements.randomPrompt.addEventListener("click", generateRandomPrompt);
     elements.retryProject.addEventListener("click", retryCurrentProject);
     elements.modeOptions.forEach((button) => button.addEventListener("click", () => setGenerationMode(button.dataset.mode)));
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
