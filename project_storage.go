@@ -21,6 +21,10 @@ func newProjectID() (string, error) {
 }
 
 func (s *Store) InsertProject(topic, model string) (VideoProject, error) {
+	return s.InsertProjectForProvider(topic, string(VideoProviderOpenRouter), model)
+}
+
+func (s *Store) InsertProjectForProvider(topic, provider, model string) (VideoProject, error) {
 	id, err := newProjectID()
 	if err != nil {
 		return VideoProject{}, err
@@ -31,7 +35,7 @@ func (s *Store) InsertProject(topic, model string) (VideoProject, error) {
 		return VideoProject{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO video_projects(id,topic,model,status,created_at,updated_at) VALUES(?,?,?,'planning',?,?)`, id, topic, model, now, now)
+	_, err = tx.Exec(`INSERT INTO video_projects(id,topic,model,video_provider,status,created_at,updated_at) VALUES(?,?,?,?,'planning',?,?)`, id, topic, model, provider, now, now)
 	if err != nil {
 		return VideoProject{}, err
 	}
@@ -94,7 +98,7 @@ func (s *Store) SaveStoryPlan(projectID string, plan StoryPlan) error {
 	return tx.Commit()
 }
 
-const projectColumns = `id,topic,title,story,script,continuity,model,status,error,final_video_path,final_size_bytes,created_at,updated_at`
+const projectColumns = `id,topic,title,story,script,continuity,model,video_provider,status,error,final_video_path,final_size_bytes,created_at,updated_at`
 const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,progress,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,created_at,updated_at`
 
 func appendPipelineEvent(execer interface {
@@ -146,7 +150,7 @@ func scanTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextGener
 
 func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) {
 	var project VideoProject
-	err := scanner.Scan(&project.ID, &project.Topic, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt)
+	err := scanner.Scan(&project.ID, &project.Topic, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt)
 	project.FinalVideoReady = project.FinalVideoPath != ""
 	return project, err
 }

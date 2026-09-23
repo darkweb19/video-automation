@@ -23,6 +23,7 @@ type Store struct {
 
 type GenerationRecord struct {
 	ID               string `json:"id"`
+	VideoProvider    string `json:"video_provider"`
 	Prompt           string `json:"prompt"`
 	Model            string `json:"model"`
 	Duration         int    `json:"duration,omitempty"`
@@ -200,6 +201,16 @@ func (s *Store) migrate() error {
 	if err := s.addColumnIfMissing("project_scenes", "progress", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := s.addColumnIfMissing("generations", "video_provider", "TEXT NOT NULL DEFAULT 'openrouter'"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("video_projects", "video_provider", "TEXT NOT NULL DEFAULT 'openrouter'"); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES('video_provider','openrouter',unixepoch()) ON CONFLICT(key) DO NOTHING`)
+	if err != nil {
+		return fmt.Errorf("initialize video provider setting: %w", err)
+	}
 	return nil
 }
 
@@ -343,16 +354,19 @@ func (s *Store) SetSetting(key, value string) error {
 
 func (s *Store) InsertGeneration(record GenerationRecord) error {
 	now := time.Now().Unix()
-	_, err := s.db.Exec(`INSERT INTO generations(id,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		record.ID, record.Prompt, record.Model, record.Duration, record.AspectRatio, record.Status, record.CostUSD, record.EstimatedCostUSD, now, now)
+	if record.VideoProvider == "" {
+		record.VideoProvider = string(VideoProviderOpenRouter)
+	}
+	_, err := s.db.Exec(`INSERT INTO generations(id,video_provider,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		record.ID, record.VideoProvider, record.Prompt, record.Model, record.Duration, record.AspectRatio, record.Status, record.CostUSD, record.EstimatedCostUSD, now, now)
 	return err
 }
 
-const generationColumns = `id,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at`
+const generationColumns = `id,video_provider,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at`
 
 func scanGeneration(scanner interface{ Scan(...any) error }) (GenerationRecord, error) {
 	var record GenerationRecord
-	err := scanner.Scan(&record.ID, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt)
+	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt)
 	record.VideoReady = record.VideoPath != ""
 	return record, err
 }
