@@ -827,15 +827,33 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "OpenRouter text generation is not configured")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
 	defer cancel()
 	prompt, err := provider.GenerateRandomPrompt(ctx, input)
 	if err != nil {
 		a.logger.Warn("random prompt generation failed")
-		writeError(w, http.StatusBadGateway, "unable to generate a random prompt")
+		writeError(w, http.StatusBadGateway, safeRandomPromptFailure(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"prompt": prompt})
+}
+
+func safeRandomPromptFailure(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "OpenRouter prompt generation timed out. Try again."
+	}
+	var upstream *upstreamError
+	if errors.As(err, &upstream) {
+		switch upstream.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return "OpenRouter rejected the saved API key. Update it in Settings."
+		case http.StatusTooManyRequests:
+			return "OpenRouter's free models are rate-limited right now. Try again shortly."
+		default:
+			return fmt.Sprintf("OpenRouter prompt generation failed with HTTP %d. Try again.", upstream.StatusCode)
+		}
+	}
+	return "OpenRouter did not return a usable prompt. Try again."
 }
 
 func compatibleProjectModel(model VideoModel) bool {

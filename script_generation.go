@@ -17,6 +17,9 @@ const (
 	MaxScriptRawResponseBytes  = 1 << 20
 	maxRandomPromptResponse    = 32 << 10
 	maxRandomProjectTopicRunes = 280
+	storyPlanCompletionTokens  = 6000
+	randomProjectTokens        = 1024
+	randomSingleTokens         = 2048
 )
 
 const scriptSystemPrompt = `You are a short-form visual storyteller and video prompt director. Create a complete silent 30-second vertical video plan from the user's topic. The final video has exactly five sequential scenes, each exactly six seconds. There is no narration, dialogue, subtitles, music, logos, or on-screen text. Tell the story only through visible action.
@@ -87,7 +90,14 @@ func newTextGenerationTrace(topic string) (TextGenerationTrace, error) {
 	if err != nil {
 		return TextGenerationTrace{}, fmt.Errorf("encode story plan schema: %w", err)
 	}
-	return TextGenerationTrace{RouterModel: ScriptModel, SystemPrompt: scriptSystemPrompt, UserPrompt: "Create the video plan for this topic or story idea:\n\n" + topic, ResponseSchema: string(schema), Status: "request_building", UpdatedAt: time.Now().Unix()}, nil
+	return TextGenerationTrace{
+		RouterModel:    ScriptModel,
+		SystemPrompt:   scriptSystemPrompt,
+		UserPrompt:     "Create the video plan for this topic or story idea:\n\n" + topic + "\n\nThe response must match this JSON schema:\n" + string(schema),
+		ResponseSchema: string(schema),
+		Status:         "request_building",
+		UpdatedAt:      time.Now().Unix(),
+	}, nil
 }
 
 // GenerateStoryPlan returns the normalized plan and auditable provider
@@ -98,42 +108,46 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 		return StoryPlan{}, trace, err
 	}
 	request := map[string]any{
-		"model":       ScriptModel,
-		"messages":    []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
-		"temperature": 0.7,
+		"model":                 ScriptModel,
+		"messages":              []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
+		"temperature":           0.4,
+		"max_completion_tokens": storyPlanCompletionTokens,
 	}
 	trace.Status = "started"
 	trace.StartedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
-	fail := func(message string) (StoryPlan, TextGenerationTrace, error) {
-		trace.Status, trace.Error = "failed", message
+	fail := func(err error) (StoryPlan, TextGenerationTrace, error) {
+		trace.Status, trace.Error = "failed", err.Error()
 		trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
-		return StoryPlan{}, trace, errors.New(message)
+		return StoryPlan{}, trace, err
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
-		return fail(fmt.Sprintf("encode OpenRouter request: %v", err))
+		return fail(fmt.Errorf("encode OpenRouter request: %w", err))
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(encoded))
 	if err != nil {
-		return fail(err.Error())
+		return fail(err)
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+c.APIKey)
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpResponse, err := c.client().Do(httpRequest)
 	if err != nil {
-		return fail(fmt.Sprintf("OpenRouter request: %v", err))
+		return fail(fmt.Errorf("OpenRouter request: %w", err))
 	}
 	defer httpResponse.Body.Close()
 	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
-		return fail(fmt.Sprintf("OpenRouter script request failed with HTTP %d", httpResponse.StatusCode))
+		upstreamErr := readUpstreamError(httpResponse)
+		trace.Status, trace.Error = "failed", upstreamErr.Error()
+		trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
+		return StoryPlan{}, trace, upstreamErr
 	}
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, MaxScriptRawResponseBytes+1))
 	if err != nil {
-		return fail(fmt.Sprintf("read OpenRouter response: %v", err))
+		return fail(fmt.Errorf("read OpenRouter response: %w", err))
 	}
 	if len(body) > MaxScriptRawResponseBytes {
-		return fail(fmt.Sprintf("OpenRouter script response exceeds %d bytes", MaxScriptRawResponseBytes))
+		return fail(fmt.Errorf("OpenRouter script response exceeds %d bytes", MaxScriptRawResponseBytes))
 	}
 	var response struct {
 		Model   string `json:"model"`
@@ -144,19 +158,19 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
-		return fail(fmt.Sprintf("decode OpenRouter response: %v", err))
+		return fail(fmt.Errorf("decode OpenRouter response: %w", err))
 	}
 	trace.ActualModel = response.Model
 	if len(response.Choices) == 0 || strings.TrimSpace(response.Choices[0].Message.Content) == "" {
-		return fail("OpenRouter returned an empty script")
+		return fail(errors.New("OpenRouter returned an empty script"))
 	}
 	trace.RawResponse = response.Choices[0].Message.Content
 	if len(trace.RawResponse) > MaxScriptRawResponseBytes {
-		return fail(fmt.Sprintf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes))
+		return fail(fmt.Errorf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes))
 	}
 	plan, err := parseStoryPlanText(trace.RawResponse)
 	if err != nil {
-		return fail(err.Error())
+		return fail(err)
 	}
 	trace.Status = "completed"
 	trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
@@ -198,10 +212,10 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 
 	systemPrompt, userPrompt, maxTokens := randomPromptInstructions(input.Mode, input.Category)
 	request := map[string]any{
-		"model":       ScriptModel,
-		"messages":    []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
-		"temperature": 1,
-		"max_tokens":  maxTokens,
+		"model":                 ScriptModel,
+		"messages":              []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
+		"temperature":           1,
+		"max_completion_tokens": maxTokens,
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
@@ -262,9 +276,9 @@ func randomPromptInstructions(mode RandomPromptMode, category string) (systemPro
 	if mode == RandomPromptModeProject {
 		return "You create original short-form video ideas. Return only one concise topic or story idea with no title, list, quotation marks, or explanation. It must be suitable for a silent 30-second vertical video with five connected six-second scenes. Keep every person clearly adult. Do not include brand names, logos, subtitles, or on-screen text.",
 			"Generate one original topic in this category: " + category,
-			120
+			randomProjectTokens
 	}
 	return "You are a production-ready text-to-video prompt writer. Return only one standalone prompt with no title, list, quotation marks, or explanation. Include a clearly adult subject, setting, visual style, lighting, camera movement, six-second visible action, ending frame, and vertical 9:16 composition. Do not include brand names, logos, subtitles, or on-screen text.",
 		"Generate one original single-clip video prompt in this category: " + category,
-		700
+		randomSingleTokens
 }

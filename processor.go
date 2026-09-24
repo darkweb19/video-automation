@@ -206,7 +206,10 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 		case "generating":
 			provider, err := p.app.videoProviderForSnapshot(project.ProviderConfigID, VideoProviderID(project.VideoProvider))
 			if err != nil {
-				p.logger.Warn("project processor waiting for immutable video provider configuration", "provider", project.VideoProvider, "error", err)
+				message := "The saved video provider configuration for this project is unavailable. Create a new project after checking Settings."
+				_ = p.app.store.AppendPipelineEventOnce(project.ID, "video_provider", "failed", message, 0, 0)
+				_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
+				p.logger.Warn("project processor cannot load immutable video provider configuration", "project_id", project.ID, "provider", project.VideoProvider)
 				continue
 			}
 			p.processProjectScenes(ctx, provider, project)
@@ -307,6 +310,9 @@ func safeTextGenerationFailure(err error) string {
 	if err == nil {
 		return "Unable to generate the story and script. Retry the project."
 	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "OpenRouter story generation timed out. Retry the project."
+	}
 	if strings.Contains(err.Error(), "valid JSON story plan") {
 		return "OpenRouter returned an invalid five-scene story plan. Retry the project."
 	}
@@ -318,7 +324,14 @@ func safeTextGenerationFailure(err error) string {
 	}
 	var upstream *upstreamError
 	if errors.As(err, &upstream) {
-		return fmt.Sprintf("OpenRouter story request failed with HTTP %d. Retry the project.", upstream.StatusCode)
+		switch upstream.StatusCode {
+		case 401, 403:
+			return "OpenRouter rejected the saved API key. Update it in Settings, then retry the project."
+		case 429:
+			return "OpenRouter's free models are rate-limited right now. Retry the project shortly."
+		default:
+			return fmt.Sprintf("OpenRouter story request failed with HTTP %d. Retry the project.", upstream.StatusCode)
+		}
 	}
 	return "Unable to generate the story and script with OpenRouter. Retry the project."
 }

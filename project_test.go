@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -35,6 +36,14 @@ func TestGenerateStoryPlanUsesFreeTextModel(t *testing.T) {
 		}
 		if body["model"] != ScriptModel {
 			t.Fatalf("model = %v", body["model"])
+		}
+		if body["max_completion_tokens"] != float64(storyPlanCompletionTokens) {
+			t.Fatalf("max completion tokens = %v", body["max_completion_tokens"])
+		}
+		messages := body["messages"].([]any)
+		userMessage := messages[1].(map[string]any)["content"].(string)
+		if !strings.Contains(userMessage, `"video_prompt"`) || !strings.Contains(userMessage, "a fox rescue") {
+			t.Fatalf("user prompt is missing topic or schema: %q", userMessage)
 		}
 		if _, ok := body["response_format"]; ok {
 			t.Fatal("free-text route must not require structured output")
@@ -299,6 +308,55 @@ func TestGenerateStoryPlanRejectsOversizedRawResponse(t *testing.T) {
 	_, trace, err := client.GenerateStoryPlan(context.Background(), "oversized")
 	if err == nil || trace.Status != "failed" || !strings.Contains(trace.Error, "exceeds") || trace.RawResponse != "" {
 		t.Fatalf("oversized trace/error = %+v / %v", trace, err)
+	}
+}
+
+func TestGenerateStoryPlanPreservesDeadlineForSafeFailureMessage(t *testing.T) {
+	client := NewOpenRouterClient("test-key")
+	client.BaseURL = "http://127.0.0.1:1"
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, trace, err := client.GenerateStoryPlan(ctx, "deadline story")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GenerateStoryPlan error = %v, want wrapped deadline", err)
+	}
+	if trace.Status != "failed" || !strings.Contains(trace.Error, context.DeadlineExceeded.Error()) {
+		t.Fatalf("deadline trace = %#v", trace)
+	}
+	if message := safeTextGenerationFailure(err); !strings.Contains(message, "timed out") {
+		t.Fatalf("safe failure message = %q", message)
+	}
+}
+
+func TestGeneratingProjectFailsWhenProviderSnapshotIsUnavailable(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProjectForProvider("missing provider snapshot", string(VideoProviderOpenRouter), "video/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+
+	processor := NewProcessor(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.process(context.Background())
+
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != "failed" || !strings.Contains(loaded.Error, "provider configuration") {
+		t.Fatalf("project should fail clearly instead of waiting forever: %#v", loaded)
+	}
+	found := false
+	for _, event := range loaded.PipelineEvents {
+		if event.Stage == "video_provider" && event.Status == "failed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing provider failure event: %#v", loaded.PipelineEvents)
 	}
 }
 

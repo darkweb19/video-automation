@@ -25,7 +25,7 @@ func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
 			input:      RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject},
 			content:    `"A firefly guides a lost traveler through a moonlit forest."`,
 			want:       "A firefly guides a lost traveler through a moonlit forest.",
-			maxTokens:  120,
+			maxTokens:  randomProjectTokens,
 			userPrefix: "Generate one original topic",
 		},
 		{
@@ -33,7 +33,7 @@ func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
 			input:      RandomPromptRequest{Category: RandomPromptCategoryHorrorStory, Mode: RandomPromptModeSingle},
 			content:    "A lone adult hiker crosses a foggy forest trail at dusk, handheld camera slowly pushes forward as branches bend, ending on a distant cabin in vertical 9:16.",
 			want:       "A lone adult hiker crosses a foggy forest trail at dusk, handheld camera slowly pushes forward as branches bend, ending on a distant cabin in vertical 9:16.",
-			maxTokens:  700,
+			maxTokens:  randomSingleTokens,
 			userPrefix: "Generate one original single-clip video prompt",
 		},
 	} {
@@ -50,7 +50,7 @@ func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
 					Messages []struct {
 						Content string `json:"content"`
 					} `json:"messages"`
-					MaxTokens float64 `json:"max_tokens"`
+					MaxTokens float64 `json:"max_completion_tokens"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatal(err)
@@ -167,5 +167,22 @@ func TestRandomPromptCategoriesAreExact(t *testing.T) {
 	}
 	if validRandomPromptCategory("soft corn") {
 		t.Fatal("categories must remain exact")
+	}
+}
+
+func TestSafeRandomPromptFailureExplainsActionableUpstreamErrors(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{context.DeadlineExceeded, "timed out"},
+		{&upstreamError{StatusCode: http.StatusUnauthorized}, "Update it in Settings"},
+		{&upstreamError{StatusCode: http.StatusTooManyRequests}, "rate-limited"},
+		{&upstreamError{StatusCode: http.StatusBadGateway}, "HTTP 502"},
+	}
+	for _, test := range tests {
+		if got := safeRandomPromptFailure(test.err); !strings.Contains(got, test.want) {
+			t.Fatalf("safeRandomPromptFailure(%v) = %q, want substring %q", test.err, got, test.want)
+		}
 	}
 }
