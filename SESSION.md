@@ -1,29 +1,31 @@
-# Session handoff — 2026-09-23
+# Session handoff — 2026-09-24
 
 ## What was done
-- Added an authenticated random-prompt endpoint using OpenRouter's `openrouter/free` text model.
-- Added six category choices and a category slider; prompt generation fills the active project-topic or single-prompt field.
-- Updated history cards to show full prompts/topics with the associated playable video and clear unavailable-video states.
-- Added mock-server coverage for both prompt modes, validation, authentication, cross-origin rejection, and secret handling.
-- Verified `go test ./...`, `go vet ./...`, `node --check static/app.js`, and `git diff --check`.
+- Implemented free-text OpenRouter `openrouter/free` plan generation, parsing, and validation for the 30-second workflow.
+- Added named Modal account CRUD, default switching, per-submission account selection, account-specific models, and encrypted job credential snapshots.
+- Added durable normalized job events, progress bars, dark live/history consoles, and persistent History failure errors for project and single-clip jobs.
+- Updated README for account workflows, generation behavior, persistence, and Go/Docker bind ports.
+- Added frontend stale-response guards; fixed Unix event timestamps and 1% progress rendering.
+- Automated verification passed: Go tests/vet, JS syntax, and diff checks.
 
 ## Decisions locked
-- OpenRouter remains the story/script text provider regardless of video provider selection.
-- The selected random-prompt category labels are Kid Animation, Horror Story, Nature, Seduction, Mature Content, and Soft Corn.
-- Project random prompts fill the project topic; single-clip random prompts fill the video prompt field.
-- Prompt generation is not persisted until the user submits the resulting project or video generation.
+- OpenRouter free-text output is parsed and validated before project video generation.
+- Modal endpoint/key accounts support add, edit, delete, and a default; each submission can choose an account independently.
+- Existing jobs use encrypted credential snapshots.
+- Live and History consoles use a traditional dark terminal with persisted normalized events, progress, and errors.
+- Failure messages remain visible on History cards.
 
 ## Open questions
-1. Sujan: complete browser visual QA for the category slider, prompt field, and history cards.
-2. Sujan: configure OpenRouter credentials and perform any desired live generation/account check.
+1. Sujan: rotate the OpenRouter API key exposed during earlier inspection before live provider testing.
+2. Sujan: complete visual QA for Generate, Settings, and History when browser access is available.
 
 ## Next steps
-1. Review the pushed branch in the browser, including both project and single-clip prompt flows.
-2. Configure OpenRouter in Settings and run a low-cost generation if live provider validation is desired.
+1. Commit agent: create 10+ small conventional commits and push the existing branch `feat/modal-llm-implementation`; do not create or switch branches or push to main.
+2. Rotate the exposed OpenRouter key before any live provider test.
+3. Repeat visual QA when an in-app browser is available; optional live checks can follow key rotation. No paid provider calls were made.
 
 ## Gotchas
-- No paid OpenRouter or video-provider calls were made; mock HTTP tests covered prompt generation.
-- Project history associates the final merged video with its submitted topic; scene prompts remain available in project details.
-- Browser visual QA has not been performed.
-- Docker and host `ffmpeg` are unavailable on this workstation; FFmpeg is included in the application Docker image.
-- Keep Go caches workspace-local with `.gocache` and `.gomodcache`.
+- `go test ./...`, `go vet ./...`, `node --check static/app.js`, and `git diff --check` passed.
+- Browser runtime discovery returned no available browsers, so visual/runtime browser QA remains unverified.
+- Current branch is `feat/modal-llm-implementation`; the requested 10+ commits and push remain for the commit agent.
+- Go listens on `0.0.0.0:8080`; Compose publishes the host side on loopback. Compose `APP_PORT` changes only the host port.
