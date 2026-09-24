@@ -397,6 +397,86 @@ async def read_job_async(job_id: str):
     return _read_job_file(job_id)
 
 
+async def reconcile_modal_call(job: dict) -> dict:
+    """
+    Reconcile a non-terminal job with its underlying Modal FunctionCall.
+
+    This catches failures that happen before VideoGenerator.generate()
+    begins, such as:
+      - GPU scheduling/startup failures
+      - snapshot restore failures
+      - container bootstrap failures
+      - @modal.enter() failures
+
+    Without this, the job JSON can remain stuck in pending/dispatched
+    forever even though the Modal worker has already failed.
+    """
+
+    if job.get("status") in {
+        "completed",
+        "failed",
+    }:
+        return job
+
+    call_id = job.get(
+        "modal_call_id"
+    )
+
+    if not call_id:
+        return job
+
+    try:
+        call = modal.FunctionCall.from_id(
+            call_id
+        )
+
+        # Non-blocking status check:
+        # - TimeoutError => still queued/running
+        # - return value => completed successfully
+        # - other exception => worker/infrastructure failure
+        await call.get.aio(
+            timeout=0
+        )
+
+    except TimeoutError:
+        return job
+
+    except Exception as error:
+        job.update(
+            {
+                "status":
+                    "failed",
+
+                "stage":
+                    "worker_failed",
+
+                "progress":
+                    0,
+
+                "error":
+                    str(error),
+
+                "completed_at":
+                    int(time.time()),
+            }
+        )
+
+        await write_job_async(
+            job["id"],
+            job,
+        )
+
+        log_event(
+            "ERROR",
+            "modal_worker_failed",
+            job=job["id"],
+            call_id=call_id,
+            error=repr(error),
+        )
+
+    return job
+
+
 # ============================================================
 # PERSISTENT GPU WORKER
 # ============================================================
@@ -1385,7 +1465,13 @@ def api():
 
         try:
 
-            await (
+            log_event(
+                "INFO",
+                "gpu_dispatch_requested",
+                job=job_id,
+            )
+
+            call = await (
                 VideoGenerator()
                 .generate
                 .spawn.aio(
@@ -1405,18 +1491,54 @@ def api():
                 )
             )
 
+            job[
+                "modal_call_id"
+            ] = call.object_id
+
+            job[
+                "stage"
+            ] = "dispatched"
+
+            await write_job_async(
+                job_id,
+                job,
+            )
+
+            log_event(
+                "INFO",
+                "gpu_job_dispatched",
+                job=job_id,
+                call_id=call.object_id,
+            )
+
         except Exception as error:
 
             job.update(
                 {
-                    "status": "failed",
-                    "error": str(error),
+                    "status":
+                        "failed",
+
+                    "stage":
+                        "dispatch_failed",
+
+                    "error":
+                        str(error),
+
+                    "completed_at":
+                        int(time.time()),
                 }
             )
 
             await write_job_async(
                 job_id,
                 job,
+            )
+
+            log_event(
+                "ERROR",
+                "gpu_dispatch_failed",
+                job=job_id,
+                error=repr(error),
             )
 
             raise HTTPException(
@@ -1439,13 +1561,16 @@ def api():
                 "pending",
 
             "stage":
-                "queued",
+                "dispatched",
 
             "model":
                 model,
 
             "progress":
                 0,
+
+            "modal_call_id":
+                call.object_id,
 
             "poll_after_seconds":
                 STATUS_POLL_RETRY_SECONDS,
@@ -1481,6 +1606,10 @@ def api():
                     "Generation not found"
                 ),
             )
+
+        job = await reconcile_modal_call(
+            job
+        )
 
         if job.get("status") not in {"completed", "failed"}:
             response.headers["Retry-After"] = str(STATUS_POLL_RETRY_SECONDS)
