@@ -1002,9 +1002,12 @@
   }
 
   function hasActiveJobs() {
-    const activeStatuses = new Set(["queued", "processing", "downloading", "download_failed"]);
+    const activeGenerationStatuses = new Set(["queued", "processing", "downloading", "download_failed"]);
+    const terminalProjectStatuses = new Set(["completed", "complete", "failed", "error"]);
     const aggregateActive = state.stats ? state.stats.active : 0;
-    return aggregateActive > 0 || state.generations.some((record) => activeStatuses.has(record.status));
+    return aggregateActive > 0
+      || state.generations.some((record) => activeGenerationStatuses.has(record.status))
+      || state.projects.some((project) => !terminalProjectStatuses.has(String(projectValue(project, "status")).toLowerCase()));
   }
 
   function normalizeStats(stats) {
@@ -1027,7 +1030,7 @@
     if (!state.authenticated || state.mustChangePassword || document.hidden || !hasActiveJobs()) return;
     state.historyRefreshTimer = window.setTimeout(() => {
       state.historyRefreshTimer = 0;
-      loadHistory(false, false);
+      void Promise.allSettled([loadHistory(false, false), loadProjects(false)]);
     }, 7000);
   }
 
@@ -1642,11 +1645,11 @@
     stopProjectPolling();
     state.currentProjectID = id;
     state.projectPollTimer = window.setTimeout(async () => {
-      if (!state.authenticated || state.currentProjectID !== id || state.mode !== "project") return;
+      if (!state.authenticated || state.currentProjectID !== id) return;
       try {
         const payload = await request(`/api/projects/${encodeURIComponent(id)}`);
         const project = payload && payload.project ? payload.project : payload;
-        renderProject(project);
+        if (state.mode === "project") renderProject(project);
         const status = String(projectValue(project, "status")).toLowerCase();
         if (!["completed", "complete", "failed", "error"].includes(status)) pollProject(id, 3000);
         else {
@@ -1753,6 +1756,7 @@
         }
       }
       renderHistory();
+      scheduleHistoryRefresh();
     } catch (error) {
       if (notify && error.status !== 401 && error.status !== 404) toast(error.message, true);
     }
@@ -1760,9 +1764,10 @@
 
   async function submitProject() {
     const topic = elements.projectTopic.value.trim();
+    const topicLength = Array.from(topic).length;
     elements.projectTopicError.textContent = "";
-    if (!topic) {
-      elements.projectTopicError.textContent = "Enter a topic or story idea.";
+    if (!topic || topicLength > 4000) {
+      elements.projectTopicError.textContent = topic ? "Topic must be 4,000 characters or fewer." : "Enter a topic or story idea.";
       elements.projectTopic.focus();
       return;
     }
