@@ -112,8 +112,7 @@ func appendPipelineEvent(execer interface {
 	return err
 }
 
-// AppendPipelineEvent appends a durable project event. Call it for meaningful
-// workflow transitions only; polling progress is intentionally not logged.
+// AppendPipelineEvent appends a durable, application-owned project event.
 func (s *Store) AppendPipelineEvent(projectID, stage, status, message string, sceneNumber, attempt int) error {
 	return appendPipelineEvent(s.db, projectID, stage, status, message, sceneNumber, attempt, time.Now().Unix())
 }
@@ -269,12 +268,10 @@ func (s *Store) PendingProjects(ctx context.Context) ([]VideoProject, error) {
 }
 
 func (s *Store) populateProjectSummary(project *VideoProject) {
-	completed := 0
+	sceneProgress := 0
 	totalCost := 0.0
 	for _, scene := range project.Scenes {
-		if scene.Status == "completed" {
-			completed++
-		}
+		sceneProgress += min(100, max(0, scene.Progress))
 		var cost float64
 		_, _ = fmt.Sscanf(scene.CostUSD, "%f", &cost)
 		totalCost += cost
@@ -284,13 +281,13 @@ func (s *Store) populateProjectSummary(project *VideoProject) {
 	case "planning":
 		project.Progress = 5
 	case "generating":
-		project.Progress = 10 + completed*16
+		project.Progress = min(90, 10+sceneProgress*80/(ProjectSceneCount*100))
 	case "combining":
 		project.Progress = 95
 	case "completed":
 		project.Progress = 100
 	default:
-		project.Progress = completed * 16
+		project.Progress = min(90, 10+sceneProgress*80/(ProjectSceneCount*100))
 	}
 }
 
@@ -336,12 +333,19 @@ func (s *Store) SetSceneGeneration(projectID string, number int, generation Gene
 	if generation.Progress != nil {
 		progress = min(100, max(0, *generation.Progress))
 	}
-	result, err := s.db.Exec(`UPDATE project_scenes SET provider_generation_id=?,status=?,progress=?,cost_usd=?,error=?,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='submitting'`, generation.ID, status, progress, generation.CostUSD, generation.Error, time.Now().Unix(), projectID, number)
+	message := ""
+	if status == "failed" {
+		message = "Video provider reported that this scene failed. Retry the scene."
+	}
+	result, err := s.db.Exec(`UPDATE project_scenes SET provider_generation_id=?,status=?,progress=?,cost_usd=?,error=?,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='submitting'`, generation.ID, status, progress, generation.CostUSD, message, time.Now().Unix(), projectID, number)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return sql.ErrNoRows
+	}
+	if status == "failed" {
+		return s.AppendPipelineEvent(projectID, "scene_submission", "failed", message, number, 0)
 	}
 	return s.AppendPipelineEvent(projectID, "scene_submission", "completed", "Video generation request accepted.", number, 0)
 }
@@ -366,8 +370,37 @@ func (s *Store) UpdateScene(projectID string, number int, status, cost, message 
 
 func (s *Store) SetSceneProgress(projectID string, number, progress int) error {
 	progress = min(100, max(0, progress))
-	_, err := s.db.Exec(`UPDATE project_scenes SET progress=?,updated_at=? WHERE project_id=? AND scene_number=?`, progress, time.Now().Unix(), projectID, number)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var previous int
+	if err := tx.QueryRow(`SELECT progress FROM project_scenes WHERE project_id=? AND scene_number=?`, projectID, number).Scan(&previous); err != nil {
+		return err
+	}
+	if progress <= previous {
+		return nil
+	}
+	if _, err := tx.Exec(`UPDATE project_scenes SET progress=?,updated_at=? WHERE project_id=? AND scene_number=?`, progress, time.Now().Unix(), projectID, number); err != nil {
+		return err
+	}
+	if milestone := sceneProgressMilestone(progress); milestone > sceneProgressMilestone(previous) {
+		message := fmt.Sprintf("Video generation reached %d%%.", milestone)
+		if err := appendPipelineEvent(tx, projectID, "scene_progress", "progress", message, number, 0, time.Now().Unix()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func sceneProgressMilestone(progress int) int {
+	for _, milestone := range []int{100, 90, 75, 50, 25} {
+		if progress >= milestone {
+			return milestone
+		}
+	}
+	return 0
 }
 
 func (s *Store) ScheduleSceneDownloadRetry(projectID string, number int) error {
