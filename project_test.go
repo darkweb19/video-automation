@@ -68,6 +68,79 @@ func TestGenerateStoryPlanUsesFreeTextModel(t *testing.T) {
 	}
 }
 
+func TestThirtySecondProjectPlanningPersistsFiveScenePlan(t *testing.T) {
+	plan := validStoryPlan()
+	content, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "provider/free-model",
+			"choices": []any{map[string]any{
+				"message": map[string]any{"content": string(content)},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := security.EncryptSetting(apiKeySetting, "test-openrouter-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSetting(apiKeySetting, encrypted); err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.InsertProject("A fox rescue", "provider/vertical-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	processor := NewProcessor(store, security, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.app.baseURL = server.URL
+	processor.process(context.Background())
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		loaded, loadErr := store.Project(project.ID)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if loaded.Status == "planning" {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if loaded.Status != "generating" || loaded.Error != "" {
+			t.Fatalf("planned project = %#v", loaded)
+		}
+		if len(loaded.Scenes) != ProjectSceneCount {
+			t.Fatalf("scene count = %d, want %d", len(loaded.Scenes), ProjectSceneCount)
+		}
+		for index, scene := range loaded.Scenes {
+			if scene.Number != index+1 || scene.Status != "pending" {
+				t.Fatalf("scene %d = %#v", index+1, scene)
+			}
+			if !strings.Contains(scene.Prompt, plan.Continuity) {
+				t.Fatalf("scene %d prompt lost continuity: %q", scene.Number, scene.Prompt)
+			}
+		}
+		if loaded.TextGeneration.Status != "completed" || loaded.TextGeneration.ActualModel != "provider/free-model" {
+			t.Fatalf("text generation trace = %#v", loaded.TextGeneration)
+		}
+		return
+	}
+	loaded, _ := store.Project(project.ID)
+	t.Fatalf("project planning did not complete: status=%s error=%s", loaded.Status, loaded.Error)
+}
+
 func TestFreeTextStoryPlanRejectsMissingScene(t *testing.T) {
 	plan := validStoryPlan()
 	plan.Scenes = plan.Scenes[:4]

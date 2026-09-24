@@ -18,6 +18,7 @@ const (
 	maxRandomPromptResponse    = 32 << 10
 	maxRandomProjectTopicRunes = 280
 	storyPlanCompletionTokens  = 6000
+	storyGenerationTimeout     = 3 * time.Minute
 	randomProjectTokens        = 1024
 	randomSingleTokens         = 2048
 )
@@ -107,6 +108,11 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 	if err != nil {
 		return StoryPlan{}, trace, err
 	}
+	// Free routed models can spend significant time queued before producing a
+	// complete five-scene plan. Keep the operation bounded, but do not apply the
+	// shorter timeout used by ordinary OpenRouter metadata requests.
+	requestContext, cancel := context.WithTimeout(ctx, storyGenerationTimeout)
+	defer cancel()
 	request := map[string]any{
 		"model":                 ScriptModel,
 		"messages":              []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
@@ -124,14 +130,14 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 	if err != nil {
 		return fail(fmt.Errorf("encode OpenRouter request: %w", err))
 	}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(encoded))
+	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(encoded))
 	if err != nil {
 		return fail(err)
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+c.APIKey)
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpResponse, err := c.client().Do(httpRequest)
+	httpResponse, err := c.storyClient().Do(httpRequest)
 	if err != nil {
 		return fail(fmt.Errorf("OpenRouter request: %w", err))
 	}
