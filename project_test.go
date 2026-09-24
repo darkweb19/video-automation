@@ -22,7 +22,7 @@ func validStoryPlan() StoryPlan {
 	return plan
 }
 
-func TestGenerateStoryPlanUsesFreeStructuredModel(t *testing.T) {
+func TestGenerateStoryPlanUsesFreeTextModel(t *testing.T) {
 	plan := validStoryPlan()
 	content, _ := json.Marshal(plan)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,11 +36,13 @@ func TestGenerateStoryPlanUsesFreeStructuredModel(t *testing.T) {
 		if body["model"] != ScriptModel {
 			t.Fatalf("model = %v", body["model"])
 		}
-		format := body["response_format"].(map[string]any)
-		if format["type"] != "json_schema" {
-			t.Fatalf("response format = %v", format["type"])
+		if _, ok := body["response_format"]; ok {
+			t.Fatal("free-text route must not require structured output")
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"model": "acme/free-actual", "choices": []any{map[string]any{"message": map[string]any{"content": string(content)}}}})
+		if _, ok := body["provider"]; ok {
+			t.Fatal("free-text route must not require provider parameters")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": "acme/free-actual", "choices": []any{map[string]any{"message": map[string]any{"content": "Here is the plan:\n```json\n" + string(content) + "\n```"}}}})
 	}))
 	defer server.Close()
 	client := NewOpenRouterClient("test-key")
@@ -52,8 +54,144 @@ func TestGenerateStoryPlanUsesFreeStructuredModel(t *testing.T) {
 	if len(generated.Scenes) != ProjectSceneCount || generated.Title != plan.Title {
 		t.Fatalf("unexpected plan: %+v", generated)
 	}
-	if trace.RouterModel != ScriptModel || trace.ActualModel != "acme/free-actual" || trace.RawResponse != string(content) || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
+	if trace.RouterModel != ScriptModel || trace.ActualModel != "acme/free-actual" || !strings.Contains(trace.RawResponse, "```json") || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
 		t.Fatalf("unexpected trace: %+v", trace)
+	}
+}
+
+func TestFreeTextStoryPlanRejectsMissingScene(t *testing.T) {
+	plan := validStoryPlan()
+	plan.Scenes = plan.Scenes[:4]
+	content, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": string(content)}}}})
+	}))
+	defer server.Close()
+	client := NewOpenRouterClient("test-key")
+	client.BaseURL = server.URL
+	_, trace, err := client.GenerateStoryPlan(context.Background(), "four scene story")
+	if err == nil || !strings.Contains(err.Error(), "exactly 5 scenes") || trace.Status != "failed" {
+		t.Fatalf("result = %v, trace = %+v", err, trace)
+	}
+}
+
+func TestSceneProgressEventsAreDurableAndDeduplicated(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.InsertProject("progress story", "provider/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []int{24, 25, 26, 61, 61, 49} {
+		if err := store.SetSceneProgress(project.ID, 1, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Scenes[0].Progress != 61 || loaded.Progress <= 10 {
+		t.Fatalf("progress = %d, scene = %d", loaded.Progress, loaded.Scenes[0].Progress)
+	}
+	var messages []string
+	for _, event := range loaded.PipelineEvents {
+		if event.Stage == "scene_progress" {
+			messages = append(messages, event.Message)
+		}
+	}
+	if len(messages) != 2 || !strings.Contains(messages[0], "25%") || !strings.Contains(messages[1], "50%") {
+		t.Fatalf("progress events = %v", messages)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reloaded, err := reopened.Project(project.ID)
+	if err != nil || reloaded.Scenes[0].Progress != 61 || len(reloaded.PipelineEvents) != len(loaded.PipelineEvents) {
+		t.Fatalf("progress did not survive restart: %+v / %v", reloaded, err)
+	}
+}
+
+func TestProjectFailureCardPersistsSceneNumberWithoutProviderPayload(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("failure story", "provider/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+	for number := 1; number <= ProjectSceneCount; number++ {
+		if number == 2 {
+			if err := store.MarkSceneSubmitting(project.ID, number); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetSceneGeneration(project.ID, number, Generation{ID: "failed_scene", Status: "failed", Error: "provider secret payload"}); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := store.MarkSceneVideoReady(project.ID, number, "saved-path", 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project, err = store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := NewProcessor(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.processProjectScenes(context.Background(), &mockProvider{}, project)
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != "failed" || !strings.Contains(loaded.Error, "Scene 2") || strings.Contains(loaded.Error, "secret") || strings.Contains(loaded.Scenes[1].Error, "secret") {
+		t.Fatalf("unsafe failure card = %+v", loaded)
+	}
+}
+
+func TestProjectPollNormalizesProviderFailure(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("poll failure", "provider/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSceneSubmitting(project.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSceneGeneration(project.ID, 1, Generation{ID: "poll_scene", Status: "processing"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &mockProvider{status: &Generation{ID: "poll_scene", Status: "failed", Error: "secret raw provider response"}}
+	processor := NewProcessor(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.pollScene(context.Background(), provider, loaded.Scenes[0])
+	loaded, err = store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Scenes[0].Status != "failed" || !strings.Contains(loaded.Scenes[0].Error, "provider reported") || strings.Contains(loaded.Scenes[0].Error, "secret") {
+		t.Fatalf("unsafe scene failure = %+v", loaded.Scenes[0])
 	}
 }
 
@@ -201,6 +339,9 @@ func TestFailedScriptGenerationPersistsTraceAndFailureEvent(t *testing.T) {
 		}
 		if loaded.TextGeneration.RouterModel != ScriptModel || loaded.TextGeneration.Status != "failed" || loaded.TextGeneration.UserPrompt == "" {
 			t.Fatalf("failed trace = %+v", loaded.TextGeneration)
+		}
+		if !strings.Contains(loaded.Error, "HTTP 502") || strings.Contains(loaded.Error, "upstream unavailable") {
+			t.Fatalf("failure card = %q", loaded.Error)
 		}
 		for _, event := range loaded.PipelineEvents {
 			if event.Stage == "text_generation" && event.Status == "failed" {
