@@ -21,7 +21,9 @@ const (
 
 const scriptSystemPrompt = `You are a short-form visual storyteller and video prompt director. Create a complete silent 30-second vertical video plan from the user's topic. The final video has exactly five sequential scenes, each exactly six seconds. There is no narration, dialogue, subtitles, music, logos, or on-screen text. Tell the story only through visible action.
 
-Create one immutable continuity bible covering every recurring character's exact physical appearance and wardrobe, the visual style, color palette, lighting, camera language, time of day, and environment. Repeat the relevant continuity details verbatim inside every scene's video_prompt so each clip can be generated independently. Each video_prompt must describe only its six-second shot, start state, motion, camera movement, end state, vertical 9:16 composition, and continuity details. Avoid transitions that require footage from another scene.`
+Create one immutable continuity bible covering every recurring character's exact physical appearance and wardrobe, the visual style, color palette, lighting, camera language, time of day, and environment. Repeat the relevant continuity details verbatim inside every scene's video_prompt so each clip can be generated independently. Each video_prompt must describe only its six-second shot, start state, motion, camera movement, end state, vertical 9:16 composition, and continuity details. Avoid transitions that require footage from another scene.
+
+Return a single JSON object with exactly these fields: title, story, script, continuity, scenes. Scenes must be an array of exactly five objects, numbered 1 through 5, each with number, title, script, and video_prompt. Return no commentary or Markdown.`
 
 func storyPlanSchema() map[string]any {
 	scene := map[string]any{
@@ -96,11 +98,9 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 		return StoryPlan{}, trace, err
 	}
 	request := map[string]any{
-		"model":           ScriptModel,
-		"messages":        []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
-		"temperature":     0.7,
-		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "short_video_plan", "strict": true, "schema": storyPlanSchema()}},
-		"provider":        map[string]any{"require_parameters": true},
+		"model":       ScriptModel,
+		"messages":    []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
+		"temperature": 0.7,
 	}
 	trace.Status = "started"
 	trace.StartedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
@@ -126,7 +126,7 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 	}
 	defer httpResponse.Body.Close()
 	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
-		return fail(readUpstreamError(httpResponse).Error())
+		return fail(fmt.Sprintf("OpenRouter script request failed with HTTP %d", httpResponse.StatusCode))
 	}
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, MaxScriptRawResponseBytes+1))
 	if err != nil {
@@ -154,13 +154,34 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 	if len(trace.RawResponse) > MaxScriptRawResponseBytes {
 		return fail(fmt.Sprintf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes))
 	}
-	var plan StoryPlan
-	if err := json.Unmarshal([]byte(trace.RawResponse), &plan); err != nil {
-		return fail(fmt.Sprintf("decode generated script: %v", err))
+	plan, err := parseStoryPlanText(trace.RawResponse)
+	if err != nil {
+		return fail(err.Error())
 	}
 	trace.Status = "completed"
 	trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
 	return plan, trace, nil
+}
+
+// Free text models can surround JSON with prose or a Markdown code fence.
+// Decode complete JSON objects and accept only a valid five-scene plan.
+func parseStoryPlanText(content string) (StoryPlan, error) {
+	attempts := 0
+	for offset, char := range content {
+		if char != '{' {
+			continue
+		}
+		attempts++
+		if attempts > 32 {
+			break
+		}
+		decoder := json.NewDecoder(strings.NewReader(content[offset:]))
+		var plan StoryPlan
+		if decoder.Decode(&plan) == nil && validateStoryPlan(plan) == nil {
+			return plan, nil
+		}
+	}
+	return StoryPlan{}, fmt.Errorf("OpenRouter did not return a valid JSON story plan with exactly %d scenes", ProjectSceneCount)
 }
 
 // GenerateRandomPrompt uses the same OpenRouter free-text route as project
