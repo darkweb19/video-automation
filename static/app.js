@@ -39,6 +39,10 @@
     audioOption: $("#audio-option"),
     generateAudio: $("#generate-audio"),
     activeVideoProvider: $("#active-video-provider"),
+    modalAccountProjectField: $("#modal-account-project-field"),
+    modalAccountProject: $("#modal-account-project"),
+    modalAccountSingleField: $("#modal-account-single-field"),
+    modalAccountSingle: $("#modal-account-single"),
     prompt: $("#prompt"),
     promptCategory: $("#prompt-category"),
     promptCategoryName: $("#prompt-category-name"),
@@ -61,6 +65,8 @@
     progressWrap: $("#progress-wrap"),
     statusDetail: $("#status-detail"),
     statusError: $("#error"),
+    singleTerminalSection: $("#single-terminal-section"),
+    singleTerminal: $("#single-terminal"),
     retryStatus: $("#retry-status"),
     generatedVideo: $("#generated-video"),
     openVideo: $("#open-video"),
@@ -72,6 +78,7 @@
     retryProject: $("#retry-project"),
     projectPipeline: $("#project-pipeline"),
     projectPipelineList: $("#project-pipeline-list"),
+    projectTerminal: $("#project-terminal"),
     projectStory: $("#project-story"),
     projectScenes: $("#project-scenes"),
     projectTrace: $("#project-trace"),
@@ -97,6 +104,11 @@
     modalSettings: $("#modal-settings"),
     modalKeyState: $("#modal-key-state"),
     modalConfigForm: $("#modal-config-form"),
+    modalAccountList: $("#modal-account-list"),
+    modalAccountFormTitle: $("#modal-account-form-title"),
+    modalAccountID: $("#modal-account-id"),
+    modalAccountName: $("#modal-account-name"),
+    modalAccountCancel: $("#modal-account-cancel"),
     modalBaseURL: $("#modal-base-url"),
     modalAPIKey: $("#modal-api-key"),
     modalKeyHelp: $("#modal-key-help"),
@@ -117,6 +129,10 @@
 
   const state = {
     models: [],
+    modalAccounts: [],
+    modalAccountsActiveID: "",
+    modalAccountsRequestID: 0,
+    modelRequestID: 0,
     videoProvider: "openrouter",
     generations: [],
     stats: null,
@@ -143,6 +159,152 @@
 
   function videoProviderName(provider = state.videoProvider) {
     return VIDEO_PROVIDER_NAMES[provider] || provider;
+  }
+
+  function updateModalAccountSelectors() {
+    const project = state.mode === "project";
+    const required = state.videoProvider === "modal";
+    elements.modalAccountProjectField.hidden = !required || !project;
+    elements.modalAccountSingleField.hidden = !required || project;
+    elements.modalAccountProject.required = required && project;
+    elements.modalAccountSingle.required = required && !project;
+    elements.modalAccountProject.disabled = !required || !state.modalAccounts.length;
+    elements.modalAccountSingle.disabled = !required || !state.modalAccounts.length;
+  }
+
+  function selectedModalAccountID() {
+    return state.mode === "project" ? elements.modalAccountProject.value : elements.modalAccountSingle.value;
+  }
+
+  function populateModalAccountSelect(select) {
+    const previous = select.value;
+    select.replaceChildren(make("option", { text: "Choose a Modal account" }));
+    select.options[0].value = "";
+    state.modalAccounts.forEach((account) => {
+      const option = make("option", { text: account.name || "Modal account" });
+      option.value = String(account.id || "");
+      select.append(option);
+    });
+    if (state.modalAccounts.some((account) => String(account.id) === previous)) select.value = previous;
+    else if (state.modalAccounts.some((account) => String(account.id) === state.modalAccountsActiveID)) select.value = state.modalAccountsActiveID;
+    else if (state.modalAccounts.length === 1) select.value = String(state.modalAccounts[0].id);
+  }
+
+  function refreshModalAccountSelectors() {
+    populateModalAccountSelect(elements.modalAccountProject);
+    populateModalAccountSelect(elements.modalAccountSingle);
+    updateModalAccountSelectors();
+    if (state.videoProvider === "modal") return loadModels(false);
+    return Promise.resolve();
+  }
+
+  function resetModalAccountForm() {
+    elements.modalConfigForm.reset();
+    elements.modalAccountID.value = "";
+    elements.modalAccountFormTitle.textContent = "Add Modal account";
+    elements.modalAccountCancel.hidden = true;
+    elements.modalAPIKey.required = true;
+    elements.modalKeyHelp.textContent = "Required when adding an account. Leave blank when editing to keep its saved key.";
+  }
+
+  function editModalAccount(account) {
+    elements.modalAccountID.value = String(account.id || "");
+    elements.modalAccountName.value = account.name || "";
+    elements.modalBaseURL.value = account.endpoint || "";
+    elements.modalAPIKey.value = "";
+    elements.modalAPIKey.required = false;
+    elements.modalAccountFormTitle.textContent = "Edit Modal account";
+    elements.modalAccountCancel.hidden = false;
+    elements.modalKeyHelp.textContent = account.configured
+      ? "The saved key is never returned. Leave this blank to keep it."
+      : "Enter the key for this account.";
+    elements.modalAccountName.focus();
+  }
+
+  function renderModalAccountList() {
+    elements.modalAccountList.replaceChildren();
+    if (!state.modalAccounts.length) {
+      elements.modalAccountList.append(make("div", { className: "empty modal-account-empty", text: "No Modal accounts yet. Add an endpoint and encrypted API key below." }));
+      return;
+    }
+    state.modalAccounts.forEach((account) => {
+      const row = make("article", { className: "modal-account-row" });
+      const isDefault = String(account.id) === state.modalAccountsActiveID;
+      const details = make("div", { className: "modal-account-copy" });
+      details.append(
+        make("strong", { text: account.name || "Modal account" }),
+        make("span", { text: account.endpoint || "Endpoint unavailable" }),
+        make("small", { text: account.configured ? "API key saved securely" : "API key not configured" })
+      );
+      if (isDefault) details.append(make("span", { className: "badge completed modal-default-badge", text: "Default account" }));
+      const actions = make("div", { className: "modal-account-actions" });
+      const activate = make("button", {
+        className: "button secondary",
+        type: "button",
+        text: isDefault ? "Default" : "Make default"
+      });
+      activate.disabled = isDefault;
+      activate.setAttribute("aria-label", isDefault ? `${account.name} is the default Modal account` : `Make ${account.name} the default Modal account`);
+      activate.addEventListener("click", () => activateModalAccount(account, activate));
+      const edit = make("button", { className: "button secondary", type: "button", text: "Edit" });
+      edit.addEventListener("click", () => editModalAccount(account));
+      const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
+      remove.disabled = isDefault;
+      if (isDefault) remove.title = "Make another account the default before deleting this account.";
+      remove.addEventListener("click", () => deleteModalAccount(account));
+      actions.append(activate, edit, remove);
+      row.append(details, actions);
+      elements.modalAccountList.append(row);
+    });
+  }
+
+  async function loadModalAccounts(notify = true) {
+    if (!state.authenticated || state.mustChangePassword) return;
+    const requestID = ++state.modalAccountsRequestID;
+    try {
+      const payload = await request("/api/modal-accounts");
+      if (requestID !== state.modalAccountsRequestID || !state.authenticated) return;
+      state.modalAccounts = Array.isArray(payload && payload.accounts) ? payload.accounts : [];
+      state.modalAccountsActiveID = String(payload && payload.active_id || "");
+      renderModalAccountList();
+      await refreshModalAccountSelectors();
+      const configured = state.modalAccounts.filter((account) => account.configured).length;
+      elements.modalKeyState.className = `badge ${configured ? "completed" : "neutral"}`;
+      elements.modalKeyState.textContent = `${configured} configured`;
+    } catch (error) {
+      if (requestID !== state.modalAccountsRequestID) return;
+      elements.modalKeyState.className = "badge failed";
+      elements.modalKeyState.textContent = "Unavailable";
+      if (notify && error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function deleteModalAccount(account) {
+    if (!window.confirm(`Delete Modal account “${account.name}”? Existing jobs keep their saved credentials.`)) return;
+    try {
+      await request(`/api/modal-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+      if (elements.modalAccountID.value === String(account.id)) resetModalAccountForm();
+      await loadModalAccounts(false);
+      toast("Modal account deleted.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function activateModalAccount(account, button) {
+    setButtonBusy(button, true, "Switching…");
+    try {
+      await request("/api/modal-accounts/active", {
+        method: "PUT",
+        body: JSON.stringify({ account_id: account.id })
+      });
+      await loadModalAccounts(false);
+      toast(`${account.name} is now the default Modal account.`);
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
   }
 
   class APIError extends Error {
@@ -255,6 +417,8 @@
     elements.prompt.closest(".field").hidden = project;
     elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
     elements.statusActive.hidden = project;
+    elements.modalAccountProjectField.hidden = state.videoProvider !== "modal" || !project;
+    elements.modalAccountSingleField.hidden = state.videoProvider !== "modal" || project;
     elements.projectStatus.hidden = !project || !state.currentProjectID;
     if (project) {
       const selected = state.models.find((model) => model.id === elements.model.value);
@@ -613,6 +777,7 @@
     if (model.audio !== true) elements.generateAudio.checked = false;
     const projectCompatible = supportsProject(model);
     elements.generate.disabled = state.mode === "project" && !projectCompatible;
+    updateModalAccountSelectors();
     elements.projectModelNote.textContent = projectCompatible
       ? "This model supports the five-scene 6-second, 480p, 9:16 project preset."
       : "This model does not support the fixed 6-second, 480p, 9:16 project preset. Choose another model or switch to Single clip.";
@@ -643,6 +808,14 @@
 
   async function loadModels(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
+    const requestID = ++state.modelRequestID;
+    const requestedProvider = state.videoProvider;
+    const requestedMode = state.mode;
+    const modalAccountID = requestedProvider === "modal" ? selectedModalAccountID() : "";
+    const isCurrentRequest = () => requestID === state.modelRequestID
+      && requestedProvider === state.videoProvider
+      && requestedMode === state.mode
+      && (requestedProvider !== "modal" || modalAccountID === selectedModalAccountID());
     elements.model.disabled = true;
     elements.modelTrigger.disabled = true;
     closeModelMenu();
@@ -653,7 +826,23 @@
     elements.model.append(loadingOption);
     renderModelPicker("Loading models…");
     try {
-      const payload = await request(`/models?provider=${encodeURIComponent(state.videoProvider)}`);
+      if (requestedProvider === "modal" && !modalAccountID) {
+        if (!isCurrentRequest()) return;
+        state.models = [];
+        elements.model.replaceChildren(make("option", { text: "Choose a Modal account first" }));
+        elements.model.options[0].value = "";
+        elements.model.disabled = true;
+        elements.modelTrigger.disabled = true;
+        elements.modelMenu.replaceChildren();
+        renderModelPicker("Choose a Modal account first");
+        updateModelOptions();
+        return;
+      }
+      const modelPath = requestedProvider === "modal"
+        ? `/api/video-models?provider=modal&modal_account_id=${encodeURIComponent(modalAccountID)}`
+        : `/models?provider=${encodeURIComponent(requestedProvider)}`;
+      const payload = await request(modelPath);
+      if (!isCurrentRequest()) return;
       state.models = Array.isArray(payload && payload.models) ? payload.models : [];
       elements.model.replaceChildren();
       if (!state.models.length) {
@@ -680,15 +869,16 @@
         || savedModel
         || state.models[0];
       if (selected) elements.model.value = selected.id;
-      elements.activeVideoProvider.textContent = `Video provider: ${videoProviderName(payload && payload.provider || state.videoProvider)}`;
+      elements.activeVideoProvider.textContent = `Video provider: ${videoProviderName(payload && payload.provider || requestedProvider)}`;
       elements.model.disabled = false;
       elements.modelTrigger.disabled = false;
       renderModelMenu();
       updateModelOptions();
-      if (selected && selected.id !== requestedModel) void persistVideoModel(selected.id, false);
+      if (selected && selected.id !== requestedModel) void persistVideoModel(selected.id, false, modalAccountID);
       renderHistory();
       renderRecent();
     } catch (error) {
+      if (!isCurrentRequest()) return;
       state.models = [];
       elements.model.replaceChildren();
       const option = make("option", { text: error.status === 422 ? "Configure provider credentials in Settings" : "Models unavailable" });
@@ -704,6 +894,47 @@
   function statusBadge(status) {
     const normalized = status || "unknown";
     return make("span", { className: `badge ${statusClass(normalized)}`, text: normalized.replaceAll("_", " ") });
+  }
+
+  function renderJobTerminal(list, events) {
+    list.replaceChildren();
+    const rows = Array.isArray(events) ? events : [];
+    if (!rows.length) {
+      list.append(make("li", { className: "terminal-empty", text: "No job events recorded yet." }));
+      return;
+    }
+    rows.forEach((event) => {
+      if (!event || typeof event !== "object") return;
+      const item = make("li", { className: "terminal-line" });
+      const time = event.created_at || event.timestamp || event.time;
+      const numericTime = typeof time === "number" || (typeof time === "string" && /^\d+(?:\.\d+)?$/.test(time.trim()))
+        ? Number(time)
+        : null;
+      const dateValue = numericTime === null ? time : (Math.abs(numericTime) < 1e12 ? numericTime * 1000 : numericTime);
+      const date = dateValue ? new Date(dateValue) : null;
+      const timeText = date && Number.isFinite(date.getTime())
+        ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        : "--:--:--";
+      const stage = String(event.stage || "job").replaceAll("_", " ");
+      const status = String(event.status || "info").replaceAll("_", " ");
+      const message = String(event.message || "").trim();
+      item.append(
+        make("time", { text: timeText }),
+        make("span", { className: "terminal-stage", text: stage }),
+        make("span", { className: `terminal-status terminal-${status.replace(/[^a-z0-9_-]/gi, "")}`, text: status }),
+        make("span", { className: "terminal-message", text: message })
+      );
+      list.append(item);
+    });
+  }
+
+  function historyTerminal(events) {
+    const section = make("section", { className: "job-terminal-section history-terminal-section" });
+    section.append(make("h4", { text: "Job console" }));
+    const terminal = make("ol", { className: "job-terminal" });
+    renderJobTerminal(terminal, events);
+    section.append(terminal);
+    return section;
   }
 
   function statusClass(status) {
@@ -891,7 +1122,8 @@
         metadataItem("File size", formatBytes(record.size_bytes))
       );
       body.append(metadata);
-      if (record.error) body.append(make("div", { className: "alert error", text: record.error }));
+      if (record.error) body.append(make("div", { className: "alert error history-error", text: record.error }));
+      body.append(historyTerminal(record.events || record.pipeline_events || record.logs));
 
       const actions = make("div", { className: "history-actions" });
       if (record.video_ready) {
@@ -1008,6 +1240,22 @@
 
     const pending = ["queued", "processing", "downloading", "download_failed"].includes(status);
     elements.progressWrap.hidden = !pending;
+    const recordEvents = record.events || record.pipeline_events || record.logs;
+    const latestEventProgress = Array.isArray(recordEvents)
+      ? [...recordEvents].reverse().find((event) => event && event.progress !== undefined)?.progress
+      : undefined;
+    const suppliedProgress = Number(record.progress ?? record.progress_percent ?? record.percent ?? latestEventProgress);
+    const hasProgress = Number.isFinite(suppliedProgress);
+    const progress = hasProgress ? Math.max(0, Math.min(100, suppliedProgress)) : 0;
+    $("#progress-bar").style.width = `${progress}%`;
+    $("#progress-bar").classList.toggle("indeterminate", pending && !hasProgress);
+    $("#progress-bar").setAttribute("role", "progressbar");
+    $("#progress-bar").setAttribute("aria-valuemin", "0");
+    $("#progress-bar").setAttribute("aria-valuemax", "100");
+    if (hasProgress) $("#progress-bar").setAttribute("aria-valuenow", String(progress));
+    else $("#progress-bar").removeAttribute("aria-valuenow");
+    elements.singleTerminalSection.hidden = false;
+    renderJobTerminal(elements.singleTerminal, recordEvents);
     const details = {
       queued: "Your request is queued with the selected video provider.",
       processing: "Your video provider is generating the video.",
@@ -1060,11 +1308,10 @@
   }
 
   function projectProgress(project, scenes) {
-    const supplied = Number(projectValue(project, "progress", "progress_percent", "percent"));
-    if (Number.isFinite(supplied)) return Math.max(0, Math.min(100, supplied <= 1 ? supplied * 100 : supplied));
-    if (!scenes.length) return ["completed", "complete"].includes(String(project.status).toLowerCase()) ? 100 : 0;
-    const done = scenes.filter((scene) => ["completed", "complete", "ready"].includes(String(projectValue(scene, "status")).toLowerCase()) || projectValue(scene, "video_ready")).length;
-    return Math.round((done / 5) * 100);
+    const raw = projectValue(project, "progress", "progress_percent", "percent");
+    const supplied = Number(raw);
+    if (raw !== "" && raw !== null && raw !== undefined && Number.isFinite(supplied)) return Math.max(0, Math.min(100, supplied));
+    return null;
   }
 
   function firstTraceValue(source, ...keys) {
@@ -1327,12 +1574,18 @@
     elements.projectStatus.hidden = false;
     elements.statusBadge.className = `badge ${statusClass(status)}`;
     elements.statusBadge.textContent = status.replaceAll("_", " ");
-    elements.projectProgressWrap.hidden = ["completed", "complete", "failed"].includes(status);
-    elements.projectProgressBar.style.width = `${progress}%`;
-    elements.projectProgressBar.style.animation = "none";
+    const projectPending = !["completed", "complete", "failed", "error"].includes(status);
+    elements.projectProgressWrap.hidden = !projectPending;
+    elements.projectProgressBar.style.width = `${progress ?? 0}%`;
+    elements.projectProgressBar.classList.toggle("indeterminate", projectPending && progress === null);
+    elements.projectProgressBar.setAttribute("role", "progressbar");
+    elements.projectProgressBar.setAttribute("aria-valuemin", "0");
+    elements.projectProgressBar.setAttribute("aria-valuemax", "100");
+    if (progress !== null) elements.projectProgressBar.setAttribute("aria-valuenow", String(progress));
+    else elements.projectProgressBar.removeAttribute("aria-valuenow");
     elements.projectStatusDetail.textContent = status === "completed" || status === "complete"
       ? "Your 30-second video is ready."
-      : status === "failed" ? "The project could not be completed." : `Project progress: ${progress}%`;
+      : status === "failed" ? "The project could not be completed." : progress === null ? "Project is in progress." : `Project progress: ${progress}%`;
     const error = projectValue(project, "error", "message");
     elements.projectError.hidden = !error;
     elements.projectError.textContent = error || "";
@@ -1340,6 +1593,7 @@
     elements.retryProject.hidden = status !== "failed" || hasFailedScene;
 
     renderProjectPipeline(project, scenes, status);
+    renderJobTerminal(elements.projectTerminal, projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"));
     renderProjectTrace(project, scenes, status);
 
     elements.projectStory.hidden = true;
@@ -1471,6 +1725,9 @@
             metadataItem("File size", formatBytes(projectValue(project, "final_size_bytes")))
           );
           body.append(metadata);
+          const projectError = projectValue(project, "error", "message");
+          if (projectError) body.append(make("div", { className: "alert error history-error", text: projectError }));
+          body.append(historyTerminal(projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs")));
           const actions = make("div", { className: "history-actions" });
           if (videoReady && videoURL) {
             download = make("a", { className: "button secondary", text: "Download" });
@@ -1522,7 +1779,13 @@
     elements.projectError.hidden = true;
     elements.projectScenes.replaceChildren();
     try {
-      const payload = await request("/api/projects", { method: "POST", body: JSON.stringify({ topic, model: elements.model.value }) });
+      const requestBody = { topic, model: elements.model.value };
+      if (state.videoProvider === "modal") {
+        const accountID = selectedModalAccountID();
+        if (!accountID) throw new APIError("Choose a Modal account for this submission.", 400);
+        requestBody.modal_account_id = accountID;
+      }
+      const payload = await request("/api/projects", { method: "POST", body: JSON.stringify(requestBody) });
       const project = payload && payload.project ? payload.project : payload;
       const id = projectID(project);
       renderProject(project);
@@ -1568,6 +1831,14 @@
     }
 
     const requestBody = { prompt, model: elements.model.value };
+    if (state.videoProvider === "modal") {
+      const accountID = selectedModalAccountID();
+      if (!accountID) {
+        toast("Choose a Modal account for this submission.", true);
+        return;
+      }
+      requestBody.modal_account_id = accountID;
+    }
     if (elements.duration.value) requestBody.duration = Number(elements.duration.value);
     if (elements.resolution.value) requestBody.resolution = elements.resolution.value;
     if (elements.aspectRatio.value) requestBody.aspect_ratio = elements.aspectRatio.value;
@@ -1613,7 +1884,8 @@
   function renderProviderSettings(settings) {
     state.videoProvider = settings.video_provider === "modal" ? "modal" : "openrouter";
     elements.videoProvider.value = state.videoProvider;
-    elements.modalSettings.hidden = state.videoProvider !== "modal";
+    elements.modalSettings.hidden = false;
+    updateModalAccountSelectors();
     elements.videoProviderState.className = "badge completed";
     elements.videoProviderState.textContent = `Active: ${videoProviderName()}`;
     elements.modalBaseURL.value = settings.modal_video_base_url || "";
@@ -1634,6 +1906,7 @@
     try {
       const settings = await request("/api/settings");
       renderProviderSettings(settings || {});
+      await loadModalAccounts(notify);
     } catch (error) {
       elements.keyState.className = "badge failed";
       elements.keyState.textContent = "Unavailable";
@@ -1693,12 +1966,18 @@
     }
   }
 
-  async function persistVideoModel(modelID, notify = false) {
+  async function persistVideoModel(modelID, notify = false, modalAccountID = selectedModalAccountID()) {
     if (!modelID || !state.videoProvider) return;
+    const provider = state.videoProvider;
+    if (provider === "modal" && !modalAccountID) return;
     try {
       await request("/api/settings/video-model", {
         method: "PUT",
-        body: JSON.stringify({ provider: state.videoProvider, model: modelID })
+        body: JSON.stringify({
+          provider,
+          model: modelID,
+          ...(provider === "modal" ? { modal_account_id: modalAccountID } : {})
+        })
       });
     } catch (error) {
       if (notify && error.status !== 401) toast(error.message, true);
@@ -1708,19 +1987,22 @@
   async function saveModalConfig(event) {
     event.preventDefault();
     const button = $("button[type='submit']", elements.modalConfigForm);
-    setButtonBusy(button, true, "Testing Modal…");
+    setButtonBusy(button, true, "Saving account…");
     try {
-      await request("/api/settings/modal", {
-        method: "PUT",
-        body: JSON.stringify({
-          base_url: elements.modalBaseURL.value.trim(),
-          api_key: elements.modalAPIKey.value
-        })
+      const id = elements.modalAccountID.value.trim();
+      const body = JSON.stringify({
+        name: elements.modalAccountName.value.trim(),
+        endpoint: elements.modalBaseURL.value.trim(),
+        api_key: elements.modalAPIKey.value
+      });
+      await request(id ? `/api/modal-accounts/${encodeURIComponent(id)}` : "/api/modal-accounts", {
+        method: id ? "PUT" : "POST",
+        body
       });
       elements.modalAPIKey.value = "";
-      await loadSettings(false);
-      toast("Modal settings tested and saved.");
-      if (state.videoProvider === "modal") await loadModels(false);
+      resetModalAccountForm();
+      await loadModalAccounts(false);
+      toast(id ? "Modal account updated." : "Modal account added.");
     } catch (error) {
       if (error.status !== 401) toast(error.message, true);
     } finally {
@@ -1862,9 +2144,19 @@
     elements.promptCategory.addEventListener("input", updatePromptCategory);
     elements.randomPrompt.addEventListener("click", generateRandomPrompt);
     elements.retryProject.addEventListener("click", retryCurrentProject);
-    elements.modeOptions.forEach((button) => button.addEventListener("click", () => setGenerationMode(button.dataset.mode)));
+    elements.modeOptions.forEach((button) => button.addEventListener("click", () => {
+      setGenerationMode(button.dataset.mode);
+      if (state.videoProvider === "modal") void loadModels(false);
+    }));
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
     elements.modalConfigForm.addEventListener("submit", saveModalConfig);
+    elements.modalAccountCancel.addEventListener("click", resetModalAccountForm);
+    elements.modalAccountProject.addEventListener("change", () => {
+      if (state.videoProvider === "modal" && state.mode === "project") void loadModels(false);
+    });
+    elements.modalAccountSingle.addEventListener("change", () => {
+      if (state.videoProvider === "modal" && state.mode === "single") void loadModels(false);
+    });
     elements.videoProvider.addEventListener("change", changeVideoProvider);
     elements.testVideoProvider.addEventListener("click", testVideoProvider);
     elements.passwordForm.addEventListener("submit", updatePassword);
