@@ -111,6 +111,16 @@
                   <small id="project-model-note">Choose a model that supports six-second clips and 9:16 output.</small>
                 </div>
                 <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
+                <div id="modal-account-project-field" class="field modal-account-field" hidden>
+                  <label for="modal-account-project">Modal account for this submission</label>
+                  <select id="modal-account-project" required><option value="">Choose a Modal account</option></select>
+                  <small>Choose which Modal endpoint and account will run this project.</small>
+                </div>
+                <div id="modal-account-single-field" class="field modal-account-field" hidden>
+                  <label for="modal-account-single">Modal account for this submission</label>
+                  <select id="modal-account-single" required><option value="">Choose a Modal account</option></select>
+                  <small>Choose which Modal endpoint and account will run this clip.</small>
+                </div>
                 <div id="single-options" class="form-grid">
                   <div class="field"><label for="duration">Duration</label><select id="duration"></select></div>
                   <div id="resolution-field" class="field"><label for="resolution">Resolution</label><select id="resolution"></select></div>
@@ -129,6 +139,10 @@
                 <div id="progress-wrap" class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
                 <p id="status-detail" class="subtle"></p>
                 <div id="error" class="alert error" role="alert" hidden></div>
+                <section id="single-terminal-section" class="job-terminal-section" hidden aria-labelledby="single-terminal-title">
+                  <div class="trace-heading"><div><h3 id="single-terminal-title">Job console</h3><p>Normalized generation events</p></div></div>
+                  <ol id="single-terminal" class="job-terminal" aria-live="polite"></ol>
+                </section>
                 <button id="retry-status" class="button secondary" type="button" hidden>Retry status</button>
                 <video id="generated-video" controls playsinline preload="metadata" hidden></video>
                 <a id="open-video" class="button secondary full" hidden>Download video</a>
@@ -141,6 +155,10 @@
                 <section id="project-pipeline" class="project-pipeline" aria-labelledby="project-pipeline-title">
                   <div class="trace-heading"><h3 id="project-pipeline-title">Pipeline</h3><span class="trace-caption">Process trace</span></div>
                   <ol id="project-pipeline-list" class="pipeline-list"></ol>
+                </section>
+                <section class="job-terminal-section project-terminal-section" aria-labelledby="project-terminal-title">
+                  <div class="trace-heading"><div><h3 id="project-terminal-title">Job console</h3><p>Normalized generation events</p></div></div>
+                  <ol id="project-terminal" class="job-terminal" aria-live="polite"></ol>
                 </section>
                 <div id="project-story" class="project-story" hidden></div>
                 <div id="project-scenes" class="project-scenes"></div>
@@ -178,11 +196,15 @@
               </form>
             </section>
             <section id="modal-settings" class="panel" hidden>
-              <div class="panel-head"><div><h2>Modal video API</h2><p>The API key is encrypted before it is stored.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
-              <form id="modal-config-form" class="stack">
-                <div class="field"><label for="modal-base-url">Modal Video Base URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
-                <div class="field"><label for="modal-api-key">Modal Video API Key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key"><small id="modal-key-help">The saved key is never returned to the browser.</small></div>
-                <button class="button primary" type="submit">Test and save Modal settings</button>
+              <div class="panel-head"><div><h2>Modal accounts</h2><p>Store multiple endpoints. Saved API keys are never returned to the browser.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
+              <div id="modal-account-list" class="modal-account-list"></div>
+              <form id="modal-config-form" class="stack modal-account-form">
+                <h3 id="modal-account-form-title">Add Modal account</h3>
+                <input id="modal-account-id" type="hidden">
+                <div class="field"><label for="modal-account-name">Account name</label><input id="modal-account-name" autocomplete="off" placeholder="e.g. Production" required></div>
+                <div class="field"><label for="modal-base-url">Modal endpoint URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
+                <div class="field"><label for="modal-api-key">Secret API key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key" required><small id="modal-key-help">Required when adding an account. Leave blank when editing to keep its saved key.</small></div>
+                <div class="modal-account-form-actions"><button class="button primary" type="submit">Save Modal account</button><button id="modal-account-cancel" class="button secondary" type="button" hidden>Cancel edit</button></div>
               </form>
             </section>
             <section class="panel">
