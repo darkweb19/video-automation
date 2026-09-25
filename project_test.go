@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -385,6 +386,68 @@ func TestProjectTraceAndPipelineEventsPersistAndAreAPIVisible(t *testing.T) {
 	reloaded, err := reopened.Project(project.ID)
 	if err != nil || reloaded.TextGeneration.SystemPrompt != trace.SystemPrompt || len(reloaded.PipelineEvents) != 3 {
 		t.Fatalf("durable trace/events = %+v / %+v / %v", reloaded.TextGeneration, reloaded.PipelineEvents, err)
+	}
+}
+
+func TestDeleteProjectRequiresTerminalAndCleansStorage(t *testing.T) {
+	store := newTestStore(t)
+	config, err := store.InsertProviderConfig(ProviderConfig{ID: "project_delete_config", Provider: string(VideoProviderOpenRouter), EncryptedAPIKey: "ciphertext"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.InsertProjectWithProviderConfig("delete me", string(VideoProviderOpenRouter), config.ID, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(store.projectDir, project.ID)
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "final.mp4"), []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(project.ID); !errors.Is(err, ErrProjectNotTerminal) {
+		t.Fatalf("active project delete err=%v", err)
+	}
+	if _, err := os.Stat(projectDir); err != nil {
+		t.Fatalf("active project directory was changed: %v", err)
+	}
+	if err := store.UpdateProjectStatus(project.ID, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendPipelineEvent(project.ID, "test", "completed", "child row", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Project(project.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted project lookup err=%v", err)
+	}
+	if _, err := store.ProviderConfig(config.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unused project provider config lookup err=%v", err)
+	}
+	var eventCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM project_pipeline_events WHERE project_id=?`, project.ID).Scan(&eventCount); err != nil || eventCount != 0 {
+		t.Fatalf("cascaded event count=%d err=%v", eventCount, err)
+	}
+	if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
+		t.Fatalf("project directory still exists, stat err=%v", err)
+	}
+}
+
+func TestDashboardRecoversInterruptedProjectDelete(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("interrupted delete", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE video_projects SET status='deleting' WHERE id=?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = NewDashboardHandler(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := store.Project(project.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("interrupted delete was not finalized, err=%v", err)
 	}
 }
 

@@ -40,6 +40,9 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 		logger = slog.Default()
 	}
 	app := &dashboardApp{store: store, security: security, logger: logger, limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
+	if err := store.RecoverInterruptedProjectDeletes(); err != nil {
+		logger.Error("recover interrupted project deletions failed")
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", app.index)
 	mux.HandleFunc("GET /static/app.js", app.static("static/app.js", "application/javascript; charset=utf-8"))
@@ -60,6 +63,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("POST /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.createProject)))
 	mux.Handle("GET /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.projects)))
 	mux.Handle("GET /api/projects/{id}", app.requirePasswordChanged(http.HandlerFunc(app.project)))
+	mux.Handle("DELETE /api/projects/{id}", app.requirePasswordChanged(http.HandlerFunc(app.deleteProject)))
 	mux.Handle("POST /api/projects/{id}/retry", app.requirePasswordChanged(http.HandlerFunc(app.retryProject)))
 	mux.Handle("POST /api/projects/{id}/scenes/{scene}/retry", app.requirePasswordChanged(http.HandlerFunc(app.retryProjectScene)))
 	mux.Handle("GET /api/projects/{id}/video", app.requirePasswordChanged(http.HandlerFunc(app.projectVideo)))
@@ -962,6 +966,29 @@ func (a *dashboardApp) project(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, project)
+}
+
+func (a *dashboardApp) deleteProject(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	if err := a.store.DeleteProject(id); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	} else if errors.Is(err, ErrProjectNotTerminal) {
+		writeError(w, http.StatusConflict, "active projects cannot be deleted")
+		return
+	} else if err != nil {
+		a.logger.Error("delete project failed", "project_id", id)
+		writeError(w, http.StatusInternalServerError, "unable to delete project")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *dashboardApp) retryProjectScene(w http.ResponseWriter, r *http.Request) {

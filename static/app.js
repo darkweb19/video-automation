@@ -1062,6 +1062,21 @@
     return wrapper;
   }
 
+  function projectRecordedCost(project) {
+    const scenes = projectScenes(project);
+    const costs = scenes.map((scene) => {
+      const raw = projectValue(scene, "cost_usd", "costUSD");
+      if (raw === "" || raw === null || raw === undefined) return null;
+      const value = Number(raw);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    });
+    const recorded = costs.filter((cost) => cost !== null);
+    if (!recorded.length) return "Not recorded";
+    const total = recorded.reduce((sum, cost) => sum + cost, 0);
+    if (recorded.length !== costs.length) return `${formatUSD(total)} recorded (partial)`;
+    return formatUSD(total);
+  }
+
   function historyPreview(videoReady, videoURL, status, onUnavailable = () => {}) {
     const preview = make("div", { className: "history-preview" });
     const showUnavailable = () => {
@@ -1103,6 +1118,23 @@
     elements.historyGrid.replaceChildren();
     if (!state.generations.length && !state.projects.length) {
       elements.historyGrid.append(make("div", { className: "empty", text: "No generations yet." }));
+      return;
+    }
+
+    if (state.generations.length || state.projects.length) {
+      const heading = make("div", { className: "history-section-heading history-generation-heading" });
+      heading.append(
+        make("h3", { text: "Video generations" }),
+        make("span", { className: "history-count", text: String(state.generations.length) })
+      );
+      elements.historyGrid.append(heading);
+    }
+
+    if (!state.generations.length && state.projects.length) {
+      elements.historyGrid.append(make("div", {
+        className: "empty history-generation-empty",
+        text: "No individual video generations yet."
+      }));
       return;
     }
 
@@ -1224,6 +1256,38 @@
       }
       await loadHistory(false, false);
       toast("Generation deleted.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function deleteProject(project) {
+    const id = projectID(project);
+    if (!id) return;
+    const status = String(projectValue(project, "status") || "queued").toLowerCase();
+    if (!["completed", "complete", "failed", "error"].includes(status)) return;
+    const topic = String(projectValue(project, "topic") || "this project").slice(0, 80);
+    if (!window.confirm(`Delete “${topic}” and its stored video? This cannot be undone.`)) return;
+    try {
+      await request(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (state.currentProjectID === id) {
+        stopProjectPolling();
+        state.currentProjectID = "";
+        elements.statusEmpty.hidden = false;
+        elements.statusActive.hidden = true;
+        elements.projectStatus.hidden = true;
+        elements.projectProgressWrap.hidden = true;
+        elements.projectError.hidden = true;
+        elements.projectStatusDetail.textContent = "";
+        elements.projectFinal.hidden = true;
+        elements.projectVideo.pause();
+        elements.projectVideo.removeAttribute("src");
+        elements.projectVideo.load();
+        elements.projectDownload.removeAttribute("href");
+      }
+      state.projects = state.projects.filter((item) => projectID(item) !== id);
+      await loadProjects(false);
+      toast("Project deleted.");
     } catch (error) {
       if (error.status !== 401) toast(error.message, true);
     }
@@ -1708,7 +1772,12 @@
       setGenerationMode(state.mode);
       elements.projectHistory.replaceChildren();
       if (state.projects.length) {
-        elements.projectHistory.append(make("h3", { className: "project-history-title", text: "30-second projects" }));
+        const heading = make("div", { className: "history-section-heading" });
+        heading.append(
+          make("h3", { text: "30-second projects" }),
+          make("span", { className: "history-count", text: String(state.projects.length) })
+        );
+        elements.projectHistory.append(heading);
         const list = make("div", { className: "project-history-list" });
         state.projects.forEach((project) => {
           const id = projectID(project);
@@ -1722,6 +1791,7 @@
           historyPrompt(body, "topic", projectValue(project, "topic"));
           const metadata = make("div", { className: "history-meta" });
           metadata.append(
+            metadataItem("Recorded video cost", projectRecordedCost(project)),
             metadataItem("Status", status.replaceAll("_", " ")),
             metadataItem("Created", formatDate(projectValue(project, "created_at", "createdAt"))),
             metadataItem("Model", friendlyModel(projectValue(project, "model"))),
@@ -1740,6 +1810,11 @@
           const open = make("button", { className: "button secondary", type: "button", text: "Open" });
           open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); pollProject(id, 0); });
           actions.append(open);
+          if (["completed", "complete", "failed", "error"].includes(status.toLowerCase())) {
+            const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
+            remove.addEventListener("click", () => deleteProject(project));
+            actions.append(remove);
+          }
           body.append(actions);
           item.append(preview, body);
           list.append(item);
