@@ -3,13 +3,55 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func TestGenerateRandomPromptUsesQueuedTextClientOnFirstRequest(t *testing.T) {
+	if defaultOpenRouterStoryHTTPClient.Timeout <= randomPromptTimeout {
+		t.Fatalf("text client timeout %s does not cover the %s prompt budget", defaultOpenRouterStoryHTTPClient.Timeout, randomPromptTimeout)
+	}
+	if randomPromptTimeout >= 2*time.Minute {
+		t.Fatalf("prompt budget %s exceeds server write deadline", randomPromptTimeout)
+	}
+	client := NewOpenRouterClient("test-key")
+	if client.storyClient() != defaultOpenRouterStoryHTTPClient {
+		t.Fatal("default prompt client does not allow queued text responses")
+	}
+	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("ordinary 45-second metadata client handled prompt request")
+		return nil, nil
+	})}
+	client.StoryHTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/v1/chat/completions" {
+			t.Fatalf("prompt request path = %q", request.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"A firefly crosses a moonlit forest."}}]}`)),
+		}, nil
+	})}
+	ctx, cancel := context.WithTimeout(context.Background(), randomPromptTimeout)
+	defer cancel()
+	prompt, err := client.GenerateRandomPrompt(ctx, RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject})
+	if err != nil || prompt != "A firefly crosses a moonlit forest." {
+		t.Fatalf("first prompt = %q, error = %v", prompt, err)
+	}
+}
 
 func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 	for _, test := range []struct {
@@ -19,6 +61,7 @@ func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 		want       string
 		maxTokens  float64
 		userPrefix string
+		systemText string
 	}{
 		{
 			name:       "project topic",
@@ -27,6 +70,7 @@ func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 			want:       "A firefly guides a lost traveler through a moonlit forest.",
 			maxTokens:  randomProjectTokens,
 			userPrefix: "Generate one original topic",
+			systemText: "at most 200 characters",
 		},
 		{
 			name:       "single prompt",
@@ -55,7 +99,7 @@ func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				if body.Model != "inclusionai/ling-3.0-flash-fin:free" || body.MaxTokens != test.maxTokens || len(body.Messages) != 2 || !strings.HasPrefix(body.Messages[1].Content, test.userPrefix) || !strings.Contains(body.Messages[1].Content, test.input.Category) {
+				if body.Model != "inclusionai/ling-3.0-flash-fin:free" || body.MaxTokens != test.maxTokens || len(body.Messages) != 2 || !strings.HasPrefix(body.Messages[1].Content, test.userPrefix) || !strings.Contains(body.Messages[1].Content, test.input.Category) || !strings.Contains(body.Messages[0].Content, test.systemText) {
 					t.Fatalf("unexpected request body: %#v", body)
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": test.content}}}})
@@ -71,7 +115,7 @@ func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 	}
 }
 
-func TestGenerateRandomPromptRejectsInvalidInputAndLongProjectTopic(t *testing.T) {
+func TestGenerateRandomPromptRejectsInvalidInputAndFitsLongProjectTopic(t *testing.T) {
 	client := NewOpenRouterClient("test-key")
 	if _, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: "unknown", Mode: RandomPromptModeSingle}); err == nil {
 		t.Fatal("expected invalid category error")
@@ -79,14 +123,19 @@ func TestGenerateRandomPromptRejectsInvalidInputAndLongProjectTopic(t *testing.T
 	if _, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: "other"}); err == nil {
 		t.Fatal("expected invalid mode error")
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": strings.Repeat("x", maxRandomProjectTopicRunes+1)}}}})
-	}))
-	defer server.Close()
-	client.BaseURL = server.URL
-	client.HTTPClient = server.Client()
-	if _, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject}); err == nil || !strings.Contains(err.Error(), "project topic exceeds") {
-		t.Fatalf("expected project topic limit error, got %v", err)
+	for _, count := range []int{maxRandomProjectTopicRunes + 1, MaxPromptLength + 1} {
+		t.Run(fmt.Sprintf("%d runes", count), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": strings.Repeat("x", count)}}}})
+			}))
+			defer server.Close()
+			client.BaseURL = server.URL
+			client.HTTPClient = server.Client()
+			prompt, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject})
+			if err != nil || utf8.RuneCountInString(prompt) > maxRandomProjectTopicRunes || !strings.HasSuffix(prompt, "…") {
+				t.Fatalf("long project topic = %q (%d runes), error = %v", prompt, utf8.RuneCountInString(prompt), err)
+			}
+		})
 	}
 }
 

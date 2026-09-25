@@ -827,7 +827,7 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "OpenRouter text generation is not configured")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), randomPromptTimeout)
 	defer cancel()
 	prompt, err := provider.GenerateRandomPrompt(ctx, input)
 	if err != nil {

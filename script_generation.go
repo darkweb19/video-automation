@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -23,6 +24,7 @@ const (
 	maxGeneratedScenePrompt    = 2200
 	randomProjectTokens        = 1024
 	randomSingleTokens         = 2048
+	randomPromptTimeout        = 105 * time.Second
 )
 
 const scriptSystemPrompt = `You are a short-form visual storyteller and video prompt director. Create a complete silent 30-second vertical video plan from the user's topic. The final video has exactly five sequential scenes, each exactly six seconds. There is no narration, dialogue, subtitles, music, logos, or on-screen text. Tell the story only through visible action.
@@ -265,7 +267,9 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 	httpRequest.Header.Set("Authorization", "Bearer "+c.APIKey)
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpResponse, err := c.client().Do(httpRequest)
+	// Free text models may queue on the first request. The ordinary metadata
+	// client times out after 45 seconds, before this endpoint's request budget.
+	httpResponse, err := c.storyClient().Do(httpRequest)
 	if err != nil {
 		return "", fmt.Errorf("OpenRouter random prompt request: %w", err)
 	}
@@ -300,18 +304,35 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 	if prompt == "" {
 		return "", errors.New("OpenRouter returned an empty random prompt")
 	}
-	if utf8.RuneCountInString(prompt) > MaxPromptLength {
+	if input.Mode == RandomPromptModeProject {
+		prompt = fitRandomProjectTopic(prompt)
+	} else if utf8.RuneCountInString(prompt) > MaxPromptLength {
 		return "", fmt.Errorf("OpenRouter random prompt exceeds %d characters", MaxPromptLength)
-	}
-	if input.Mode == RandomPromptModeProject && utf8.RuneCountInString(prompt) > maxRandomProjectTopicRunes {
-		return "", fmt.Errorf("OpenRouter random project topic exceeds %d characters", maxRandomProjectTopicRunes)
 	}
 	return prompt, nil
 }
 
+// Keep a verbose free-model response usable as a project topic. Prefer a word
+// boundary, while preserving the random project topic's 280-character limit.
+func fitRandomProjectTopic(prompt string) string {
+	runes := []rune(prompt)
+	if len(runes) <= maxRandomProjectTopicRunes {
+		return prompt
+	}
+	limit := maxRandomProjectTopicRunes - 1 // reserve one rune for the ellipsis
+	cut := limit
+	for cut > limit/2 && !unicode.IsSpace(runes[cut]) {
+		cut--
+	}
+	if cut <= limit/2 {
+		cut = limit
+	}
+	return strings.TrimSpace(string(runes[:cut])) + "…"
+}
+
 func randomPromptInstructions(mode RandomPromptMode, category string) (systemPrompt, userPrompt string, maxTokens int) {
 	if mode == RandomPromptModeProject {
-		return "You create original short-form video ideas. Return only one concise topic or story idea with no title, list, quotation marks, or explanation. It must be suitable for a silent 30-second vertical video with five connected six-second scenes. Keep every person clearly adult. Do not include brand names, logos, subtitles, or on-screen text.",
+		return "You create original short-form video ideas. Return only one concise topic or story idea in at most 200 characters, with no title, list, quotation marks, or explanation. It must be suitable for a silent 30-second vertical video with five connected six-second scenes. Keep every person clearly adult. Do not include brand names, logos, subtitles, or on-screen text.",
 			"Generate one original topic in this category: " + category,
 			randomProjectTokens
 	}
