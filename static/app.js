@@ -39,6 +39,10 @@
     audioOption: $("#audio-option"),
     generateAudio: $("#generate-audio"),
     activeVideoProvider: $("#active-video-provider"),
+    modalAccountProjectField: $("#modal-account-project-field"),
+    modalAccountProject: $("#modal-account-project"),
+    modalAccountSingleField: $("#modal-account-single-field"),
+    modalAccountSingle: $("#modal-account-single"),
     prompt: $("#prompt"),
     promptCategory: $("#prompt-category"),
     promptCategoryName: $("#prompt-category-name"),
@@ -61,6 +65,8 @@
     progressWrap: $("#progress-wrap"),
     statusDetail: $("#status-detail"),
     statusError: $("#error"),
+    singleTerminalSection: $("#single-terminal-section"),
+    singleTerminal: $("#single-terminal"),
     retryStatus: $("#retry-status"),
     generatedVideo: $("#generated-video"),
     openVideo: $("#open-video"),
@@ -72,6 +78,7 @@
     retryProject: $("#retry-project"),
     projectPipeline: $("#project-pipeline"),
     projectPipelineList: $("#project-pipeline-list"),
+    projectTerminal: $("#project-terminal"),
     projectStory: $("#project-story"),
     projectScenes: $("#project-scenes"),
     projectTrace: $("#project-trace"),
@@ -81,6 +88,23 @@
     projectDownload: $("#project-download"),
     projectHistory: $("#project-history"),
     historyGrid: $("#history-grid"),
+    vaultLock: $("#vault-lock"),
+    vaultLocked: $("#vault-locked"),
+    vaultGateTitle: $("#vault-gate-title"),
+    vaultGateCopy: $("#vault-gate-copy"),
+    vaultUnlockForm: $("#vault-unlock-form"),
+    vaultCode: $("#vault-code"),
+    vaultCodeError: $("#vault-code-error"),
+    vaultUnlockButton: $("#vault-unlock-button"),
+    vaultGoSettings: $("#vault-go-settings"),
+    vaultContent: $("#vault-content"),
+    vaultCount: $("#vault-count"),
+    vaultEmpty: $("#vault-empty"),
+    vaultGrid: $("#vault-grid"),
+    vaultPlayerDialog: $("#vault-player-dialog"),
+    vaultPlayerTitle: $("#vault-player-title"),
+    vaultPlayer: $("#vault-player"),
+    vaultPlayerClose: $("#vault-player-close"),
     recentList: $("#recent-list"),
     refreshHistory: $("#refresh-history"),
     statTotal: $("#stat-total"),
@@ -97,12 +121,25 @@
     modalSettings: $("#modal-settings"),
     modalKeyState: $("#modal-key-state"),
     modalConfigForm: $("#modal-config-form"),
+    modalAccountList: $("#modal-account-list"),
+    modalAccountFormTitle: $("#modal-account-form-title"),
+    modalAccountID: $("#modal-account-id"),
+    modalAccountName: $("#modal-account-name"),
+    modalAccountCancel: $("#modal-account-cancel"),
     modalBaseURL: $("#modal-base-url"),
     modalAPIKey: $("#modal-api-key"),
     modalKeyHelp: $("#modal-key-help"),
     passwordForm: $("#password-form"),
     currentPassword: $("#current-password"),
     newPassword: $("#new-password"),
+    vaultCodeState: $("#vault-code-state"),
+    vaultCodeForm: $("#vault-code-form"),
+    vaultCurrentCodeField: $("#vault-current-code-field"),
+    vaultCurrentCode: $("#vault-current-code"),
+    vaultNewCode: $("#vault-new-code"),
+    vaultConfirmCode: $("#vault-confirm-code"),
+    vaultCodeSave: $("#vault-code-save"),
+    vaultCodeHelp: $("#vault-code-help"),
     toast: $("#toast")
   };
 
@@ -110,6 +147,7 @@
     overview: { title: "Overview", kicker: "Workspace" },
     generate: { title: "Generate", kicker: "Create" },
     history: { title: "History", kicker: "Library" },
+    vault: { title: "Vault", kicker: "Private library" },
     settings: { title: "Settings", kicker: "AI providers" }
   };
 
@@ -117,6 +155,10 @@
 
   const state = {
     models: [],
+    modalAccounts: [],
+    modalAccountsActiveID: "",
+    modalAccountsRequestID: 0,
+    modelRequestID: 0,
     videoProvider: "openrouter",
     generations: [],
     stats: null,
@@ -128,21 +170,185 @@
     historyNextBeforeID: "",
     historyLoading: false,
     historyRefreshTimer: 0,
+    historyTerminalOpen: new Map(),
     currentGenerationID: "",
+    displayedGenerationID: "",
     pollTimer: 0,
     mode: "project",
     projects: [],
     currentProjectID: "",
+    displayedProjectID: "",
     projectPollTimer: 0,
     toastTimer: 0,
     authenticated: false,
-    mustChangePassword: false
+    mustChangePassword: false,
+    vaultConfigured: false,
+    vaultToken: "",
+    vaultGeneration: 0,
+    vaultLocking: false,
+    vaultLockQueue: Promise.resolve(),
+    vaultPendingLocks: 0,
+    vaultRestoringLock: false,
+    vaultRestoreLockReady: false,
+    vaultRestoreLockFailed: false,
+    vaultRestoreGeneration: 0,
+    vaultAuthGeneration: 0,
+    vaultUnlockPending: 0,
+    vaultMediaControllers: new Set(),
+    vaultItems: [],
+    vaultObjectURL: ""
   };
 
   const VIDEO_PROVIDER_NAMES = Object.freeze({ modal: "Modal", openrouter: "OpenRouter" });
 
   function videoProviderName(provider = state.videoProvider) {
     return VIDEO_PROVIDER_NAMES[provider] || provider;
+  }
+
+  function updateModalAccountSelectors() {
+    const project = state.mode === "project";
+    const required = state.videoProvider === "modal";
+    elements.modalAccountProjectField.hidden = !required || !project;
+    elements.modalAccountSingleField.hidden = !required || project;
+    elements.modalAccountProject.required = required && project;
+    elements.modalAccountSingle.required = required && !project;
+    elements.modalAccountProject.disabled = !required || !state.modalAccounts.length;
+    elements.modalAccountSingle.disabled = !required || !state.modalAccounts.length;
+  }
+
+  function selectedModalAccountID() {
+    return state.mode === "project" ? elements.modalAccountProject.value : elements.modalAccountSingle.value;
+  }
+
+  function populateModalAccountSelect(select) {
+    const previous = select.value;
+    select.replaceChildren(make("option", { text: "Choose a Modal account" }));
+    select.options[0].value = "";
+    state.modalAccounts.forEach((account) => {
+      const option = make("option", { text: account.name || "Modal account" });
+      option.value = String(account.id || "");
+      select.append(option);
+    });
+    if (state.modalAccounts.some((account) => String(account.id) === previous)) select.value = previous;
+    else if (state.modalAccounts.some((account) => String(account.id) === state.modalAccountsActiveID)) select.value = state.modalAccountsActiveID;
+    else if (state.modalAccounts.length === 1) select.value = String(state.modalAccounts[0].id);
+  }
+
+  function refreshModalAccountSelectors() {
+    populateModalAccountSelect(elements.modalAccountProject);
+    populateModalAccountSelect(elements.modalAccountSingle);
+    updateModalAccountSelectors();
+    if (state.videoProvider === "modal") return loadModels(false);
+    return Promise.resolve();
+  }
+
+  function resetModalAccountForm() {
+    elements.modalConfigForm.reset();
+    elements.modalAccountID.value = "";
+    elements.modalAccountFormTitle.textContent = "Add Modal account";
+    elements.modalAccountCancel.hidden = true;
+    elements.modalAPIKey.required = true;
+    elements.modalKeyHelp.textContent = "Required when adding an account. Leave blank when editing to keep its saved key.";
+  }
+
+  function editModalAccount(account) {
+    elements.modalAccountID.value = String(account.id || "");
+    elements.modalAccountName.value = account.name || "";
+    elements.modalBaseURL.value = account.endpoint || "";
+    elements.modalAPIKey.value = "";
+    elements.modalAPIKey.required = false;
+    elements.modalAccountFormTitle.textContent = "Edit Modal account";
+    elements.modalAccountCancel.hidden = false;
+    elements.modalKeyHelp.textContent = account.configured
+      ? "The saved key is never returned. Leave this blank to keep it."
+      : "Enter the key for this account.";
+    elements.modalAccountName.focus();
+  }
+
+  function renderModalAccountList() {
+    elements.modalAccountList.replaceChildren();
+    if (!state.modalAccounts.length) {
+      elements.modalAccountList.append(make("div", { className: "empty modal-account-empty", text: "No Modal accounts yet. Add an endpoint and encrypted API key below." }));
+      return;
+    }
+    state.modalAccounts.forEach((account) => {
+      const row = make("article", { className: "modal-account-row" });
+      const isDefault = String(account.id) === state.modalAccountsActiveID;
+      const details = make("div", { className: "modal-account-copy" });
+      details.append(
+        make("strong", { text: account.name || "Modal account" }),
+        make("span", { text: account.endpoint || "Endpoint unavailable" }),
+        make("small", { text: account.configured ? "API key saved securely" : "API key not configured" })
+      );
+      if (isDefault) details.append(make("span", { className: "badge completed modal-default-badge", text: "Default account" }));
+      const actions = make("div", { className: "modal-account-actions" });
+      const activate = make("button", {
+        className: "button secondary",
+        type: "button",
+        text: isDefault ? "Default" : "Make default"
+      });
+      activate.disabled = isDefault;
+      activate.setAttribute("aria-label", isDefault ? `${account.name} is the default Modal account` : `Make ${account.name} the default Modal account`);
+      activate.addEventListener("click", () => activateModalAccount(account, activate));
+      const edit = make("button", { className: "button secondary", type: "button", text: "Edit" });
+      edit.addEventListener("click", () => editModalAccount(account));
+      const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
+      remove.disabled = isDefault;
+      if (isDefault) remove.title = "Make another account the default before deleting this account.";
+      remove.addEventListener("click", () => deleteModalAccount(account));
+      actions.append(activate, edit, remove);
+      row.append(details, actions);
+      elements.modalAccountList.append(row);
+    });
+  }
+
+  async function loadModalAccounts(notify = true) {
+    if (!state.authenticated || state.mustChangePassword) return;
+    const requestID = ++state.modalAccountsRequestID;
+    try {
+      const payload = await request("/api/modal-accounts");
+      if (requestID !== state.modalAccountsRequestID || !state.authenticated) return;
+      state.modalAccounts = Array.isArray(payload && payload.accounts) ? payload.accounts : [];
+      state.modalAccountsActiveID = String(payload && payload.active_id || "");
+      renderModalAccountList();
+      await refreshModalAccountSelectors();
+      const configured = state.modalAccounts.filter((account) => account.configured).length;
+      elements.modalKeyState.className = `badge ${configured ? "completed" : "neutral"}`;
+      elements.modalKeyState.textContent = `${configured} configured`;
+    } catch (error) {
+      if (requestID !== state.modalAccountsRequestID) return;
+      elements.modalKeyState.className = "badge failed";
+      elements.modalKeyState.textContent = "Unavailable";
+      if (notify && error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function deleteModalAccount(account) {
+    if (!window.confirm(`Delete Modal account “${account.name}”? Existing jobs keep their saved credentials.`)) return;
+    try {
+      await request(`/api/modal-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+      if (elements.modalAccountID.value === String(account.id)) resetModalAccountForm();
+      await loadModalAccounts(false);
+      toast("Modal account deleted.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function activateModalAccount(account, button) {
+    setButtonBusy(button, true, "Switching…");
+    try {
+      await request("/api/modal-accounts/active", {
+        method: "PUT",
+        body: JSON.stringify({ account_id: account.id })
+      });
+      await loadModalAccounts(false);
+      toast(`${account.name} is now the default Modal account.`);
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
   }
 
   class APIError extends Error {
@@ -255,6 +461,8 @@
     elements.prompt.closest(".field").hidden = project;
     elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
     elements.statusActive.hidden = project;
+    elements.modalAccountProjectField.hidden = state.videoProvider !== "modal" || !project;
+    elements.modalAccountSingleField.hidden = state.videoProvider !== "modal" || project;
     elements.projectStatus.hidden = !project || !state.currentProjectID;
     if (project) {
       const selected = state.models.find((model) => model.id === elements.model.value);
@@ -324,6 +532,8 @@
 
     const apiKeyPanel = elements.apiKeyForm.closest(".panel");
     if (apiKeyPanel) apiKeyPanel.hidden = state.mustChangePassword;
+    const vaultCodePanel = elements.vaultCodeForm.closest(".panel");
+    if (vaultCodePanel) vaultCodePanel.hidden = state.mustChangePassword;
     let notice = $("#forced-password-notice");
     if (!notice) {
       notice = make("div", {
@@ -341,11 +551,24 @@
     }
   }
 
+  function resetVaultRestoreState() {
+    state.vaultRestoreGeneration += 1;
+    state.vaultAuthGeneration += 1;
+    state.vaultRestoringLock = false;
+    state.vaultRestoreLockReady = false;
+    state.vaultRestoreLockFailed = false;
+  }
+
   function showLoggedOut() {
     stopPolling();
     stopProjectPolling();
     stopHistoryRefresh();
+    resetVaultRestoreState();
+    clearVaultClientState();
+    clearGenerationDisplay();
+    clearProjectDisplay();
     state.authenticated = false;
+    state.vaultConfigured = false;
     state.currentGenerationID = "";
     state.currentProjectID = "";
     state.generations = [];
@@ -381,6 +604,7 @@
   }
 
   function showAuthenticated(username, mustChangePassword) {
+    resetVaultRestoreState();
     state.authenticated = true;
     applyPasswordGate(mustChangePassword);
     elements.accountName.textContent = username || "sujanshrestha";
@@ -407,6 +631,7 @@
     elements.sidebar.classList.remove("open");
     elements.menuButton.setAttribute("aria-expanded", "false");
     if (view === "settings" && !state.mustChangePassword) loadSettings(false);
+    if (view === "vault" && !state.mustChangePassword) loadVault();
     if (view === "history" && !state.mustChangePassword) {
       loadHistory(false);
       loadProjects(false);
@@ -613,6 +838,7 @@
     if (model.audio !== true) elements.generateAudio.checked = false;
     const projectCompatible = supportsProject(model);
     elements.generate.disabled = state.mode === "project" && !projectCompatible;
+    updateModalAccountSelectors();
     elements.projectModelNote.textContent = projectCompatible
       ? "This model supports the five-scene 6-second, 480p, 9:16 project preset."
       : "This model does not support the fixed 6-second, 480p, 9:16 project preset. Choose another model or switch to Single clip.";
@@ -643,6 +869,14 @@
 
   async function loadModels(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
+    const requestID = ++state.modelRequestID;
+    const requestedProvider = state.videoProvider;
+    const requestedMode = state.mode;
+    const modalAccountID = requestedProvider === "modal" ? selectedModalAccountID() : "";
+    const isCurrentRequest = () => requestID === state.modelRequestID
+      && requestedProvider === state.videoProvider
+      && requestedMode === state.mode
+      && (requestedProvider !== "modal" || modalAccountID === selectedModalAccountID());
     elements.model.disabled = true;
     elements.modelTrigger.disabled = true;
     closeModelMenu();
@@ -653,7 +887,23 @@
     elements.model.append(loadingOption);
     renderModelPicker("Loading models…");
     try {
-      const payload = await request(`/models?provider=${encodeURIComponent(state.videoProvider)}`);
+      if (requestedProvider === "modal" && !modalAccountID) {
+        if (!isCurrentRequest()) return;
+        state.models = [];
+        elements.model.replaceChildren(make("option", { text: "Choose a Modal account first" }));
+        elements.model.options[0].value = "";
+        elements.model.disabled = true;
+        elements.modelTrigger.disabled = true;
+        elements.modelMenu.replaceChildren();
+        renderModelPicker("Choose a Modal account first");
+        updateModelOptions();
+        return;
+      }
+      const modelPath = requestedProvider === "modal"
+        ? `/api/video-models?provider=modal&modal_account_id=${encodeURIComponent(modalAccountID)}`
+        : `/models?provider=${encodeURIComponent(requestedProvider)}`;
+      const payload = await request(modelPath);
+      if (!isCurrentRequest()) return;
       state.models = Array.isArray(payload && payload.models) ? payload.models : [];
       elements.model.replaceChildren();
       if (!state.models.length) {
@@ -680,15 +930,16 @@
         || savedModel
         || state.models[0];
       if (selected) elements.model.value = selected.id;
-      elements.activeVideoProvider.textContent = `Video provider: ${videoProviderName(payload && payload.provider || state.videoProvider)}`;
+      elements.activeVideoProvider.textContent = `Video provider: ${videoProviderName(payload && payload.provider || requestedProvider)}`;
       elements.model.disabled = false;
       elements.modelTrigger.disabled = false;
       renderModelMenu();
       updateModelOptions();
-      if (selected && selected.id !== requestedModel) void persistVideoModel(selected.id, false);
+      if (selected && selected.id !== requestedModel) void persistVideoModel(selected.id, false, modalAccountID);
       renderHistory();
       renderRecent();
     } catch (error) {
+      if (!isCurrentRequest()) return;
       state.models = [];
       elements.model.replaceChildren();
       const option = make("option", { text: error.status === 422 ? "Configure provider credentials in Settings" : "Models unavailable" });
@@ -704,6 +955,73 @@
   function statusBadge(status) {
     const normalized = status || "unknown";
     return make("span", { className: `badge ${statusClass(normalized)}`, text: normalized.replaceAll("_", " ") });
+  }
+
+  function renderJobTerminal(list, events) {
+    list.replaceChildren();
+    const rows = Array.isArray(events) ? events : [];
+    if (!rows.length) {
+      list.append(make("li", { className: "terminal-empty", text: "No job events recorded yet." }));
+      return;
+    }
+    rows.forEach((event) => {
+      if (!event || typeof event !== "object") return;
+      const item = make("li", { className: "terminal-line" });
+      const time = event.created_at || event.timestamp || event.time;
+      const numericTime = typeof time === "number" || (typeof time === "string" && /^\d+(?:\.\d+)?$/.test(time.trim()))
+        ? Number(time)
+        : null;
+      const dateValue = numericTime === null ? time : (Math.abs(numericTime) < 1e12 ? numericTime * 1000 : numericTime);
+      const date = dateValue ? new Date(dateValue) : null;
+      const timeText = date && Number.isFinite(date.getTime())
+        ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        : "--:--:--";
+      const stage = String(event.stage || "job").replaceAll("_", " ");
+      const status = String(event.status || "info").replaceAll("_", " ");
+      const message = String(event.message || "").trim();
+      item.append(
+        make("time", { text: timeText }),
+        make("span", { className: "terminal-stage", text: stage }),
+        make("span", { className: `terminal-status terminal-${status.replace(/[^a-z0-9_-]/gi, "")}`, text: status }),
+        make("span", { className: "terminal-message", text: message })
+      );
+      list.append(item);
+    });
+  }
+
+  function historyTerminal(events, key, status) {
+    const section = make("details", { className: "job-terminal-section history-terminal-section" });
+    const rows = Array.isArray(events) ? events.filter((event) => event && typeof event === "object") : [];
+    const normalizedStatus = String(status || "").toLowerCase();
+    const openByDefault = [
+      "queued", "processing", "downloading", "download_failed", "failed", "error",
+      "planning", "generating", "combining", "submitting", "pending", "retry", "retrying", "started", "running"
+    ].includes(normalizedStatus);
+    section.open = state.historyTerminalOpen.has(key)
+      ? state.historyTerminalOpen.get(key)
+      : openByDefault;
+
+    const heading = make("summary", { className: "history-terminal-head" });
+    heading.append(
+      make("h4", { text: "Process log" }),
+      make("span", { className: "history-terminal-count", text: `${rows.length} ${rows.length === 1 ? "event" : "events"}` })
+    );
+    const terminal = make("ol", { className: "job-terminal", "aria-label": "Recorded process events" });
+    renderJobTerminal(terminal, rows);
+    const toggleLabel = make("span", {
+      className: "history-terminal-action",
+      text: section.open ? "Hide logs" : "View logs"
+    });
+    heading.append(toggleLabel);
+    section.addEventListener("toggle", () => {
+      toggleLabel.textContent = section.open ? "Hide logs" : "View logs";
+    });
+    heading.addEventListener("click", () => {
+      window.setTimeout(() => state.historyTerminalOpen.set(key, section.open), 0);
+    });
+    section.append(heading);
+    section.append(terminal);
+    return section;
   }
 
   function statusClass(status) {
@@ -771,9 +1089,12 @@
   }
 
   function hasActiveJobs() {
-    const activeStatuses = new Set(["queued", "processing", "downloading", "download_failed"]);
+    const activeGenerationStatuses = new Set(["queued", "processing", "downloading", "download_failed"]);
+    const terminalProjectStatuses = new Set(["completed", "complete", "failed", "error"]);
     const aggregateActive = state.stats ? state.stats.active : 0;
-    return aggregateActive > 0 || state.generations.some((record) => activeStatuses.has(record.status));
+    return aggregateActive > 0
+      || state.generations.some((record) => activeGenerationStatuses.has(record.status))
+      || state.projects.some((project) => !terminalProjectStatuses.has(String(projectValue(project, "status")).toLowerCase()));
   }
 
   function normalizeStats(stats) {
@@ -796,7 +1117,7 @@
     if (!state.authenticated || state.mustChangePassword || document.hidden || !hasActiveJobs()) return;
     state.historyRefreshTimer = window.setTimeout(() => {
       state.historyRefreshTimer = 0;
-      loadHistory(false, false);
+      void Promise.allSettled([loadHistory(false, false), loadProjects(false)]);
     }, 7000);
   }
 
@@ -826,6 +1147,21 @@
     const wrapper = make("div");
     wrapper.append(make("span", { text: label }), make("strong", { text: value }));
     return wrapper;
+  }
+
+  function projectRecordedCost(project) {
+    const scenes = projectScenes(project);
+    const costs = scenes.map((scene) => {
+      const raw = projectValue(scene, "cost_usd", "costUSD");
+      if (raw === "" || raw === null || raw === undefined) return null;
+      const value = Number(raw);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    });
+    const recorded = costs.filter((cost) => cost !== null);
+    if (!recorded.length) return "Not recorded";
+    const total = recorded.reduce((sum, cost) => sum + cost, 0);
+    if (recorded.length !== costs.length) return `${formatUSD(total)} recorded (partial)`;
+    return formatUSD(total);
   }
 
   function historyPreview(videoReady, videoURL, status, onUnavailable = () => {}) {
@@ -872,7 +1208,24 @@
       return;
     }
 
-    state.generations.forEach((record) => {
+    if (state.generations.length || state.projects.length) {
+      const heading = make("div", { className: "history-section-heading history-generation-heading" });
+      heading.append(
+        make("h3", { text: "Video generations" }),
+        make("span", { className: "history-count", text: String(state.generations.length) })
+      );
+      elements.historyGrid.append(heading);
+    }
+
+    if (!state.generations.length && state.projects.length) {
+      elements.historyGrid.append(make("div", {
+        className: "empty history-generation-empty",
+        text: "No individual video generations yet."
+      }));
+      return;
+    }
+
+    state.generations.forEach((record, index) => {
       const card = make("article", { className: "history-card" });
       const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
       let download;
@@ -891,13 +1244,23 @@
         metadataItem("File size", formatBytes(record.size_bytes))
       );
       body.append(metadata);
-      if (record.error) body.append(make("div", { className: "alert error", text: record.error }));
+      if (record.error) body.append(make("div", { className: "alert error history-error", text: record.error }));
+      body.append(historyTerminal(
+        record.events || record.pipeline_events || record.logs,
+        `generation:${record.id || record.created_at || index}`,
+        record.status
+      ));
 
       const actions = make("div", { className: "history-actions" });
       if (record.video_ready) {
         download = make("a", { className: "button secondary", text: "Download" });
         download.href = `${videoURL}&download=1`;
         actions.append(download);
+      }
+      if (record.status === "completed" && record.video_ready) {
+        const move = make("button", { className: "button secondary vault-move-button", text: "Move to Vault", type: "button" });
+        move.addEventListener("click", () => moveHistoryItem("generation", record.id, move));
+        actions.append(move);
       }
       const remove = make("button", { className: "button secondary danger-button", text: "Delete", type: "button" });
       remove.addEventListener("click", () => deleteGeneration(record));
@@ -983,10 +1346,7 @@
     try {
       await request(`/api/generations/${encodeURIComponent(record.id)}`, { method: "DELETE" });
       state.generations = state.generations.filter((item) => item.id !== record.id);
-      if (state.currentGenerationID === record.id) {
-        stopPolling();
-        state.currentGenerationID = "";
-      }
+      clearGenerationDisplay(record.id);
       await loadHistory(false, false);
       toast("Generation deleted.");
     } catch (error) {
@@ -994,7 +1354,104 @@
     }
   }
 
+  function clearGenerationDisplay(id = "") {
+    const matchesCurrent = !id || state.currentGenerationID === id;
+    const matchesDisplay = !id || state.displayedGenerationID === id;
+    if (matchesCurrent) {
+      stopPolling();
+      state.currentGenerationID = "";
+    }
+    if (!matchesDisplay) return;
+    state.displayedGenerationID = "";
+    elements.generatedVideo.pause();
+    elements.generatedVideo.removeAttribute("src");
+    elements.generatedVideo.load();
+    elements.generatedVideo.hidden = true;
+    elements.openVideo.removeAttribute("href");
+    elements.openVideo.hidden = true;
+    elements.singleTerminal.replaceChildren();
+    elements.singleTerminalSection.hidden = true;
+    elements.statusActive.hidden = true;
+    elements.statusError.hidden = true;
+    elements.statusError.textContent = "";
+    elements.retryStatus.hidden = true;
+    elements.progressWrap.hidden = true;
+    elements.statusDetail.textContent = "";
+    if (state.mode === "single") elements.statusEmpty.hidden = false;
+  }
+
+  function clearProjectDisplay(id = "") {
+    const matchesCurrent = !id || state.currentProjectID === id;
+    const matchesDisplay = !id || state.displayedProjectID === id;
+    if (matchesCurrent) {
+      stopProjectPolling();
+      state.currentProjectID = "";
+    }
+    if (!matchesDisplay) return;
+    state.displayedProjectID = "";
+    elements.projectVideo.pause();
+    elements.projectVideo.removeAttribute("src");
+    elements.projectVideo.load();
+    elements.projectFinal.hidden = true;
+    elements.projectDownload.removeAttribute("href");
+    elements.projectStory.replaceChildren();
+    elements.projectStory.hidden = true;
+    elements.projectScenes.replaceChildren();
+    elements.projectPipelineList.replaceChildren();
+    elements.projectTerminal.replaceChildren();
+    elements.projectTraceSections.replaceChildren();
+    elements.projectPipeline.hidden = true;
+    elements.projectTrace.hidden = true;
+    elements.projectProgressWrap.hidden = true;
+    elements.projectError.hidden = true;
+    elements.projectError.textContent = "";
+    elements.retryProject.hidden = true;
+    elements.projectStatusDetail.textContent = "";
+    elements.projectStatus.hidden = true;
+    if (state.mode === "project") elements.statusEmpty.hidden = false;
+  }
+
+  async function moveHistoryItem(kind, id, button) {
+    if (!id) return;
+    setButtonBusy(button, true, "Moving…");
+    try {
+      await request(`/api/vault/items/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/move`, { method: "POST" });
+      if (kind === "generation") {
+        state.generations = state.generations.filter((item) => item.id !== id);
+        clearGenerationDisplay(id);
+      } else {
+        state.projects = state.projects.filter((item) => projectID(item) !== id);
+        clearProjectDisplay(id);
+      }
+      await Promise.allSettled([loadHistory(false), loadProjects(false)]);
+      toast("Moved to Vault.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function deleteProject(project) {
+    const id = projectID(project);
+    if (!id) return;
+    const status = String(projectValue(project, "status") || "queued").toLowerCase();
+    if (!["completed", "complete", "failed", "error"].includes(status)) return;
+    const topic = String(projectValue(project, "topic") || "this project").slice(0, 80);
+    if (!window.confirm(`Delete “${topic}” and its stored video? This cannot be undone.`)) return;
+    try {
+      await request(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+      clearProjectDisplay(id);
+      state.projects = state.projects.filter((item) => projectID(item) !== id);
+      await loadProjects(false);
+      toast("Project deleted.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
   function setStatusRecord(record) {
+    state.displayedGenerationID = String(record.id || "");
     const status = record.status || "processing";
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = false;
@@ -1008,6 +1465,22 @@
 
     const pending = ["queued", "processing", "downloading", "download_failed"].includes(status);
     elements.progressWrap.hidden = !pending;
+    const recordEvents = record.events || record.pipeline_events || record.logs;
+    const latestEventProgress = Array.isArray(recordEvents)
+      ? [...recordEvents].reverse().find((event) => event && event.progress !== undefined)?.progress
+      : undefined;
+    const suppliedProgress = Number(record.progress ?? record.progress_percent ?? record.percent ?? latestEventProgress);
+    const hasProgress = Number.isFinite(suppliedProgress);
+    const progress = hasProgress ? Math.max(0, Math.min(100, suppliedProgress)) : 0;
+    $("#progress-bar").style.width = `${progress}%`;
+    $("#progress-bar").classList.toggle("indeterminate", pending && !hasProgress);
+    $("#progress-bar").setAttribute("role", "progressbar");
+    $("#progress-bar").setAttribute("aria-valuemin", "0");
+    $("#progress-bar").setAttribute("aria-valuemax", "100");
+    if (hasProgress) $("#progress-bar").setAttribute("aria-valuenow", String(progress));
+    else $("#progress-bar").removeAttribute("aria-valuenow");
+    elements.singleTerminalSection.hidden = false;
+    renderJobTerminal(elements.singleTerminal, recordEvents);
     const details = {
       queued: "Your request is queued with the selected video provider.",
       processing: "Your video provider is generating the video.",
@@ -1060,11 +1533,10 @@
   }
 
   function projectProgress(project, scenes) {
-    const supplied = Number(projectValue(project, "progress", "progress_percent", "percent"));
-    if (Number.isFinite(supplied)) return Math.max(0, Math.min(100, supplied <= 1 ? supplied * 100 : supplied));
-    if (!scenes.length) return ["completed", "complete"].includes(String(project.status).toLowerCase()) ? 100 : 0;
-    const done = scenes.filter((scene) => ["completed", "complete", "ready"].includes(String(projectValue(scene, "status")).toLowerCase()) || projectValue(scene, "video_ready")).length;
-    return Math.round((done / 5) * 100);
+    const raw = projectValue(project, "progress", "progress_percent", "percent");
+    const supplied = Number(raw);
+    if (raw !== "" && raw !== null && raw !== undefined && Number.isFinite(supplied)) return Math.max(0, Math.min(100, supplied));
+    return null;
   }
 
   function firstTraceValue(source, ...keys) {
@@ -1321,18 +1793,25 @@
     const status = String(projectValue(project, "status") || "queued").toLowerCase();
     const id = projectID(project);
     const progress = projectProgress(project, scenes);
+    state.displayedProjectID = id;
     state.currentProjectID = id;
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = true;
     elements.projectStatus.hidden = false;
     elements.statusBadge.className = `badge ${statusClass(status)}`;
     elements.statusBadge.textContent = status.replaceAll("_", " ");
-    elements.projectProgressWrap.hidden = ["completed", "complete", "failed"].includes(status);
-    elements.projectProgressBar.style.width = `${progress}%`;
-    elements.projectProgressBar.style.animation = "none";
+    const projectPending = !["completed", "complete", "failed", "error"].includes(status);
+    elements.projectProgressWrap.hidden = !projectPending;
+    elements.projectProgressBar.style.width = `${progress ?? 0}%`;
+    elements.projectProgressBar.classList.toggle("indeterminate", projectPending && progress === null);
+    elements.projectProgressBar.setAttribute("role", "progressbar");
+    elements.projectProgressBar.setAttribute("aria-valuemin", "0");
+    elements.projectProgressBar.setAttribute("aria-valuemax", "100");
+    if (progress !== null) elements.projectProgressBar.setAttribute("aria-valuenow", String(progress));
+    else elements.projectProgressBar.removeAttribute("aria-valuenow");
     elements.projectStatusDetail.textContent = status === "completed" || status === "complete"
       ? "Your 30-second video is ready."
-      : status === "failed" ? "The project could not be completed." : `Project progress: ${progress}%`;
+      : status === "failed" ? "The project could not be completed." : progress === null ? "Project is in progress." : `Project progress: ${progress}%`;
     const error = projectValue(project, "error", "message");
     elements.projectError.hidden = !error;
     elements.projectError.textContent = error || "";
@@ -1340,6 +1819,7 @@
     elements.retryProject.hidden = status !== "failed" || hasFailedScene;
 
     renderProjectPipeline(project, scenes, status);
+    renderJobTerminal(elements.projectTerminal, projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"));
     renderProjectTrace(project, scenes, status);
 
     elements.projectStory.hidden = true;
@@ -1388,11 +1868,11 @@
     stopProjectPolling();
     state.currentProjectID = id;
     state.projectPollTimer = window.setTimeout(async () => {
-      if (!state.authenticated || state.currentProjectID !== id || state.mode !== "project") return;
+      if (!state.authenticated || state.currentProjectID !== id) return;
       try {
         const payload = await request(`/api/projects/${encodeURIComponent(id)}`);
         const project = payload && payload.project ? payload.project : payload;
-        renderProject(project);
+        if (state.mode === "project") renderProject(project);
         const status = String(projectValue(project, "status")).toLowerCase();
         if (!["completed", "complete", "failed", "error"].includes(status)) pollProject(id, 3000);
         else {
@@ -1451,9 +1931,14 @@
       setGenerationMode(state.mode);
       elements.projectHistory.replaceChildren();
       if (state.projects.length) {
-        elements.projectHistory.append(make("h3", { className: "project-history-title", text: "30-second projects" }));
+        const heading = make("div", { className: "history-section-heading" });
+        heading.append(
+          make("h3", { text: "30-second projects" }),
+          make("span", { className: "history-count", text: String(state.projects.length) })
+        );
+        elements.projectHistory.append(heading);
         const list = make("div", { className: "project-history-list" });
-        state.projects.forEach((project) => {
+        state.projects.forEach((project, index) => {
           const id = projectID(project);
           const status = String(projectValue(project, "status") || "queued");
           const videoReady = Boolean(projectValue(project, "final_video_ready"));
@@ -1465,21 +1950,39 @@
           historyPrompt(body, "topic", projectValue(project, "topic"));
           const metadata = make("div", { className: "history-meta" });
           metadata.append(
+            metadataItem("Recorded video cost", projectRecordedCost(project)),
             metadataItem("Status", status.replaceAll("_", " ")),
             metadataItem("Created", formatDate(projectValue(project, "created_at", "createdAt"))),
             metadataItem("Model", friendlyModel(projectValue(project, "model"))),
             metadataItem("File size", formatBytes(projectValue(project, "final_size_bytes")))
           );
           body.append(metadata);
+          const projectError = projectValue(project, "error", "message");
+          if (projectError) body.append(make("div", { className: "alert error history-error", text: projectError }));
+          body.append(historyTerminal(
+            projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"),
+            `project:${id || projectValue(project, "created_at", "createdAt") || index}`,
+            status
+          ));
           const actions = make("div", { className: "history-actions" });
           if (videoReady && videoURL) {
             download = make("a", { className: "button secondary", text: "Download" });
             download.href = `${videoURL}?download=1`;
             actions.append(download);
           }
+          if (status === "completed" && videoReady) {
+            const move = make("button", { className: "button secondary vault-move-button", type: "button", text: "Move to Vault" });
+            move.addEventListener("click", () => moveHistoryItem("project", id, move));
+            actions.append(move);
+          }
           const open = make("button", { className: "button secondary", type: "button", text: "Open" });
           open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); pollProject(id, 0); });
           actions.append(open);
+          if (["completed", "complete", "failed", "error"].includes(status.toLowerCase())) {
+            const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
+            remove.addEventListener("click", () => deleteProject(project));
+            actions.append(remove);
+          }
           body.append(actions);
           item.append(preview, body);
           list.append(item);
@@ -1496,6 +1999,7 @@
         }
       }
       renderHistory();
+      scheduleHistoryRefresh();
     } catch (error) {
       if (notify && error.status !== 401 && error.status !== 404) toast(error.message, true);
     }
@@ -1503,14 +2007,20 @@
 
   async function submitProject() {
     const topic = elements.projectTopic.value.trim();
+    const topicLength = Array.from(topic).length;
     elements.projectTopicError.textContent = "";
-    if (!topic) {
-      elements.projectTopicError.textContent = "Enter a topic or story idea.";
+    if (!topic || topicLength > 4000) {
+      elements.projectTopicError.textContent = topic ? "Topic must be 4,000 characters or fewer." : "Enter a topic or story idea.";
       elements.projectTopic.focus();
       return;
     }
-    if (!elements.model.value) {
+    const model = selectedModel();
+    if (!model) {
       toast("Select an available model first.", true);
+      return;
+    }
+    if (!supportsProject(model)) {
+      toast("Choose a model that supports 6-second clips at 480p in 9:16.", true);
       return;
     }
     setButtonBusy(elements.generate, true, "Building projectâ€¦");
@@ -1522,7 +2032,13 @@
     elements.projectError.hidden = true;
     elements.projectScenes.replaceChildren();
     try {
-      const payload = await request("/api/projects", { method: "POST", body: JSON.stringify({ topic, model: elements.model.value }) });
+      const requestBody = { topic, model: elements.model.value };
+      if (state.videoProvider === "modal") {
+        const accountID = selectedModalAccountID();
+        if (!accountID) throw new APIError("Choose a Modal account for this submission.", 400);
+        requestBody.modal_account_id = accountID;
+      }
+      const payload = await request("/api/projects", { method: "POST", body: JSON.stringify(requestBody) });
       const project = payload && payload.project ? payload.project : payload;
       const id = projectID(project);
       renderProject(project);
@@ -1540,7 +2056,8 @@
       if (error.status !== 401) toast(error.message, true);
     } finally {
       setButtonBusy(elements.generate, false);
-      elements.generate.disabled = !elements.model.value;
+      const currentModel = selectedModel();
+      elements.generate.disabled = !currentModel || (state.mode === "project" && !supportsProject(currentModel));
     }
   }
 
@@ -1568,6 +2085,14 @@
     }
 
     const requestBody = { prompt, model: elements.model.value };
+    if (state.videoProvider === "modal") {
+      const accountID = selectedModalAccountID();
+      if (!accountID) {
+        toast("Choose a Modal account for this submission.", true);
+        return;
+      }
+      requestBody.modal_account_id = accountID;
+    }
     if (elements.duration.value) requestBody.duration = Number(elements.duration.value);
     if (elements.resolution.value) requestBody.resolution = elements.resolution.value;
     if (elements.aspectRatio.value) requestBody.aspect_ratio = elements.aspectRatio.value;
@@ -1613,7 +2138,8 @@
   function renderProviderSettings(settings) {
     state.videoProvider = settings.video_provider === "modal" ? "modal" : "openrouter";
     elements.videoProvider.value = state.videoProvider;
-    elements.modalSettings.hidden = state.videoProvider !== "modal";
+    elements.modalSettings.hidden = false;
+    updateModalAccountSelectors();
     elements.videoProviderState.className = "badge completed";
     elements.videoProviderState.textContent = `Active: ${videoProviderName()}`;
     elements.modalBaseURL.value = settings.modal_video_base_url || "";
@@ -1627,6 +2153,19 @@
     elements.modalKeyHelp.textContent = modalConfigured
       ? "A key is saved securely. Leave this field blank to keep it while changing the URL."
       : "A key is required for the first save. The saved key is never returned to the browser.";
+    renderVaultCodeSettings(Boolean(settings.vault_code_configured));
+  }
+
+  function renderVaultCodeSettings(configured) {
+    state.vaultConfigured = configured;
+    elements.vaultCodeState.className = `badge ${state.vaultConfigured ? "completed" : "neutral"}`;
+    elements.vaultCodeState.textContent = state.vaultConfigured ? "Code set" : "Not set";
+    elements.vaultCurrentCodeField.hidden = !state.vaultConfigured;
+    elements.vaultCurrentCode.required = state.vaultConfigured;
+    elements.vaultCodeSave.textContent = state.vaultConfigured ? "Change Vault code" : "Set Vault code";
+    elements.vaultCodeHelp.textContent = state.vaultConfigured
+      ? "Keep this code safe. Changing it locks active Vault sessions."
+      : "Keep this code safe. If you lose it, the Vault cannot be opened in this version.";
   }
 
   async function loadSettings(notify = true) {
@@ -1634,11 +2173,426 @@
     try {
       const settings = await request("/api/settings");
       renderProviderSettings(settings || {});
+      await loadModalAccounts(notify);
     } catch (error) {
       elements.keyState.className = "badge failed";
       elements.keyState.textContent = "Unavailable";
       if (notify && error.status !== 401) toast(error.message, true);
     }
+  }
+
+  function clearVaultClientState() {
+    invalidateVaultOperations();
+    closeVaultPlayer();
+    state.vaultToken = "";
+    state.vaultLocking = false;
+    state.vaultItems = [];
+    if (elements.vaultGrid) elements.vaultGrid.replaceChildren();
+    if (elements.vaultCount) elements.vaultCount.textContent = "0";
+    if (elements.vaultEmpty) elements.vaultEmpty.hidden = true;
+    if (elements.vaultContent) elements.vaultContent.hidden = true;
+    if (elements.vaultLock) elements.vaultLock.hidden = true;
+  }
+
+  function invalidateVaultOperations() {
+    state.vaultGeneration += 1;
+    state.vaultMediaControllers.forEach((controller) => controller.abort());
+    state.vaultMediaControllers.clear();
+  }
+
+  function renderVaultLocked(message = "") {
+    clearVaultClientState();
+    elements.vaultLocked.hidden = false;
+    const lockMessage = state.vaultRestoringLock
+      ? "Securing the Vault session. Wait before entering your code."
+      : state.vaultRestoreLockFailed
+        ? "Could not confirm the Vault is locked. Refresh the page and try again."
+        : message;
+    elements.vaultCodeError.textContent = lockMessage;
+    elements.vaultCodeError.hidden = !lockMessage;
+    elements.vaultCode.value = "";
+    elements.vaultUnlockForm.hidden = !state.vaultConfigured;
+    elements.vaultGoSettings.hidden = state.vaultConfigured;
+    const unlockDisabled = state.vaultRestoringLock || state.vaultRestoreLockFailed;
+    elements.vaultCode.disabled = unlockDisabled;
+    elements.vaultUnlockButton.disabled = unlockDisabled;
+    elements.vaultUnlockButton.textContent = state.vaultRestoringLock ? "Securing…" : "Unlock Vault";
+    elements.vaultGateTitle.textContent = state.vaultConfigured ? "Vault is locked" : "Set up your Vault";
+    elements.vaultGateCopy.textContent = state.vaultRestoringLock
+      ? "Confirming the previous Vault session is locked."
+      : state.vaultRestoreLockFailed
+        ? "Refresh to retry the lock check before unlocking."
+        : state.vaultConfigured
+          ? "Enter your four-digit code to view protected videos."
+          : "Choose a four-digit code in Settings before moving videos here.";
+  }
+
+  function vaultHeaders() {
+    return state.vaultToken ? { Authorization: `Vault ${state.vaultToken}` } : {};
+  }
+
+  async function vaultRequest(path, options = {}) {
+    if (state.vaultLocking) throw new APIError("Vault is locking", 423);
+    return request(path, {
+      ...options,
+      headers: { ...(options.headers || {}), ...vaultHeaders() }
+    });
+  }
+
+  function requestVaultLock(options = {}, shouldRun = null) {
+    state.vaultPendingLocks += 1;
+    const operation = state.vaultLockQueue.then(async () => {
+      if (shouldRun && !shouldRun()) return false;
+      await request("/api/vault/lock", { method: "POST", ...options });
+      return true;
+    });
+    const settled = operation.finally(() => {
+      state.vaultPendingLocks = Math.max(0, state.vaultPendingLocks - 1);
+      finishVaultRestoreIfReady();
+    });
+    state.vaultLockQueue = settled.then(() => undefined, () => undefined);
+    return settled;
+  }
+
+  function finishVaultRestoreIfReady() {
+    if (!state.vaultRestoreLockReady || state.vaultRestoreLockFailed
+      || state.vaultUnlockPending > 0 || state.vaultPendingLocks > 0) return;
+    state.vaultRestoreLockReady = false;
+    state.vaultRestoringLock = false;
+    renderVaultLocked();
+  }
+
+  async function loadVault() {
+    if (!state.authenticated || state.mustChangePassword) return;
+    try {
+      const status = await request("/api/vault/status");
+      state.vaultConfigured = Boolean(status && status.configured);
+      if (!state.vaultConfigured) {
+        renderVaultLocked();
+        return;
+      }
+      if (!state.vaultToken) {
+        renderVaultLocked();
+        return;
+      }
+      await loadVaultItems();
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function loadVaultItems() {
+    const generation = state.vaultGeneration;
+    const token = state.vaultToken;
+    try {
+      const payload = await vaultRequest("/api/vault/items");
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) return;
+      state.vaultItems = Array.isArray(payload && payload.items) ? payload.items : [];
+      renderVaultItems();
+      elements.vaultLocked.hidden = true;
+      elements.vaultContent.hidden = false;
+      elements.vaultLock.hidden = false;
+    } catch (error) {
+      if (generation !== state.vaultGeneration || token !== state.vaultToken) return;
+      if (error.status === 423) {
+        renderVaultLocked("Your Vault session ended. Enter your code to unlock it again.");
+      } else if (error.status !== 401) {
+        toast(error.message, true);
+      }
+    }
+  }
+
+  function renderVaultItems() {
+    elements.vaultGrid.replaceChildren();
+    elements.vaultCount.textContent = String(state.vaultItems.length);
+    elements.vaultEmpty.hidden = state.vaultItems.length > 0;
+    state.vaultItems.forEach((item) => {
+      const card = make("article", { className: "history-card vault-card" });
+      const preview = make("div", { className: "vault-preview" });
+      preview.append(
+        make("span", { className: "vault-preview-mark", text: "▣", attrs: { "aria-hidden": "true" } }),
+        make("span", { className: "vault-preview-kind", text: item.kind === "project" ? "30-second video" : "Video" })
+      );
+      const body = make("div", { className: "history-body" });
+      body.append(make("h3", { className: "history-title", text: item.title || "Untitled video" }));
+      const metadata = make("div", { className: "history-meta" });
+      metadata.append(
+        metadataItem("Created", formatDate(item.created_at)),
+        metadataItem("Duration", item.duration ? `${item.duration} sec` : "Provider default"),
+        metadataItem("Model", friendlyModel(item.model)),
+        metadataItem("File size", formatBytes(item.size_bytes))
+      );
+      body.append(metadata);
+      const actions = make("div", { className: "history-actions vault-actions" });
+      const view = make("button", { className: "button primary", text: "View video", type: "button" });
+      view.addEventListener("click", () => openVaultVideo(item, view));
+      const download = make("button", { className: "button secondary", text: "Download", type: "button" });
+      download.addEventListener("click", () => downloadVaultVideo(item, download));
+      const restore = make("button", { className: "button secondary", text: "Return to History", type: "button" });
+      restore.addEventListener("click", () => restoreVaultItem(item, restore));
+      actions.append(view, download, restore);
+      body.append(actions);
+      card.append(preview, body);
+      elements.vaultGrid.append(card);
+    });
+  }
+
+  async function fetchVaultVideo(item, download = false) {
+    if (state.vaultLocking || !state.vaultToken) throw new APIError("Vault is locked", 423);
+    const path = `/api/vault/items/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}/video${download ? "?download=1" : ""}`;
+    const generation = state.vaultGeneration;
+    const token = state.vaultToken;
+    const controller = new AbortController();
+    state.vaultMediaControllers.add(controller);
+    try {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        cache: "no-store",
+        signal: controller.signal,
+        headers: { Accept: "video/mp4", ...vaultHeaders() }
+      });
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) {
+        throw new APIError("Vault is locked", 423);
+      }
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        if (response.status === 401) showLoggedOut();
+        if (response.status === 423) {
+          renderVaultLocked("Your Vault session ended. Enter your code to unlock it again.");
+        }
+        throw new APIError(payload && payload.error || `Request failed (${response.status})`, response.status);
+      }
+      const blob = await response.blob();
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) {
+        throw new APIError("Vault is locked", 423);
+      }
+      return blob;
+    } catch (error) {
+      if (controller.signal.aborted) throw new APIError("Vault is locked", 423);
+      throw error;
+    } finally {
+      state.vaultMediaControllers.delete(controller);
+    }
+  }
+
+  async function openVaultVideo(item, button) {
+    const generation = state.vaultGeneration;
+    setButtonBusy(button, true, "Loading…");
+    try {
+      const blob = await fetchVaultVideo(item);
+      if (generation !== state.vaultGeneration || !state.vaultToken) return;
+      closeVaultPlayer();
+      state.vaultObjectURL = URL.createObjectURL(blob);
+      elements.vaultPlayerTitle.textContent = item.title || "Vault video";
+      elements.vaultPlayer.src = state.vaultObjectURL;
+      elements.vaultPlayerDialog.showModal();
+    } catch (error) {
+      if (error.status !== 401 && error.status !== 423) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function downloadVaultVideo(item, button) {
+    const generation = state.vaultGeneration;
+    setButtonBusy(button, true, "Preparing…");
+    try {
+      const blob = await fetchVaultVideo(item, true);
+      if (generation !== state.vaultGeneration || !state.vaultToken) return;
+      const url = URL.createObjectURL(blob);
+      const link = make("a", { attrs: { href: url, download: `${item.kind}-${item.id}.mp4` } });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      if (error.status !== 401 && error.status !== 423) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function restoreVaultItem(item, button) {
+    const generation = state.vaultGeneration;
+    const token = state.vaultToken;
+    setButtonBusy(button, true, "Returning…");
+    try {
+      await vaultRequest(`/api/vault/items/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}/restore`, { method: "POST" });
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) return;
+      state.vaultItems = state.vaultItems.filter((entry) => entry.id !== item.id || entry.kind !== item.kind);
+      renderVaultItems();
+      await Promise.allSettled([loadHistory(false), loadProjects(false)]);
+      toast("Returned to History.");
+    } catch (error) {
+      if (generation !== state.vaultGeneration || token !== state.vaultToken) return;
+      if (error.status === 423) {
+        renderVaultLocked("Your Vault session ended. Enter your code to unlock it again.");
+      } else if (error.status !== 401) {
+        toast(error.message, true);
+      }
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function unlockVault(event) {
+    event.preventDefault();
+    if (state.vaultRestoringLock || state.vaultRestoreLockFailed) return;
+    const generation = state.vaultGeneration;
+    const authGeneration = state.vaultAuthGeneration;
+    const code = elements.vaultCode.value;
+    if (!/^[0-9]{4}$/.test(code)) {
+      renderVaultLocked("Enter all four digits.");
+      elements.vaultCode.focus();
+      return;
+    }
+    elements.vaultCodeError.hidden = true;
+    state.vaultUnlockPending += 1;
+    setButtonBusy(elements.vaultUnlockButton, true, "Unlocking…");
+    try {
+      const result = await request("/api/vault/unlock", {
+        method: "POST",
+        body: JSON.stringify({ code })
+      });
+      const token = result && typeof result.token === "string" ? result.token : "";
+      if (generation !== state.vaultGeneration) {
+        if (authGeneration !== state.vaultAuthGeneration || !state.authenticated) return;
+        try {
+          await requestVaultLock({}, () => authGeneration === state.vaultAuthGeneration && state.authenticated);
+        } catch (error) {
+          if (error.status !== 401 && authGeneration === state.vaultAuthGeneration
+            && state.authenticated && !state.mustChangePassword) {
+            state.vaultRestoreLockFailed = true;
+            state.vaultRestoreLockReady = false;
+            state.vaultRestoringLock = false;
+            renderVaultLocked();
+          }
+        }
+        return;
+      }
+      state.vaultToken = token;
+      elements.vaultCode.value = "";
+      if (!state.vaultToken) throw new APIError("Unable to unlock Vault", 500);
+      await loadVaultItems();
+    } catch (error) {
+      if (generation !== state.vaultGeneration) return;
+      if (error.status !== 401) {
+        elements.vaultCode.value = "";
+        elements.vaultCodeError.textContent = error.message;
+        elements.vaultCodeError.hidden = false;
+        elements.vaultCode.focus();
+      }
+    } finally {
+      state.vaultUnlockPending = Math.max(0, state.vaultUnlockPending - 1);
+      setButtonBusy(elements.vaultUnlockButton, false);
+      finishVaultRestoreIfReady();
+      if (state.vaultRestoringLock || state.vaultRestoreLockFailed) {
+        elements.vaultUnlockButton.disabled = true;
+        elements.vaultUnlockButton.textContent = state.vaultRestoringLock ? "Securing…" : "Unlock Vault";
+      }
+    }
+  }
+
+  async function lockVault() {
+    if (state.vaultLocking) return;
+    state.vaultLocking = true;
+    invalidateVaultOperations();
+    elements.vaultLock.disabled = true;
+    elements.vaultLock.textContent = "Locking…";
+    try {
+      // The server clears every grant for this login session, including one
+      // whose in-memory browser token was lost during a navigation.
+      await requestVaultLock();
+    } catch (error) {
+      if (error.status === 401) return;
+      toast(`Vault could not be locked. ${error.message}`, true);
+      return;
+    } finally {
+      state.vaultLocking = false;
+      elements.vaultLock.disabled = false;
+      elements.vaultLock.textContent = "Lock Vault";
+    }
+    clearVaultClientState();
+    if (state.authenticated && !state.mustChangePassword) renderVaultLocked();
+  }
+
+  async function secureVaultAfterPageRestore() {
+    const restoreGeneration = ++state.vaultRestoreGeneration;
+    state.vaultRestoringLock = true;
+    state.vaultRestoreLockReady = false;
+    state.vaultRestoreLockFailed = false;
+    renderVaultLocked();
+    try {
+      await requestVaultLock();
+      if (restoreGeneration !== state.vaultRestoreGeneration) return;
+      state.vaultRestoreLockReady = true;
+    } catch (error) {
+      if (restoreGeneration !== state.vaultRestoreGeneration) return;
+      if (error.status === 401) return;
+      state.vaultRestoreLockFailed = true;
+      state.vaultRestoreLockReady = false;
+      state.vaultRestoringLock = false;
+      renderVaultLocked();
+      return;
+    }
+    if (restoreGeneration !== state.vaultRestoreGeneration) return;
+    if (!state.authenticated || state.mustChangePassword) return;
+    finishVaultRestoreIfReady();
+    renderVaultLocked();
+  }
+
+  function closeVaultPlayer() {
+    if (elements.vaultPlayer) {
+      elements.vaultPlayer.pause();
+      elements.vaultPlayer.removeAttribute("src");
+      elements.vaultPlayer.load();
+    }
+    if (state.vaultObjectURL) URL.revokeObjectURL(state.vaultObjectURL);
+    state.vaultObjectURL = "";
+    if (elements.vaultPlayerDialog && elements.vaultPlayerDialog.open) elements.vaultPlayerDialog.close();
+  }
+
+  async function saveVaultCode(event) {
+    event.preventDefault();
+    const currentCode = elements.vaultCurrentCode.value;
+    const newCode = elements.vaultNewCode.value;
+    const confirmation = elements.vaultConfirmCode.value;
+    if (!/^[0-9]{4}$/.test(newCode)) {
+      toast("Enter a new four-digit code.", true);
+      elements.vaultNewCode.focus();
+      return;
+    }
+    if (newCode !== confirmation) {
+      toast("The new codes do not match.", true);
+      elements.vaultConfirmCode.focus();
+      return;
+    }
+    const configured = state.vaultConfigured;
+    if (configured && !/^[0-9]{4}$/.test(currentCode)) {
+      toast("Enter the current four-digit code.", true);
+      elements.vaultCurrentCode.focus();
+      return;
+    }
+    setButtonBusy(elements.vaultCodeSave, true, "Saving…");
+    try {
+      const result = await request("/api/settings/vault-code", {
+        method: "PUT",
+        body: JSON.stringify({ current_code: currentCode, new_code: newCode })
+      });
+      state.vaultConfigured = Boolean(result && result.configured);
+      clearVaultClientState();
+      elements.vaultCodeForm.reset();
+      renderVaultCodeSettings(state.vaultConfigured);
+      toast(configured ? "Vault code changed." : "Vault code set.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(elements.vaultCodeSave, false);
+    }
+  }
+
+  function constrainVaultCodeInput(input) {
+    input.value = input.value.replace(/[^0-9]/g, "").slice(0, 4);
   }
 
   async function saveAPIKey(event) {
@@ -1693,12 +2647,18 @@
     }
   }
 
-  async function persistVideoModel(modelID, notify = false) {
+  async function persistVideoModel(modelID, notify = false, modalAccountID = selectedModalAccountID()) {
     if (!modelID || !state.videoProvider) return;
+    const provider = state.videoProvider;
+    if (provider === "modal" && !modalAccountID) return;
     try {
       await request("/api/settings/video-model", {
         method: "PUT",
-        body: JSON.stringify({ provider: state.videoProvider, model: modelID })
+        body: JSON.stringify({
+          provider,
+          model: modelID,
+          ...(provider === "modal" ? { modal_account_id: modalAccountID } : {})
+        })
       });
     } catch (error) {
       if (notify && error.status !== 401) toast(error.message, true);
@@ -1708,19 +2668,22 @@
   async function saveModalConfig(event) {
     event.preventDefault();
     const button = $("button[type='submit']", elements.modalConfigForm);
-    setButtonBusy(button, true, "Testing Modal…");
+    setButtonBusy(button, true, "Saving account…");
     try {
-      await request("/api/settings/modal", {
-        method: "PUT",
-        body: JSON.stringify({
-          base_url: elements.modalBaseURL.value.trim(),
-          api_key: elements.modalAPIKey.value
-        })
+      const id = elements.modalAccountID.value.trim();
+      const body = JSON.stringify({
+        name: elements.modalAccountName.value.trim(),
+        endpoint: elements.modalBaseURL.value.trim(),
+        api_key: elements.modalAPIKey.value
+      });
+      await request(id ? `/api/modal-accounts/${encodeURIComponent(id)}` : "/api/modal-accounts", {
+        method: id ? "PUT" : "POST",
+        body
       });
       elements.modalAPIKey.value = "";
-      await loadSettings(false);
-      toast("Modal settings tested and saved.");
-      if (state.videoProvider === "modal") await loadModels(false);
+      resetModalAccountForm();
+      await loadModalAccounts(false);
+      toast(id ? "Modal account updated." : "Modal account added.");
     } catch (error) {
       if (error.status !== 401) toast(error.message, true);
     } finally {
@@ -1862,9 +2825,28 @@
     elements.promptCategory.addEventListener("input", updatePromptCategory);
     elements.randomPrompt.addEventListener("click", generateRandomPrompt);
     elements.retryProject.addEventListener("click", retryCurrentProject);
-    elements.modeOptions.forEach((button) => button.addEventListener("click", () => setGenerationMode(button.dataset.mode)));
+    elements.modeOptions.forEach((button) => button.addEventListener("click", () => {
+      setGenerationMode(button.dataset.mode);
+      if (state.videoProvider === "modal") void loadModels(false);
+    }));
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
+    elements.vaultCodeForm.addEventListener("submit", saveVaultCode);
+    [elements.vaultCurrentCode, elements.vaultNewCode, elements.vaultConfirmCode, elements.vaultCode].forEach((input) => {
+      input.addEventListener("input", () => constrainVaultCodeInput(input));
+    });
+    elements.vaultUnlockForm.addEventListener("submit", unlockVault);
+    elements.vaultLock.addEventListener("click", lockVault);
+    elements.vaultGoSettings.addEventListener("click", () => navigate("settings"));
+    elements.vaultPlayerClose.addEventListener("click", closeVaultPlayer);
+    elements.vaultPlayerDialog.addEventListener("close", closeVaultPlayer);
     elements.modalConfigForm.addEventListener("submit", saveModalConfig);
+    elements.modalAccountCancel.addEventListener("click", resetModalAccountForm);
+    elements.modalAccountProject.addEventListener("change", () => {
+      if (state.videoProvider === "modal" && state.mode === "project") void loadModels(false);
+    });
+    elements.modalAccountSingle.addEventListener("change", () => {
+      if (state.videoProvider === "modal" && state.mode === "single") void loadModels(false);
+    });
     elements.videoProvider.addEventListener("change", changeVideoProvider);
     elements.testVideoProvider.addEventListener("click", testVideoProvider);
     elements.passwordForm.addEventListener("submit", updatePassword);
@@ -1922,6 +2904,15 @@
         loadProjects(false);
       }
     });
+    window.addEventListener("pagehide", () => {
+      if (!state.authenticated) return;
+      void requestVaultLock({ cache: "no-store", keepalive: true }).catch(() => {});
+      renderVaultLocked();
+    });
+    window.addEventListener("pageshow", (event) => {
+      if (!event.persisted || !state.authenticated) return;
+      void secureVaultAfterPageRestore();
+    });
   }
 
   async function bootstrap() {
@@ -1930,6 +2921,9 @@
     elements.menuButton.setAttribute("aria-expanded", "false");
     try {
       const session = await request("/api/session", {}, true);
+      if (!session.must_change_password) {
+        await requestVaultLock();
+      }
       showAuthenticated(session.username, session.must_change_password);
       if (!state.mustChangePassword) {
         await loadSettings(false);

@@ -7,10 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+var ErrProjectNotTerminal = errors.New("project is not terminal")
 
 func newProjectID() (string, error) {
 	raw := make([]byte, 12)
@@ -102,7 +105,7 @@ func (s *Store) SaveStoryPlan(projectID string, plan StoryPlan) error {
 	return tx.Commit()
 }
 
-const projectColumns = `id,topic,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at`
+const projectColumns = `id,topic,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at,in_vault`
 const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,progress,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,created_at,updated_at`
 
 func appendPipelineEvent(execer interface {
@@ -112,8 +115,7 @@ func appendPipelineEvent(execer interface {
 	return err
 }
 
-// AppendPipelineEvent appends a durable project event. Call it for meaningful
-// workflow transitions only; polling progress is intentionally not logged.
+// AppendPipelineEvent appends a durable, application-owned project event.
 func (s *Store) AppendPipelineEvent(projectID, stage, status, message string, sceneNumber, attempt int) error {
 	return appendPipelineEvent(s.db, projectID, stage, status, message, sceneNumber, attempt, time.Now().Unix())
 }
@@ -154,7 +156,7 @@ func scanTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextGener
 
 func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) {
 	var project VideoProject
-	err := scanner.Scan(&project.ID, &project.Topic, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt)
+	err := scanner.Scan(&project.ID, &project.Topic, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt, &project.InVault)
 	project.FinalVideoReady = project.FinalVideoPath != ""
 	return project, err
 }
@@ -213,11 +215,122 @@ func (s *Store) Project(id string) (VideoProject, error) {
 	return project, nil
 }
 
+// DeleteProject removes a completed or failed project and its persisted data.
+// The intermediate deleting status reserves the row before touching disk, so a
+// retry or worker cannot claim the project while its files are being removed.
+func (s *Store) DeleteProject(id string) error {
+	if !safeID(id) {
+		return errors.New("invalid project id")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var status, providerConfigID string
+	var inVault bool
+	if err := tx.QueryRow(`SELECT status,provider_config_id,in_vault FROM video_projects WHERE id=?`, id).Scan(&status, &providerConfigID, &inVault); err != nil {
+		return err
+	}
+	if inVault {
+		return ErrVaultItemInVault
+	}
+	if status != "completed" && status != "failed" {
+		return ErrProjectNotTerminal
+	}
+	result, err := tx.Exec(`UPDATE video_projects SET status='deleting',updated_at=? WHERE id=? AND status=?`, time.Now().Unix(), id, status)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return ErrProjectNotTerminal
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	projectPath := filepath.Join(s.projectDir, id)
+	if err := os.RemoveAll(projectPath); err != nil {
+		_, _ = s.db.Exec(`UPDATE video_projects SET status=?,updated_at=? WHERE id=? AND status='deleting'`, status, time.Now().Unix(), id)
+		return fmt.Errorf("remove project files: %w", err)
+	}
+
+	deleteTx, err := s.db.Begin()
+	if err != nil {
+		_, _ = s.db.Exec(`UPDATE video_projects SET status=?,updated_at=? WHERE id=? AND status='deleting'`, status, time.Now().Unix(), id)
+		return err
+	}
+	result, err = deleteTx.Exec(`DELETE FROM video_projects WHERE id=? AND status='deleting'`, id)
+	if err != nil {
+		_ = deleteTx.Rollback()
+		_, _ = s.db.Exec(`UPDATE video_projects SET status=?,updated_at=? WHERE id=? AND status='deleting'`, status, time.Now().Unix(), id)
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		_ = deleteTx.Rollback()
+		_, _ = s.db.Exec(`UPDATE video_projects SET status=?,updated_at=? WHERE id=? AND status='deleting'`, status, time.Now().Unix(), id)
+		return sql.ErrNoRows
+	}
+	if err := deleteTx.Commit(); err != nil {
+		_ = deleteTx.Rollback()
+		_, _ = s.db.Exec(`UPDATE video_projects SET status=?,updated_at=? WHERE id=? AND status='deleting'`, status, time.Now().Unix(), id)
+		return err
+	}
+	return s.DeleteProviderConfigIfUnused(providerConfigID)
+}
+
+// RecoverInterruptedProjectDeletes makes a project whose delete was interrupted
+// by a process crash visible and deletable again. Its folder may be partially
+// removed, so the terminal status explains that cleanup can be retried.
+func (s *Store) RecoverInterruptedProjectDeletes() error {
+	rows, err := s.db.Query(`SELECT id,provider_config_id FROM video_projects WHERE status='deleting'`)
+	if err != nil {
+		return err
+	}
+	type interruptedDelete struct{ id, providerConfigID string }
+	var pending []interruptedDelete
+	for rows.Next() {
+		var item interruptedDelete
+		if err := rows.Scan(&item.id, &item.providerConfigID); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range pending {
+		if !safeID(item.id) {
+			return errors.New("invalid project id during interrupted delete recovery")
+		}
+		if err := os.RemoveAll(filepath.Join(s.projectDir, item.id)); err != nil {
+			return fmt.Errorf("recover project file deletion: %w", err)
+		}
+		result, err := s.db.Exec(`DELETE FROM video_projects WHERE id=? AND status='deleting'`, item.id)
+		if err != nil {
+			return err
+		}
+		if count, _ := result.RowsAffected(); count == 1 {
+			if err := s.DeleteProviderConfigIfUnused(item.providerConfigID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Store) Projects(limit int) ([]VideoProject, error) {
 	if limit < 1 || limit > 100 {
 		limit = 24
 	}
-	rows, err := s.db.Query(`SELECT `+projectColumns+` FROM video_projects ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT `+projectColumns+` FROM video_projects WHERE in_vault=0 ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -269,12 +382,10 @@ func (s *Store) PendingProjects(ctx context.Context) ([]VideoProject, error) {
 }
 
 func (s *Store) populateProjectSummary(project *VideoProject) {
-	completed := 0
+	sceneProgress := 0
 	totalCost := 0.0
 	for _, scene := range project.Scenes {
-		if scene.Status == "completed" {
-			completed++
-		}
+		sceneProgress += min(100, max(0, scene.Progress))
 		var cost float64
 		_, _ = fmt.Sscanf(scene.CostUSD, "%f", &cost)
 		totalCost += cost
@@ -284,13 +395,13 @@ func (s *Store) populateProjectSummary(project *VideoProject) {
 	case "planning":
 		project.Progress = 5
 	case "generating":
-		project.Progress = 10 + completed*16
+		project.Progress = min(90, 10+sceneProgress*80/(ProjectSceneCount*100))
 	case "combining":
 		project.Progress = 95
 	case "completed":
 		project.Progress = 100
 	default:
-		project.Progress = completed * 16
+		project.Progress = min(90, 10+sceneProgress*80/(ProjectSceneCount*100))
 	}
 }
 
@@ -299,7 +410,7 @@ func (s *Store) UpdateProjectStatus(id, status, message string) error {
 	if err := s.db.QueryRow(`SELECT status FROM video_projects WHERE id=?`, id).Scan(&previous); err != nil {
 		return err
 	}
-	result, err := s.db.Exec(`UPDATE video_projects SET status=?,error=?,updated_at=? WHERE id=?`, status, message, time.Now().Unix(), id)
+	result, err := s.db.Exec(`UPDATE video_projects SET status=?,error=?,updated_at=? WHERE id=? AND status!='deleting'`, status, message, time.Now().Unix(), id)
 	if err != nil {
 		return err
 	}
@@ -336,12 +447,19 @@ func (s *Store) SetSceneGeneration(projectID string, number int, generation Gene
 	if generation.Progress != nil {
 		progress = min(100, max(0, *generation.Progress))
 	}
-	result, err := s.db.Exec(`UPDATE project_scenes SET provider_generation_id=?,status=?,progress=?,cost_usd=?,error=?,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='submitting'`, generation.ID, status, progress, generation.CostUSD, generation.Error, time.Now().Unix(), projectID, number)
+	message := ""
+	if status == "failed" {
+		message = "Video provider reported that this scene failed. Retry the scene."
+	}
+	result, err := s.db.Exec(`UPDATE project_scenes SET provider_generation_id=?,status=?,progress=?,cost_usd=?,error=?,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='submitting'`, generation.ID, status, progress, generation.CostUSD, message, time.Now().Unix(), projectID, number)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return sql.ErrNoRows
+	}
+	if status == "failed" {
+		return s.AppendPipelineEvent(projectID, "scene_submission", "failed", message, number, 0)
 	}
 	return s.AppendPipelineEvent(projectID, "scene_submission", "completed", "Video generation request accepted.", number, 0)
 }
@@ -366,8 +484,37 @@ func (s *Store) UpdateScene(projectID string, number int, status, cost, message 
 
 func (s *Store) SetSceneProgress(projectID string, number, progress int) error {
 	progress = min(100, max(0, progress))
-	_, err := s.db.Exec(`UPDATE project_scenes SET progress=?,updated_at=? WHERE project_id=? AND scene_number=?`, progress, time.Now().Unix(), projectID, number)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var previous int
+	if err := tx.QueryRow(`SELECT progress FROM project_scenes WHERE project_id=? AND scene_number=?`, projectID, number).Scan(&previous); err != nil {
+		return err
+	}
+	if progress <= previous {
+		return nil
+	}
+	if _, err := tx.Exec(`UPDATE project_scenes SET progress=?,updated_at=? WHERE project_id=? AND scene_number=?`, progress, time.Now().Unix(), projectID, number); err != nil {
+		return err
+	}
+	if milestone := sceneProgressMilestone(progress); milestone > sceneProgressMilestone(previous) {
+		message := fmt.Sprintf("Video generation reached %d%%.", milestone)
+		if err := appendPipelineEvent(tx, projectID, "scene_progress", "progress", message, number, 0, time.Now().Unix()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func sceneProgressMilestone(progress int) int {
+	for _, milestone := range []int{100, 90, 75, 50, 25} {
+		if progress >= milestone {
+			return milestone
+		}
+	}
+	return 0
 }
 
 func (s *Store) ScheduleSceneDownloadRetry(projectID string, number int) error {
@@ -399,18 +546,38 @@ func (s *Store) MarkSceneVideoReady(projectID string, number int, path string, s
 }
 
 func (s *Store) RetryScene(projectID string, number int) error {
-	result, err := s.db.Exec(`UPDATE project_scenes SET status='pending',progress=0,provider_generation_id='',cost_usd='',video_path='',size_bytes=0,error='',download_attempts=0,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='failed'`, time.Now().Unix(), projectID, number)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var projectStatus string
+	if err := tx.QueryRow(`SELECT status FROM video_projects WHERE id=?`, projectID).Scan(&projectStatus); err != nil {
+		return err
+	}
+	if projectStatus != "failed" && projectStatus != "generating" {
+		return sql.ErrNoRows
+	}
+	result, err := tx.Exec(`UPDATE project_scenes SET status='pending',progress=0,provider_generation_id='',cost_usd='',video_path='',size_bytes=0,error='',download_attempts=0,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='failed' AND EXISTS (SELECT 1 FROM video_projects WHERE id=? AND status IN ('failed','generating'))`, time.Now().Unix(), projectID, number, projectID)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return sql.ErrNoRows
 	}
-	_, err = s.db.Exec(`UPDATE video_projects SET status='generating',error='',updated_at=? WHERE id=?`, time.Now().Unix(), projectID)
-	if err != nil {
+	if projectStatus == "failed" {
+		projectUpdate, err := tx.Exec(`UPDATE video_projects SET status='generating',error='',updated_at=? WHERE id=? AND status='failed'`, time.Now().Unix(), projectID)
+		if err != nil {
+			return err
+		}
+		if count, _ := projectUpdate.RowsAffected(); count != 1 {
+			return sql.ErrNoRows
+		}
+	}
+	if err := appendPipelineEvent(tx, projectID, "scene_retry", "started", "Failed scene reset for another submission.", number, 0, time.Now().Unix()); err != nil {
 		return err
 	}
-	return s.AppendPipelineEvent(projectID, "scene_retry", "started", "Failed scene reset for another submission.", number, 0)
+	return tx.Commit()
 }
 
 func (s *Store) RetryProject(projectID string) error {

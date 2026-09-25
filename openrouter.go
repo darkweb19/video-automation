@@ -23,6 +23,15 @@ var defaultOpenRouterHTTPClient = &http.Client{
 	},
 }
 
+var defaultOpenRouterStoryHTTPClient = &http.Client{
+	// Leave a small margin beyond the story context so context cancellation,
+	// rather than the transport timer, is recorded in the project trace.
+	Timeout: storyGenerationTimeout + 15*time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 var defaultOpenRouterContentClient = &http.Client{
 	Transport: func() http.RoundTripper {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -40,6 +49,7 @@ var defaultOpenRouterContentClient = &http.Client{
 type OpenRouterClient struct {
 	APIKey            string
 	HTTPClient        *http.Client
+	StoryHTTPClient   *http.Client
 	ContentHTTPClient *http.Client
 	BaseURL           string
 }
@@ -79,6 +89,18 @@ func (c *OpenRouterClient) client() *http.Client {
 		return c.HTTPClient
 	}
 	return defaultOpenRouterHTTPClient
+}
+
+func (c *OpenRouterClient) storyClient() *http.Client {
+	if c.StoryHTTPClient != nil {
+		return c.StoryHTTPClient
+	}
+	// HTTPClient is the established dependency-injection point across tests and
+	// custom callers. Honor an injected replacement for story requests too.
+	if c.HTTPClient != nil && c.HTTPClient != defaultOpenRouterHTTPClient {
+		return c.HTTPClient
+	}
+	return defaultOpenRouterStoryHTTPClient
 }
 
 func (c *OpenRouterClient) contentClient() *http.Client {

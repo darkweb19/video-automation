@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FrameVault — Video dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260923-3">
+  <link rel="stylesheet" href="/static/styles.css?v=20260925-1">
   <link rel="stylesheet" href="/static/model-picker.css?v=20260923-1">
   <link rel="stylesheet" href="/static/project.css?v=20260923-1">
+  <link rel="stylesheet" href="/static/history-settings.css?v=20260925-2">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -49,6 +50,7 @@
         <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span>Overview</button>
         <button class="nav-item" data-view="generate"><span class="nav-icon">＋</span>Generate</button>
         <button class="nav-item" data-view="history"><span class="nav-icon">▤</span>History</button>
+        <button class="nav-item" data-view="vault"><span class="nav-icon">▣</span>Vault</button>
         <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span>Settings</button>
       </nav>
       <div class="sidebar-foot"><span class="status-dot"></span><span>Docker storage active</span></div>
@@ -111,6 +113,16 @@
                   <small id="project-model-note">Choose a model that supports six-second clips and 9:16 output.</small>
                 </div>
                 <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
+                <div id="modal-account-project-field" class="field modal-account-field" hidden>
+                  <label for="modal-account-project">Modal account for this submission</label>
+                  <select id="modal-account-project" required><option value="">Choose a Modal account</option></select>
+                  <small>Choose which Modal endpoint and account will run this project.</small>
+                </div>
+                <div id="modal-account-single-field" class="field modal-account-field" hidden>
+                  <label for="modal-account-single">Modal account for this submission</label>
+                  <select id="modal-account-single" required><option value="">Choose a Modal account</option></select>
+                  <small>Choose which Modal endpoint and account will run this clip.</small>
+                </div>
                 <div id="single-options" class="form-grid">
                   <div class="field"><label for="duration">Duration</label><select id="duration"></select></div>
                   <div id="resolution-field" class="field"><label for="resolution">Resolution</label><select id="resolution"></select></div>
@@ -129,6 +141,10 @@
                 <div id="progress-wrap" class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
                 <p id="status-detail" class="subtle"></p>
                 <div id="error" class="alert error" role="alert" hidden></div>
+                <section id="single-terminal-section" class="job-terminal-section" hidden aria-labelledby="single-terminal-title">
+                  <div class="trace-heading"><div><h3 id="single-terminal-title">Job console</h3><p>Normalized generation events</p></div></div>
+                  <ol id="single-terminal" class="job-terminal" aria-live="polite"></ol>
+                </section>
                 <button id="retry-status" class="button secondary" type="button" hidden>Retry status</button>
                 <video id="generated-video" controls playsinline preload="metadata" hidden></video>
                 <a id="open-video" class="button secondary full" hidden>Download video</a>
@@ -141,6 +157,10 @@
                 <section id="project-pipeline" class="project-pipeline" aria-labelledby="project-pipeline-title">
                   <div class="trace-heading"><h3 id="project-pipeline-title">Pipeline</h3><span class="trace-caption">Process trace</span></div>
                   <ol id="project-pipeline-list" class="pipeline-list"></ol>
+                </section>
+                <section class="job-terminal-section project-terminal-section" aria-labelledby="project-terminal-title">
+                  <div class="trace-heading"><div><h3 id="project-terminal-title">Job console</h3><p>Normalized generation events</p></div></div>
+                  <ol id="project-terminal" class="job-terminal" aria-live="polite"></ol>
                 </section>
                 <div id="project-story" class="project-story" hidden></div>
                 <div id="project-scenes" class="project-scenes"></div>
@@ -155,21 +175,68 @@
         </section>
 
         <section class="view" data-page="history">
-          <section class="panel">
-            <div class="panel-head"><div><h2>Generation history</h2><p>Videos and metadata stored in your Docker volume</p></div><button id="refresh-history" class="button secondary">Refresh</button></div>
+          <div class="history-page-head">
+            <div><h2>Generation history</h2><p>Videos, project runs, and the process logs saved with each run.</p></div>
+            <button id="refresh-history" class="button secondary">Refresh history</button>
+          </div>
+          <div class="history-library">
             <div id="project-history" class="project-history"></div>
             <div id="history-grid" class="history-grid"><div class="empty">No generations yet.</div></div>
-          </section>
+          </div>
+        </section>
+
+        <section class="view" data-page="vault">
+          <div class="vault-page-head">
+            <div><h2>Vault</h2><p>Videos you moved out of History.</p></div>
+            <button id="vault-lock" class="button secondary" type="button" hidden>Lock Vault</button>
+          </div>
+          <div id="vault-locked" class="panel vault-lock-panel">
+            <div class="vault-gate">
+              <div class="vault-gate-mark" aria-hidden="true">▣</div>
+              <h3 id="vault-gate-title">Vault is locked</h3>
+              <p id="vault-gate-copy">Enter your four-digit code to view protected videos.</p>
+              <form id="vault-unlock-form" class="vault-code-form">
+                <label for="vault-code">Vault code</label>
+                <input id="vault-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="one-time-code" aria-describedby="vault-code-error" required>
+                <p id="vault-code-error" class="form-error" role="alert" hidden></p>
+                <button id="vault-unlock-button" class="button primary full" type="submit">Unlock Vault</button>
+              </form>
+              <button id="vault-go-settings" class="text-button vault-settings-link" type="button" hidden>Set a code in Settings</button>
+              <p class="vault-gate-foot">The Vault locks when you refresh this page or choose Lock Vault.</p>
+            </div>
+          </div>
+          <div id="vault-content" class="vault-content" hidden>
+            <div class="vault-collection-head">
+              <div><h3>Protected videos</h3><p>Only available while the Vault is unlocked.</p></div>
+              <span id="vault-count" class="history-count">0</span>
+            </div>
+            <div id="vault-empty" class="panel vault-empty" hidden>
+              <div class="vault-empty-mark" aria-hidden="true">▤</div>
+              <h3>Nothing stored here yet</h3>
+              <p>Move a completed video from History to keep it here.</p>
+              <button class="button secondary" data-go="history" type="button">Go to History</button>
+            </div>
+            <div id="vault-grid" class="history-grid vault-grid"></div>
+          </div>
+          <dialog id="vault-player-dialog" class="vault-player-dialog" aria-labelledby="vault-player-title">
+            <div class="vault-player-head">
+              <h2 id="vault-player-title">Vault video</h2>
+              <button id="vault-player-close" class="button secondary" type="button">Close</button>
+            </div>
+            <video id="vault-player" controls playsinline preload="metadata"></video>
+          </dialog>
         </section>
 
         <section class="view" data-page="settings">
           <div class="settings-grid">
-            <section class="panel">
+            <section class="panel settings-provider-panel">
               <div class="panel-head"><div><h2>Video generation</h2><p>Select the provider used for new video jobs.</p></div></div>
-              <div class="field"><label for="video-provider">Video provider</label><select id="video-provider"><option value="modal">Modal</option><option value="openrouter">OpenRouter</option></select><small id="provider-help">Model options and capabilities follow the selected provider.</small></div>
-              <div class="provider-actions"><span id="video-provider-state" class="badge neutral">Checking</span><button id="test-video-provider" class="button secondary" type="button">Test video provider</button></div>
+              <div class="settings-provider-controls">
+                <div class="field"><label for="video-provider">Video provider</label><select id="video-provider"><option value="modal">Modal</option><option value="openrouter">OpenRouter</option></select><small id="provider-help">Model options and capabilities follow the selected provider.</small></div>
+                <div class="provider-actions"><span id="video-provider-state" class="badge neutral">Checking</span><button id="test-video-provider" class="button secondary" type="button">Test video provider</button></div>
+              </div>
             </section>
-            <section id="openrouter-settings" class="panel">
+            <section id="openrouter-settings" class="panel settings-key-panel">
               <div class="panel-head"><div><h2>OpenRouter API key</h2><p>Used for story generation and OpenRouter video. Encrypted at rest.</p></div><span id="key-state" class="badge neutral">Checking</span></div>
               <div class="key-display"><span>Saved key status</span><strong id="masked-key">Not configured</strong></div>
               <form id="api-key-form" class="stack">
@@ -177,15 +244,29 @@
                 <button class="button primary" type="submit">Test and save key</button>
               </form>
             </section>
-            <section id="modal-settings" class="panel" hidden>
-              <div class="panel-head"><div><h2>Modal video API</h2><p>The API key is encrypted before it is stored.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
-              <form id="modal-config-form" class="stack">
-                <div class="field"><label for="modal-base-url">Modal Video Base URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
-                <div class="field"><label for="modal-api-key">Modal Video API Key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key"><small id="modal-key-help">The saved key is never returned to the browser.</small></div>
-                <button class="button primary" type="submit">Test and save Modal settings</button>
+            <section class="panel vault-settings-panel">
+              <div class="panel-head"><div><h2>Vault code</h2><p>Set the four-digit code used to open your protected videos.</p></div><span id="vault-code-state" class="badge neutral">Checking</span></div>
+              <form id="vault-code-form" class="stack">
+                <div id="vault-current-code-field" class="field" hidden><label for="vault-current-code">Current code</label><input id="vault-current-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password"><small>Enter the current code before changing it.</small></div>
+                <div class="field"><label for="vault-new-code">New four-digit code</label><input id="vault-new-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></div>
+                <div class="field"><label for="vault-confirm-code">Confirm new code</label><input id="vault-confirm-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></div>
+                <button id="vault-code-save" class="button primary" type="submit">Set Vault code</button>
+                <small id="vault-code-help">Keep this code safe. If you lose it, the Vault cannot be opened in this version.</small>
               </form>
             </section>
-            <section class="panel">
+            <section id="modal-settings" class="panel settings-account-panel" hidden>
+              <div class="panel-head"><div><h2>Modal accounts</h2><p>Store multiple endpoints. Saved API keys are never returned to the browser.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
+              <div id="modal-account-list" class="modal-account-list"></div>
+              <form id="modal-config-form" class="stack modal-account-form">
+                <h3 id="modal-account-form-title">Add Modal account</h3>
+                <input id="modal-account-id" type="hidden">
+                <div class="field"><label for="modal-account-name">Account name</label><input id="modal-account-name" autocomplete="off" placeholder="e.g. Production" required></div>
+                <div class="field"><label for="modal-base-url">Modal endpoint URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
+                <div class="field"><label for="modal-api-key">Secret API key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key" required><small id="modal-key-help">Required when adding an account. Leave blank when editing to keep its saved key.</small></div>
+                <div class="modal-account-form-actions"><button class="button primary" type="submit">Save Modal account</button><button id="modal-account-cancel" class="button secondary" type="button" hidden>Cancel edit</button></div>
+              </form>
+            </section>
+            <section class="panel settings-password-panel">
               <div class="panel-head"><div><h2>Change password</h2><p>All existing sessions will be signed out</p></div></div>
               <form id="password-form" class="stack">
                 <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password" autocomplete="current-password" required></div>
@@ -199,6 +280,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260923-3" defer></script>
+  <script src="/static/app.js?v=20260925-2" defer></script>
 </body>
 </html>

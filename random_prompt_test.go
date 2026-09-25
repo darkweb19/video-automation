@@ -3,15 +3,57 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
-func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func TestGenerateRandomPromptUsesQueuedTextClientOnFirstRequest(t *testing.T) {
+	if defaultOpenRouterStoryHTTPClient.Timeout <= randomPromptTimeout {
+		t.Fatalf("text client timeout %s does not cover the %s prompt budget", defaultOpenRouterStoryHTTPClient.Timeout, randomPromptTimeout)
+	}
+	if randomPromptTimeout >= 2*time.Minute {
+		t.Fatalf("prompt budget %s exceeds server write deadline", randomPromptTimeout)
+	}
+	client := NewOpenRouterClient("test-key")
+	if client.storyClient() != defaultOpenRouterStoryHTTPClient {
+		t.Fatal("default prompt client does not allow queued text responses")
+	}
+	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("ordinary 45-second metadata client handled prompt request")
+		return nil, nil
+	})}
+	client.StoryHTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/v1/chat/completions" {
+			t.Fatalf("prompt request path = %q", request.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"A firefly crosses a moonlit forest."}}]}`)),
+		}, nil
+	})}
+	ctx, cancel := context.WithTimeout(context.Background(), randomPromptTimeout)
+	defer cancel()
+	prompt, err := client.GenerateRandomPrompt(ctx, RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject})
+	if err != nil || prompt != "A firefly crosses a moonlit forest." {
+		t.Fatalf("first prompt = %q, error = %v", prompt, err)
+	}
+}
+
+func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		input      RandomPromptRequest
@@ -19,22 +61,42 @@ func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
 		want       string
 		maxTokens  float64
 		userPrefix string
+		systemText string
 	}{
 		{
 			name:       "project topic",
 			input:      RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject},
 			content:    `"A firefly guides a lost traveler through a moonlit forest."`,
 			want:       "A firefly guides a lost traveler through a moonlit forest.",
-			maxTokens:  120,
+			maxTokens:  randomProjectTokens,
 			userPrefix: "Generate one original topic",
+			systemText: "at most 200 characters",
 		},
 		{
 			name:       "single prompt",
 			input:      RandomPromptRequest{Category: RandomPromptCategoryHorrorStory, Mode: RandomPromptModeSingle},
 			content:    "A lone adult hiker crosses a foggy forest trail at dusk, handheld camera slowly pushes forward as branches bend, ending on a distant cabin in vertical 9:16.",
 			want:       "A lone adult hiker crosses a foggy forest trail at dusk, handheld camera slowly pushes forward as branches bend, ending on a distant cabin in vertical 9:16.",
-			maxTokens:  700,
+			maxTokens:  randomSingleTokens,
 			userPrefix: "Generate one original single-clip video prompt",
+		},
+		{
+			name:       "mature project topic",
+			input:      RandomPromptRequest{Category: RandomPromptCategoryMatureContent, Mode: RandomPromptModeProject},
+			content:    "A confident adult dancer in a red bikini playfully sways beneath neon lights, her bare back framed by the mirrorball glow.",
+			want:       "A confident adult dancer in a red bikini playfully sways beneath neon lights, her bare back framed by the mirrorball glow.",
+			maxTokens:  randomProjectTokens,
+			userPrefix: "Generate one original bold, sensual, non-explicit adult video idea",
+			systemText: "daring two-piece, bikini, or exotic lingerie",
+		},
+		{
+			name:       "mature single prompt",
+			input:      RandomPromptRequest{Category: RandomPromptCategoryMatureContent, Mode: RandomPromptModeSingle},
+			content:    "A clearly adult woman in an opaque black lingerie set turns to show her bare back, then gives a teasing hip sway under warm amber light, six-second slow push-in, vertical 9:16.",
+			want:       "A clearly adult woman in an opaque black lingerie set turns to show her bare back, then gives a teasing hip sway under warm amber light, six-second slow push-in, vertical 9:16.",
+			maxTokens:  randomSingleTokens,
+			userPrefix: "Generate one original bold, sensual, non-explicit adult single-clip prompt",
+			systemText: "no nudity, visible nipples, genitalia",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -50,12 +112,12 @@ func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
 					Messages []struct {
 						Content string `json:"content"`
 					} `json:"messages"`
-					MaxTokens float64 `json:"max_tokens"`
+					MaxTokens float64 `json:"max_completion_tokens"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				if body.Model != ScriptModel || body.MaxTokens != test.maxTokens || len(body.Messages) != 2 || !strings.HasPrefix(body.Messages[1].Content, test.userPrefix) || !strings.Contains(body.Messages[1].Content, test.input.Category) {
+				if body.Model != "inclusionai/ling-3.0-flash-fin:free" || body.MaxTokens != test.maxTokens || len(body.Messages) != 2 || !strings.HasPrefix(body.Messages[1].Content, test.userPrefix) || !strings.Contains(body.Messages[1].Content, test.input.Category) || !strings.Contains(body.Messages[0].Content, test.systemText) {
 					t.Fatalf("unexpected request body: %#v", body)
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": test.content}}}})
@@ -71,7 +133,20 @@ func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
 	}
 }
 
-func TestGenerateRandomPromptRejectsInvalidInputAndLongProjectTopic(t *testing.T) {
+func TestGenerateRandomPromptReadsTextBlocksAndFallsThroughEmptyChoices(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":""}},{"message":{"content":[{"type":"image","image_url":"ignored"},{"type":"text","text":"A confident adult woman in an opaque red bikini turns to reveal her bare back"},{"type":"text","text":" under golden studio light, vertical 9:16."}]}}]}`)
+	}))
+	defer server.Close()
+	client := testClient(server)
+	prompt, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryMatureContent, Mode: RandomPromptModeSingle})
+	want := "A confident adult woman in an opaque red bikini turns to reveal her bare back under golden studio light, vertical 9:16."
+	if err != nil || prompt != want {
+		t.Fatalf("prompt = %q, error = %v", prompt, err)
+	}
+}
+
+func TestGenerateRandomPromptRejectsInvalidInputAndFitsLongProjectTopic(t *testing.T) {
 	client := NewOpenRouterClient("test-key")
 	if _, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: "unknown", Mode: RandomPromptModeSingle}); err == nil {
 		t.Fatal("expected invalid category error")
@@ -79,14 +154,19 @@ func TestGenerateRandomPromptRejectsInvalidInputAndLongProjectTopic(t *testing.T
 	if _, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: "other"}); err == nil {
 		t.Fatal("expected invalid mode error")
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": strings.Repeat("x", maxRandomProjectTopicRunes+1)}}}})
-	}))
-	defer server.Close()
-	client.BaseURL = server.URL
-	client.HTTPClient = server.Client()
-	if _, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject}); err == nil || !strings.Contains(err.Error(), "project topic exceeds") {
-		t.Fatalf("expected project topic limit error, got %v", err)
+	for _, count := range []int{maxRandomProjectTopicRunes + 1, MaxPromptLength + 1} {
+		t.Run(fmt.Sprintf("%d runes", count), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": strings.Repeat("x", count)}}}})
+			}))
+			defer server.Close()
+			client.BaseURL = server.URL
+			client.HTTPClient = server.Client()
+			prompt, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject})
+			if err != nil || utf8.RuneCountInString(prompt) > maxRandomProjectTopicRunes || !strings.HasSuffix(prompt, "…") {
+				t.Fatalf("long project topic = %q (%d runes), error = %v", prompt, utf8.RuneCountInString(prompt), err)
+			}
+		})
 	}
 }
 
@@ -167,5 +247,22 @@ func TestRandomPromptCategoriesAreExact(t *testing.T) {
 	}
 	if validRandomPromptCategory("soft corn") {
 		t.Fatal("categories must remain exact")
+	}
+}
+
+func TestSafeRandomPromptFailureExplainsActionableUpstreamErrors(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{context.DeadlineExceeded, "timed out"},
+		{&upstreamError{StatusCode: http.StatusUnauthorized}, "Update it in Settings"},
+		{&upstreamError{StatusCode: http.StatusTooManyRequests}, "rate-limited"},
+		{&upstreamError{StatusCode: http.StatusBadGateway}, "HTTP 502"},
+	}
+	for _, test := range tests {
+		if got := safeRandomPromptFailure(test.err); !strings.Contains(got, test.want) {
+			t.Fatalf("safeRandomPromptFailure(%v) = %q, want substring %q", test.err, got, test.want)
+		}
 	}
 }

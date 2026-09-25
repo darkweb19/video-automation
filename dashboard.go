@@ -18,16 +18,18 @@ import (
 )
 
 const (
-	apiKeySetting            = "openrouter_api_key"
-	videoProviderSetting     = "video_provider"
-	modalVideoBaseURLSetting = "modal_video_base_url"
-	modalVideoAPIKeySetting  = "modal_video_api_key"
+	apiKeySetting                = "openrouter_api_key"
+	videoProviderSetting         = "video_provider"
+	modalVideoBaseURLSetting     = "modal_video_base_url"
+	modalVideoAPIKeySetting      = "modal_video_api_key"
+	modalAccountsMigratedSetting = "modal_video_accounts_migrated"
 )
 
 type dashboardApp struct {
 	store                     *Store
 	security                  *Security
 	logger                    *slog.Logger
+	vault                     *vaultRuntime
 	baseURL                   string
 	limiter                   *loginThrottle
 	recoveryLimiter           *loginThrottle
@@ -38,13 +40,17 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger, limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
+	app := &dashboardApp{store: store, security: security, logger: logger, vault: newVaultRuntime(), limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
+	if err := store.RecoverInterruptedProjectDeletes(); err != nil {
+		logger.Error("recover interrupted project deletions failed")
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", app.index)
 	mux.HandleFunc("GET /static/app.js", app.static("static/app.js", "application/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /static/styles.css", app.static("static/styles.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/model-picker.css", app.static("static/model-picker.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/project.css", app.static("static/project.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /static/history-settings.css", app.static("static/history-settings.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /health", app.health)
 	mux.HandleFunc("POST /api/login", app.login)
 	mux.HandleFunc("POST /api/password/recover", app.recoverPassword)
@@ -55,10 +61,18 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("POST /generate", app.requirePasswordChanged(http.HandlerFunc(app.generate)))
 	mux.Handle("GET /status", app.requirePasswordChanged(http.HandlerFunc(app.status)))
 	mux.Handle("GET /api/generations", app.requirePasswordChanged(http.HandlerFunc(app.history)))
+	mux.Handle("GET /api/vault/status", app.requirePasswordChanged(http.HandlerFunc(app.vaultStatus)))
+	mux.Handle("POST /api/vault/unlock", app.requirePasswordChanged(http.HandlerFunc(app.unlockVault)))
+	mux.Handle("POST /api/vault/lock", app.requirePasswordChanged(http.HandlerFunc(app.lockVault)))
+	mux.Handle("GET /api/vault/items", app.requirePasswordChanged(app.requireVaultUnlock(http.HandlerFunc(app.vaultItems))))
+	mux.Handle("GET /api/vault/items/{kind}/{id}/video", app.requirePasswordChanged(app.requireVaultUnlock(http.HandlerFunc(app.vaultVideo))))
+	mux.Handle("POST /api/vault/items/{kind}/{id}/move", app.requirePasswordChanged(http.HandlerFunc(app.moveToVault)))
+	mux.Handle("POST /api/vault/items/{kind}/{id}/restore", app.requirePasswordChanged(app.requireVaultUnlock(http.HandlerFunc(app.restoreFromVault))))
 	mux.Handle("POST /api/prompts/random", app.requirePasswordChanged(http.HandlerFunc(app.randomPrompt)))
 	mux.Handle("POST /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.createProject)))
 	mux.Handle("GET /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.projects)))
 	mux.Handle("GET /api/projects/{id}", app.requirePasswordChanged(http.HandlerFunc(app.project)))
+	mux.Handle("DELETE /api/projects/{id}", app.requirePasswordChanged(http.HandlerFunc(app.deleteProject)))
 	mux.Handle("POST /api/projects/{id}/retry", app.requirePasswordChanged(http.HandlerFunc(app.retryProject)))
 	mux.Handle("POST /api/projects/{id}/scenes/{scene}/retry", app.requirePasswordChanged(http.HandlerFunc(app.retryProjectScene)))
 	mux.Handle("GET /api/projects/{id}/video", app.requirePasswordChanged(http.HandlerFunc(app.projectVideo)))
@@ -68,9 +82,20 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("PUT /api/settings/api-key", app.requirePasswordChanged(http.HandlerFunc(app.updateAPIKey)))
 	mux.Handle("PUT /api/settings/video-provider", app.requirePasswordChanged(http.HandlerFunc(app.updateVideoProvider)))
 	mux.Handle("PUT /api/settings/modal", app.requirePasswordChanged(http.HandlerFunc(app.updateModalSettings)))
+	mux.Handle("GET /api/modal-accounts", app.requirePasswordChanged(http.HandlerFunc(app.modalAccounts)))
+	mux.Handle("POST /api/modal-accounts", app.requirePasswordChanged(http.HandlerFunc(app.createModalAccount)))
+	mux.Handle("PUT /api/modal-accounts/active", app.requirePasswordChanged(http.HandlerFunc(app.setActiveModalAccount)))
+	mux.Handle("PUT /api/modal-accounts/{id}", app.requirePasswordChanged(http.HandlerFunc(app.updateModalAccount)))
+	mux.Handle("DELETE /api/modal-accounts/{id}", app.requirePasswordChanged(http.HandlerFunc(app.deleteModalAccount)))
 	mux.Handle("PUT /api/settings/video-model", app.requirePasswordChanged(http.HandlerFunc(app.updateVideoModel)))
 	mux.Handle("POST /api/settings/video-provider/test", app.requirePasswordChanged(http.HandlerFunc(app.testVideoProvider)))
 	mux.Handle("PUT /api/settings/password", app.requireAuth(http.HandlerFunc(app.updatePassword)))
+	mux.Handle("PUT /api/settings/vault-code", app.requirePasswordChanged(http.HandlerFunc(app.updateVaultCode)))
+	if security != nil {
+		if err := app.migrateLegacyModalAccount(); err != nil {
+			logger.Warn("legacy Modal account migration failed")
+		}
+	}
 	return securityHeaders(mux)
 }
 
@@ -243,6 +268,7 @@ func (a *dashboardApp) recoverPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.recoveryLimiter.Succeeded(ip)
+	a.clearVaultGrants()
 	a.security.Logout(w, r)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "password reset"})
 }
@@ -250,6 +276,9 @@ func (a *dashboardApp) recoverPassword(w http.ResponseWriter, r *http.Request) {
 func (a *dashboardApp) logout(w http.ResponseWriter, r *http.Request) {
 	if !mutationAllowed(w, r) {
 		return
+	}
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		a.clearVaultGrantsForSession(tokenHash(cookie.Value))
 	}
 	a.security.Logout(w, r)
 	w.WriteHeader(http.StatusNoContent)
@@ -286,11 +315,87 @@ func (a *dashboardApp) selectedVideoProvider() (VideoProviderID, error) {
 	return provider, nil
 }
 
+func modalAccountAAD(id string) string { return "modal_video_account." + id }
+
+func (a *dashboardApp) defaultModalAccountID() string {
+	id, err := a.store.Setting("modal_video_default_account_id")
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
+func (a *dashboardApp) modalVideoProviderForAccount(id string) (VideoService, error) {
+	if !safeID(id) {
+		return nil, errors.New("select a valid Modal account")
+	}
+	account, err := a.store.ModalVideoAccount(id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("selected Modal account no longer exists")
+	}
+	if err != nil {
+		return nil, err
+	}
+	key, err := a.security.DecryptSetting(modalAccountAAD(account.ID), account.EncryptedAPIKey)
+	if err != nil {
+		return nil, errors.New("unable to load selected Modal account")
+	}
+	return NewModalVideoClient(account.Endpoint, key), nil
+}
+
+// migrateLegacyModalAccount preserves old single-account installations. The
+// legacy settings remain in place for pre-upgrade immutable snapshot backfill;
+// all new account ciphertext uses a stable account-id AAD.
+func (a *dashboardApp) migrateLegacyModalAccount() error {
+	if migrated, err := a.store.Setting(modalAccountsMigratedSetting); err == nil && migrated == "1" {
+		return nil
+	}
+	accounts, err := a.store.ModalVideoAccounts()
+	if err != nil {
+		return err
+	}
+	if len(accounts) > 0 {
+		if a.defaultModalAccountID() == "" {
+			if err := a.store.SetSetting("modal_video_default_account_id", accounts[0].ID); err != nil {
+				return err
+			}
+		}
+		return a.store.SetSetting(modalAccountsMigratedSetting, "1")
+	}
+	endpoint, endpointErr := a.store.Setting(modalVideoBaseURLSetting)
+	ciphertext, keyErr := a.store.Setting(modalVideoAPIKeySetting)
+	if endpointErr != nil || keyErr != nil || strings.TrimSpace(endpoint) == "" {
+		return a.store.SetSetting(modalAccountsMigratedSetting, "1")
+	}
+	key, err := a.security.DecryptSetting(modalVideoAPIKeySetting, ciphertext)
+	if err != nil {
+		return err
+	}
+	id, err := newModalVideoAccountID()
+	if err != nil {
+		return err
+	}
+	encrypted, err := a.security.EncryptSetting(modalAccountAAD(id), key)
+	if err != nil {
+		return err
+	}
+	if _, err := a.store.InsertModalVideoAccount(ModalVideoAccount{ID: id, Name: "Legacy Modal account", Endpoint: endpoint, EncryptedAPIKey: encrypted}); err != nil {
+		return err
+	}
+	if err := a.store.SetSetting("modal_video_default_account_id", id); err != nil {
+		return err
+	}
+	return a.store.SetSetting(modalAccountsMigratedSetting, "1")
+}
+
 func (a *dashboardApp) videoProvider(provider VideoProviderID) (VideoService, error) {
 	switch provider {
 	case VideoProviderOpenRouter:
 		return a.openRouterTextProvider()
 	case VideoProviderModal:
+		if id := a.defaultModalAccountID(); id != "" {
+			return a.modalVideoProviderForAccount(id)
+		}
 		baseURL, err := a.store.Setting(modalVideoBaseURLSetting)
 		if err != nil {
 			return nil, errors.New("Modal video base URL is not configured")
@@ -341,6 +446,13 @@ func (a *dashboardApp) activeVideoProviderSnapshot() (VideoService, VideoProvide
 }
 
 func (a *dashboardApp) videoProviderSnapshot(provider VideoProviderID) (VideoService, VideoProviderID, string, error) {
+	return a.videoProviderSnapshotForAccount(provider, "")
+}
+
+// videoProviderSnapshotForAccount creates an immutable credential snapshot at
+// submission time. Deleting or editing a reusable Modal account can therefore
+// never retarget an already accepted job.
+func (a *dashboardApp) videoProviderSnapshotForAccount(provider VideoProviderID, modalAccountID string) (VideoService, VideoProviderID, string, error) {
 	var baseURL, encryptedSetting string
 	var err error
 	switch provider {
@@ -348,6 +460,22 @@ func (a *dashboardApp) videoProviderSnapshot(provider VideoProviderID) (VideoSer
 		encryptedSetting, err = a.store.Setting(apiKeySetting)
 		baseURL = a.baseURL
 	case VideoProviderModal:
+		if modalAccountID != "" {
+			account, accountErr := a.store.ModalVideoAccount(modalAccountID)
+			if errors.Is(accountErr, sql.ErrNoRows) {
+				return nil, "", "", errors.New("selected Modal account no longer exists")
+			}
+			if accountErr != nil {
+				return nil, "", "", accountErr
+			}
+			baseURL = account.Endpoint
+			encryptedSetting = account.EncryptedAPIKey
+			key, decryptErr := a.security.DecryptSetting(modalAccountAAD(account.ID), encryptedSetting)
+			if decryptErr != nil {
+				return nil, "", "", errors.New("unable to load selected Modal account")
+			}
+			return a.createProviderSnapshot(provider, baseURL, key)
+		}
 		baseURL, err = a.store.Setting(modalVideoBaseURLSetting)
 		if err == nil {
 			encryptedSetting, err = a.store.Setting(modalVideoAPIKeySetting)
@@ -360,6 +488,10 @@ func (a *dashboardApp) videoProviderSnapshot(provider VideoProviderID) (VideoSer
 	if err != nil {
 		return nil, "", "", err
 	}
+	return a.createProviderSnapshot(provider, baseURL, key)
+}
+
+func (a *dashboardApp) createProviderSnapshot(provider VideoProviderID, baseURL, key string) (VideoService, VideoProviderID, string, error) {
 	configID, err := newProviderConfigID()
 	if err != nil {
 		return nil, "", "", err
@@ -421,6 +553,7 @@ func (a *dashboardApp) activeVideoProvider() (VideoService, VideoProviderID, err
 
 func (a *dashboardApp) models(w http.ResponseWriter, r *http.Request) {
 	requested := VideoProviderID(r.URL.Query().Get("provider"))
+	modalAccountID := strings.TrimSpace(r.URL.Query().Get("modal_account_id"))
 	var err error
 	if requested == "" {
 		requested, err = a.selectedVideoProvider()
@@ -432,7 +565,12 @@ func (a *dashboardApp) models(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "unable to load video provider")
 		return
 	}
-	provider, err := a.videoProvider(requested)
+	var provider VideoService
+	if requested == VideoProviderModal && modalAccountID != "" {
+		provider, err = a.modalVideoProviderForAccount(modalAccountID)
+	} else {
+		provider, err = a.videoProvider(requested)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -446,16 +584,28 @@ func (a *dashboardApp) models(w http.ResponseWriter, r *http.Request) {
 	if models == nil {
 		models = []VideoModel{}
 	}
+	effectiveModalAccountID := modalAccountID
+	if requested == VideoProviderModal && effectiveModalAccountID == "" {
+		effectiveModalAccountID = a.defaultModalAccountID()
+	}
 	writeJSON(w, http.StatusOK, struct {
 		Models          []VideoModel `json:"models"`
 		MaxPromptLength int          `json:"max_prompt_length"`
 		Provider        string       `json:"provider"`
 		SelectedModel   string       `json:"selected_model,omitempty"`
-	}{models, MaxPromptLength, string(requested), a.selectedVideoModel(requested)})
+	}{models, MaxPromptLength, string(requested), a.selectedVideoModelForAccount(requested, effectiveModalAccountID)})
 }
 
 func (a *dashboardApp) selectedVideoModel(provider VideoProviderID) string {
-	model, err := a.store.Setting("video_model." + string(provider))
+	return a.selectedVideoModelForAccount(provider, "")
+}
+
+func (a *dashboardApp) selectedVideoModelForAccount(provider VideoProviderID, modalAccountID string) string {
+	key := "video_model." + string(provider)
+	if provider == VideoProviderModal && modalAccountID != "" {
+		key += "." + modalAccountID
+	}
+	model, err := a.store.Setting(key)
 	if err != nil {
 		return ""
 	}
@@ -473,6 +623,40 @@ func estimateCost(duration int, price string) string {
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", value*float64(duration)), "0"), ".")
 }
 
+type generationSubmission struct {
+	Prompt         string `json:"prompt"`
+	Model          string `json:"model"`
+	Duration       int    `json:"duration,omitempty"`
+	Resolution     string `json:"resolution,omitempty"`
+	AspectRatio    string `json:"aspect_ratio,omitempty"`
+	GenerateAudio  *bool  `json:"generate_audio,omitempty"`
+	ModalAccountID string `json:"modal_account_id,omitempty"`
+}
+
+func (s generationSubmission) providerRequest() GenerateRequest {
+	return GenerateRequest{Prompt: s.Prompt, Model: s.Model, Duration: s.Duration, Resolution: s.Resolution, AspectRatio: s.AspectRatio, GenerateAudio: s.GenerateAudio}
+}
+
+type projectSubmission struct {
+	Topic          string `json:"topic"`
+	Model          string `json:"model"`
+	ModalAccountID string `json:"modal_account_id,omitempty"`
+}
+
+func (a *dashboardApp) selectedSubmissionProvider(modalAccountID string) (VideoProviderID, error) {
+	providerID, err := a.selectedVideoProvider()
+	if err != nil {
+		return "", err
+	}
+	if providerID == VideoProviderModal && !safeID(modalAccountID) {
+		return "", errors.New("select a Modal account for this generation")
+	}
+	if providerID != VideoProviderModal && modalAccountID != "" {
+		return "", errors.New("a Modal account can only be used with the Modal provider")
+	}
+	return providerID, nil
+}
+
 func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 	if !mutationAllowed(w, r) {
 		return
@@ -481,16 +665,23 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 		return
 	}
-	var request GenerateRequest
-	if decodeJSONBody(w, r, &request) != nil {
+	var input generationSubmission
+	if decodeJSONBody(w, r, &input) != nil {
 		return
 	}
+	input.ModalAccountID = strings.TrimSpace(input.ModalAccountID)
+	request := input.providerRequest()
 	request.Prompt, request.Model = strings.TrimSpace(request.Prompt), strings.TrimSpace(request.Model)
 	if request.Prompt == "" || len([]rune(request.Prompt)) > MaxPromptLength {
 		writeError(w, http.StatusBadRequest, "a valid prompt is required")
 		return
 	}
-	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
+	providerID, err := a.selectedSubmissionProvider(input.ModalAccountID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	provider, providerID, providerConfigID, err := a.videoProviderSnapshotForAccount(providerID, input.ModalAccountID)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -534,6 +725,10 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 	if generation.Status == "completed" {
 		generation.Status = "downloading"
 	}
+	initialProgress := 0
+	if generation.Progress != nil {
+		initialProgress = *generation.Progress
+	}
 	record := GenerationRecord{
 		ID:               generation.ID,
 		VideoProvider:    string(providerID),
@@ -543,8 +738,15 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		Duration:         request.Duration,
 		AspectRatio:      request.AspectRatio,
 		Status:           generation.Status,
+		Progress:         initialProgress,
 		CostUSD:          generation.CostUSD,
 		EstimatedCostUSD: estimateCost(request.Duration, model.PricePerSecond),
+	}
+	if generation.Status == "failed" {
+		record.Error = sanitizeProviderFailure(generation.Error)
+		if record.Error == "" {
+			record.Error = "Video generation failed"
+		}
 	}
 	if err := a.store.InsertGeneration(record); err != nil {
 		a.logger.Error("save generation failed", "generation_id", generation.ID)
@@ -552,6 +754,12 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	persisted = true
+	record, err = a.store.Generation(record.ID)
+	if err != nil {
+		a.logger.Error("reload submitted generation failed", "generation_id", generation.ID)
+		writeError(w, http.StatusInternalServerError, "unable to load saved generation")
+		return
+	}
 	writeJSON(w, http.StatusAccepted, record)
 }
 
@@ -567,6 +775,10 @@ func (a *dashboardApp) status(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "unable to load generation")
+		return
+	}
+	if record.InVault {
+		writeError(w, http.StatusNotFound, "generation not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, record)
@@ -637,15 +849,33 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "OpenRouter text generation is not configured")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), randomPromptTimeout)
 	defer cancel()
 	prompt, err := provider.GenerateRandomPrompt(ctx, input)
 	if err != nil {
 		a.logger.Warn("random prompt generation failed")
-		writeError(w, http.StatusBadGateway, "unable to generate a random prompt")
+		writeError(w, http.StatusBadGateway, safeRandomPromptFailure(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"prompt": prompt})
+}
+
+func safeRandomPromptFailure(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "OpenRouter prompt generation timed out. Try again."
+	}
+	var upstream *upstreamError
+	if errors.As(err, &upstream) {
+		switch upstream.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return "OpenRouter rejected the saved API key. Update it in Settings."
+		case http.StatusTooManyRequests:
+			return "OpenRouter's free models are rate-limited right now. Try again shortly."
+		default:
+			return fmt.Sprintf("OpenRouter prompt generation failed with HTTP %d. Try again.", upstream.StatusCode)
+		}
+	}
+	return "OpenRouter did not return a usable prompt. Try again."
 }
 
 func compatibleProjectModel(model VideoModel) bool {
@@ -668,7 +898,7 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	var input ProjectRequest
+	var input projectSubmission
 	if decodeJSONBody(w, r, &input) != nil {
 		return
 	}
@@ -677,7 +907,13 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "a topic or story idea of at most 4,000 characters is required")
 		return
 	}
-	provider, providerID, providerConfigID, err := a.activeVideoProviderSnapshot()
+	input.ModalAccountID = strings.TrimSpace(input.ModalAccountID)
+	providerID, err := a.selectedSubmissionProvider(input.ModalAccountID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	provider, providerID, providerConfigID, err := a.videoProviderSnapshotForAccount(providerID, input.ModalAccountID)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -696,7 +932,7 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 	var model VideoModel
 	var ok bool
 	if input.Model == "" {
-		if selected := a.selectedVideoModel(providerID); selected != "" {
+		if selected := a.selectedVideoModelForAccount(providerID, input.ModalAccountID); selected != "" {
 			model, ok = findModel(models, selected)
 			ok = ok && compatibleProjectModel(model)
 		} else {
@@ -747,7 +983,34 @@ func (a *dashboardApp) project(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "unable to load project")
 		return
 	}
+	if project.InVault {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, project)
+}
+
+func (a *dashboardApp) deleteProject(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	if err := a.store.DeleteProject(id); errors.Is(err, sql.ErrNoRows) || errors.Is(err, ErrVaultItemInVault) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	} else if errors.Is(err, ErrProjectNotTerminal) {
+		writeError(w, http.StatusConflict, "active projects cannot be deleted")
+		return
+	} else if err != nil {
+		a.logger.Error("delete project failed", "project_id", id)
+		writeError(w, http.StatusInternalServerError, "unable to delete project")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *dashboardApp) retryProjectScene(w http.ResponseWriter, r *http.Request) {
@@ -802,7 +1065,7 @@ func (a *dashboardApp) projectVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	project, err := a.store.Project(id)
-	if err != nil || !project.FinalVideoReady {
+	if err != nil || project.InVault || !project.FinalVideoReady {
 		writeError(w, http.StatusNotFound, "final video not found")
 		return
 	}
@@ -824,7 +1087,7 @@ func (a *dashboardApp) projectVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Cache-Control", "private, no-store")
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="project-%s.mp4"`, id))
 	}
@@ -884,7 +1147,7 @@ func (a *dashboardApp) video(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := a.store.Generation(id)
-	if err != nil || record.VideoPath == "" {
+	if err != nil || record.InVault || record.VideoPath == "" {
 		writeError(w, http.StatusNotFound, "video not found")
 		return
 	}
@@ -910,7 +1173,7 @@ func (a *dashboardApp) video(w http.ResponseWriter, r *http.Request) {
 		contentType = "video/mp4"
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Cache-Control", "private, no-store")
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="generation-%s.mp4"`, id))
 	}
@@ -927,13 +1190,220 @@ func (a *dashboardApp) settings(w http.ResponseWriter, _ *http.Request) {
 	_, openRouterErr := a.store.Setting(apiKeySetting)
 	modalBaseURL, _ := a.store.Setting(modalVideoBaseURLSetting)
 	_, modalKeyErr := a.store.Setting(modalVideoAPIKeySetting)
+	defaultModalAccountID := a.defaultModalAccountID()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"video_provider":                 string(provider),
 		"openrouter_api_key_configured":  openRouterErr == nil,
 		"modal_video_base_url":           modalBaseURL,
 		"modal_video_api_key_configured": modalKeyErr == nil,
-		"video_models":                   map[string]string{"openrouter": a.selectedVideoModel(VideoProviderOpenRouter), "modal": a.selectedVideoModel(VideoProviderModal)},
+		"video_models":                   map[string]string{"openrouter": a.selectedVideoModel(VideoProviderOpenRouter), "modal": a.selectedVideoModelForAccount(VideoProviderModal, defaultModalAccountID)},
+		"vault_code_configured":          a.vaultCodeConfigured(),
 	})
+}
+
+type modalAccountInput struct {
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
+	// BaseURL keeps the former settings client compatible while the dashboard
+	// moves to named accounts.
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+}
+
+func (input modalAccountInput) normalizedEndpoint() string {
+	if strings.TrimSpace(input.Endpoint) != "" {
+		return strings.TrimSpace(input.Endpoint)
+	}
+	return strings.TrimSpace(input.BaseURL)
+}
+
+func validModalAccountName(name string) bool {
+	return name != "" && len([]rune(name)) <= 100
+}
+
+func (a *dashboardApp) modalAccounts(w http.ResponseWriter, _ *http.Request) {
+	a.writeModalAccounts(w)
+}
+
+func (a *dashboardApp) writeModalAccounts(w http.ResponseWriter) {
+	accounts, err := a.store.ModalVideoAccounts()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to load Modal accounts")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts, "active_id": a.defaultModalAccountID()})
+}
+
+func (a *dashboardApp) setActiveModalAccount(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) || !isJSON(r.Header.Get("Content-Type")) {
+		if !isJSON(r.Header.Get("Content-Type")) {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		}
+		return
+	}
+	var input struct {
+		AccountID string `json:"account_id"`
+	}
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	input.AccountID = strings.TrimSpace(input.AccountID)
+	if !safeID(input.AccountID) {
+		writeError(w, http.StatusBadRequest, "select a valid Modal account")
+		return
+	}
+	if _, err := a.store.ModalVideoAccount(input.AccountID); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "Modal account not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to load Modal account")
+		return
+	}
+	if err := a.store.SetSetting("modal_video_default_account_id", input.AccountID); err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to select Modal account")
+		return
+	}
+	a.writeModalAccounts(w)
+}
+
+func (a *dashboardApp) createModalAccount(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) || !isJSON(r.Header.Get("Content-Type")) {
+		if !isJSON(r.Header.Get("Content-Type")) {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		}
+		return
+	}
+	var input modalAccountInput
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	if !validModalAccountName(input.Name) {
+		writeError(w, http.StatusBadRequest, "enter an account name of at most 100 characters")
+		return
+	}
+	endpoint, err := validateModalBaseURL(input.normalizedEndpoint())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	key := strings.TrimSpace(input.APIKey)
+	if len(key) < 10 || len(key) > 500 {
+		writeError(w, http.StatusBadRequest, "enter a valid Modal video API key")
+		return
+	}
+	if _, err := NewModalVideoClient(endpoint, key).ListVideoModels(r.Context()); err != nil {
+		writeError(w, http.StatusBadGateway, "unable to test Modal video connection")
+		return
+	}
+	id, err := newModalVideoAccountID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to create Modal account")
+		return
+	}
+	encrypted, err := a.security.EncryptSetting(modalAccountAAD(id), key)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to save Modal account")
+		return
+	}
+	account, err := a.store.InsertModalVideoAccount(ModalVideoAccount{ID: id, Name: input.Name, Endpoint: endpoint, EncryptedAPIKey: encrypted})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to save Modal account")
+		return
+	}
+	if a.defaultModalAccountID() == "" {
+		if err := a.store.SetSetting("modal_video_default_account_id", account.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "unable to select Modal account")
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, account)
+}
+
+func (a *dashboardApp) updateModalAccount(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) || !isJSON(r.Header.Get("Content-Type")) {
+		if !isJSON(r.Header.Get("Content-Type")) {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		}
+		return
+	}
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid Modal account")
+		return
+	}
+	var input modalAccountInput
+	if decodeJSONBody(w, r, &input) != nil {
+		return
+	}
+	account, err := a.store.ModalVideoAccount(id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "Modal account not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to load Modal account")
+		return
+	}
+	account.Name = strings.TrimSpace(input.Name)
+	if !validModalAccountName(account.Name) {
+		writeError(w, http.StatusBadRequest, "enter an account name of at most 100 characters")
+		return
+	}
+	account.Endpoint, err = validateModalBaseURL(input.normalizedEndpoint())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if key := strings.TrimSpace(input.APIKey); key != "" {
+		if len(key) < 10 || len(key) > 500 {
+			writeError(w, http.StatusBadRequest, "enter a valid Modal video API key")
+			return
+		}
+		account.EncryptedAPIKey, err = a.security.EncryptSetting(modalAccountAAD(account.ID), key)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "unable to save Modal account")
+			return
+		}
+	}
+	key, err := a.security.DecryptSetting(modalAccountAAD(account.ID), account.EncryptedAPIKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to load Modal account")
+		return
+	}
+	if _, err := NewModalVideoClient(account.Endpoint, key).ListVideoModels(r.Context()); err != nil {
+		writeError(w, http.StatusBadGateway, "unable to test Modal video connection")
+		return
+	}
+	account, err = a.store.UpdateModalVideoAccount(account)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to save Modal account")
+		return
+	}
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (a *dashboardApp) deleteModalAccount(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid Modal account")
+		return
+	}
+	if a.defaultModalAccountID() == id {
+		writeError(w, http.StatusConflict, "select a different Modal account before deleting this account")
+		return
+	}
+	if err := a.store.DeleteModalVideoAccount(id); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "Modal account not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to delete Modal account")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *dashboardApp) updateAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -1062,8 +1532,9 @@ func (a *dashboardApp) updateVideoModel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var input struct {
-		Provider VideoProviderID `json:"provider"`
-		Model    string          `json:"model"`
+		Provider       VideoProviderID `json:"provider"`
+		Model          string          `json:"model"`
+		ModalAccountID string          `json:"modal_account_id,omitempty"`
 	}
 	if decodeJSONBody(w, r, &input) != nil {
 		return
@@ -1071,11 +1542,28 @@ func (a *dashboardApp) updateVideoModel(w http.ResponseWriter, r *http.Request) 
 	if input.Provider == "" {
 		input.Provider, _ = a.selectedVideoProvider()
 	}
+	input.ModalAccountID = strings.TrimSpace(input.ModalAccountID)
 	if !validVideoProvider(input.Provider) || strings.TrimSpace(input.Model) == "" {
 		writeError(w, http.StatusBadRequest, "a supported provider and model are required")
 		return
 	}
-	service, err := a.videoProvider(input.Provider)
+	if input.Provider == VideoProviderModal && !safeID(input.ModalAccountID) {
+		writeError(w, http.StatusBadRequest, "select a Modal account before saving a Modal model")
+		return
+	}
+	if input.Provider != VideoProviderModal && input.ModalAccountID != "" {
+		writeError(w, http.StatusBadRequest, "a Modal account can only be used with the Modal provider")
+		return
+	}
+	var (
+		service VideoService
+		err     error
+	)
+	if input.Provider == VideoProviderModal {
+		service, err = a.modalVideoProviderForAccount(input.ModalAccountID)
+	} else {
+		service, err = a.videoProvider(input.Provider)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -1089,11 +1577,19 @@ func (a *dashboardApp) updateVideoModel(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "selected model is unavailable")
 		return
 	}
-	if err := a.store.SetSetting("video_model."+string(input.Provider), strings.TrimSpace(input.Model)); err != nil {
+	modelSetting := "video_model." + string(input.Provider)
+	if input.Provider == VideoProviderModal {
+		modelSetting += "." + input.ModalAccountID
+	}
+	if err := a.store.SetSetting(modelSetting, strings.TrimSpace(input.Model)); err != nil {
 		writeError(w, http.StatusInternalServerError, "unable to save video model")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"provider": string(input.Provider), "model": strings.TrimSpace(input.Model)})
+	response := map[string]string{"provider": string(input.Provider), "model": strings.TrimSpace(input.Model)}
+	if input.Provider == VideoProviderModal {
+		response["modal_account_id"] = input.ModalAccountID
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (a *dashboardApp) testVideoProvider(w http.ResponseWriter, r *http.Request) {
@@ -1143,6 +1639,7 @@ func (a *dashboardApp) updatePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "unable to change password")
 		return
 	}
+	a.clearVaultGrants()
 	if err := a.security.NewSession(w, r, identity.Username); err != nil {
 		writeError(w, http.StatusInternalServerError, "password changed; please log in again")
 		return

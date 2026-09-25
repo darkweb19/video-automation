@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -98,12 +100,16 @@ func (p *Processor) process(ctx context.Context) {
 		if generation == nil {
 			continue
 		}
-		if err := p.app.store.UpdateGeneration(record.ID, generation.Status, generation.Model, generation.CostUSD, generation.Error); err != nil {
+		progress := -1
+		if generation.Progress != nil {
+			progress = *generation.Progress
+		}
+		if err := p.app.store.UpdateGenerationProgress(record.ID, generation.Status, generation.Model, generation.CostUSD, generation.Error, progress); err != nil {
 			p.logger.Error("generation update failed", "generation_id", record.ID)
 			continue
 		}
 		if generation.Status == "completed" {
-			_ = p.app.store.UpdateGeneration(record.ID, "downloading", generation.Model, generation.CostUSD, "")
+			_ = p.app.store.UpdateGenerationProgress(record.ID, "downloading", generation.Model, generation.CostUSD, "", 100)
 			record.CostUSD = generation.CostUSD
 			p.startDownload(ctx, provider, record)
 		}
@@ -160,11 +166,13 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "Unable to prepare the story and script request. Retry the project.")
 					return
 				}
-				_ = p.app.store.AppendPipelineEvent(project.ID, "text_request", "started", "Structured script-generation request built.", 0, 0)
+				_ = p.app.store.AppendPipelineEvent(project.ID, "text_request", "started", "Free-text story request prepared for OpenRouter.", 0, 0)
 				_ = p.app.store.AppendPipelineEvent(project.ID, "text_generation", "started", "OpenRouter text generation started.", 0, 0)
 				textProvider, providerErr := p.app.openRouterTextProvider()
 				if providerErr != nil {
-					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "OpenRouter text generation is not configured. Retry the project.")
+					message := "OpenRouter text generation is not configured. Add its API key, then retry the project."
+					_ = p.app.store.AppendPipelineEvent(project.ID, "text_generation", "failed", message, 0, 0)
+					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
 					return
 				}
 				plan, trace, err := textProvider.GenerateStoryPlan(taskCtx, project.Topic)
@@ -172,23 +180,25 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 					p.logger.Error("save project text trace failed", "project_id", project.ID)
 				}
 				if err != nil {
-					_ = p.app.store.AppendPipelineEvent(project.ID, "text_generation", "failed", "OpenRouter text generation failed.", 0, 0)
-					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "Unable to generate the story and script. Retry the project.")
+					message := safeTextGenerationFailure(err)
+					_ = p.app.store.AppendPipelineEvent(project.ID, "text_generation", "failed", message, 0, 0)
+					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
 					p.logger.Warn("project script generation failed", "project_id", project.ID)
 					return
 				}
-				_ = p.app.store.AppendPipelineEvent(project.ID, "text_generation", "completed", "OpenRouter returned a structured script response.", 0, 0)
+				_ = p.app.store.AppendPipelineEvent(project.ID, "text_generation", "completed", "OpenRouter returned a story plan.", 0, 0)
 				_ = p.app.store.AppendPipelineEvent(project.ID, "validation", "started", "Validating the generated story plan.", 0, 0)
 				if err := validateStoryPlan(plan); err != nil || len([]rune(plan.Script)) > 12000 || len([]rune(plan.Continuity)) > 8000 {
 					_ = p.app.store.AppendPipelineEvent(project.ID, "validation", "failed", "Generated story plan failed validation.", 0, 0)
-					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "Generated story plan was invalid. Retry the project.")
+					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "OpenRouter returned an invalid five-scene story plan. Retry the project.")
 					return
 				}
 				_ = p.app.store.AppendPipelineEvent(project.ID, "validation", "completed", "Generated story plan validated.", 0, 0)
 				_ = p.app.store.AppendPipelineEvent(project.ID, "continuity", "started", "Applying continuity bible to final scene prompts.", 0, 0)
 				if err := p.app.store.SaveStoryPlan(project.ID, plan); err != nil {
-					_ = p.app.store.AppendPipelineEvent(project.ID, "continuity", "failed", "Unable to prepare final scene prompts.", 0, 0)
-					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "Unable to prepare final scene prompts. Retry the project.")
+					message := safeStoryPlanSaveFailure(err)
+					_ = p.app.store.AppendPipelineEvent(project.ID, "continuity", "failed", message, 0, 0)
+					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
 					p.logger.Error("save project script failed", "project_id", project.ID)
 					return
 				}
@@ -197,7 +207,10 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 		case "generating":
 			provider, err := p.app.videoProviderForSnapshot(project.ProviderConfigID, VideoProviderID(project.VideoProvider))
 			if err != nil {
-				p.logger.Warn("project processor waiting for immutable video provider configuration", "provider", project.VideoProvider, "error", err)
+				message := "The saved video provider configuration for this project is unavailable. Create a new project after checking Settings."
+				_ = p.app.store.AppendPipelineEventOnce(project.ID, "video_provider", "failed", message, 0, 0)
+				_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
+				p.logger.Warn("project processor cannot load immutable video provider configuration", "project_id", project.ID, "provider", project.VideoProvider)
 				continue
 			}
 			p.processProjectScenes(ctx, provider, project)
@@ -205,14 +218,25 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 	}
 }
 
+func safeStoryPlanSaveFailure(err error) string {
+	if err != nil && strings.Contains(err.Error(), "prompt exceeds 4000 characters after continuity rules") {
+		return "The generated scene prompt exceeded the 4,000-character limit after continuity details. Retry with a shorter topic."
+	}
+	return "Unable to prepare final scene prompts. Retry the project."
+}
+
 func (p *Processor) processProjectScenes(ctx context.Context, provider VideoService, project VideoProject) {
 	complete, failed, active := 0, 0, 0
+	firstFailedScene := 0
 	for _, scene := range project.Scenes {
 		switch scene.Status {
 		case "completed":
 			complete++
 		case "failed":
 			failed++
+			if firstFailedScene == 0 {
+				firstFailedScene = scene.Number
+			}
 		case "pending":
 			active++
 			sceneCopy := scene
@@ -237,7 +261,7 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider VideoServ
 	if len(project.Scenes) == ProjectSceneCount && complete == ProjectSceneCount {
 		_ = p.app.store.UpdateProjectStatus(project.ID, "combining", "")
 	} else if failed > 0 && active == 0 {
-		_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "One or more scenes failed. Retry only the failed scene.")
+		_ = p.app.store.UpdateProjectStatus(project.ID, "failed", fmt.Sprintf("Scene %d failed during video generation. Open its details and retry it.", firstFailedScene))
 	}
 }
 
@@ -249,8 +273,9 @@ func (p *Processor) submitScene(ctx context.Context, provider VideoService, proj
 	defer cancel()
 	generation, err := provider.GenerateVideo(requestContext, GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, Resolution: ProjectResolution, AspectRatio: ProjectAspectRatio})
 	if err != nil || generation == nil || !safeID(generation.ID) {
-		_ = p.app.store.AppendPipelineEvent(project.ID, "scene_submission", "failed", "Video generation submission failed.", scene.Number, 0)
-		_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", "Scene submission failed. Retrying this scene may create a duplicate if the video provider accepted the interrupted request.")
+		message := safeSceneSubmissionFailure(err)
+		_ = p.app.store.AppendPipelineEvent(project.ID, "scene_submission", "failed", message, scene.Number, 0)
+		_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", message)
 		p.logger.Warn("scene submission failed", "project_id", project.ID, "scene", scene.Number)
 		return
 	}
@@ -274,7 +299,11 @@ func (p *Processor) pollScene(ctx context.Context, provider VideoService, scene 
 	if status == "completed" {
 		status = "downloading"
 	}
-	_ = p.app.store.UpdateScene(scene.ProjectID, scene.Number, status, generation.CostUSD, generation.Error)
+	message := ""
+	if status == "failed" {
+		message = "Video provider reported that this scene failed. Retry the scene."
+	}
+	_ = p.app.store.UpdateScene(scene.ProjectID, scene.Number, status, generation.CostUSD, message)
 	if generation.Progress != nil {
 		_ = p.app.store.SetSceneProgress(scene.ProjectID, scene.Number, *generation.Progress)
 	}
@@ -283,6 +312,44 @@ func (p *Processor) pollScene(ctx context.Context, provider VideoService, scene 
 		scene.CostUSD = generation.CostUSD
 		p.startSceneDownload(ctx, provider, scene)
 	}
+}
+
+func safeTextGenerationFailure(err error) string {
+	if err == nil {
+		return "Unable to generate the story and script. Retry the project."
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "OpenRouter story generation timed out. Retry the project."
+	}
+	if strings.Contains(err.Error(), "valid JSON story plan") {
+		return "OpenRouter returned an invalid five-scene story plan. Retry the project."
+	}
+	if strings.HasPrefix(err.Error(), "OpenRouter script request failed with HTTP ") {
+		var status int
+		if _, scanErr := fmt.Sscanf(err.Error(), "OpenRouter script request failed with HTTP %d", &status); scanErr == nil && status >= 400 && status <= 599 {
+			return fmt.Sprintf("OpenRouter story request failed with HTTP %d. Retry the project.", status)
+		}
+	}
+	var upstream *upstreamError
+	if errors.As(err, &upstream) {
+		switch upstream.StatusCode {
+		case 401, 403:
+			return "OpenRouter rejected the saved API key. Update it in Settings, then retry the project."
+		case 429:
+			return "OpenRouter's free models are rate-limited right now. Retry the project shortly."
+		default:
+			return fmt.Sprintf("OpenRouter story request failed with HTTP %d. Retry the project.", upstream.StatusCode)
+		}
+	}
+	return "Unable to generate the story and script with OpenRouter. Retry the project."
+}
+
+func safeSceneSubmissionFailure(err error) string {
+	var upstream *upstreamError
+	if errors.As(err, &upstream) {
+		return fmt.Sprintf("Video provider rejected the scene with HTTP %d. Retry the scene.", upstream.StatusCode)
+	}
+	return "Scene submission failed. Retrying may create a duplicate if the video provider accepted the interrupted request."
 }
 
 func (p *Processor) startSceneDownload(ctx context.Context, provider VideoService, scene ProjectScene) {

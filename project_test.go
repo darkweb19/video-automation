@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func validStoryPlan() StoryPlan {
@@ -22,7 +25,7 @@ func validStoryPlan() StoryPlan {
 	return plan
 }
 
-func TestGenerateStoryPlanUsesFreeStructuredModel(t *testing.T) {
+func TestGenerateStoryPlanUsesLingModel(t *testing.T) {
 	plan := validStoryPlan()
 	content, _ := json.Marshal(plan)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,14 +36,40 @@ func TestGenerateStoryPlanUsesFreeStructuredModel(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != ScriptModel {
+		if body["model"] != "inclusionai/ling-3.0-flash-fin:free" {
 			t.Fatalf("model = %v", body["model"])
 		}
-		format := body["response_format"].(map[string]any)
-		if format["type"] != "json_schema" {
-			t.Fatalf("response format = %v", format["type"])
+		if body["max_completion_tokens"] != float64(storyPlanCompletionTokens) {
+			t.Fatalf("max completion tokens = %v", body["max_completion_tokens"])
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"model": "acme/free-actual", "choices": []any{map[string]any{"message": map[string]any{"content": string(content)}}}})
+		tools, ok := body["tools"].([]any)
+		if !ok || len(tools) != 1 {
+			t.Fatalf("tools = %v", body["tools"])
+		}
+		function := tools[0].(map[string]any)["function"].(map[string]any)
+		choice := body["tool_choice"].(map[string]any)["function"].(map[string]any)
+		if function["name"] != "submit_story_plan" || function["parameters"] == nil || choice["name"] != "submit_story_plan" {
+			t.Fatalf("tool configuration = %v, choice = %v", function, choice)
+		}
+		properties := function["parameters"].(map[string]any)["properties"].(map[string]any)
+		continuity := properties["continuity"].(map[string]any)
+		scenes := properties["scenes"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)
+		videoPrompt := scenes["video_prompt"].(map[string]any)
+		if continuity["maxLength"] != float64(maxGeneratedContinuity) || videoPrompt["maxLength"] != float64(maxGeneratedScenePrompt) {
+			t.Fatalf("scene and continuity length guidance missing: %v, %v", videoPrompt, continuity)
+		}
+		messages := body["messages"].([]any)
+		userMessage := messages[1].(map[string]any)["content"].(string)
+		if !strings.Contains(userMessage, `"video_prompt"`) || !strings.Contains(userMessage, "a fox rescue") {
+			t.Fatalf("user prompt is missing topic or schema: %q", userMessage)
+		}
+		if _, ok := body["response_format"]; ok {
+			t.Fatal("free-text route must not require structured output")
+		}
+		if _, ok := body["provider"]; ok {
+			t.Fatal("free-text route must not require provider parameters")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": "acme/free-actual", "choices": []any{map[string]any{"message": map[string]any{"content": "Here is the plan:\n```json\n" + string(content) + "\n```"}}}})
 	}))
 	defer server.Close()
 	client := NewOpenRouterClient("test-key")
@@ -52,8 +81,246 @@ func TestGenerateStoryPlanUsesFreeStructuredModel(t *testing.T) {
 	if len(generated.Scenes) != ProjectSceneCount || generated.Title != plan.Title {
 		t.Fatalf("unexpected plan: %+v", generated)
 	}
-	if trace.RouterModel != ScriptModel || trace.ActualModel != "acme/free-actual" || trace.RawResponse != string(content) || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
+	if trace.RouterModel != "inclusionai/ling-3.0-flash-fin:free" || trace.ActualModel != "acme/free-actual" || !strings.Contains(trace.RawResponse, "```json") || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
 		t.Fatalf("unexpected trace: %+v", trace)
+	}
+}
+
+func TestGenerateStoryPlanAcceptsToolCallResponse(t *testing.T) {
+	plan := validStoryPlan()
+	arguments, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": ScriptModel,
+			"choices": []any{map[string]any{"message": map[string]any{
+				"content": nil,
+				"tool_calls": []any{map[string]any{"type": "function", "function": map[string]any{
+					"name": storyPlanToolName, "arguments": string(arguments),
+				}}},
+			}}},
+		})
+	}))
+	defer server.Close()
+	client := NewOpenRouterClient("test-key")
+	client.BaseURL = server.URL
+	got, trace, err := client.GenerateStoryPlan(context.Background(), "a fox rescue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != plan.Title || len(got.Scenes) != ProjectSceneCount || trace.RawResponse != string(arguments) || trace.RouterModel != ScriptModel {
+		t.Fatalf("plan = %+v, trace = %+v", got, trace)
+	}
+}
+
+func TestThirtySecondProjectPlanningPersistsFiveScenePlan(t *testing.T) {
+	plan := validStoryPlan()
+	content, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "provider/free-model",
+			"choices": []any{map[string]any{
+				"message": map[string]any{"content": string(content)},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := security.EncryptSetting(apiKeySetting, "test-openrouter-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSetting(apiKeySetting, encrypted); err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.InsertProject("A fox rescue", "provider/vertical-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	processor := NewProcessor(store, security, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.app.baseURL = server.URL
+	processor.process(context.Background())
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		loaded, loadErr := store.Project(project.ID)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if loaded.Status == "planning" {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if loaded.Status != "generating" || loaded.Error != "" {
+			t.Fatalf("planned project = %#v", loaded)
+		}
+		if len(loaded.Scenes) != ProjectSceneCount {
+			t.Fatalf("scene count = %d, want %d", len(loaded.Scenes), ProjectSceneCount)
+		}
+		for index, scene := range loaded.Scenes {
+			if scene.Number != index+1 || scene.Status != "pending" {
+				t.Fatalf("scene %d = %#v", index+1, scene)
+			}
+			if !strings.Contains(scene.Prompt, plan.Continuity) {
+				t.Fatalf("scene %d prompt lost continuity: %q", scene.Number, scene.Prompt)
+			}
+		}
+		if loaded.TextGeneration.Status != "completed" || loaded.TextGeneration.ActualModel != "provider/free-model" {
+			t.Fatalf("text generation trace = %#v", loaded.TextGeneration)
+		}
+		return
+	}
+	loaded, _ := store.Project(project.ID)
+	t.Fatalf("project planning did not complete: status=%s error=%s", loaded.Status, loaded.Error)
+}
+
+func TestFreeTextStoryPlanRejectsMissingScene(t *testing.T) {
+	plan := validStoryPlan()
+	plan.Scenes = plan.Scenes[:4]
+	content, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": string(content)}}}})
+	}))
+	defer server.Close()
+	client := NewOpenRouterClient("test-key")
+	client.BaseURL = server.URL
+	_, trace, err := client.GenerateStoryPlan(context.Background(), "four scene story")
+	if err == nil || !strings.Contains(err.Error(), "exactly 5 scenes") || trace.Status != "failed" {
+		t.Fatalf("result = %v, trace = %+v", err, trace)
+	}
+}
+
+func TestSceneProgressEventsAreDurableAndDeduplicated(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.InsertProject("progress story", "provider/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []int{24, 25, 26, 61, 61, 49} {
+		if err := store.SetSceneProgress(project.ID, 1, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Scenes[0].Progress != 61 || loaded.Progress <= 10 {
+		t.Fatalf("progress = %d, scene = %d", loaded.Progress, loaded.Scenes[0].Progress)
+	}
+	var messages []string
+	for _, event := range loaded.PipelineEvents {
+		if event.Stage == "scene_progress" {
+			messages = append(messages, event.Message)
+		}
+	}
+	if len(messages) != 2 || !strings.Contains(messages[0], "25%") || !strings.Contains(messages[1], "50%") {
+		t.Fatalf("progress events = %v", messages)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reloaded, err := reopened.Project(project.ID)
+	if err != nil || reloaded.Scenes[0].Progress != 61 || len(reloaded.PipelineEvents) != len(loaded.PipelineEvents) {
+		t.Fatalf("progress did not survive restart: %+v / %v", reloaded, err)
+	}
+}
+
+func TestProjectFailureCardPersistsSceneNumberWithoutProviderPayload(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("failure story", "provider/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+	for number := 1; number <= ProjectSceneCount; number++ {
+		if number == 2 {
+			if err := store.MarkSceneSubmitting(project.ID, number); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetSceneGeneration(project.ID, number, Generation{ID: "failed_scene", Status: "failed", Error: "provider secret payload"}); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := store.MarkSceneVideoReady(project.ID, number, "saved-path", 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project, err = store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := NewProcessor(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.processProjectScenes(context.Background(), &mockProvider{}, project)
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != "failed" || !strings.Contains(loaded.Error, "Scene 2") || strings.Contains(loaded.Error, "secret") || strings.Contains(loaded.Scenes[1].Error, "secret") {
+		t.Fatalf("unsafe failure card = %+v", loaded)
+	}
+}
+
+func TestProjectPollNormalizesProviderFailure(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("poll failure", "provider/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSceneSubmitting(project.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSceneGeneration(project.ID, 1, Generation{ID: "poll_scene", Status: "processing"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &mockProvider{status: &Generation{ID: "poll_scene", Status: "failed", Error: "secret raw provider response"}}
+	processor := NewProcessor(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.pollScene(context.Background(), provider, loaded.Scenes[0])
+	loaded, err = store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Scenes[0].Status != "failed" || !strings.Contains(loaded.Scenes[0].Error, "provider reported") || strings.Contains(loaded.Scenes[0].Error, "secret") {
+		t.Fatalf("unsafe scene failure = %+v", loaded.Scenes[0])
 	}
 }
 
@@ -122,6 +389,68 @@ func TestProjectTraceAndPipelineEventsPersistAndAreAPIVisible(t *testing.T) {
 	}
 }
 
+func TestDeleteProjectRequiresTerminalAndCleansStorage(t *testing.T) {
+	store := newTestStore(t)
+	config, err := store.InsertProviderConfig(ProviderConfig{ID: "project_delete_config", Provider: string(VideoProviderOpenRouter), EncryptedAPIKey: "ciphertext"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.InsertProjectWithProviderConfig("delete me", string(VideoProviderOpenRouter), config.ID, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(store.projectDir, project.ID)
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "final.mp4"), []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(project.ID); !errors.Is(err, ErrProjectNotTerminal) {
+		t.Fatalf("active project delete err=%v", err)
+	}
+	if _, err := os.Stat(projectDir); err != nil {
+		t.Fatalf("active project directory was changed: %v", err)
+	}
+	if err := store.UpdateProjectStatus(project.ID, "completed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendPipelineEvent(project.ID, "test", "completed", "child row", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Project(project.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted project lookup err=%v", err)
+	}
+	if _, err := store.ProviderConfig(config.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unused project provider config lookup err=%v", err)
+	}
+	var eventCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM project_pipeline_events WHERE project_id=?`, project.ID).Scan(&eventCount); err != nil || eventCount != 0 {
+		t.Fatalf("cascaded event count=%d err=%v", eventCount, err)
+	}
+	if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
+		t.Fatalf("project directory still exists, stat err=%v", err)
+	}
+}
+
+func TestDashboardRecoversInterruptedProjectDelete(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProject("interrupted delete", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE video_projects SET status='deleting' WHERE id=?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = NewDashboardHandler(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := store.Project(project.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("interrupted delete was not finalized, err=%v", err)
+	}
+}
+
 func TestTraceMigrationAddsTablesToExistingProjectDatabase(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenStore(dir)
@@ -164,6 +493,55 @@ func TestGenerateStoryPlanRejectsOversizedRawResponse(t *testing.T) {
 	}
 }
 
+func TestGenerateStoryPlanPreservesDeadlineForSafeFailureMessage(t *testing.T) {
+	client := NewOpenRouterClient("test-key")
+	client.BaseURL = "http://127.0.0.1:1"
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, trace, err := client.GenerateStoryPlan(ctx, "deadline story")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GenerateStoryPlan error = %v, want wrapped deadline", err)
+	}
+	if trace.Status != "failed" || !strings.Contains(trace.Error, context.DeadlineExceeded.Error()) {
+		t.Fatalf("deadline trace = %#v", trace)
+	}
+	if message := safeTextGenerationFailure(err); !strings.Contains(message, "timed out") {
+		t.Fatalf("safe failure message = %q", message)
+	}
+}
+
+func TestGeneratingProjectFailsWhenProviderSnapshotIsUnavailable(t *testing.T) {
+	store := newTestStore(t)
+	project, err := store.InsertProjectForProvider("missing provider snapshot", string(VideoProviderOpenRouter), "video/model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+
+	processor := NewProcessor(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	processor.process(context.Background())
+
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != "failed" || !strings.Contains(loaded.Error, "provider configuration") {
+		t.Fatalf("project should fail clearly instead of waiting forever: %#v", loaded)
+	}
+	found := false
+	for _, event := range loaded.PipelineEvents {
+		if event.Stage == "video_provider" && event.Status == "failed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing provider failure event: %#v", loaded.PipelineEvents)
+	}
+}
+
 func TestFailedScriptGenerationPersistsTraceAndFailureEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -201,6 +579,9 @@ func TestFailedScriptGenerationPersistsTraceAndFailureEvent(t *testing.T) {
 		}
 		if loaded.TextGeneration.RouterModel != ScriptModel || loaded.TextGeneration.Status != "failed" || loaded.TextGeneration.UserPrompt == "" {
 			t.Fatalf("failed trace = %+v", loaded.TextGeneration)
+		}
+		if !strings.Contains(loaded.Error, "HTTP 502") || strings.Contains(loaded.Error, "upstream unavailable") {
+			t.Fatalf("failure card = %q", loaded.Error)
 		}
 		for _, event := range loaded.PipelineEvents {
 			if event.Stage == "text_generation" && event.Status == "failed" {
@@ -315,16 +696,49 @@ func TestSaveStoryPlanPersistsContinuityInEveryScenePromptAndProgress(t *testing
 	}
 }
 
-func TestSaveStoryPlanRejectsPromptOverLimitAfterContinuity(t *testing.T) {
+func TestSaveStoryPlanShortensLongSceneAndKeepsContinuity(t *testing.T) {
 	store := newTestStore(t)
 	project, err := store.InsertProject("long story", "minimax/k3-pro")
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan := validStoryPlan()
-	plan.Scenes[0].VideoPrompt = strings.Repeat("x", MaxPromptLength)
-	if err := store.SaveStoryPlan(project.ID, plan); err == nil || !strings.Contains(err.Error(), "after continuity rules") {
-		t.Fatalf("expected post-continuity prompt limit error, got %v", err)
+	plan.Scenes[0].VideoPrompt = "A fox crosses the same dawn forest. " + strings.Repeat("Rain falls 🌧️ while the fox runs. ", 180) + "The fox reaches shelter 🦊."
+	if err := store.SaveStoryPlan(project.ID, plan); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := loaded.Scenes[0].Prompt
+	if !utf8.ValidString(prompt) || utf8.RuneCountInString(prompt) > MaxPromptLength || strings.Count(prompt, plan.Continuity) != 1 || !strings.Contains(prompt, "The fox reaches shelter 🦊.") ||
+		!strings.Contains(prompt, "exactly six seconds") || !strings.Contains(prompt, "vertical 9:16") || !strings.Contains(prompt, "Motion: show visible action") || !strings.Contains(prompt, "Camera movement: make a slow forward push") {
+		t.Fatalf("scene prompt lost action, ending, or continuity after shortening: %q", prompt)
+	}
+}
+
+func TestAppendContinuityBibleRejectsBibleThatLeavesNoSceneAction(t *testing.T) {
+	plan := validStoryPlan()
+	plan.Continuity = strings.Repeat("a", MaxPromptLength)
+	if err := appendContinuityBible(&plan); err == nil || !strings.Contains(err.Error(), "continuity bible leaves insufficient room for scene action") {
+		t.Fatalf("expected oversized continuity error, got %v", err)
+	}
+}
+
+func TestAppendContinuityBibleDoesNotDuplicateExistingRules(t *testing.T) {
+	plan := validStoryPlan()
+	plan.Continuity = strings.TrimSpace(strings.Repeat("blue forest and red fox; ", 120))
+	for index := range plan.Scenes {
+		plan.Scenes[index].VideoPrompt = "A standalone shot. " + plan.Continuity
+	}
+	if err := appendContinuityBible(&plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, scene := range plan.Scenes {
+		if strings.Count(scene.VideoPrompt, plan.Continuity) != 1 {
+			t.Fatalf("scene %d repeats continuity rules", scene.Number)
+		}
 	}
 }
 

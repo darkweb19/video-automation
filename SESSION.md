@@ -1,29 +1,27 @@
-# Session handoff — 2026-09-23
+# Session handoff — 2026-09-25
 
 ## What was done
-- Added an authenticated random-prompt endpoint using OpenRouter's `openrouter/free` text model.
-- Added six category choices and a category slider; prompt generation fills the active project-topic or single-prompt field.
-- Updated history cards to show full prompts/topics with the associated playable video and clear unavailable-video states.
-- Added mock-server coverage for both prompt modes, validation, authentication, cross-origin rejection, and secret handling.
-- Verified `go test ./...`, `go vet ./...`, `node --check static/app.js`, and `git diff --check`.
+- Redesigned History and Settings; completed History logs now collapse behind per-card toggles.
+- Added a password-protected Vault tab for completed generated videos and 30-second project videos.
+- Added encrypted Vault code storage, PIN attempt throttling, server-enforced grants, lock/reload revocation, and reversible History/Vault moves.
+- Protected Vault membership, listing, media, details, and downloads across API paths; added persistence and concurrency tests.
 
 ## Decisions locked
-- OpenRouter remains the story/script text provider regardless of video provider selection.
-- The selected random-prompt category labels are Kid Animation, Horror Story, Nature, Seduction, Mature Content, and Soft Corn.
-- Project random prompts fill the project topic; single-clip random prompts fill the video prompt field.
-- Prompt generation is not persisted until the user submits the resulting project or video generation.
+- Vault is a separate tab; moving a video removes it from regular History, and Restore returns it.
+- Use a four-digit code; the Vault locks on refresh or explicit Lock. There is no forgotten-code recovery in this version.
+- Keep the code safe; it is encrypted at rest and never returned by Settings.
+- Do not run paid video generation for verification.
 
 ## Open questions
-1. Sujan: complete browser visual QA for the category slider, prompt field, and history cards.
-2. Sujan: configure OpenRouter credentials and perform any desired live generation/account check.
+- None for the feature scope.
 
 ## Next steps
-1. Review the pushed branch in the browser, including both project and single-clip prompt flows.
-2. Configure OpenRouter in Settings and run a low-cost generation if live provider validation is desired.
+1. Release agent creates and merges a PR from the pushed feature branch.
+2. Verify the Railway deployment and manually check the History, Settings, Vault, move, restore, and lock flows.
+3. If rolling back to a pre-Vault image, first account for vaulted items becoming visible in regular History.
 
 ## Gotchas
-- No paid OpenRouter or video-provider calls were made; mock HTTP tests covered prompt generation.
-- Project history associates the final merged video with its submitted topic; scene prompts remain available in project details.
-- Browser visual QA has not been performed.
-- Docker and host `ffmpeg` are unavailable on this workstation; FFmpeg is included in the application Docker image.
-- Keep Go caches workspace-local with `.gocache` and `.gomodcache`.
+- Old pre-Vault app images ignore the `in_vault` flag and can expose vaulted items in normal History/media routes; keep Vault-aware code deployed or restore items before rollback.
+- SQLite migration is additive and preserves existing records; encrypted Vault code depends on persistent `data/secret.key`.
+- Keep Vault unlock grants in JS memory only; do not put codes or tokens in URLs, logs, or local storage.
+- Never read or print `.env` contents.

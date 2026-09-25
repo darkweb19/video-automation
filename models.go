@@ -82,7 +82,7 @@ const (
 	ProjectSceneCount   = 5
 	ProjectSceneSeconds = 6
 	ProjectAspectRatio  = "9:16"
-	ScriptModel         = "openrouter/free"
+	ScriptModel         = "inclusionai/ling-3.0-flash-fin:free"
 	ProjectResolution   = "480p"
 )
 
@@ -182,6 +182,7 @@ type VideoProject struct {
 	VideoProvider    string         `json:"video_provider"`
 	ProviderConfigID string         `json:"-"`
 	Status           string         `json:"status"`
+	InVault          bool           `json:"-"`
 	Progress         int            `json:"progress"`
 	Error            string         `json:"error,omitempty"`
 	FinalVideoPath   string         `json:"-"`
@@ -192,16 +193,16 @@ type VideoProject struct {
 	// TextGeneration contains auditable request/response artifacts for the
 	// script planner. It never includes credentials or provider headers.
 	TextGeneration TextGenerationTrace `json:"text_generation"`
-	// PipelineEvents is ordered oldest first and intentionally records state
-	// transitions rather than every polling loop.
+	// PipelineEvents is ordered oldest first and records state changes and
+	// significant progress milestones rather than every polling loop.
 	PipelineEvents []PipelineEvent `json:"pipeline_events"`
 	CreatedAt      int64           `json:"created_at"`
 	UpdatedAt      int64           `json:"updated_at"`
 }
 
-// TextGenerationTrace is the durable, user-visible record of a structured
-// script-generation request. RawResponse is the assistant content exactly as
-// received, subject to MaxScriptRawResponseBytes.
+// TextGenerationTrace is the durable record of a free-text script-generation
+// request. RawResponse is the assistant content exactly as received, subject
+// to MaxScriptRawResponseBytes.
 type TextGenerationTrace struct {
 	RouterModel    string `json:"router_model"`
 	ActualModel    string `json:"actual_model,omitempty"`

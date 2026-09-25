@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,22 +25,48 @@ type Store struct {
 }
 
 type GenerationRecord struct {
+	ID               string            `json:"id"`
+	VideoProvider    string            `json:"video_provider"`
+	ProviderConfigID string            `json:"-"`
+	Prompt           string            `json:"prompt"`
+	Model            string            `json:"model"`
+	Duration         int               `json:"duration,omitempty"`
+	AspectRatio      string            `json:"aspect_ratio,omitempty"`
+	Status           string            `json:"status"`
+	Progress         int               `json:"progress,omitempty"`
+	CostUSD          string            `json:"cost_usd,omitempty"`
+	EstimatedCostUSD string            `json:"estimated_cost_usd,omitempty"`
+	VideoPath        string            `json:"-"`
+	InVault          bool              `json:"-"`
+	VideoReady       bool              `json:"video_ready"`
+	SizeBytes        int64             `json:"size_bytes,omitempty"`
+	Error            string            `json:"error,omitempty"`
+	DownloadAttempts int               `json:"download_attempts,omitempty"`
+	NextDownloadAt   int64             `json:"next_download_at,omitempty"`
+	CreatedAt        int64             `json:"created_at"`
+	UpdatedAt        int64             `json:"updated_at"`
+	Events           []GenerationEvent `json:"events"`
+}
+
+// GenerationEvent is a backend-owned lifecycle entry. It intentionally never
+// contains provider headers, credentials, or raw upstream responses.
+type GenerationEvent struct {
+	ID        int64  `json:"id"`
+	Stage     string `json:"stage"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+	Progress  int    `json:"progress,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// ModalVideoAccount is the safe account shape returned to the dashboard. The
+// ciphertext is storage-only and deliberately excluded from JSON.
+type ModalVideoAccount struct {
 	ID               string `json:"id"`
-	VideoProvider    string `json:"video_provider"`
-	ProviderConfigID string `json:"-"`
-	Prompt           string `json:"prompt"`
-	Model            string `json:"model"`
-	Duration         int    `json:"duration,omitempty"`
-	AspectRatio      string `json:"aspect_ratio,omitempty"`
-	Status           string `json:"status"`
-	CostUSD          string `json:"cost_usd,omitempty"`
-	EstimatedCostUSD string `json:"estimated_cost_usd,omitempty"`
-	VideoPath        string `json:"-"`
-	VideoReady       bool   `json:"video_ready"`
-	SizeBytes        int64  `json:"size_bytes,omitempty"`
-	Error            string `json:"error,omitempty"`
-	DownloadAttempts int    `json:"download_attempts,omitempty"`
-	NextDownloadAt   int64  `json:"next_download_at,omitempty"`
+	Name             string `json:"name"`
+	Endpoint         string `json:"endpoint"`
+	EncryptedAPIKey  string `json:"-"`
+	APIKeyConfigured bool   `json:"configured"`
 	CreatedAt        int64  `json:"created_at"`
 	UpdatedAt        int64  `json:"updated_at"`
 }
@@ -59,6 +86,14 @@ func newProviderConfigID() (string, error) {
 		return "", err
 	}
 	return "provider_config_" + hex.EncodeToString(raw), nil
+}
+
+func newModalVideoAccountID() (string, error) {
+	raw := make([]byte, 12)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return "modal_account_" + hex.EncodeToString(raw), nil
 }
 
 func (s *Store) CreateProviderConfig(provider, baseURL, encryptedAPIKey string) (ProviderConfig, error) {
@@ -81,6 +116,81 @@ func (s *Store) ProviderConfig(id string) (ProviderConfig, error) {
 	var config ProviderConfig
 	err := s.db.QueryRow(`SELECT id,provider,base_url,encrypted_api_key FROM video_provider_configs WHERE id=?`, id).Scan(&config.ID, &config.Provider, &config.BaseURL, &config.EncryptedAPIKey)
 	return config, err
+}
+
+func (s *Store) InsertModalVideoAccount(account ModalVideoAccount) (ModalVideoAccount, error) {
+	if account.ID == "" || account.Name == "" || account.Endpoint == "" || account.EncryptedAPIKey == "" {
+		return ModalVideoAccount{}, errors.New("modal account is incomplete")
+	}
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`INSERT INTO modal_video_accounts(id,name,endpoint,encrypted_api_key,created_at,updated_at) VALUES(?,?,?,?,?,?)`, account.ID, account.Name, account.Endpoint, account.EncryptedAPIKey, now, now)
+	if err != nil {
+		return ModalVideoAccount{}, err
+	}
+	account.APIKeyConfigured = true
+	account.CreatedAt, account.UpdatedAt = now, now
+	return account, nil
+}
+
+func (s *Store) ModalVideoAccount(id string) (ModalVideoAccount, error) {
+	var account ModalVideoAccount
+	err := s.db.QueryRow(`SELECT id,name,endpoint,encrypted_api_key,created_at,updated_at FROM modal_video_accounts WHERE id=?`, id).Scan(&account.ID, &account.Name, &account.Endpoint, &account.EncryptedAPIKey, &account.CreatedAt, &account.UpdatedAt)
+	account.APIKeyConfigured = account.EncryptedAPIKey != ""
+	return account, err
+}
+
+func (s *Store) ModalVideoAccounts() ([]ModalVideoAccount, error) {
+	rows, err := s.db.Query(`SELECT id,name,endpoint,encrypted_api_key,created_at,updated_at FROM modal_video_accounts ORDER BY created_at,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	accounts := make([]ModalVideoAccount, 0)
+	for rows.Next() {
+		var account ModalVideoAccount
+		if err := rows.Scan(&account.ID, &account.Name, &account.Endpoint, &account.EncryptedAPIKey, &account.CreatedAt, &account.UpdatedAt); err != nil {
+			return nil, err
+		}
+		account.APIKeyConfigured = account.EncryptedAPIKey != ""
+		accounts = append(accounts, account)
+	}
+	return accounts, rows.Err()
+}
+
+func (s *Store) UpdateModalVideoAccount(account ModalVideoAccount) (ModalVideoAccount, error) {
+	if account.ID == "" || account.Name == "" || account.Endpoint == "" || account.EncryptedAPIKey == "" {
+		return ModalVideoAccount{}, errors.New("modal account is incomplete")
+	}
+	now := time.Now().Unix()
+	result, err := s.db.Exec(`UPDATE modal_video_accounts SET name=?,endpoint=?,encrypted_api_key=?,updated_at=? WHERE id=?`, account.Name, account.Endpoint, account.EncryptedAPIKey, now, account.ID)
+	if err != nil {
+		return ModalVideoAccount{}, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return ModalVideoAccount{}, err
+	}
+	if count != 1 {
+		return ModalVideoAccount{}, sql.ErrNoRows
+	}
+	account.APIKeyConfigured = true
+	account.UpdatedAt = now
+	return account, nil
+}
+
+func (s *Store) DeleteModalVideoAccount(id string) error {
+	result, err := s.db.Exec(`DELETE FROM modal_video_accounts WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // DeleteProviderConfigIfUnused removes a snapshot only when no durable job or
@@ -202,6 +312,15 @@ func (s *Store) migrate() error {
 			encrypted_api_key TEXT NOT NULL,
 			created_at INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS modal_video_accounts (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			endpoint TEXT NOT NULL,
+			encrypted_api_key TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS modal_video_accounts_name ON modal_video_accounts(name);
 		CREATE TABLE IF NOT EXISTS generations (
 			id TEXT PRIMARY KEY,
 			prompt TEXT NOT NULL,
@@ -212,6 +331,7 @@ func (s *Store) migrate() error {
 			cost_usd TEXT NOT NULL DEFAULT '',
 			estimated_cost_usd TEXT NOT NULL DEFAULT '',
 			video_path TEXT NOT NULL DEFAULT '',
+			in_vault INTEGER NOT NULL DEFAULT 0,
 			size_bytes INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
 			download_attempts INTEGER NOT NULL DEFAULT 0,
@@ -221,6 +341,16 @@ func (s *Store) migrate() error {
 		);
 		CREATE INDEX IF NOT EXISTS generations_created_at ON generations(created_at DESC);
 		CREATE INDEX IF NOT EXISTS generations_status ON generations(status);
+		CREATE TABLE IF NOT EXISTS generation_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			generation_id TEXT NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+			stage TEXT NOT NULL,
+			status TEXT NOT NULL,
+			message TEXT NOT NULL DEFAULT '',
+			progress INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS generation_events_generation_id ON generation_events(generation_id,id);
 		CREATE TABLE IF NOT EXISTS video_projects (
 			id TEXT PRIMARY KEY,
 			topic TEXT NOT NULL,
@@ -232,6 +362,7 @@ func (s *Store) migrate() error {
 			status TEXT NOT NULL,
 			error TEXT NOT NULL DEFAULT '',
 			final_video_path TEXT NOT NULL DEFAULT '',
+			in_vault INTEGER NOT NULL DEFAULT 0,
 			final_size_bytes INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
@@ -313,7 +444,16 @@ func (s *Store) migrate() error {
 	if err := s.addColumnIfMissing("generations", "provider_config_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.addColumnIfMissing("generations", "progress", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("generations", "in_vault", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := s.addColumnIfMissing("video_projects", "provider_config_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("video_projects", "in_vault", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES('video_provider','openrouter',unixepoch()) ON CONFLICT(key) DO NOTHING`)
@@ -466,42 +606,83 @@ func (s *Store) InsertGeneration(record GenerationRecord) error {
 	if record.VideoProvider == "" {
 		record.VideoProvider = string(VideoProviderOpenRouter)
 	}
-	_, err := s.db.Exec(`INSERT INTO generations(id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		record.ID, record.VideoProvider, record.ProviderConfigID, record.Prompt, record.Model, record.Duration, record.AspectRatio, record.Status, record.CostUSD, record.EstimatedCostUSD, now, now)
-	return err
+	if record.Status == "failed" {
+		record.Error = sanitizeProviderFailure(record.Error)
+		if record.Error == "" {
+			record.Error = "Video generation failed"
+		}
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO generations(id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,progress,cost_usd,estimated_cost_usd,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		record.ID, record.VideoProvider, record.ProviderConfigID, record.Prompt, record.Model, record.Duration, record.AspectRatio, record.Status, record.Progress, record.CostUSD, record.EstimatedCostUSD, record.Error, now, now)
+	if err != nil {
+		return err
+	}
+	message := "Generation request accepted"
+	if record.Status == "failed" {
+		message = record.Error
+	}
+	// A submitted provider job may already be billable. Keep its durable state
+	// even if the optional terminal-event write is rejected (for example by a
+	// transient SQLite constraint); otherwise the caller would lose the job ID.
+	_ = appendGenerationEvent(tx, record.ID, "submission", record.Status, message, record.Progress)
+	return tx.Commit()
 }
 
-const generationColumns = `id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at`
+const generationColumns = `id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,progress,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at,in_vault`
 
 func scanGeneration(scanner interface{ Scan(...any) error }) (GenerationRecord, error) {
 	var record GenerationRecord
-	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.ProviderConfigID, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt)
+	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.ProviderConfigID, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.Progress, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt, &record.InVault)
 	record.VideoReady = record.VideoPath != ""
 	return record, err
 }
 
 func (s *Store) Generation(id string) (GenerationRecord, error) {
-	return scanGeneration(s.db.QueryRow(`SELECT `+generationColumns+` FROM generations WHERE id=?`, id))
+	record, err := scanGeneration(s.db.QueryRow(`SELECT `+generationColumns+` FROM generations WHERE id=?`, id))
+	if err != nil {
+		return record, err
+	}
+	record.Events, err = s.GenerationEvents(id)
+	return record, err
 }
 
 func (s *Store) Generations(limit int) ([]GenerationRecord, error) {
 	if limit < 1 || limit > 200 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT `+generationColumns+` FROM generations ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT `+generationColumns+` FROM generations WHERE in_vault=0 ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	records := make([]GenerationRecord, 0)
 	for rows.Next() {
 		record, err := scanGeneration(rows)
 		if err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		records = append(records, record)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range records {
+		events, err := s.GenerationEvents(records[index].ID)
+		if err != nil {
+			return nil, err
+		}
+		records[index].Events = events
+	}
+	return records, nil
 }
 
 type GenerationStats struct {
@@ -517,7 +698,7 @@ type GenerationStats struct {
 func (s *Store) GenerationStats() (GenerationStats, error) {
 	var stats GenerationStats
 	var cost float64
-	err := s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='processing'),0),COALESCE(SUM(status IN ('downloading','download_failed')),0),COALESCE(SUM(status='completed'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(CAST(NULLIF(cost_usd,'') AS REAL)),0) FROM generations`).Scan(&stats.Total, &stats.Queued, &stats.Processing, &stats.Downloading, &stats.Completed, &stats.Failed, &cost)
+	err := s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='processing'),0),COALESCE(SUM(status IN ('downloading','download_failed')),0),COALESCE(SUM(status='completed'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(CAST(NULLIF(cost_usd,'') AS REAL)),0) FROM generations WHERE in_vault=0`).Scan(&stats.Total, &stats.Queued, &stats.Processing, &stats.Downloading, &stats.Completed, &stats.Failed, &cost)
 	stats.TotalCostUSD = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", cost), "0"), ".")
 	return stats, err
 }
@@ -527,9 +708,10 @@ func (s *Store) GenerationsPage(limit int, beforeCreated int64, beforeID string)
 		limit = 25
 	}
 	query := `SELECT ` + generationColumns + ` FROM generations`
+	query += ` WHERE in_vault=0`
 	args := []any{}
 	if beforeCreated > 0 && beforeID != "" {
-		query += ` WHERE created_at < ? OR (created_at = ? AND id < ?)`
+		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
 		args = append(args, beforeCreated, beforeCreated, beforeID)
 	}
 	query += ` ORDER BY created_at DESC,id DESC LIMIT ?`
@@ -538,16 +720,30 @@ func (s *Store) GenerationsPage(limit int, beforeCreated int64, beforeID string)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	records := make([]GenerationRecord, 0, limit)
 	for rows.Next() {
 		record, err := scanGeneration(rows)
 		if err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		records = append(records, record)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range records {
+		events, err := s.GenerationEvents(records[index].ID)
+		if err != nil {
+			return nil, err
+		}
+		records[index].Events = events
+	}
+	return records, nil
 }
 
 func (s *Store) PendingGenerations(ctx context.Context) ([]GenerationRecord, error) {
@@ -567,8 +763,113 @@ func (s *Store) PendingGenerations(ctx context.Context) ([]GenerationRecord, err
 	return records, rows.Err()
 }
 
+var (
+	credentialValuePattern = regexp.MustCompile(`(?i)(authorization|api[_-]?key|token|secret)\s*(?:=|:)?\s*(?:bearer\s+)?[^\s,;]+`)
+	urlQueryPattern        = regexp.MustCompile(`https?://[^\s?]+\?[^\s]+`)
+)
+
+// sanitizeProviderFailure converts provider responses into an operator-safe
+// card message. Raw upstream bodies must never be persisted or displayed.
+func sanitizeProviderFailure(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "unauthorized"), strings.Contains(lower, "forbidden"), strings.Contains(lower, "401"), strings.Contains(lower, "403"):
+		return "Video provider authentication failed"
+	case strings.Contains(lower, "rate limit"), strings.Contains(lower, "429"):
+		return "Video provider rate limit reached"
+	case strings.Contains(lower, "timeout"), strings.Contains(lower, "deadline exceeded"):
+		return "Video provider request timed out"
+	case strings.Contains(lower, "not found"), strings.Contains(lower, "404"):
+		return "Video provider job was not found"
+	}
+	return "Video provider reported a generation failure"
+}
+
+type generationEventExecutor interface {
+	Exec(string, ...any) (sql.Result, error)
+	QueryRow(string, ...any) *sql.Row
+}
+
+func (s *Store) AppendGenerationEvent(id, stage, status, message string, progress int) error {
+	return appendGenerationEvent(s.db, id, stage, status, message, progress)
+}
+
+func appendGenerationEvent(executor generationEventExecutor, id, stage, status, message string, progress int) error {
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	// Callers own these normalized lifecycle messages. Defensive redaction keeps
+	// accidental secret-like values out without converting useful app messages.
+	message = credentialValuePattern.ReplaceAllString(message, "[redacted]")
+	message = urlQueryPattern.ReplaceAllString(message, "[provider URL redacted]")
+	message = strings.Join(strings.Fields(message), " ")
+	// Provider polling can repeat the same state. Keep a durable terminal that
+	// records transitions/progress changes rather than every polling loop.
+	var previous GenerationEvent
+	err := executor.QueryRow(`SELECT id,stage,status,message,progress,created_at FROM generation_events WHERE generation_id=? ORDER BY id DESC LIMIT 1`, id).Scan(&previous.ID, &previous.Stage, &previous.Status, &previous.Message, &previous.Progress, &previous.CreatedAt)
+	if err == nil && previous.Stage == stage && previous.Status == status && previous.Message == message && previous.Progress == progress {
+		return nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = executor.Exec(`INSERT INTO generation_events(generation_id,stage,status,message,progress,created_at) VALUES(?,?,?,?,?,?)`, id, stage, status, message, progress, time.Now().Unix())
+	return err
+}
+
+func (s *Store) GenerationEvents(id string) ([]GenerationEvent, error) {
+	rows, err := s.db.Query(`SELECT id,stage,status,message,progress,created_at FROM generation_events WHERE generation_id=? ORDER BY id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]GenerationEvent, 0)
+	for rows.Next() {
+		var event GenerationEvent
+		if err := rows.Scan(&event.ID, &event.Stage, &event.Status, &event.Message, &event.Progress, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
 func (s *Store) UpdateGeneration(id, status, model, cost, message string) error {
-	result, err := s.db.Exec(`UPDATE generations SET status=?,model=CASE WHEN ?='' THEN model ELSE ? END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error=?,updated_at=? WHERE id=? AND status!='deleting'`, status, model, model, cost, cost, message, time.Now().Unix(), id)
+	return s.UpdateGenerationProgress(id, status, model, cost, message, -1)
+}
+
+// UpdateGenerationProgress is used by the durable worker after polling a
+// provider. Progress is optional: pass -1 when an upstream provider has no
+// numeric progress signal and the previous value will be retained.
+func (s *Store) UpdateGenerationProgress(id, status, model, cost, message string, progress int) error {
+	if status == "failed" {
+		if message == "" {
+			message = "Video generation failed"
+		} else {
+			message = sanitizeProviderFailure(message)
+		}
+	} else if message != "" {
+		message = sanitizeProviderFailure(message)
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	if progress < -1 {
+		progress = -1
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE generations SET status=?,progress=CASE WHEN ?<0 THEN progress ELSE ? END,model=CASE WHEN ?='' THEN model ELSE ? END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error=?,updated_at=? WHERE id=? AND status!='deleting'`, status, progress, progress, model, model, cost, cost, message, time.Now().Unix(), id)
 	if err != nil {
 		return err
 	}
@@ -579,11 +880,32 @@ func (s *Store) UpdateGeneration(id, status, model, cost, message string) error 
 	if count != 1 {
 		return sql.ErrNoRows
 	}
-	return nil
+	eventProgress := progress
+	if eventProgress < 0 {
+		var stored int
+		if err := tx.QueryRow(`SELECT progress FROM generations WHERE id=?`, id).Scan(&stored); err == nil {
+			eventProgress = stored
+		} else {
+			return err
+		}
+	}
+	stage := "provider"
+	if status == "downloading" || status == "download_failed" {
+		stage = "download"
+	}
+	// Status/progress are the recovery source of truth. Never fail a successful
+	// provider transition solely because an auxiliary terminal entry failed.
+	_ = appendGenerationEvent(tx, id, stage, status, message, eventProgress)
+	return tx.Commit()
 }
 
 func (s *Store) MarkVideoReady(id, videoPath string, size int64) error {
-	result, err := s.db.Exec(`UPDATE generations SET status='completed',video_path=?,size_bytes=?,error='',next_download_at=0,updated_at=? WHERE id=? AND status!='deleting'`, videoPath, size, time.Now().Unix(), id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE generations SET status='completed',progress=100,video_path=?,size_bytes=?,error='',next_download_at=0,updated_at=? WHERE id=? AND status!='deleting'`, videoPath, size, time.Now().Unix(), id)
 	if err != nil {
 		return err
 	}
@@ -594,7 +916,10 @@ func (s *Store) MarkVideoReady(id, videoPath string, size int64) error {
 	if count != 1 {
 		return sql.ErrNoRows
 	}
-	return nil
+	// The local file is valid at this point. Do not make the downloader delete it
+	// merely because recording an auxiliary terminal line failed.
+	_ = appendGenerationEvent(tx, id, "download", "completed", "Video downloaded and ready", 100)
+	return tx.Commit()
 }
 
 // VideoPath returns the only permissible local filename for a generation.
@@ -621,7 +946,7 @@ func (s *Store) ScheduleDownloadRetry(id string) error {
 	if count != 1 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return s.AppendGenerationEvent(id, "download", "download_failed", "Video download will retry automatically", 0)
 }
 
 func min(a, b int) int {
@@ -637,11 +962,11 @@ func (s *Store) BeginDelete(id string) (GenerationRecord, error) {
 		return GenerationRecord{}, err
 	}
 	defer tx.Rollback()
-	record, err := scanGeneration(tx.QueryRow(`SELECT `+generationColumns+` FROM generations WHERE id=? AND status!='deleting'`, id))
+	record, err := scanGeneration(tx.QueryRow(`SELECT `+generationColumns+` FROM generations WHERE id=? AND status!='deleting' AND in_vault=0`, id))
 	if err != nil {
 		return record, err
 	}
-	result, err := tx.Exec(`UPDATE generations SET status='deleting',updated_at=? WHERE id=? AND status!='deleting'`, time.Now().Unix(), id)
+	result, err := tx.Exec(`UPDATE generations SET status='deleting',updated_at=? WHERE id=? AND status!='deleting' AND in_vault=0`, time.Now().Unix(), id)
 	if err != nil {
 		return record, err
 	}
@@ -676,6 +1001,9 @@ func (s *Store) DeleteGeneration(id string) (GenerationRecord, error) {
 	record, err := s.Generation(id)
 	if err != nil {
 		return record, err
+	}
+	if record.InVault {
+		return record, ErrVaultItemInVault
 	}
 	_, err = s.db.Exec(`DELETE FROM generations WHERE id=?`, id)
 	if err == nil {
