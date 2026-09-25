@@ -1771,8 +1771,13 @@
       elements.projectTopic.focus();
       return;
     }
-    if (!elements.model.value) {
+    const model = selectedModel();
+    if (!model) {
       toast("Select an available model first.", true);
+      return;
+    }
+    if (!supportsProject(model)) {
+      toast("Choose a model that supports 6-second clips at 480p in 9:16.", true);
       return;
     }
     setButtonBusy(elements.generate, true, "Building projectâ€¦");
@@ -1808,7 +1813,8 @@
       if (error.status !== 401) toast(error.message, true);
     } finally {
       setButtonBusy(elements.generate, false);
-      elements.generate.disabled = !elements.model.value;
+      const currentModel = selectedModel();
+      elements.generate.disabled = !currentModel || (state.mode === "project" && !supportsProject(currentModel));
     }
   }
 

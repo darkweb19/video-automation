@@ -196,8 +196,9 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 				_ = p.app.store.AppendPipelineEvent(project.ID, "validation", "completed", "Generated story plan validated.", 0, 0)
 				_ = p.app.store.AppendPipelineEvent(project.ID, "continuity", "started", "Applying continuity bible to final scene prompts.", 0, 0)
 				if err := p.app.store.SaveStoryPlan(project.ID, plan); err != nil {
-					_ = p.app.store.AppendPipelineEvent(project.ID, "continuity", "failed", "Unable to prepare final scene prompts.", 0, 0)
-					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "Unable to prepare final scene prompts. Retry the project.")
+					message := safeStoryPlanSaveFailure(err)
+					_ = p.app.store.AppendPipelineEvent(project.ID, "continuity", "failed", message, 0, 0)
+					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
 					p.logger.Error("save project script failed", "project_id", project.ID)
 					return
 				}
@@ -215,6 +216,13 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 			p.processProjectScenes(ctx, provider, project)
 		}
 	}
+}
+
+func safeStoryPlanSaveFailure(err error) string {
+	if err != nil && strings.Contains(err.Error(), "prompt exceeds 4000 characters after continuity rules") {
+		return "The generated scene prompt exceeded the 4,000-character limit after continuity details. Retry with a shorter topic."
+	}
+	return "Unable to prepare final scene prompts. Retry the project."
 }
 
 func (p *Processor) processProjectScenes(ctx context.Context, provider VideoService, project VideoProject) {
