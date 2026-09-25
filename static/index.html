@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/static/styles.css?v=20260925-1">
   <link rel="stylesheet" href="/static/model-picker.css?v=20260923-1">
   <link rel="stylesheet" href="/static/project.css?v=20260923-1">
-  <link rel="stylesheet" href="/static/history-settings.css?v=20260925-1">
+  <link rel="stylesheet" href="/static/history-settings.css?v=20260925-2">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -50,6 +50,7 @@
         <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span>Overview</button>
         <button class="nav-item" data-view="generate"><span class="nav-icon">＋</span>Generate</button>
         <button class="nav-item" data-view="history"><span class="nav-icon">▤</span>History</button>
+        <button class="nav-item" data-view="vault"><span class="nav-icon">▣</span>Vault</button>
         <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span>Settings</button>
       </nav>
       <div class="sidebar-foot"><span class="status-dot"></span><span>Docker storage active</span></div>
@@ -184,6 +185,48 @@
           </div>
         </section>
 
+        <section class="view" data-page="vault">
+          <div class="vault-page-head">
+            <div><h2>Vault</h2><p>Videos you moved out of History.</p></div>
+            <button id="vault-lock" class="button secondary" type="button" hidden>Lock Vault</button>
+          </div>
+          <div id="vault-locked" class="panel vault-lock-panel">
+            <div class="vault-gate">
+              <div class="vault-gate-mark" aria-hidden="true">▣</div>
+              <h3 id="vault-gate-title">Vault is locked</h3>
+              <p id="vault-gate-copy">Enter your four-digit code to view protected videos.</p>
+              <form id="vault-unlock-form" class="vault-code-form">
+                <label for="vault-code">Vault code</label>
+                <input id="vault-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="one-time-code" aria-describedby="vault-code-error" required>
+                <p id="vault-code-error" class="form-error" role="alert" hidden></p>
+                <button id="vault-unlock-button" class="button primary full" type="submit">Unlock Vault</button>
+              </form>
+              <button id="vault-go-settings" class="text-button vault-settings-link" type="button" hidden>Set a code in Settings</button>
+              <p class="vault-gate-foot">The Vault locks when you refresh this page or choose Lock Vault.</p>
+            </div>
+          </div>
+          <div id="vault-content" class="vault-content" hidden>
+            <div class="vault-collection-head">
+              <div><h3>Protected videos</h3><p>Only available while the Vault is unlocked.</p></div>
+              <span id="vault-count" class="history-count">0</span>
+            </div>
+            <div id="vault-empty" class="panel vault-empty" hidden>
+              <div class="vault-empty-mark" aria-hidden="true">▤</div>
+              <h3>Nothing stored here yet</h3>
+              <p>Move a completed video from History to keep it here.</p>
+              <button class="button secondary" data-go="history" type="button">Go to History</button>
+            </div>
+            <div id="vault-grid" class="history-grid vault-grid"></div>
+          </div>
+          <dialog id="vault-player-dialog" class="vault-player-dialog" aria-labelledby="vault-player-title">
+            <div class="vault-player-head">
+              <h2 id="vault-player-title">Vault video</h2>
+              <button id="vault-player-close" class="button secondary" type="button">Close</button>
+            </div>
+            <video id="vault-player" controls playsinline preload="metadata"></video>
+          </dialog>
+        </section>
+
         <section class="view" data-page="settings">
           <div class="settings-grid">
             <section class="panel settings-provider-panel">
@@ -199,6 +242,16 @@
               <form id="api-key-form" class="stack">
                 <div class="field"><label for="api-key">Replace API key</label><input id="api-key" type="password" autocomplete="off" placeholder="sk-or-v1-…" required><small>The key is tested before it is saved.</small></div>
                 <button class="button primary" type="submit">Test and save key</button>
+              </form>
+            </section>
+            <section class="panel vault-settings-panel">
+              <div class="panel-head"><div><h2>Vault code</h2><p>Set the four-digit code used to open your protected videos.</p></div><span id="vault-code-state" class="badge neutral">Checking</span></div>
+              <form id="vault-code-form" class="stack">
+                <div id="vault-current-code-field" class="field" hidden><label for="vault-current-code">Current code</label><input id="vault-current-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password"><small>Enter the current code before changing it.</small></div>
+                <div class="field"><label for="vault-new-code">New four-digit code</label><input id="vault-new-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></div>
+                <div class="field"><label for="vault-confirm-code">Confirm new code</label><input id="vault-confirm-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></div>
+                <button id="vault-code-save" class="button primary" type="submit">Set Vault code</button>
+                <small id="vault-code-help">Keep this code safe. If you lose it, the Vault cannot be opened in this version.</small>
               </form>
             </section>
             <section id="modal-settings" class="panel settings-account-panel" hidden>
@@ -227,6 +280,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260925-1" defer></script>
+  <script src="/static/app.js?v=20260925-2" defer></script>
 </body>
 </html>

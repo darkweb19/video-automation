@@ -29,6 +29,7 @@ type dashboardApp struct {
 	store                     *Store
 	security                  *Security
 	logger                    *slog.Logger
+	vault                     *vaultRuntime
 	baseURL                   string
 	limiter                   *loginThrottle
 	recoveryLimiter           *loginThrottle
@@ -39,7 +40,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger, limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
+	app := &dashboardApp{store: store, security: security, logger: logger, vault: newVaultRuntime(), limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
 	if err := store.RecoverInterruptedProjectDeletes(); err != nil {
 		logger.Error("recover interrupted project deletions failed")
 	}
@@ -60,6 +61,13 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("POST /generate", app.requirePasswordChanged(http.HandlerFunc(app.generate)))
 	mux.Handle("GET /status", app.requirePasswordChanged(http.HandlerFunc(app.status)))
 	mux.Handle("GET /api/generations", app.requirePasswordChanged(http.HandlerFunc(app.history)))
+	mux.Handle("GET /api/vault/status", app.requirePasswordChanged(http.HandlerFunc(app.vaultStatus)))
+	mux.Handle("POST /api/vault/unlock", app.requirePasswordChanged(http.HandlerFunc(app.unlockVault)))
+	mux.Handle("POST /api/vault/lock", app.requirePasswordChanged(http.HandlerFunc(app.lockVault)))
+	mux.Handle("GET /api/vault/items", app.requirePasswordChanged(app.requireVaultUnlock(http.HandlerFunc(app.vaultItems))))
+	mux.Handle("GET /api/vault/items/{kind}/{id}/video", app.requirePasswordChanged(app.requireVaultUnlock(http.HandlerFunc(app.vaultVideo))))
+	mux.Handle("POST /api/vault/items/{kind}/{id}/move", app.requirePasswordChanged(http.HandlerFunc(app.moveToVault)))
+	mux.Handle("POST /api/vault/items/{kind}/{id}/restore", app.requirePasswordChanged(app.requireVaultUnlock(http.HandlerFunc(app.restoreFromVault))))
 	mux.Handle("POST /api/prompts/random", app.requirePasswordChanged(http.HandlerFunc(app.randomPrompt)))
 	mux.Handle("POST /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.createProject)))
 	mux.Handle("GET /api/projects", app.requirePasswordChanged(http.HandlerFunc(app.projects)))
@@ -82,6 +90,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("PUT /api/settings/video-model", app.requirePasswordChanged(http.HandlerFunc(app.updateVideoModel)))
 	mux.Handle("POST /api/settings/video-provider/test", app.requirePasswordChanged(http.HandlerFunc(app.testVideoProvider)))
 	mux.Handle("PUT /api/settings/password", app.requireAuth(http.HandlerFunc(app.updatePassword)))
+	mux.Handle("PUT /api/settings/vault-code", app.requirePasswordChanged(http.HandlerFunc(app.updateVaultCode)))
 	if security != nil {
 		if err := app.migrateLegacyModalAccount(); err != nil {
 			logger.Warn("legacy Modal account migration failed")
@@ -259,6 +268,7 @@ func (a *dashboardApp) recoverPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.recoveryLimiter.Succeeded(ip)
+	a.clearVaultGrants()
 	a.security.Logout(w, r)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "password reset"})
 }
@@ -266,6 +276,9 @@ func (a *dashboardApp) recoverPassword(w http.ResponseWriter, r *http.Request) {
 func (a *dashboardApp) logout(w http.ResponseWriter, r *http.Request) {
 	if !mutationAllowed(w, r) {
 		return
+	}
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		a.clearVaultGrantsForSession(tokenHash(cookie.Value))
 	}
 	a.security.Logout(w, r)
 	w.WriteHeader(http.StatusNoContent)
@@ -764,6 +777,10 @@ func (a *dashboardApp) status(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "unable to load generation")
 		return
 	}
+	if record.InVault {
+		writeError(w, http.StatusNotFound, "generation not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, record)
 }
 
@@ -966,6 +983,10 @@ func (a *dashboardApp) project(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "unable to load project")
 		return
 	}
+	if project.InVault {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, project)
 }
 
@@ -978,7 +999,7 @@ func (a *dashboardApp) deleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid project id")
 		return
 	}
-	if err := a.store.DeleteProject(id); errors.Is(err, sql.ErrNoRows) {
+	if err := a.store.DeleteProject(id); errors.Is(err, sql.ErrNoRows) || errors.Is(err, ErrVaultItemInVault) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	} else if errors.Is(err, ErrProjectNotTerminal) {
@@ -1044,7 +1065,7 @@ func (a *dashboardApp) projectVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	project, err := a.store.Project(id)
-	if err != nil || !project.FinalVideoReady {
+	if err != nil || project.InVault || !project.FinalVideoReady {
 		writeError(w, http.StatusNotFound, "final video not found")
 		return
 	}
@@ -1066,7 +1087,7 @@ func (a *dashboardApp) projectVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Cache-Control", "private, no-store")
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="project-%s.mp4"`, id))
 	}
@@ -1126,7 +1147,7 @@ func (a *dashboardApp) video(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := a.store.Generation(id)
-	if err != nil || record.VideoPath == "" {
+	if err != nil || record.InVault || record.VideoPath == "" {
 		writeError(w, http.StatusNotFound, "video not found")
 		return
 	}
@@ -1152,7 +1173,7 @@ func (a *dashboardApp) video(w http.ResponseWriter, r *http.Request) {
 		contentType = "video/mp4"
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Cache-Control", "private, no-store")
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="generation-%s.mp4"`, id))
 	}
@@ -1176,6 +1197,7 @@ func (a *dashboardApp) settings(w http.ResponseWriter, _ *http.Request) {
 		"modal_video_base_url":           modalBaseURL,
 		"modal_video_api_key_configured": modalKeyErr == nil,
 		"video_models":                   map[string]string{"openrouter": a.selectedVideoModel(VideoProviderOpenRouter), "modal": a.selectedVideoModelForAccount(VideoProviderModal, defaultModalAccountID)},
+		"vault_code_configured":          a.vaultCodeConfigured(),
 	})
 }
 
@@ -1617,6 +1639,7 @@ func (a *dashboardApp) updatePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "unable to change password")
 		return
 	}
+	a.clearVaultGrants()
 	if err := a.security.NewSession(w, r, identity.Username); err != nil {
 		writeError(w, http.StatusInternalServerError, "password changed; please log in again")
 		return

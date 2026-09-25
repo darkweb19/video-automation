@@ -37,6 +37,7 @@ type GenerationRecord struct {
 	CostUSD          string            `json:"cost_usd,omitempty"`
 	EstimatedCostUSD string            `json:"estimated_cost_usd,omitempty"`
 	VideoPath        string            `json:"-"`
+	InVault          bool              `json:"-"`
 	VideoReady       bool              `json:"video_ready"`
 	SizeBytes        int64             `json:"size_bytes,omitempty"`
 	Error            string            `json:"error,omitempty"`
@@ -330,6 +331,7 @@ func (s *Store) migrate() error {
 			cost_usd TEXT NOT NULL DEFAULT '',
 			estimated_cost_usd TEXT NOT NULL DEFAULT '',
 			video_path TEXT NOT NULL DEFAULT '',
+			in_vault INTEGER NOT NULL DEFAULT 0,
 			size_bytes INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
 			download_attempts INTEGER NOT NULL DEFAULT 0,
@@ -360,6 +362,7 @@ func (s *Store) migrate() error {
 			status TEXT NOT NULL,
 			error TEXT NOT NULL DEFAULT '',
 			final_video_path TEXT NOT NULL DEFAULT '',
+			in_vault INTEGER NOT NULL DEFAULT 0,
 			final_size_bytes INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
@@ -444,7 +447,13 @@ func (s *Store) migrate() error {
 	if err := s.addColumnIfMissing("generations", "progress", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := s.addColumnIfMissing("generations", "in_vault", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := s.addColumnIfMissing("video_projects", "provider_config_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("video_projects", "in_vault", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES('video_provider','openrouter',unixepoch()) ON CONFLICT(key) DO NOTHING`)
@@ -624,11 +633,11 @@ func (s *Store) InsertGeneration(record GenerationRecord) error {
 	return tx.Commit()
 }
 
-const generationColumns = `id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,progress,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at`
+const generationColumns = `id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,progress,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at,in_vault`
 
 func scanGeneration(scanner interface{ Scan(...any) error }) (GenerationRecord, error) {
 	var record GenerationRecord
-	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.ProviderConfigID, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.Progress, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt)
+	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.ProviderConfigID, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.Progress, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt, &record.InVault)
 	record.VideoReady = record.VideoPath != ""
 	return record, err
 }
@@ -646,7 +655,7 @@ func (s *Store) Generations(limit int) ([]GenerationRecord, error) {
 	if limit < 1 || limit > 200 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT `+generationColumns+` FROM generations ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT `+generationColumns+` FROM generations WHERE in_vault=0 ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -689,7 +698,7 @@ type GenerationStats struct {
 func (s *Store) GenerationStats() (GenerationStats, error) {
 	var stats GenerationStats
 	var cost float64
-	err := s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='processing'),0),COALESCE(SUM(status IN ('downloading','download_failed')),0),COALESCE(SUM(status='completed'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(CAST(NULLIF(cost_usd,'') AS REAL)),0) FROM generations`).Scan(&stats.Total, &stats.Queued, &stats.Processing, &stats.Downloading, &stats.Completed, &stats.Failed, &cost)
+	err := s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='processing'),0),COALESCE(SUM(status IN ('downloading','download_failed')),0),COALESCE(SUM(status='completed'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(CAST(NULLIF(cost_usd,'') AS REAL)),0) FROM generations WHERE in_vault=0`).Scan(&stats.Total, &stats.Queued, &stats.Processing, &stats.Downloading, &stats.Completed, &stats.Failed, &cost)
 	stats.TotalCostUSD = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", cost), "0"), ".")
 	return stats, err
 }
@@ -699,9 +708,10 @@ func (s *Store) GenerationsPage(limit int, beforeCreated int64, beforeID string)
 		limit = 25
 	}
 	query := `SELECT ` + generationColumns + ` FROM generations`
+	query += ` WHERE in_vault=0`
 	args := []any{}
 	if beforeCreated > 0 && beforeID != "" {
-		query += ` WHERE created_at < ? OR (created_at = ? AND id < ?)`
+		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
 		args = append(args, beforeCreated, beforeCreated, beforeID)
 	}
 	query += ` ORDER BY created_at DESC,id DESC LIMIT ?`
@@ -952,11 +962,11 @@ func (s *Store) BeginDelete(id string) (GenerationRecord, error) {
 		return GenerationRecord{}, err
 	}
 	defer tx.Rollback()
-	record, err := scanGeneration(tx.QueryRow(`SELECT `+generationColumns+` FROM generations WHERE id=? AND status!='deleting'`, id))
+	record, err := scanGeneration(tx.QueryRow(`SELECT `+generationColumns+` FROM generations WHERE id=? AND status!='deleting' AND in_vault=0`, id))
 	if err != nil {
 		return record, err
 	}
-	result, err := tx.Exec(`UPDATE generations SET status='deleting',updated_at=? WHERE id=? AND status!='deleting'`, time.Now().Unix(), id)
+	result, err := tx.Exec(`UPDATE generations SET status='deleting',updated_at=? WHERE id=? AND status!='deleting' AND in_vault=0`, time.Now().Unix(), id)
 	if err != nil {
 		return record, err
 	}
@@ -991,6 +1001,9 @@ func (s *Store) DeleteGeneration(id string) (GenerationRecord, error) {
 	record, err := s.Generation(id)
 	if err != nil {
 		return record, err
+	}
+	if record.InVault {
+		return record, ErrVaultItemInVault
 	}
 	_, err = s.db.Exec(`DELETE FROM generations WHERE id=?`, id)
 	if err == nil {

@@ -182,6 +182,7 @@ type VideoProject struct {
 	VideoProvider    string         `json:"video_provider"`
 	ProviderConfigID string         `json:"-"`
 	Status           string         `json:"status"`
+	InVault          bool           `json:"-"`
 	Progress         int            `json:"progress"`
 	Error            string         `json:"error,omitempty"`
 	FinalVideoPath   string         `json:"-"`

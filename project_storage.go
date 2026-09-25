@@ -105,7 +105,7 @@ func (s *Store) SaveStoryPlan(projectID string, plan StoryPlan) error {
 	return tx.Commit()
 }
 
-const projectColumns = `id,topic,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at`
+const projectColumns = `id,topic,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at,in_vault`
 const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,progress,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,created_at,updated_at`
 
 func appendPipelineEvent(execer interface {
@@ -156,7 +156,7 @@ func scanTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextGener
 
 func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) {
 	var project VideoProject
-	err := scanner.Scan(&project.ID, &project.Topic, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt)
+	err := scanner.Scan(&project.ID, &project.Topic, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt, &project.InVault)
 	project.FinalVideoReady = project.FinalVideoPath != ""
 	return project, err
 }
@@ -230,8 +230,12 @@ func (s *Store) DeleteProject(id string) error {
 	defer tx.Rollback()
 
 	var status, providerConfigID string
-	if err := tx.QueryRow(`SELECT status,provider_config_id FROM video_projects WHERE id=?`, id).Scan(&status, &providerConfigID); err != nil {
+	var inVault bool
+	if err := tx.QueryRow(`SELECT status,provider_config_id,in_vault FROM video_projects WHERE id=?`, id).Scan(&status, &providerConfigID, &inVault); err != nil {
 		return err
+	}
+	if inVault {
+		return ErrVaultItemInVault
 	}
 	if status != "completed" && status != "failed" {
 		return ErrProjectNotTerminal
@@ -326,7 +330,7 @@ func (s *Store) Projects(limit int) ([]VideoProject, error) {
 	if limit < 1 || limit > 100 {
 		limit = 24
 	}
-	rows, err := s.db.Query(`SELECT `+projectColumns+` FROM video_projects ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT `+projectColumns+` FROM video_projects WHERE in_vault=0 ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

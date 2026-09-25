@@ -60,7 +60,7 @@ Within that volume:
 
 | Path | Contents |
 | --- | --- |
-| `/data/app.db` | SQLite users, selected video provider, named Modal accounts and encrypted credentials, per-job provider credential snapshots, provider-scoped video models, jobs, normalized events, progress, errors, and cost records |
+| `/data/app.db` | SQLite users, selected video provider, named Modal accounts and encrypted credentials, encrypted Vault code and membership, per-job provider credential snapshots, provider-scoped video models, jobs, normalized events, progress, errors, and cost records |
 | `/data/secret.key` | Encryption key for stored API credentials |
 | `/data/videos/` | Downloaded completed MP4 files |
 | `/data/projects/` | Per-project scene clips and final 30-second MP4 files |
@@ -148,6 +148,8 @@ Each Modal deployment has its own endpoint and key. The key is encrypted at rest
 For OpenRouter, the model list includes provider-supplied per-second pricing where available, such as `$0.50/sec`; otherwise it shows `From …/sec` or `Price unavailable`. The dashboard shows estimates only when the active provider supplies pricing. Modal's API returns no per-video price, so its compute cost is billed separately by Modal. History stores the cost value reported by the selected provider; confirm the provider's billing dashboard for actual charges.
 
 Jobs are stored before provider polling begins. The background worker keeps polling and downloads completed video into `/data/videos`, so closing the dashboard does not cancel a job. Live job views and History show persisted, application-normalized event messages and progress for project and single-clip jobs. Failure errors are stored with the job and remain visible on its History card. History also includes the prompt, model, date, duration, status, cost, local playback/download, and manual deletion. Deletion removes the corresponding database record and local video file. Files are retained indefinitely until deleted in History.
+
+Completed videos can be moved from History into the separate Vault tab; this hides them from regular History without moving or copying their files. Set the four-digit Vault code in Settings first. Enter the code to list, play, or download Vault videos. The Vault locks when you refresh the page or choose **Lock Vault**. Change the code in Settings with the current code; keep it safe, because a forgotten code cannot be recovered in this version. Returning a Vault video restores it to History.
 
 ## Verification
 

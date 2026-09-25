@@ -88,6 +88,23 @@
     projectDownload: $("#project-download"),
     projectHistory: $("#project-history"),
     historyGrid: $("#history-grid"),
+    vaultLock: $("#vault-lock"),
+    vaultLocked: $("#vault-locked"),
+    vaultGateTitle: $("#vault-gate-title"),
+    vaultGateCopy: $("#vault-gate-copy"),
+    vaultUnlockForm: $("#vault-unlock-form"),
+    vaultCode: $("#vault-code"),
+    vaultCodeError: $("#vault-code-error"),
+    vaultUnlockButton: $("#vault-unlock-button"),
+    vaultGoSettings: $("#vault-go-settings"),
+    vaultContent: $("#vault-content"),
+    vaultCount: $("#vault-count"),
+    vaultEmpty: $("#vault-empty"),
+    vaultGrid: $("#vault-grid"),
+    vaultPlayerDialog: $("#vault-player-dialog"),
+    vaultPlayerTitle: $("#vault-player-title"),
+    vaultPlayer: $("#vault-player"),
+    vaultPlayerClose: $("#vault-player-close"),
     recentList: $("#recent-list"),
     refreshHistory: $("#refresh-history"),
     statTotal: $("#stat-total"),
@@ -115,6 +132,14 @@
     passwordForm: $("#password-form"),
     currentPassword: $("#current-password"),
     newPassword: $("#new-password"),
+    vaultCodeState: $("#vault-code-state"),
+    vaultCodeForm: $("#vault-code-form"),
+    vaultCurrentCodeField: $("#vault-current-code-field"),
+    vaultCurrentCode: $("#vault-current-code"),
+    vaultNewCode: $("#vault-new-code"),
+    vaultConfirmCode: $("#vault-confirm-code"),
+    vaultCodeSave: $("#vault-code-save"),
+    vaultCodeHelp: $("#vault-code-help"),
     toast: $("#toast")
   };
 
@@ -122,6 +147,7 @@
     overview: { title: "Overview", kicker: "Workspace" },
     generate: { title: "Generate", kicker: "Create" },
     history: { title: "History", kicker: "Library" },
+    vault: { title: "Vault", kicker: "Private library" },
     settings: { title: "Settings", kicker: "AI providers" }
   };
 
@@ -146,14 +172,31 @@
     historyRefreshTimer: 0,
     historyTerminalOpen: new Map(),
     currentGenerationID: "",
+    displayedGenerationID: "",
     pollTimer: 0,
     mode: "project",
     projects: [],
     currentProjectID: "",
+    displayedProjectID: "",
     projectPollTimer: 0,
     toastTimer: 0,
     authenticated: false,
-    mustChangePassword: false
+    mustChangePassword: false,
+    vaultConfigured: false,
+    vaultToken: "",
+    vaultGeneration: 0,
+    vaultLocking: false,
+    vaultLockQueue: Promise.resolve(),
+    vaultPendingLocks: 0,
+    vaultRestoringLock: false,
+    vaultRestoreLockReady: false,
+    vaultRestoreLockFailed: false,
+    vaultRestoreGeneration: 0,
+    vaultAuthGeneration: 0,
+    vaultUnlockPending: 0,
+    vaultMediaControllers: new Set(),
+    vaultItems: [],
+    vaultObjectURL: ""
   };
 
   const VIDEO_PROVIDER_NAMES = Object.freeze({ modal: "Modal", openrouter: "OpenRouter" });
@@ -489,6 +532,8 @@
 
     const apiKeyPanel = elements.apiKeyForm.closest(".panel");
     if (apiKeyPanel) apiKeyPanel.hidden = state.mustChangePassword;
+    const vaultCodePanel = elements.vaultCodeForm.closest(".panel");
+    if (vaultCodePanel) vaultCodePanel.hidden = state.mustChangePassword;
     let notice = $("#forced-password-notice");
     if (!notice) {
       notice = make("div", {
@@ -506,11 +551,24 @@
     }
   }
 
+  function resetVaultRestoreState() {
+    state.vaultRestoreGeneration += 1;
+    state.vaultAuthGeneration += 1;
+    state.vaultRestoringLock = false;
+    state.vaultRestoreLockReady = false;
+    state.vaultRestoreLockFailed = false;
+  }
+
   function showLoggedOut() {
     stopPolling();
     stopProjectPolling();
     stopHistoryRefresh();
+    resetVaultRestoreState();
+    clearVaultClientState();
+    clearGenerationDisplay();
+    clearProjectDisplay();
     state.authenticated = false;
+    state.vaultConfigured = false;
     state.currentGenerationID = "";
     state.currentProjectID = "";
     state.generations = [];
@@ -546,6 +604,7 @@
   }
 
   function showAuthenticated(username, mustChangePassword) {
+    resetVaultRestoreState();
     state.authenticated = true;
     applyPasswordGate(mustChangePassword);
     elements.accountName.textContent = username || "sujanshrestha";
@@ -572,6 +631,7 @@
     elements.sidebar.classList.remove("open");
     elements.menuButton.setAttribute("aria-expanded", "false");
     if (view === "settings" && !state.mustChangePassword) loadSettings(false);
+    if (view === "vault" && !state.mustChangePassword) loadVault();
     if (view === "history" && !state.mustChangePassword) {
       loadHistory(false);
       loadProjects(false);
@@ -1197,6 +1257,11 @@
         download.href = `${videoURL}&download=1`;
         actions.append(download);
       }
+      if (record.status === "completed" && record.video_ready) {
+        const move = make("button", { className: "button secondary vault-move-button", text: "Move to Vault", type: "button" });
+        move.addEventListener("click", () => moveHistoryItem("generation", record.id, move));
+        actions.append(move);
+      }
       const remove = make("button", { className: "button secondary danger-button", text: "Delete", type: "button" });
       remove.addEventListener("click", () => deleteGeneration(record));
       actions.append(remove);
@@ -1281,14 +1346,89 @@
     try {
       await request(`/api/generations/${encodeURIComponent(record.id)}`, { method: "DELETE" });
       state.generations = state.generations.filter((item) => item.id !== record.id);
-      if (state.currentGenerationID === record.id) {
-        stopPolling();
-        state.currentGenerationID = "";
-      }
+      clearGenerationDisplay(record.id);
       await loadHistory(false, false);
       toast("Generation deleted.");
     } catch (error) {
       if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  function clearGenerationDisplay(id = "") {
+    const matchesCurrent = !id || state.currentGenerationID === id;
+    const matchesDisplay = !id || state.displayedGenerationID === id;
+    if (matchesCurrent) {
+      stopPolling();
+      state.currentGenerationID = "";
+    }
+    if (!matchesDisplay) return;
+    state.displayedGenerationID = "";
+    elements.generatedVideo.pause();
+    elements.generatedVideo.removeAttribute("src");
+    elements.generatedVideo.load();
+    elements.generatedVideo.hidden = true;
+    elements.openVideo.removeAttribute("href");
+    elements.openVideo.hidden = true;
+    elements.singleTerminal.replaceChildren();
+    elements.singleTerminalSection.hidden = true;
+    elements.statusActive.hidden = true;
+    elements.statusError.hidden = true;
+    elements.statusError.textContent = "";
+    elements.retryStatus.hidden = true;
+    elements.progressWrap.hidden = true;
+    elements.statusDetail.textContent = "";
+    if (state.mode === "single") elements.statusEmpty.hidden = false;
+  }
+
+  function clearProjectDisplay(id = "") {
+    const matchesCurrent = !id || state.currentProjectID === id;
+    const matchesDisplay = !id || state.displayedProjectID === id;
+    if (matchesCurrent) {
+      stopProjectPolling();
+      state.currentProjectID = "";
+    }
+    if (!matchesDisplay) return;
+    state.displayedProjectID = "";
+    elements.projectVideo.pause();
+    elements.projectVideo.removeAttribute("src");
+    elements.projectVideo.load();
+    elements.projectFinal.hidden = true;
+    elements.projectDownload.removeAttribute("href");
+    elements.projectStory.replaceChildren();
+    elements.projectStory.hidden = true;
+    elements.projectScenes.replaceChildren();
+    elements.projectPipelineList.replaceChildren();
+    elements.projectTerminal.replaceChildren();
+    elements.projectTraceSections.replaceChildren();
+    elements.projectPipeline.hidden = true;
+    elements.projectTrace.hidden = true;
+    elements.projectProgressWrap.hidden = true;
+    elements.projectError.hidden = true;
+    elements.projectError.textContent = "";
+    elements.retryProject.hidden = true;
+    elements.projectStatusDetail.textContent = "";
+    elements.projectStatus.hidden = true;
+    if (state.mode === "project") elements.statusEmpty.hidden = false;
+  }
+
+  async function moveHistoryItem(kind, id, button) {
+    if (!id) return;
+    setButtonBusy(button, true, "Moving…");
+    try {
+      await request(`/api/vault/items/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/move`, { method: "POST" });
+      if (kind === "generation") {
+        state.generations = state.generations.filter((item) => item.id !== id);
+        clearGenerationDisplay(id);
+      } else {
+        state.projects = state.projects.filter((item) => projectID(item) !== id);
+        clearProjectDisplay(id);
+      }
+      await Promise.allSettled([loadHistory(false), loadProjects(false)]);
+      toast("Moved to Vault.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
     }
   }
 
@@ -1301,21 +1441,7 @@
     if (!window.confirm(`Delete “${topic}” and its stored video? This cannot be undone.`)) return;
     try {
       await request(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
-      if (state.currentProjectID === id) {
-        stopProjectPolling();
-        state.currentProjectID = "";
-        elements.statusEmpty.hidden = false;
-        elements.statusActive.hidden = true;
-        elements.projectStatus.hidden = true;
-        elements.projectProgressWrap.hidden = true;
-        elements.projectError.hidden = true;
-        elements.projectStatusDetail.textContent = "";
-        elements.projectFinal.hidden = true;
-        elements.projectVideo.pause();
-        elements.projectVideo.removeAttribute("src");
-        elements.projectVideo.load();
-        elements.projectDownload.removeAttribute("href");
-      }
+      clearProjectDisplay(id);
       state.projects = state.projects.filter((item) => projectID(item) !== id);
       await loadProjects(false);
       toast("Project deleted.");
@@ -1325,6 +1451,7 @@
   }
 
   function setStatusRecord(record) {
+    state.displayedGenerationID = String(record.id || "");
     const status = record.status || "processing";
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = false;
@@ -1666,6 +1793,7 @@
     const status = String(projectValue(project, "status") || "queued").toLowerCase();
     const id = projectID(project);
     const progress = projectProgress(project, scenes);
+    state.displayedProjectID = id;
     state.currentProjectID = id;
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = true;
@@ -1841,6 +1969,11 @@
             download = make("a", { className: "button secondary", text: "Download" });
             download.href = `${videoURL}?download=1`;
             actions.append(download);
+          }
+          if (status === "completed" && videoReady) {
+            const move = make("button", { className: "button secondary vault-move-button", type: "button", text: "Move to Vault" });
+            move.addEventListener("click", () => moveHistoryItem("project", id, move));
+            actions.append(move);
           }
           const open = make("button", { className: "button secondary", type: "button", text: "Open" });
           open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); pollProject(id, 0); });
@@ -2020,6 +2153,19 @@
     elements.modalKeyHelp.textContent = modalConfigured
       ? "A key is saved securely. Leave this field blank to keep it while changing the URL."
       : "A key is required for the first save. The saved key is never returned to the browser.";
+    renderVaultCodeSettings(Boolean(settings.vault_code_configured));
+  }
+
+  function renderVaultCodeSettings(configured) {
+    state.vaultConfigured = configured;
+    elements.vaultCodeState.className = `badge ${state.vaultConfigured ? "completed" : "neutral"}`;
+    elements.vaultCodeState.textContent = state.vaultConfigured ? "Code set" : "Not set";
+    elements.vaultCurrentCodeField.hidden = !state.vaultConfigured;
+    elements.vaultCurrentCode.required = state.vaultConfigured;
+    elements.vaultCodeSave.textContent = state.vaultConfigured ? "Change Vault code" : "Set Vault code";
+    elements.vaultCodeHelp.textContent = state.vaultConfigured
+      ? "Keep this code safe. Changing it locks active Vault sessions."
+      : "Keep this code safe. If you lose it, the Vault cannot be opened in this version.";
   }
 
   async function loadSettings(notify = true) {
@@ -2033,6 +2179,420 @@
       elements.keyState.textContent = "Unavailable";
       if (notify && error.status !== 401) toast(error.message, true);
     }
+  }
+
+  function clearVaultClientState() {
+    invalidateVaultOperations();
+    closeVaultPlayer();
+    state.vaultToken = "";
+    state.vaultLocking = false;
+    state.vaultItems = [];
+    if (elements.vaultGrid) elements.vaultGrid.replaceChildren();
+    if (elements.vaultCount) elements.vaultCount.textContent = "0";
+    if (elements.vaultEmpty) elements.vaultEmpty.hidden = true;
+    if (elements.vaultContent) elements.vaultContent.hidden = true;
+    if (elements.vaultLock) elements.vaultLock.hidden = true;
+  }
+
+  function invalidateVaultOperations() {
+    state.vaultGeneration += 1;
+    state.vaultMediaControllers.forEach((controller) => controller.abort());
+    state.vaultMediaControllers.clear();
+  }
+
+  function renderVaultLocked(message = "") {
+    clearVaultClientState();
+    elements.vaultLocked.hidden = false;
+    const lockMessage = state.vaultRestoringLock
+      ? "Securing the Vault session. Wait before entering your code."
+      : state.vaultRestoreLockFailed
+        ? "Could not confirm the Vault is locked. Refresh the page and try again."
+        : message;
+    elements.vaultCodeError.textContent = lockMessage;
+    elements.vaultCodeError.hidden = !lockMessage;
+    elements.vaultCode.value = "";
+    elements.vaultUnlockForm.hidden = !state.vaultConfigured;
+    elements.vaultGoSettings.hidden = state.vaultConfigured;
+    const unlockDisabled = state.vaultRestoringLock || state.vaultRestoreLockFailed;
+    elements.vaultCode.disabled = unlockDisabled;
+    elements.vaultUnlockButton.disabled = unlockDisabled;
+    elements.vaultUnlockButton.textContent = state.vaultRestoringLock ? "Securing…" : "Unlock Vault";
+    elements.vaultGateTitle.textContent = state.vaultConfigured ? "Vault is locked" : "Set up your Vault";
+    elements.vaultGateCopy.textContent = state.vaultRestoringLock
+      ? "Confirming the previous Vault session is locked."
+      : state.vaultRestoreLockFailed
+        ? "Refresh to retry the lock check before unlocking."
+        : state.vaultConfigured
+          ? "Enter your four-digit code to view protected videos."
+          : "Choose a four-digit code in Settings before moving videos here.";
+  }
+
+  function vaultHeaders() {
+    return state.vaultToken ? { Authorization: `Vault ${state.vaultToken}` } : {};
+  }
+
+  async function vaultRequest(path, options = {}) {
+    if (state.vaultLocking) throw new APIError("Vault is locking", 423);
+    return request(path, {
+      ...options,
+      headers: { ...(options.headers || {}), ...vaultHeaders() }
+    });
+  }
+
+  function requestVaultLock(options = {}, shouldRun = null) {
+    state.vaultPendingLocks += 1;
+    const operation = state.vaultLockQueue.then(async () => {
+      if (shouldRun && !shouldRun()) return false;
+      await request("/api/vault/lock", { method: "POST", ...options });
+      return true;
+    });
+    const settled = operation.finally(() => {
+      state.vaultPendingLocks = Math.max(0, state.vaultPendingLocks - 1);
+      finishVaultRestoreIfReady();
+    });
+    state.vaultLockQueue = settled.then(() => undefined, () => undefined);
+    return settled;
+  }
+
+  function finishVaultRestoreIfReady() {
+    if (!state.vaultRestoreLockReady || state.vaultRestoreLockFailed
+      || state.vaultUnlockPending > 0 || state.vaultPendingLocks > 0) return;
+    state.vaultRestoreLockReady = false;
+    state.vaultRestoringLock = false;
+    renderVaultLocked();
+  }
+
+  async function loadVault() {
+    if (!state.authenticated || state.mustChangePassword) return;
+    try {
+      const status = await request("/api/vault/status");
+      state.vaultConfigured = Boolean(status && status.configured);
+      if (!state.vaultConfigured) {
+        renderVaultLocked();
+        return;
+      }
+      if (!state.vaultToken) {
+        renderVaultLocked();
+        return;
+      }
+      await loadVaultItems();
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    }
+  }
+
+  async function loadVaultItems() {
+    const generation = state.vaultGeneration;
+    const token = state.vaultToken;
+    try {
+      const payload = await vaultRequest("/api/vault/items");
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) return;
+      state.vaultItems = Array.isArray(payload && payload.items) ? payload.items : [];
+      renderVaultItems();
+      elements.vaultLocked.hidden = true;
+      elements.vaultContent.hidden = false;
+      elements.vaultLock.hidden = false;
+    } catch (error) {
+      if (generation !== state.vaultGeneration || token !== state.vaultToken) return;
+      if (error.status === 423) {
+        renderVaultLocked("Your Vault session ended. Enter your code to unlock it again.");
+      } else if (error.status !== 401) {
+        toast(error.message, true);
+      }
+    }
+  }
+
+  function renderVaultItems() {
+    elements.vaultGrid.replaceChildren();
+    elements.vaultCount.textContent = String(state.vaultItems.length);
+    elements.vaultEmpty.hidden = state.vaultItems.length > 0;
+    state.vaultItems.forEach((item) => {
+      const card = make("article", { className: "history-card vault-card" });
+      const preview = make("div", { className: "vault-preview" });
+      preview.append(
+        make("span", { className: "vault-preview-mark", text: "▣", attrs: { "aria-hidden": "true" } }),
+        make("span", { className: "vault-preview-kind", text: item.kind === "project" ? "30-second video" : "Video" })
+      );
+      const body = make("div", { className: "history-body" });
+      body.append(make("h3", { className: "history-title", text: item.title || "Untitled video" }));
+      const metadata = make("div", { className: "history-meta" });
+      metadata.append(
+        metadataItem("Created", formatDate(item.created_at)),
+        metadataItem("Duration", item.duration ? `${item.duration} sec` : "Provider default"),
+        metadataItem("Model", friendlyModel(item.model)),
+        metadataItem("File size", formatBytes(item.size_bytes))
+      );
+      body.append(metadata);
+      const actions = make("div", { className: "history-actions vault-actions" });
+      const view = make("button", { className: "button primary", text: "View video", type: "button" });
+      view.addEventListener("click", () => openVaultVideo(item, view));
+      const download = make("button", { className: "button secondary", text: "Download", type: "button" });
+      download.addEventListener("click", () => downloadVaultVideo(item, download));
+      const restore = make("button", { className: "button secondary", text: "Return to History", type: "button" });
+      restore.addEventListener("click", () => restoreVaultItem(item, restore));
+      actions.append(view, download, restore);
+      body.append(actions);
+      card.append(preview, body);
+      elements.vaultGrid.append(card);
+    });
+  }
+
+  async function fetchVaultVideo(item, download = false) {
+    if (state.vaultLocking || !state.vaultToken) throw new APIError("Vault is locked", 423);
+    const path = `/api/vault/items/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}/video${download ? "?download=1" : ""}`;
+    const generation = state.vaultGeneration;
+    const token = state.vaultToken;
+    const controller = new AbortController();
+    state.vaultMediaControllers.add(controller);
+    try {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        cache: "no-store",
+        signal: controller.signal,
+        headers: { Accept: "video/mp4", ...vaultHeaders() }
+      });
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) {
+        throw new APIError("Vault is locked", 423);
+      }
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        if (response.status === 401) showLoggedOut();
+        if (response.status === 423) {
+          renderVaultLocked("Your Vault session ended. Enter your code to unlock it again.");
+        }
+        throw new APIError(payload && payload.error || `Request failed (${response.status})`, response.status);
+      }
+      const blob = await response.blob();
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) {
+        throw new APIError("Vault is locked", 423);
+      }
+      return blob;
+    } catch (error) {
+      if (controller.signal.aborted) throw new APIError("Vault is locked", 423);
+      throw error;
+    } finally {
+      state.vaultMediaControllers.delete(controller);
+    }
+  }
+
+  async function openVaultVideo(item, button) {
+    const generation = state.vaultGeneration;
+    setButtonBusy(button, true, "Loading…");
+    try {
+      const blob = await fetchVaultVideo(item);
+      if (generation !== state.vaultGeneration || !state.vaultToken) return;
+      closeVaultPlayer();
+      state.vaultObjectURL = URL.createObjectURL(blob);
+      elements.vaultPlayerTitle.textContent = item.title || "Vault video";
+      elements.vaultPlayer.src = state.vaultObjectURL;
+      elements.vaultPlayerDialog.showModal();
+    } catch (error) {
+      if (error.status !== 401 && error.status !== 423) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function downloadVaultVideo(item, button) {
+    const generation = state.vaultGeneration;
+    setButtonBusy(button, true, "Preparing…");
+    try {
+      const blob = await fetchVaultVideo(item, true);
+      if (generation !== state.vaultGeneration || !state.vaultToken) return;
+      const url = URL.createObjectURL(blob);
+      const link = make("a", { attrs: { href: url, download: `${item.kind}-${item.id}.mp4` } });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      if (error.status !== 401 && error.status !== 423) toast(error.message, true);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function restoreVaultItem(item, button) {
+    const generation = state.vaultGeneration;
+    const token = state.vaultToken;
+    setButtonBusy(button, true, "Returning…");
+    try {
+      await vaultRequest(`/api/vault/items/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}/restore`, { method: "POST" });
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) return;
+      state.vaultItems = state.vaultItems.filter((entry) => entry.id !== item.id || entry.kind !== item.kind);
+      renderVaultItems();
+      await Promise.allSettled([loadHistory(false), loadProjects(false)]);
+      toast("Returned to History.");
+    } catch (error) {
+      if (generation !== state.vaultGeneration || token !== state.vaultToken) return;
+      if (error.status === 423) {
+        renderVaultLocked("Your Vault session ended. Enter your code to unlock it again.");
+      } else if (error.status !== 401) {
+        toast(error.message, true);
+      }
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  async function unlockVault(event) {
+    event.preventDefault();
+    if (state.vaultRestoringLock || state.vaultRestoreLockFailed) return;
+    const generation = state.vaultGeneration;
+    const authGeneration = state.vaultAuthGeneration;
+    const code = elements.vaultCode.value;
+    if (!/^[0-9]{4}$/.test(code)) {
+      renderVaultLocked("Enter all four digits.");
+      elements.vaultCode.focus();
+      return;
+    }
+    elements.vaultCodeError.hidden = true;
+    state.vaultUnlockPending += 1;
+    setButtonBusy(elements.vaultUnlockButton, true, "Unlocking…");
+    try {
+      const result = await request("/api/vault/unlock", {
+        method: "POST",
+        body: JSON.stringify({ code })
+      });
+      const token = result && typeof result.token === "string" ? result.token : "";
+      if (generation !== state.vaultGeneration) {
+        if (authGeneration !== state.vaultAuthGeneration || !state.authenticated) return;
+        try {
+          await requestVaultLock({}, () => authGeneration === state.vaultAuthGeneration && state.authenticated);
+        } catch (error) {
+          if (error.status !== 401 && authGeneration === state.vaultAuthGeneration
+            && state.authenticated && !state.mustChangePassword) {
+            state.vaultRestoreLockFailed = true;
+            state.vaultRestoreLockReady = false;
+            state.vaultRestoringLock = false;
+            renderVaultLocked();
+          }
+        }
+        return;
+      }
+      state.vaultToken = token;
+      elements.vaultCode.value = "";
+      if (!state.vaultToken) throw new APIError("Unable to unlock Vault", 500);
+      await loadVaultItems();
+    } catch (error) {
+      if (generation !== state.vaultGeneration) return;
+      if (error.status !== 401) {
+        elements.vaultCode.value = "";
+        elements.vaultCodeError.textContent = error.message;
+        elements.vaultCodeError.hidden = false;
+        elements.vaultCode.focus();
+      }
+    } finally {
+      state.vaultUnlockPending = Math.max(0, state.vaultUnlockPending - 1);
+      setButtonBusy(elements.vaultUnlockButton, false);
+      finishVaultRestoreIfReady();
+      if (state.vaultRestoringLock || state.vaultRestoreLockFailed) {
+        elements.vaultUnlockButton.disabled = true;
+        elements.vaultUnlockButton.textContent = state.vaultRestoringLock ? "Securing…" : "Unlock Vault";
+      }
+    }
+  }
+
+  async function lockVault() {
+    if (state.vaultLocking) return;
+    state.vaultLocking = true;
+    invalidateVaultOperations();
+    elements.vaultLock.disabled = true;
+    elements.vaultLock.textContent = "Locking…";
+    try {
+      // The server clears every grant for this login session, including one
+      // whose in-memory browser token was lost during a navigation.
+      await requestVaultLock();
+    } catch (error) {
+      if (error.status === 401) return;
+      toast(`Vault could not be locked. ${error.message}`, true);
+      return;
+    } finally {
+      state.vaultLocking = false;
+      elements.vaultLock.disabled = false;
+      elements.vaultLock.textContent = "Lock Vault";
+    }
+    clearVaultClientState();
+    if (state.authenticated && !state.mustChangePassword) renderVaultLocked();
+  }
+
+  async function secureVaultAfterPageRestore() {
+    const restoreGeneration = ++state.vaultRestoreGeneration;
+    state.vaultRestoringLock = true;
+    state.vaultRestoreLockReady = false;
+    state.vaultRestoreLockFailed = false;
+    renderVaultLocked();
+    try {
+      await requestVaultLock();
+      if (restoreGeneration !== state.vaultRestoreGeneration) return;
+      state.vaultRestoreLockReady = true;
+    } catch (error) {
+      if (restoreGeneration !== state.vaultRestoreGeneration) return;
+      if (error.status === 401) return;
+      state.vaultRestoreLockFailed = true;
+      state.vaultRestoreLockReady = false;
+      state.vaultRestoringLock = false;
+      renderVaultLocked();
+      return;
+    }
+    if (restoreGeneration !== state.vaultRestoreGeneration) return;
+    if (!state.authenticated || state.mustChangePassword) return;
+    finishVaultRestoreIfReady();
+    renderVaultLocked();
+  }
+
+  function closeVaultPlayer() {
+    if (elements.vaultPlayer) {
+      elements.vaultPlayer.pause();
+      elements.vaultPlayer.removeAttribute("src");
+      elements.vaultPlayer.load();
+    }
+    if (state.vaultObjectURL) URL.revokeObjectURL(state.vaultObjectURL);
+    state.vaultObjectURL = "";
+    if (elements.vaultPlayerDialog && elements.vaultPlayerDialog.open) elements.vaultPlayerDialog.close();
+  }
+
+  async function saveVaultCode(event) {
+    event.preventDefault();
+    const currentCode = elements.vaultCurrentCode.value;
+    const newCode = elements.vaultNewCode.value;
+    const confirmation = elements.vaultConfirmCode.value;
+    if (!/^[0-9]{4}$/.test(newCode)) {
+      toast("Enter a new four-digit code.", true);
+      elements.vaultNewCode.focus();
+      return;
+    }
+    if (newCode !== confirmation) {
+      toast("The new codes do not match.", true);
+      elements.vaultConfirmCode.focus();
+      return;
+    }
+    const configured = state.vaultConfigured;
+    if (configured && !/^[0-9]{4}$/.test(currentCode)) {
+      toast("Enter the current four-digit code.", true);
+      elements.vaultCurrentCode.focus();
+      return;
+    }
+    setButtonBusy(elements.vaultCodeSave, true, "Saving…");
+    try {
+      const result = await request("/api/settings/vault-code", {
+        method: "PUT",
+        body: JSON.stringify({ current_code: currentCode, new_code: newCode })
+      });
+      state.vaultConfigured = Boolean(result && result.configured);
+      clearVaultClientState();
+      elements.vaultCodeForm.reset();
+      renderVaultCodeSettings(state.vaultConfigured);
+      toast(configured ? "Vault code changed." : "Vault code set.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(elements.vaultCodeSave, false);
+    }
+  }
+
+  function constrainVaultCodeInput(input) {
+    input.value = input.value.replace(/[^0-9]/g, "").slice(0, 4);
   }
 
   async function saveAPIKey(event) {
@@ -2270,6 +2830,15 @@
       if (state.videoProvider === "modal") void loadModels(false);
     }));
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
+    elements.vaultCodeForm.addEventListener("submit", saveVaultCode);
+    [elements.vaultCurrentCode, elements.vaultNewCode, elements.vaultConfirmCode, elements.vaultCode].forEach((input) => {
+      input.addEventListener("input", () => constrainVaultCodeInput(input));
+    });
+    elements.vaultUnlockForm.addEventListener("submit", unlockVault);
+    elements.vaultLock.addEventListener("click", lockVault);
+    elements.vaultGoSettings.addEventListener("click", () => navigate("settings"));
+    elements.vaultPlayerClose.addEventListener("click", closeVaultPlayer);
+    elements.vaultPlayerDialog.addEventListener("close", closeVaultPlayer);
     elements.modalConfigForm.addEventListener("submit", saveModalConfig);
     elements.modalAccountCancel.addEventListener("click", resetModalAccountForm);
     elements.modalAccountProject.addEventListener("change", () => {
@@ -2335,6 +2904,15 @@
         loadProjects(false);
       }
     });
+    window.addEventListener("pagehide", () => {
+      if (!state.authenticated) return;
+      void requestVaultLock({ cache: "no-store", keepalive: true }).catch(() => {});
+      renderVaultLocked();
+    });
+    window.addEventListener("pageshow", (event) => {
+      if (!event.persisted || !state.authenticated) return;
+      void secureVaultAfterPageRestore();
+    });
   }
 
   async function bootstrap() {
@@ -2343,6 +2921,9 @@
     elements.menuButton.setAttribute("aria-expanded", "false");
     try {
       const session = await request("/api/session", {}, true);
+      if (!session.must_change_password) {
+        await requestVaultLock();
+      }
       showAuthenticated(session.username, session.must_change_password);
       if (!state.mustChangePassword) {
         await loadSettings(false);
