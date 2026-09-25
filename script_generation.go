@@ -287,22 +287,25 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 	var response struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", fmt.Errorf("decode OpenRouter random prompt response: %w", err)
 	}
-	if len(response.Choices) == 0 {
-		return "", errors.New("OpenRouter returned an empty random prompt")
-	}
-	prompt := strings.TrimSpace(response.Choices[0].Message.Content)
-	if len(prompt) >= 2 && prompt[0] == '"' && prompt[len(prompt)-1] == '"' {
-		prompt = strings.TrimSpace(prompt[1 : len(prompt)-1])
+	var prompt string
+	for _, choice := range response.Choices {
+		prompt = strings.TrimSpace(openRouterMessageText(choice.Message.Content))
+		if prompt != "" {
+			break
+		}
 	}
 	if prompt == "" {
-		return "", errors.New("OpenRouter returned an empty random prompt")
+		return "", errors.New("OpenRouter returned no text in its random prompt choices")
+	}
+	if len(prompt) >= 2 && prompt[0] == '"' && prompt[len(prompt)-1] == '"' {
+		prompt = strings.TrimSpace(prompt[1 : len(prompt)-1])
 	}
 	if input.Mode == RandomPromptModeProject {
 		prompt = fitRandomProjectTopic(prompt)
@@ -310,6 +313,30 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 		return "", fmt.Errorf("OpenRouter random prompt exceeds %d characters", MaxPromptLength)
 	}
 	return prompt, nil
+}
+
+// OpenRouter normally returns message.content as a string, but compatible
+// providers may return an array of text blocks. Read both forms and ignore
+// non-text blocks without exposing the raw upstream response to the browser.
+func openRouterMessageText(content json.RawMessage) string {
+	var text string
+	if json.Unmarshal(content, &text) == nil {
+		return text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, block := range blocks {
+		if block.Text != "" && (block.Type == "" || block.Type == "text") {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 // Keep a verbose free-model response usable as a project topic. Prefer a word
@@ -331,6 +358,16 @@ func fitRandomProjectTopic(prompt string) string {
 }
 
 func randomPromptInstructions(mode RandomPromptMode, category string) (systemPrompt, userPrompt string, maxTokens int) {
+	if category == RandomPromptCategoryMatureContent {
+		if mode == RandomPromptModeProject {
+			return "You create bold, sensual short-form video story ideas for an adult audience. Every person must be clearly 25 or older. Make the idea itself unmistakably sensual and visually revealing while remaining non-explicit: center it on a confident adult woman in a daring two-piece, bikini, or exotic lingerie look, with flirtatious posing, curves, cleavage, a striking bare back, or suggestive dancing such as a playful hip sway or twerk. Specify the outfit and sensual action in the idea so a later video script preserves them across scenes. Rotate the featured look and action; don't make every idea a robe, quiet glance, or generic elegant lounge scene. Keep breasts and buttocks covered by opaque clothing, with no nudity, visible nipples, genitalia, sexual activity, or fetish framing. Return only one concise topic or story idea in at most 200 characters, with no title, list, quotation marks, or explanation. It must suit a silent 30-second vertical video told in five connected six-second scenes. Do not include brand names, logos, subtitles, or on-screen text.",
+				"Generate one original bold, sensual, non-explicit adult video idea in this category: " + category,
+				randomProjectTokens
+		}
+		return "You are a production-ready text-to-video prompt writer for bold, sensual adult content. Every person must be clearly 25 or older. Write an unmistakably erotic, visually revealing but non-explicit prompt: favor a confident adult woman in a daring two-piece, bikini, or exotic lingerie, emphasizing her curves and fuller bust through opaque clothing, a striking bare back, teasing poses, flirtatious eye contact, and sensual movement such as a hip sway or twerk. Rotate settings, outfits, camera angles, and actions; avoid tame, generic scenes. Keep breasts and buttocks covered by opaque clothing, with no nudity, visible nipples, genitalia, sexual activity, or fetish framing. Return only one standalone prompt with setting, visual style, lighting, camera movement, six-second visible action, ending frame, and vertical 9:16 composition. Do not include brand names, logos, subtitles, or on-screen text.",
+			"Generate one original bold, sensual, non-explicit adult single-clip prompt in this category: " + category,
+			randomSingleTokens
+	}
 	if mode == RandomPromptModeProject {
 		return "You create original short-form video ideas. Return only one concise topic or story idea in at most 200 characters, with no title, list, quotation marks, or explanation. It must be suitable for a silent 30-second vertical video with five connected six-second scenes. Keep every person clearly adult. Do not include brand names, logos, subtitles, or on-screen text.",
 			"Generate one original topic in this category: " + category,

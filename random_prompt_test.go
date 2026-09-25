@@ -80,6 +80,24 @@ func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 			maxTokens:  randomSingleTokens,
 			userPrefix: "Generate one original single-clip video prompt",
 		},
+		{
+			name:       "mature project topic",
+			input:      RandomPromptRequest{Category: RandomPromptCategoryMatureContent, Mode: RandomPromptModeProject},
+			content:    "A confident adult dancer in a red bikini playfully sways beneath neon lights, her bare back framed by the mirrorball glow.",
+			want:       "A confident adult dancer in a red bikini playfully sways beneath neon lights, her bare back framed by the mirrorball glow.",
+			maxTokens:  randomProjectTokens,
+			userPrefix: "Generate one original bold, sensual, non-explicit adult video idea",
+			systemText: "daring two-piece, bikini, or exotic lingerie",
+		},
+		{
+			name:       "mature single prompt",
+			input:      RandomPromptRequest{Category: RandomPromptCategoryMatureContent, Mode: RandomPromptModeSingle},
+			content:    "A clearly adult woman in an opaque black lingerie set turns to show her bare back, then gives a teasing hip sway under warm amber light, six-second slow push-in, vertical 9:16.",
+			want:       "A clearly adult woman in an opaque black lingerie set turns to show her bare back, then gives a teasing hip sway under warm amber light, six-second slow push-in, vertical 9:16.",
+			maxTokens:  randomSingleTokens,
+			userPrefix: "Generate one original bold, sensual, non-explicit adult single-clip prompt",
+			systemText: "no nudity, visible nipples, genitalia",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +130,19 @@ func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 				t.Fatalf("prompt = %q, error = %v", prompt, err)
 			}
 		})
+	}
+}
+
+func TestGenerateRandomPromptReadsTextBlocksAndFallsThroughEmptyChoices(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":""}},{"message":{"content":[{"type":"image","image_url":"ignored"},{"type":"text","text":"A confident adult woman in an opaque red bikini turns to reveal her bare back"},{"type":"text","text":" under golden studio light, vertical 9:16."}]}}]}`)
+	}))
+	defer server.Close()
+	client := testClient(server)
+	prompt, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryMatureContent, Mode: RandomPromptModeSingle})
+	want := "A confident adult woman in an opaque red bikini turns to reveal her bare back under golden studio light, vertical 9:16."
+	if err != nil || prompt != want {
+		t.Fatalf("prompt = %q, error = %v", prompt, err)
 	}
 }
 
