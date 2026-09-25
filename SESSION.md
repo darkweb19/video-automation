@@ -1,27 +1,29 @@
-# Session handoff - 2026-09-25
+# Session handoff — 2026-09-25
 
 ## What was done
-- Fixed random prompt parsing to accept string or text-block content and use a later usable choice; added regression tests. Commit: `a3a4c71`.
-- Strengthened Mature Content random prompt instructions for project ideas and single clips: clearly adult, visibly sensual and revealing, while non-explicit.
-- Verified `go test ./...`, `go vet ./...`, `node --check static/app.js`, and `git diff --check`.
-- No paid provider generation was run.
+- Redesigned History with responsive three-column generation and project cards, accessible process logs, and saved-event counts.
+- Reorganized Settings while preserving API behavior and write-only credential fields.
+- Added and embedded `static/history-settings.css`; both Go handlers serve it from the same origin.
+- Added static-asset coverage for the new stylesheet in both handler paths.
+- Verified `go test ./...`, `go vet ./...`, `node --check static/app.js`, formatting, and diff checks. No paid generation was run.
 
 ## Decisions locked
-- OpenRouter model remains `inclusionai/ling-3.0-flash-fin:free` for random prompts and project scripts.
-- 30-second projects remain five six-second 9:16 scenes.
-- Mature Content prompts should emphasize adult subjects, revealing opaque swimwear/lingerie and sensual poses or movement, with no nudity or explicit sexual activity.
-- Provider credentials remain encrypted and must never be returned to the browser or printed.
+- History logs display persisted job events and status colors; they do not use sample or invented events.
+- Keep the existing light workspace and use the dark event console as the History accent.
+- Keep the 30-second project preset at five six-second 9:16 scenes.
+- API credentials stay encrypted and are never returned to the browser.
+- OpenRouter remains the story and script provider.
 
 ## Open questions
 1. Sujan: after deployment, does Random Prompt succeed on the first click in the 30-second tab?
-2. Sujan: do generated Mature Content project scenes preserve the bolder wardrobe and sensual action?
+2. Sujan: do generated Mature Content project scenes preserve the intended wardrobe and sensual action?
 
 ## Next steps
-1. Deploy through the normal release path and test 30-second random prompt generation.
-2. Test Mature Content in project and single modes; confirm the resulting prompts match the intended non-explicit style.
-3. Rotate the OpenRouter key previously identified for rotation before live generation.
+1. Review History and Settings in a browser at desktop and mobile widths; no browser was available during this implementation.
+2. Deploy through the normal release path and verify Random Prompt on the 30-second tab.
+3. Check Mature Content in project and single modes, then rotate the OpenRouter key previously identified for rotation.
 
 ## Gotchas
-- Prompt-generation and project creation both use OpenRouter, but the project script model receives the generated topic as context; verify the style is carried into all five scenes after deployment.
-- Local Go builds must set `GOCACHE` and `GOMODCACHE` to `.gocache` and `.gomodcache` because the default Go cache path is denied in this environment.
-- Do not run paid video generation as a routine check.
+- The app serves embedded static files through explicit routes; new static assets need an embed entry and route in both `handlers.go` and `dashboard.go`.
+- Local Go builds need `GOCACHE=.gocache` and `GOMODCACHE=.gomodcache` in this environment.
+- Do not run paid provider generation as a routine check or read/print `.env` contents.
