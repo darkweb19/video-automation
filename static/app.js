@@ -144,6 +144,7 @@
     historyNextBeforeID: "",
     historyLoading: false,
     historyRefreshTimer: 0,
+    historyTerminalOpen: new Map(),
     currentGenerationID: "",
     pollTimer: 0,
     mode: "project",
@@ -928,16 +929,36 @@
     });
   }
 
-  function historyTerminal(events) {
-    const section = make("section", { className: "job-terminal-section history-terminal-section" });
+  function historyTerminal(events, key, status) {
+    const section = make("details", { className: "job-terminal-section history-terminal-section" });
     const rows = Array.isArray(events) ? events.filter((event) => event && typeof event === "object") : [];
-    const heading = make("div", { className: "history-terminal-head" });
+    const normalizedStatus = String(status || "").toLowerCase();
+    const openByDefault = [
+      "queued", "processing", "downloading", "download_failed", "failed", "error",
+      "planning", "generating", "combining", "submitting", "pending", "retry", "retrying", "started", "running"
+    ].includes(normalizedStatus);
+    section.open = state.historyTerminalOpen.has(key)
+      ? state.historyTerminalOpen.get(key)
+      : openByDefault;
+
+    const heading = make("summary", { className: "history-terminal-head" });
     heading.append(
       make("h4", { text: "Process log" }),
       make("span", { className: "history-terminal-count", text: `${rows.length} ${rows.length === 1 ? "event" : "events"}` })
     );
     const terminal = make("ol", { className: "job-terminal", "aria-label": "Recorded process events" });
     renderJobTerminal(terminal, rows);
+    const toggleLabel = make("span", {
+      className: "history-terminal-action",
+      text: section.open ? "Hide logs" : "View logs"
+    });
+    heading.append(toggleLabel);
+    section.addEventListener("toggle", () => {
+      toggleLabel.textContent = section.open ? "Hide logs" : "View logs";
+    });
+    heading.addEventListener("click", () => {
+      window.setTimeout(() => state.historyTerminalOpen.set(key, section.open), 0);
+    });
     section.append(heading);
     section.append(terminal);
     return section;
@@ -1144,7 +1165,7 @@
       return;
     }
 
-    state.generations.forEach((record) => {
+    state.generations.forEach((record, index) => {
       const card = make("article", { className: "history-card" });
       const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
       let download;
@@ -1164,7 +1185,11 @@
       );
       body.append(metadata);
       if (record.error) body.append(make("div", { className: "alert error history-error", text: record.error }));
-      body.append(historyTerminal(record.events || record.pipeline_events || record.logs));
+      body.append(historyTerminal(
+        record.events || record.pipeline_events || record.logs,
+        `generation:${record.id || record.created_at || index}`,
+        record.status
+      ));
 
       const actions = make("div", { className: "history-actions" });
       if (record.video_ready) {
@@ -1785,7 +1810,7 @@
         );
         elements.projectHistory.append(heading);
         const list = make("div", { className: "project-history-list" });
-        state.projects.forEach((project) => {
+        state.projects.forEach((project, index) => {
           const id = projectID(project);
           const status = String(projectValue(project, "status") || "queued");
           const videoReady = Boolean(projectValue(project, "final_video_ready"));
@@ -1806,7 +1831,11 @@
           body.append(metadata);
           const projectError = projectValue(project, "error", "message");
           if (projectError) body.append(make("div", { className: "alert error history-error", text: projectError }));
-          body.append(historyTerminal(projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs")));
+          body.append(historyTerminal(
+            projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"),
+            `project:${id || projectValue(project, "created_at", "createdAt") || index}`,
+            status
+          ));
           const actions = make("div", { className: "history-actions" });
           if (videoReady && videoURL) {
             download = make("a", { className: "button secondary", text: "Download" });

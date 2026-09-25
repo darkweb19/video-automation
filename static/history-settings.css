@@ -149,7 +149,24 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin: 0 0 8px;
+  min-height: 32px;
+  margin: 0;
+  padding: 3px 2px;
+  border-radius: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.history-terminal-head::-webkit-details-marker {
+  display: none;
+}
+
+.history-terminal-head:hover .history-terminal-action {
+  color: var(--primary-dark);
+}
+
+.history-terminal-section[open] > .history-terminal-head {
+  margin-bottom: 8px;
 }
 
 .history-terminal-head h4 {
@@ -174,6 +191,31 @@
   color: var(--muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.history-terminal-action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.history-terminal-action::after {
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  content: "";
+  transform: rotate(45deg) translateY(-1px);
+}
+
+.history-terminal-section[open] .history-terminal-action::after {
+  transform: rotate(225deg) translate(-1px, -1px);
 }
 
 .history-terminal-section .job-terminal {
@@ -275,6 +317,7 @@
 .history-page-head .button:focus-visible,
 .history-actions .button:focus-visible,
 .history-prompt-details summary:focus-visible,
+.history-terminal-head:focus-visible,
 .settings-grid button:focus-visible {
   outline: 3px solid rgba(102, 86, 232, .32);
   outline-offset: 2px;
