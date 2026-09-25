@@ -1,30 +1,27 @@
-﻿# Session handoff - 2026-09-25
+# Session handoff — 2026-09-25
 
 ## What was done
-- Redesigned the History and Settings views while preserving the existing API behavior.
-- Added a per-card process log disclosure for individual generations and 30-second projects.
-- Completed logs start collapsed; active and failed logs start open. Manual choices persist while History refreshes.
-- Committed the disclosure as eea6d81 (feat: collapse history process logs).
-- Verified go test ./..., go vet ./..., node --check static/app.js, and git diff --check.
+- Redesigned History and Settings; completed History logs now collapse behind per-card toggles.
+- Added a password-protected Vault tab for completed generated videos and 30-second project videos.
+- Added encrypted Vault code storage, PIN attempt throttling, server-enforced grants, lock/reload revocation, and reversible History/Vault moves.
+- Protected Vault membership, listing, media, details, and downloads across API paths; added persistence and concurrency tests.
 
 ## Decisions locked
-- History shows persisted job events only; event text remains safely rendered as text.
-- Keep the light dashboard and dark process console, with three cards per row on desktop.
-- Keep the 30-second project preset at five six-second 9:16 scenes.
-- API credentials stay encrypted and are never returned to the browser.
-- OpenRouter remains the story and script provider.
+- Vault is a separate tab; moving a video removes it from regular History, and Restore returns it.
+- Use a four-digit code; the Vault locks on refresh or explicit Lock. There is no forgotten-code recovery in this version.
+- Keep the code safe; it is encrypted at rest and never returned by Settings.
+- Do not run paid video generation for verification.
 
 ## Open questions
-1. Sujan: after deployment, does Random Prompt work on the first click in the 30-second tab?
-2. Sujan: do generated Mature Content project scenes preserve the intended wardrobe and sensual action?
-3. Sujan: can the previously identified OpenRouter key be rotated?
+- None for the feature scope.
 
 ## Next steps
-1. Review History disclosure behavior at desktop and mobile widths in a browser.
-2. Deploy through the normal release path and verify Random Prompt on the 30-second tab.
-3. Check Mature Content in project and single modes, then rotate the OpenRouter key.
+1. Release agent creates and merges a PR from the pushed feature branch.
+2. Verify the Railway deployment and manually check the History, Settings, Vault, move, restore, and lock flows.
+3. If rolling back to a pre-Vault image, first account for vaulted items becoming visible in regular History.
 
 ## Gotchas
-- Embedded static assets are served through explicit Go routes; new files need an embed entry and route.
-- Use absolute GOCACHE and GOMODCACHE paths in this environment; Go rejects a relative GOMODCACHE.
-- Do not run paid provider generation as a routine check or read/print .env contents.
+- Old pre-Vault app images ignore the `in_vault` flag and can expose vaulted items in normal History/media routes; keep Vault-aware code deployed or restore items before rollback.
+- SQLite migration is additive and preserves existing records; encrypted Vault code depends on persistent `data/secret.key`.
+- Keep Vault unlock grants in JS memory only; do not put codes or tokens in URLs, logs, or local storage.
+- Never read or print `.env` contents.
