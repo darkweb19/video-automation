@@ -117,6 +117,12 @@ func TestDashboardProtectsHistoryAndServesLocalVideo(t *testing.T) {
 	}
 	app := NewDashboardHandler(store, security, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
+	asset := httptest.NewRecorder()
+	app.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/static/history-settings.css?v=test", nil))
+	if asset.Code != http.StatusOK || !strings.Contains(asset.Header().Get("Content-Type"), "text/css") || !strings.Contains(asset.Body.String(), ".history-page-head") {
+		t.Fatalf("history settings stylesheet = %d %q", asset.Code, asset.Header().Get("Content-Type"))
+	}
+
 	unauthorized := httptest.NewRecorder()
 	app.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/generations", nil))
 	if unauthorized.Code != http.StatusUnauthorized {

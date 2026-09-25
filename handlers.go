@@ -14,7 +14,7 @@ import (
 	"unicode/utf8"
 )
 
-//go:embed static/index.html static/app.js static/styles.css static/model-picker.css static/project.css
+//go:embed static/index.html static/app.js static/styles.css static/model-picker.css static/project.css static/history-settings.css
 var staticFiles embed.FS
 
 type handler struct {
@@ -34,6 +34,7 @@ func NewHandler(provider VideoProvider, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /static/styles.css", h.static("static/styles.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/model-picker.css", h.static("static/model-picker.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/project.css", h.static("static/project.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /static/history-settings.css", h.static("static/history-settings.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("GET /models", h.models)
 	mux.HandleFunc("POST /generate", h.generate)

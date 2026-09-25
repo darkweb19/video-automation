@@ -930,9 +930,15 @@
 
   function historyTerminal(events) {
     const section = make("section", { className: "job-terminal-section history-terminal-section" });
-    section.append(make("h4", { text: "Job console" }));
-    const terminal = make("ol", { className: "job-terminal" });
-    renderJobTerminal(terminal, events);
+    const rows = Array.isArray(events) ? events.filter((event) => event && typeof event === "object") : [];
+    const heading = make("div", { className: "history-terminal-head" });
+    heading.append(
+      make("h4", { text: "Process log" }),
+      make("span", { className: "history-terminal-count", text: `${rows.length} ${rows.length === 1 ? "event" : "events"}` })
+    );
+    const terminal = make("ol", { className: "job-terminal", "aria-label": "Recorded process events" });
+    renderJobTerminal(terminal, rows);
+    section.append(heading);
     section.append(terminal);
     return section;
   }

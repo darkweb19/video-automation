@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FrameVault — Video dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260923-3">
+  <link rel="stylesheet" href="/static/styles.css?v=20260925-1">
   <link rel="stylesheet" href="/static/model-picker.css?v=20260923-1">
   <link rel="stylesheet" href="/static/project.css?v=20260923-1">
+  <link rel="stylesheet" href="/static/history-settings.css?v=20260925-1">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -173,21 +174,26 @@
         </section>
 
         <section class="view" data-page="history">
-          <section class="panel">
-            <div class="panel-head"><div><h2>Generation history</h2><p>Browse finished videos, project runs, and their recorded details.</p></div><button id="refresh-history" class="button secondary">Refresh</button></div>
+          <div class="history-page-head">
+            <div><h2>Generation history</h2><p>Videos, project runs, and the process logs saved with each run.</p></div>
+            <button id="refresh-history" class="button secondary">Refresh history</button>
+          </div>
+          <div class="history-library">
             <div id="project-history" class="project-history"></div>
             <div id="history-grid" class="history-grid"><div class="empty">No generations yet.</div></div>
-          </section>
+          </div>
         </section>
 
         <section class="view" data-page="settings">
           <div class="settings-grid">
-            <section class="panel">
+            <section class="panel settings-provider-panel">
               <div class="panel-head"><div><h2>Video generation</h2><p>Select the provider used for new video jobs.</p></div></div>
-              <div class="field"><label for="video-provider">Video provider</label><select id="video-provider"><option value="modal">Modal</option><option value="openrouter">OpenRouter</option></select><small id="provider-help">Model options and capabilities follow the selected provider.</small></div>
-              <div class="provider-actions"><span id="video-provider-state" class="badge neutral">Checking</span><button id="test-video-provider" class="button secondary" type="button">Test video provider</button></div>
+              <div class="settings-provider-controls">
+                <div class="field"><label for="video-provider">Video provider</label><select id="video-provider"><option value="modal">Modal</option><option value="openrouter">OpenRouter</option></select><small id="provider-help">Model options and capabilities follow the selected provider.</small></div>
+                <div class="provider-actions"><span id="video-provider-state" class="badge neutral">Checking</span><button id="test-video-provider" class="button secondary" type="button">Test video provider</button></div>
+              </div>
             </section>
-            <section id="openrouter-settings" class="panel">
+            <section id="openrouter-settings" class="panel settings-key-panel">
               <div class="panel-head"><div><h2>OpenRouter API key</h2><p>Used for story generation and OpenRouter video. Encrypted at rest.</p></div><span id="key-state" class="badge neutral">Checking</span></div>
               <div class="key-display"><span>Saved key status</span><strong id="masked-key">Not configured</strong></div>
               <form id="api-key-form" class="stack">
@@ -195,7 +201,7 @@
                 <button class="button primary" type="submit">Test and save key</button>
               </form>
             </section>
-            <section id="modal-settings" class="panel" hidden>
+            <section id="modal-settings" class="panel settings-account-panel" hidden>
               <div class="panel-head"><div><h2>Modal accounts</h2><p>Store multiple endpoints. Saved API keys are never returned to the browser.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
               <div id="modal-account-list" class="modal-account-list"></div>
               <form id="modal-config-form" class="stack modal-account-form">
@@ -207,7 +213,7 @@
                 <div class="modal-account-form-actions"><button class="button primary" type="submit">Save Modal account</button><button id="modal-account-cancel" class="button secondary" type="button" hidden>Cancel edit</button></div>
               </form>
             </section>
-            <section class="panel">
+            <section class="panel settings-password-panel">
               <div class="panel-head"><div><h2>Change password</h2><p>All existing sessions will be signed out</p></div></div>
               <form id="password-form" class="stack">
                 <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password" autocomplete="current-password" required></div>
@@ -221,6 +227,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260923-3" defer></script>
+  <script src="/static/app.js?v=20260925-1" defer></script>
 </body>
 </html>

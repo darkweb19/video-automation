@@ -1,0 +1,424 @@
+/* Archive and configuration views */
+:root {
+  --console-bg: #111820;
+  --console-line: #26323d;
+  --console-muted: #8290a0;
+}
+
+.history-page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 2px 0 24px;
+}
+
+.history-page-head h2 {
+  margin: 0 0 6px;
+  font-size: clamp(22px, 2.4vw, 29px);
+  letter-spacing: -.035em;
+}
+
+.history-page-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.history-library {
+  display: grid;
+  gap: 23px;
+}
+
+.project-history {
+  margin: 0;
+}
+
+.history-grid,
+.project-history-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.history-grid {
+  align-items: stretch;
+}
+
+.history-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border-color: #dfe3eb;
+  border-radius: 11px;
+  box-shadow: 0 2px 5px rgba(23, 32, 51, .035);
+}
+
+.history-preview {
+  position: relative;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  background: #0d1218;
+}
+
+.history-preview video {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+
+.history-preview-empty {
+  align-content: center;
+  gap: 9px;
+  padding: 16px;
+  color: #d9e0e8;
+}
+
+.history-preview-empty .badge {
+  background: #26313b;
+  color: #edf2f7;
+}
+
+.history-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  padding: 16px;
+}
+
+.history-title {
+  min-height: 42px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.history-prompt-details {
+  margin-bottom: 15px;
+}
+
+.history-prompt-details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: #f2f1ff;
+  font-size: 10px;
+}
+
+.history-prompt-details summary::before {
+  color: var(--primary);
+  content: "+";
+  font-size: 14px;
+  line-height: 1;
+}
+
+.history-prompt-details[open] summary::before {
+  content: "-";
+}
+
+.history-meta {
+  gap: 12px 10px;
+  margin: 0 0 15px;
+  padding: 13px 0;
+  border-top: 1px solid #edf0f4;
+  border-bottom: 1px solid #edf0f4;
+}
+
+.history-meta strong {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-terminal-section {
+  margin: 0 0 15px;
+  padding: 0;
+  border: 0;
+}
+
+.history-terminal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+}
+
+.history-terminal-head h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: #465163;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.history-terminal-head h4::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+  content: "";
+}
+
+.history-terminal-count {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-terminal-section .job-terminal {
+  max-height: 190px;
+  padding: 5px 0;
+  border: 1px solid var(--console-line);
+  border-left: 3px solid #7668ed;
+  border-radius: 7px;
+  background: var(--console-bg);
+  color: #dce4ec;
+  counter-reset: history-event;
+  scrollbar-color: #43505c var(--console-bg);
+  scrollbar-width: thin;
+}
+
+.history-terminal-section .terminal-line {
+  grid-template-columns: 22px 61px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "index time stage status"
+    ". message message message";
+  gap: 2px 7px;
+  padding: 6px 8px;
+  border-bottom-color: #202a34;
+  counter-increment: history-event;
+}
+
+.history-terminal-section .terminal-line::before {
+  grid-area: index;
+  color: #8190a0;
+  content: counter(history-event, decimal-leading-zero);
+  font: 9px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-terminal-section .terminal-line time {
+  grid-area: time;
+  color: var(--console-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-terminal-section .terminal-stage {
+  grid-area: stage;
+  overflow: hidden;
+  color: #aebacd;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+}
+
+.history-terminal-section .terminal-status {
+  grid-area: status;
+  color: #79d2a5;
+  font-size: 9px;
+  letter-spacing: .01em;
+  text-transform: none;
+}
+
+.history-terminal-section .terminal-status.terminal-failed,
+.history-terminal-section .terminal-status.terminal-error,
+.history-terminal-section .terminal-status.terminal-warning,
+.history-terminal-section .terminal-status.terminal-download_failed {
+  color: #ff958e;
+}
+
+.history-terminal-section .terminal-status.terminal-queued,
+.history-terminal-section .terminal-status.terminal-processing,
+.history-terminal-section .terminal-status.terminal-retry {
+  color: #b8adff;
+}
+
+.history-terminal-section .terminal-message {
+  grid-area: message;
+  padding-top: 1px;
+  color: #dce4ec;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.history-terminal-section .terminal-empty {
+  padding: 12px 10px;
+  color: #aebacd;
+}
+
+.history-error {
+  line-height: 1.5;
+}
+
+.history-actions {
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.history-actions .button {
+  min-height: 36px;
+}
+
+.history-page-head .button:focus-visible,
+.history-actions .button:focus-visible,
+.history-prompt-details summary:focus-visible,
+.settings-grid button:focus-visible {
+  outline: 3px solid rgba(102, 86, 232, .32);
+  outline-offset: 2px;
+}
+
+.settings-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.settings-grid > .panel {
+  grid-column: span 6;
+  min-width: 0;
+  padding: 22px;
+  border-radius: 12px;
+  box-shadow: 0 2px 7px rgba(24, 32, 50, .035);
+}
+
+.settings-grid > .settings-provider-panel,
+.settings-grid > .settings-account-panel {
+  grid-column: 1 / -1;
+}
+
+.settings-provider-panel {
+  border-top: 3px solid var(--primary);
+}
+
+.settings-provider-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, .8fr) minmax(0, 1.2fr);
+  align-items: end;
+  gap: 24px;
+}
+
+.settings-provider-controls .field {
+  margin: 0;
+}
+
+.settings-provider-controls .provider-actions {
+  justify-content: flex-start;
+  min-height: 41px;
+  padding-bottom: 0;
+}
+
+.settings-key-panel .key-display {
+  min-height: 50px;
+  margin: 0 0 17px;
+  border: 1px solid #eceef3;
+  background: #f7f8fa;
+}
+
+.settings-key-panel .stack .field:last-of-type,
+.settings-password-panel .stack .field:last-of-type {
+  margin-bottom: 12px;
+}
+
+.settings-account-panel .modal-account-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-account-panel .modal-account-row {
+  align-items: flex-start;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.settings-account-panel .modal-account-copy {
+  width: 100%;
+}
+
+.settings-account-panel .modal-account-actions {
+  width: 100%;
+}
+
+.settings-account-panel .modal-account-actions .button {
+  flex: 1;
+}
+
+.settings-account-panel .modal-account-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+
+.settings-account-panel .modal-account-form h3,
+.settings-account-panel .modal-account-form-actions {
+  grid-column: 1 / -1;
+}
+
+.settings-account-panel .modal-account-form .field {
+  margin: 0;
+}
+
+.settings-password-panel .stack {
+  gap: 2px;
+}
+
+@media (max-width: 1080px) {
+  .history-grid,
+  .project-history-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .settings-grid > .panel {
+    grid-column: 1 / -1;
+  }
+
+  .settings-provider-controls {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+}
+
+@media (max-width: 760px) {
+  .history-page-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+
+  .history-grid,
+  .project-history-list,
+  .settings-account-panel .modal-account-list,
+  .settings-account-panel .modal-account-form {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-grid > .panel {
+    padding: 18px;
+  }
+
+  .settings-account-panel .modal-account-form h3,
+  .settings-account-panel .modal-account-form-actions {
+    grid-column: auto;
+  }
+
+  .history-terminal-section .terminal-line {
+    grid-template-columns: 19px 57px minmax(0, 1fr) auto;
+    gap: 2px 5px;
+  }
+
+  .history-terminal-section .terminal-stage {
+    display: block;
+  }
+}
