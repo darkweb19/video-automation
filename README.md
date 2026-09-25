@@ -2,7 +2,7 @@
 
 A self-hosted dashboard for generating video with a selectable Modal or OpenRouter provider, tracking jobs after the browser closes, and storing completed MP4 files locally in a Docker-managed volume. It uses SQLite for metadata and no external storage service. OpenRouter remains the separate provider for story and script generation.
 
-The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's `openrouter/free` model generates a plan as ordinary text. The application extracts and validates the plan, including its story, script, continuity bible, and five scene prompts. The selected video provider generates five independent six-second 480p clips in 9:16. FFmpeg normalizes and joins them into one silent 1080×1920 MP4. The original single-clip workflow remains available.
+The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's `inclusionai/ling-3.0-flash-fin:free` model generates the plan through a tool call, with plain-text parsing as a fallback. The application validates the plan, including its story, script, continuity bible, and five scene prompts. The selected video provider generates five independent six-second 480p clips in 9:16. FFmpeg normalizes and joins them into one silent 1080×1920 MP4. The original single-clip workflow remains available.
 
 ## Docker quick start
 
@@ -70,13 +70,13 @@ Within that volume:
 1. Open **Generate** and leave **30-second project** selected.
 2. Enter a topic or story idea.
 3. Select a model that supports six-second clips, 480p resolution, and the 9:16 aspect ratio. The model list comes from the selected video provider and its capabilities determine which requests are accepted.
-4. If Modal is selected, choose the Modal account for this submission. Submit the project. OpenRouter's `openrouter/free` router generates a free-text plan; the application parses and validates it before video generation starts. Video generation uses the selected provider and its provider-specific model.
+4. If Modal is selected, choose the Modal account for this submission. Submit the project. OpenRouter's `inclusionai/ling-3.0-flash-fin:free` model generates a plan; the application parses and validates it before video generation starts. Video generation uses the selected provider and its provider-specific model.
 5. Follow overall progress and each scene independently. A failed scene can be retried without regenerating successful scenes.
 6. When all five scene files are stored, FFmpeg creates the final video automatically.
 
 Projects, scene prompts, provider job IDs, statuses, errors, costs, and file paths are stored in SQLite. The background worker resumes unfinished planning, polling, downloading, and combining work after a restart. Submitted jobs keep an encrypted snapshot of their selected provider credentials, so later account edits or default changes do not alter the account used by an existing job. If the process stops while a paid scene submission is in flight, that scene is marked failed instead of being silently resubmitted; check the selected video provider's activity before using **Retry scene**, because the interrupted request may already have been accepted upstream.
 
-Each project also keeps a permanent process/audit trace. In **Generation details**, expandable sections retain the exact text-generation system prompt, user prompt, JSON schema, raw assistant response, router (`openrouter/free`), actual model when returned, normalized story/script/continuity, and each scene's final video prompt. The **Pipeline** timeline records stages, statuses, timestamps, errors, and attempts/retries. This is an operational audit trace, not hidden chain-of-thought or private reasoning. Raw assistant responses are capped at 1 MiB.
+Each project also keeps a permanent process/audit trace. In **Generation details**, expandable sections retain the exact text-generation system prompt, user prompt, JSON schema, raw tool arguments or assistant response, requested model (`inclusionai/ling-3.0-flash-fin:free`), actual model when returned, normalized story/script/continuity, and each scene's final video prompt. The **Pipeline** timeline records stages, statuses, timestamps, errors, and attempts/retries. This is an operational audit trace, not hidden chain-of-thought or private reasoning. Raw responses are capped at 1 MiB.
 
 The displayed project estimate covers five video generations when the selected provider publishes pricing. Modal does not return per-generation pricing through this API, and its compute charges are billed separately by Modal. Provider pricing and capabilities can change, so confirm any available estimate and account balance before starting a project.
 

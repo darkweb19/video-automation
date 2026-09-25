@@ -19,13 +19,15 @@ const (
 	maxRandomProjectTopicRunes = 280
 	storyPlanCompletionTokens  = 6000
 	storyGenerationTimeout     = 3 * time.Minute
+	maxGeneratedContinuity     = 900
+	maxGeneratedScenePrompt    = 2200
 	randomProjectTokens        = 1024
 	randomSingleTokens         = 2048
 )
 
 const scriptSystemPrompt = `You are a short-form visual storyteller and video prompt director. Create a complete silent 30-second vertical video plan from the user's topic. The final video has exactly five sequential scenes, each exactly six seconds. There is no narration, dialogue, subtitles, music, logos, or on-screen text. Tell the story only through visible action.
 
-Create one immutable continuity bible covering every recurring character's exact physical appearance and wardrobe, the visual style, color palette, lighting, camera language, time of day, and environment. Repeat the relevant continuity details verbatim inside every scene's video_prompt so each clip can be generated independently. Each video_prompt must describe only its six-second shot, start state, motion, camera movement, end state, vertical 9:16 composition, and continuity details. Avoid transitions that require footage from another scene.
+Create one immutable continuity bible covering every recurring character's exact physical appearance and wardrobe, the visual style, color palette, lighting, camera language, time of day, and environment. Keep the continuity bible within 900 characters. Repeat the relevant continuity details verbatim inside every scene's video_prompt so each clip can be generated independently. Keep each video_prompt within 2200 characters. Each video_prompt must describe only its six-second shot, start state, visible motion, slow forward camera movement, end state, vertical 9:16 composition, and continuity details. Avoid transitions that require footage from another scene.
 
 Return a single JSON object with exactly these fields: title, story, script, continuity, scenes. Scenes must be an array of exactly five objects, numbered 1 through 5, each with number, title, script, and video_prompt. Return no commentary or Markdown.`
 
@@ -36,7 +38,7 @@ func storyPlanSchema() map[string]any {
 			"number":       map[string]any{"type": "integer", "minimum": 1, "maximum": ProjectSceneCount},
 			"title":        map[string]any{"type": "string"},
 			"script":       map[string]any{"type": "string", "description": "Visible action during this six-second scene."},
-			"video_prompt": map[string]any{"type": "string", "description": "Standalone video-generation prompt with repeated continuity details."},
+			"video_prompt": map[string]any{"type": "string", "maxLength": maxGeneratedScenePrompt, "description": "Standalone six-second vertical 9:16 video prompt with visible motion, slow forward camera movement, start and end states, and repeated continuity details."},
 		},
 		"required":             []string{"number", "title", "script", "video_prompt"},
 		"additionalProperties": false,
@@ -47,7 +49,7 @@ func storyPlanSchema() map[string]any {
 			"title":      map[string]any{"type": "string"},
 			"story":      map[string]any{"type": "string", "description": "Complete story synopsis."},
 			"script":     map[string]any{"type": "string", "description": "Full 30-second visual script covering all five scenes."},
-			"continuity": map[string]any{"type": "string", "description": "Immutable character, wardrobe, environment, palette, lighting, style, and camera bible."},
+			"continuity": map[string]any{"type": "string", "maxLength": maxGeneratedContinuity, "description": "Immutable character, wardrobe, environment, palette, lighting, style, and camera bible."},
 			"scenes": map[string]any{
 				"type": "array", "minItems": ProjectSceneCount, "maxItems": ProjectSceneCount, "items": scene,
 			},
@@ -58,6 +60,9 @@ func storyPlanSchema() map[string]any {
 }
 
 const continuityPromptSuffix = "\n\nContinuity bible - apply exactly in this scene:\n"
+const shotContractSuffix = "\n\nShot requirements: exactly six seconds; vertical 9:16 framing. Motion: show visible action progressing from the described start state to the end state. Camera movement: make a slow forward push toward the action throughout the shot."
+
+const minSceneActionRunes = 40
 
 // appendContinuityBible normalizes scene prompts at the storage boundary. The
 // provider response is not the only possible source of a plan, so persisted
@@ -68,18 +73,37 @@ func appendContinuityBible(plan *StoryPlan) error {
 	if continuity == "" {
 		return errors.New("script plan is missing continuity rules")
 	}
+	maxSceneRunes := MaxPromptLength - utf8.RuneCountInString(shotContractSuffix+continuityPromptSuffix+continuity)
 	for index := range plan.Scenes {
 		prompt := strings.TrimSpace(plan.Scenes[index].VideoPrompt)
+		prompt = strings.TrimSpace(strings.ReplaceAll(prompt, shotContractSuffix, ""))
 		if marker := strings.Index(prompt, "\n\nContinuity bible"); marker >= 0 {
 			prompt = strings.TrimSpace(prompt[:marker])
 		}
-		prompt += continuityPromptSuffix + continuity
-		if utf8.RuneCountInString(prompt) > MaxPromptLength {
-			return fmt.Errorf("scene %d prompt exceeds %d characters after continuity rules", plan.Scenes[index].Number, MaxPromptLength)
+		if maxSceneRunes < minSceneActionRunes {
+			return fmt.Errorf("scene %d prompt exceeds %d characters after continuity rules: continuity bible leaves insufficient room for scene action", plan.Scenes[index].Number, MaxPromptLength)
 		}
-		plan.Scenes[index].VideoPrompt = prompt
+		prompt = strings.TrimSpace(strings.ReplaceAll(prompt, continuity, ""))
+		if prompt == "" {
+			return fmt.Errorf("scene %d prompt has no action after continuity rules", plan.Scenes[index].Number)
+		}
+		plan.Scenes[index].VideoPrompt = fitSceneAction(prompt, maxSceneRunes) + shotContractSuffix + continuityPromptSuffix + continuity
 	}
 	return nil
+}
+
+// Keep the start state and ending frame when a verbose model response needs
+// shortening. Slicing runes avoids corrupting multi-byte scene descriptions.
+func fitSceneAction(prompt string, maxRunes int) string {
+	runes := []rune(prompt)
+	if len(runes) <= maxRunes {
+		return prompt
+	}
+	const separator = " … "
+	available := maxRunes - len([]rune(separator))
+	front := available * 2 / 3
+	back := available - front
+	return strings.TrimSpace(string(runes[:front])) + separator + strings.TrimSpace(string(runes[len(runes)-back:]))
 }
 
 func newTextGenerationTrace(topic string) (TextGenerationTrace, error) {
@@ -108,7 +132,7 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 	if err != nil {
 		return StoryPlan{}, trace, err
 	}
-	// Free routed models can spend significant time queued before producing a
+	// Free models can spend significant time queued before producing a
 	// complete five-scene plan. Keep the operation bounded, but do not apply the
 	// shorter timeout used by ordinary OpenRouter metadata requests.
 	requestContext, cancel := context.WithTimeout(ctx, storyGenerationTimeout)
@@ -118,6 +142,15 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 		"messages":              []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
 		"temperature":           0.4,
 		"max_completion_tokens": storyPlanCompletionTokens,
+		"tools": []map[string]any{{
+			"type": "function",
+			"function": map[string]any{
+				"name":        storyPlanToolName,
+				"description": "Submit the complete five-scene video plan.",
+				"parameters":  storyPlanSchema(),
+			},
+		}},
+		"tool_choice": map[string]any{"type": "function", "function": map[string]string{"name": storyPlanToolName}},
 	}
 	trace.Status = "started"
 	trace.StartedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
@@ -158,23 +191,21 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 	var response struct {
 		Model   string `json:"model"`
 		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
+			Message json.RawMessage `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return fail(fmt.Errorf("decode OpenRouter response: %w", err))
 	}
 	trace.ActualModel = response.Model
-	if len(response.Choices) == 0 || strings.TrimSpace(response.Choices[0].Message.Content) == "" {
+	if len(response.Choices) == 0 {
 		return fail(errors.New("OpenRouter returned an empty script"))
 	}
-	trace.RawResponse = response.Choices[0].Message.Content
+	plan, rawResponse, err := parseStoryPlanChoice(response.Choices[0].Message)
+	trace.RawResponse = rawResponse
 	if len(trace.RawResponse) > MaxScriptRawResponseBytes {
 		return fail(fmt.Errorf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes))
 	}
-	plan, err := parseStoryPlanText(trace.RawResponse)
 	if err != nil {
 		return fail(err)
 	}

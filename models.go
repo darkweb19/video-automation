@@ -82,7 +82,7 @@ const (
 	ProjectSceneCount   = 5
 	ProjectSceneSeconds = 6
 	ProjectAspectRatio  = "9:16"
-	ScriptModel         = "openrouter/free"
+	ScriptModel         = "inclusionai/ling-3.0-flash-fin:free"
 	ProjectResolution   = "480p"
 )
 

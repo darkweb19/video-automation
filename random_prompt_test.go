@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
+func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		input      RandomPromptRequest
@@ -55,7 +55,7 @@ func TestGenerateRandomPromptUsesFreeTextModelForBothModes(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				if body.Model != ScriptModel || body.MaxTokens != test.maxTokens || len(body.Messages) != 2 || !strings.HasPrefix(body.Messages[1].Content, test.userPrefix) || !strings.Contains(body.Messages[1].Content, test.input.Category) {
+				if body.Model != "inclusionai/ling-3.0-flash-fin:free" || body.MaxTokens != test.maxTokens || len(body.Messages) != 2 || !strings.HasPrefix(body.Messages[1].Content, test.userPrefix) || !strings.Contains(body.Messages[1].Content, test.input.Category) {
 					t.Fatalf("unexpected request body: %#v", body)
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": test.content}}}})

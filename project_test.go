@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func validStoryPlan() StoryPlan {
@@ -23,7 +24,7 @@ func validStoryPlan() StoryPlan {
 	return plan
 }
 
-func TestGenerateStoryPlanUsesFreeTextModel(t *testing.T) {
+func TestGenerateStoryPlanUsesLingModel(t *testing.T) {
 	plan := validStoryPlan()
 	content, _ := json.Marshal(plan)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,11 +35,27 @@ func TestGenerateStoryPlanUsesFreeTextModel(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != ScriptModel {
+		if body["model"] != "inclusionai/ling-3.0-flash-fin:free" {
 			t.Fatalf("model = %v", body["model"])
 		}
 		if body["max_completion_tokens"] != float64(storyPlanCompletionTokens) {
 			t.Fatalf("max completion tokens = %v", body["max_completion_tokens"])
+		}
+		tools, ok := body["tools"].([]any)
+		if !ok || len(tools) != 1 {
+			t.Fatalf("tools = %v", body["tools"])
+		}
+		function := tools[0].(map[string]any)["function"].(map[string]any)
+		choice := body["tool_choice"].(map[string]any)["function"].(map[string]any)
+		if function["name"] != "submit_story_plan" || function["parameters"] == nil || choice["name"] != "submit_story_plan" {
+			t.Fatalf("tool configuration = %v, choice = %v", function, choice)
+		}
+		properties := function["parameters"].(map[string]any)["properties"].(map[string]any)
+		continuity := properties["continuity"].(map[string]any)
+		scenes := properties["scenes"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)
+		videoPrompt := scenes["video_prompt"].(map[string]any)
+		if continuity["maxLength"] != float64(maxGeneratedContinuity) || videoPrompt["maxLength"] != float64(maxGeneratedScenePrompt) {
+			t.Fatalf("scene and continuity length guidance missing: %v, %v", videoPrompt, continuity)
 		}
 		messages := body["messages"].([]any)
 		userMessage := messages[1].(map[string]any)["content"].(string)
@@ -63,8 +80,37 @@ func TestGenerateStoryPlanUsesFreeTextModel(t *testing.T) {
 	if len(generated.Scenes) != ProjectSceneCount || generated.Title != plan.Title {
 		t.Fatalf("unexpected plan: %+v", generated)
 	}
-	if trace.RouterModel != ScriptModel || trace.ActualModel != "acme/free-actual" || !strings.Contains(trace.RawResponse, "```json") || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
+	if trace.RouterModel != "inclusionai/ling-3.0-flash-fin:free" || trace.ActualModel != "acme/free-actual" || !strings.Contains(trace.RawResponse, "```json") || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
 		t.Fatalf("unexpected trace: %+v", trace)
+	}
+}
+
+func TestGenerateStoryPlanAcceptsToolCallResponse(t *testing.T) {
+	plan := validStoryPlan()
+	arguments, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": ScriptModel,
+			"choices": []any{map[string]any{"message": map[string]any{
+				"content": nil,
+				"tool_calls": []any{map[string]any{"type": "function", "function": map[string]any{
+					"name": storyPlanToolName, "arguments": string(arguments),
+				}}},
+			}}},
+		})
+	}))
+	defer server.Close()
+	client := NewOpenRouterClient("test-key")
+	client.BaseURL = server.URL
+	got, trace, err := client.GenerateStoryPlan(context.Background(), "a fox rescue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != plan.Title || len(got.Scenes) != ProjectSceneCount || trace.RawResponse != string(arguments) || trace.RouterModel != ScriptModel {
+		t.Fatalf("plan = %+v, trace = %+v", got, trace)
 	}
 }
 
@@ -587,16 +633,49 @@ func TestSaveStoryPlanPersistsContinuityInEveryScenePromptAndProgress(t *testing
 	}
 }
 
-func TestSaveStoryPlanRejectsPromptOverLimitAfterContinuity(t *testing.T) {
+func TestSaveStoryPlanShortensLongSceneAndKeepsContinuity(t *testing.T) {
 	store := newTestStore(t)
 	project, err := store.InsertProject("long story", "minimax/k3-pro")
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan := validStoryPlan()
-	plan.Scenes[0].VideoPrompt = strings.Repeat("x", MaxPromptLength)
-	if err := store.SaveStoryPlan(project.ID, plan); err == nil || !strings.Contains(err.Error(), "after continuity rules") {
-		t.Fatalf("expected post-continuity prompt limit error, got %v", err)
+	plan.Scenes[0].VideoPrompt = "A fox crosses the same dawn forest. " + strings.Repeat("Rain falls 🌧️ while the fox runs. ", 180) + "The fox reaches shelter 🦊."
+	if err := store.SaveStoryPlan(project.ID, plan); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Project(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := loaded.Scenes[0].Prompt
+	if !utf8.ValidString(prompt) || utf8.RuneCountInString(prompt) > MaxPromptLength || strings.Count(prompt, plan.Continuity) != 1 || !strings.Contains(prompt, "The fox reaches shelter 🦊.") ||
+		!strings.Contains(prompt, "exactly six seconds") || !strings.Contains(prompt, "vertical 9:16") || !strings.Contains(prompt, "Motion: show visible action") || !strings.Contains(prompt, "Camera movement: make a slow forward push") {
+		t.Fatalf("scene prompt lost action, ending, or continuity after shortening: %q", prompt)
+	}
+}
+
+func TestAppendContinuityBibleRejectsBibleThatLeavesNoSceneAction(t *testing.T) {
+	plan := validStoryPlan()
+	plan.Continuity = strings.Repeat("a", MaxPromptLength)
+	if err := appendContinuityBible(&plan); err == nil || !strings.Contains(err.Error(), "continuity bible leaves insufficient room for scene action") {
+		t.Fatalf("expected oversized continuity error, got %v", err)
+	}
+}
+
+func TestAppendContinuityBibleDoesNotDuplicateExistingRules(t *testing.T) {
+	plan := validStoryPlan()
+	plan.Continuity = strings.TrimSpace(strings.Repeat("blue forest and red fox; ", 120))
+	for index := range plan.Scenes {
+		plan.Scenes[index].VideoPrompt = "A standalone shot. " + plan.Continuity
+	}
+	if err := appendContinuityBible(&plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, scene := range plan.Scenes {
+		if strings.Count(scene.VideoPrompt, plan.Continuity) != 1 {
+			t.Fatalf("scene %d repeats continuity rules", scene.Number)
+		}
 	}
 }
 
