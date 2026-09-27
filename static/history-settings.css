@@ -496,6 +496,7 @@
 .vault-player-dialog{width:min(820px,calc(100vw - 28px));max-width:none;max-height:calc(100vh - 28px);padding:0;border:0;border-radius:14px;background:#fff;color:var(--ink);box-shadow:0 28px 80px rgba(8,12,24,.35)}
 .vault-player-dialog::backdrop{background:rgba(17,21,36,.78)}
 .vault-player-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px}
+.vault-player-actions{display:flex;align-items:center;gap:8px}
 .vault-player-head h2{overflow:hidden;margin:0;font-size:14px;text-overflow:ellipsis;white-space:nowrap}
 .vault-player-dialog video{width:100%;max-height:calc(100vh - 90px);margin:0;border-radius:0;background:#0c0f18}
 .vault-player-dialog button:focus-visible{outline:3px solid rgba(102,86,232,.42);outline-offset:3px}

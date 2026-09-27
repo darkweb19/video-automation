@@ -221,7 +221,10 @@
           <dialog id="vault-player-dialog" class="vault-player-dialog" aria-labelledby="vault-player-title">
             <div class="vault-player-head">
               <h2 id="vault-player-title">Vault video</h2>
-              <button id="vault-player-close" class="button secondary" type="button">Close</button>
+              <div class="vault-player-actions">
+                <button id="vault-player-download" class="button secondary" type="button" disabled>Download</button>
+                <button id="vault-player-close" class="button secondary" type="button">Close</button>
+              </div>
             </div>
             <video id="vault-player" controls playsinline preload="metadata"></video>
           </dialog>
