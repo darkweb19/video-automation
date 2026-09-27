@@ -22,6 +22,14 @@ Password: Sujan@123
 
 Change this password immediately in **Settings**. Add and test the OpenRouter API key there; it remains necessary for story and script generation even when Modal is selected for video. In **Video generation**, choose the active video provider. In **Modal accounts**, add named endpoints and encrypted API keys, and choose a default. These settings persist in SQLite, so changing providers or Modal accounts does not require rebuilding the Go application. No API-key environment variable or `.env` file is required for normal setup.
 
+Before submitting a Modal job, set the public HTTPS dashboard address for callbacks. It must be reachable by Modal, so `localhost` and the Compose loopback port are not sufficient:
+
+```bash
+PUBLIC_BASE_URL="https://video.example.com" docker compose up -d --build
+```
+
+OpenRouter-only use and local dashboard development do not need this variable. When it is absent, Modal submissions fail before any paid provider request is made.
+
 The container is configured with `restart: unless-stopped`; it resumes outstanding jobs after a restart. Check its logs with:
 
 ```bash
@@ -60,7 +68,7 @@ Within that volume:
 
 | Path | Contents |
 | --- | --- |
-| `/data/app.db` | SQLite users, selected video provider, named Modal accounts and encrypted credentials, encrypted Vault code and membership, per-job provider credential snapshots, provider-scoped video models, jobs, normalized events, progress, errors, and cost records |
+| `/data/app.db` | SQLite users, selected video provider, named Modal accounts and encrypted credentials, encrypted Vault code and membership, per-job provider credential snapshots, hashed Modal callback capabilities, provider-scoped video models, jobs, normalized events, progress, errors, and cost records |
 | `/data/secret.key` | Encryption key for stored API credentials |
 | `/data/videos/` | Downloaded completed MP4 files |
 | `/data/projects/` | Per-project scene clips and final 30-second MP4 files |
@@ -112,6 +120,8 @@ video.example.com {
 
 Point DNS at the host and let Caddy obtain the certificate. Configure TLS before using real credentials or API keys. Do not publish the dashboard directly to a public interface.
 
+For Modal, set `PUBLIC_BASE_URL` to the exact externally reachable HTTPS origin, for example `https://video.example.com`. The Go service builds callback URLs only from this setting and never from an inbound `Host` or forwarding header. Modal receives a fresh opaque capability token with each submission; the dashboard stores only its hash, does not return it to browsers, and accepts callbacks at `POST /api/provider-callbacks/modal`.
+
 ## OpenRouter key bootstrap (optional)
 
 The normal path is adding the key in the authenticated Settings page. For unattended initial deployment only, the Compose file accepts an optional `OPENROUTER_API_KEY` environment value. On first start it is encrypted and persisted in the Docker volume:
@@ -143,11 +153,13 @@ https://<your-modal-endpoint>/api/v1
 
 Each Modal deployment has its own endpoint and key. The key is encrypted at rest and is never returned to the browser. Add, edit, or delete named accounts in Settings, and mark one account as the default; the Generate screen lets you choose the account separately for each 30-second project or single clip. Existing jobs retain the encrypted credential snapshot captured at submission. The supplied Modal service currently exposes one static model, `modal/wan2.2-lightning-a14b`, with durations from 1 to 15 seconds, 480p/720p, 9:16/16:9, and no generated audio. Its API does not report a video usage charge; Modal infrastructure usage is billed separately by Modal.
 
+The supplied service requires `callback_url` and `callback_token` on video creation. The dashboard supplies both internally after `PUBLIC_BASE_URL` is configured; do not add the callback token to a Modal secret, browser setting, proxy log, or source file. On completion or failure, Modal writes the terminal job state first and sends a bounded-retry HTTPS callback. If delivery is exhausted, the dashboard uses a sparse persisted recovery check after the callback deadline and backs it off after each attempt. This recovery survives restarts and is separate from normal OpenRouter status polling.
+
 ## Dashboard behavior
 
 For OpenRouter, the model list includes provider-supplied per-second pricing where available, such as `$0.50/sec`; otherwise it shows `From …/sec` or `Price unavailable`. The dashboard shows estimates only when the active provider supplies pricing. Modal's API returns no per-video price, so its compute cost is billed separately by Modal. History stores the cost value reported by the selected provider; confirm the provider's billing dashboard for actual charges.
 
-Jobs are stored before provider polling begins. The background worker keeps polling and downloads completed video into `/data/videos`, so closing the dashboard does not cancel a job. Live job views and History show persisted, application-normalized event messages and progress for project and single-clip jobs. Failure errors are stored with the job and remain visible on its History card. History also includes the prompt, model, date, duration, status, cost, local playback/download, and manual deletion. Deletion removes the corresponding database record and local video file. Files are retained indefinitely until deleted in History.
+Jobs are stored before provider polling begins. OpenRouter jobs are polled by the background worker. Modal jobs transition through authenticated terminal callbacks, then the worker downloads completed video into `/data/videos`; closing the dashboard does not cancel a job. Live job views and History receive same-origin authenticated server-sent events and retain persisted, application-normalized event messages and progress for project and single-clip jobs. Failure errors are stored with the job and remain visible on its History card. History also includes the prompt, model, date, duration, status, cost, local playback/download, and manual deletion. Deletion removes the corresponding database record and local video file. Files are retained indefinitely until deleted in History.
 
 Completed videos can be moved from History into the separate Vault tab; this hides them from regular History without moving or copying their files. Set the four-digit Vault code in Settings first. Enter the code to list, play, or download Vault videos. The Vault locks when you refresh the page or choose **Lock Vault**. Change the code in Settings with the current code; keep it safe, because a forgotten code cannot be recovered in this version. Returning a Vault video restores it to History.
 
