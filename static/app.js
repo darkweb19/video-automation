@@ -104,6 +104,7 @@
     vaultPlayerDialog: $("#vault-player-dialog"),
     vaultPlayerTitle: $("#vault-player-title"),
     vaultPlayer: $("#vault-player"),
+    vaultPlayerDownload: $("#vault-player-download"),
     vaultPlayerClose: $("#vault-player-close"),
     recentList: $("#recent-list"),
     refreshHistory: $("#refresh-history"),
@@ -169,16 +170,25 @@
     historyNextBeforeCreated: 0,
     historyNextBeforeID: "",
     historyLoading: false,
-    historyRefreshTimer: 0,
     historyTerminalOpen: new Map(),
     currentGenerationID: "",
     displayedGenerationID: "",
-    pollTimer: 0,
+    currentGenerationRecord: null,
     mode: "project",
+    currentView: "",
     projects: [],
     currentProjectID: "",
     displayedProjectID: "",
-    projectPollTimer: 0,
+    currentProjectRecord: null,
+    projectTraceFetches: new Map(),
+    projectTraceRequestEpoch: 0,
+    projectRawTraceOpenKey: "",
+    jobEventSource: null,
+    jobStreamHasOpened: false,
+    jobStreamDisconnected: false,
+    jobStreamAuthCheckPending: false,
+    terminalRefreshTimer: 0,
+    terminalRefreshKinds: new Set(),
     toastTimer: 0,
     authenticated: false,
     mustChangePassword: false,
@@ -196,7 +206,8 @@
     vaultUnlockPending: 0,
     vaultMediaControllers: new Set(),
     vaultItems: [],
-    vaultObjectURL: ""
+    vaultObjectURL: "",
+    vaultPlayerItemKey: ""
   };
 
   const VIDEO_PROVIDER_NAMES = Object.freeze({ modal: "Modal", openrouter: "OpenRouter" });
@@ -412,7 +423,7 @@
     if (!response.ok) {
       if (response.status === 401 && !allowUnauthorized) showLoggedOut();
       if (response.status === 428 && payload && payload.must_change_password && state.authenticated) {
-        stopHistoryRefresh();
+        stopJobEventStream();
         applyPasswordGate(true);
         navigate("settings");
       }
@@ -422,16 +433,6 @@
       throw new APIError(message, response.status);
     }
     return payload;
-  }
-
-  function stopPolling() {
-    window.clearTimeout(state.pollTimer);
-    state.pollTimer = 0;
-  }
-
-  function stopProjectPolling() {
-    window.clearTimeout(state.projectPollTimer);
-    state.projectPollTimer = 0;
   }
 
   function projectValue(project, ...keys) {
@@ -445,8 +446,394 @@
     return String(projectValue(project, "id", "project_id", "projectID"));
   }
 
+  function projectTextGeneration(project) {
+    const trace = projectValue(project, "text_generation", "textGeneration", "generation_details");
+    return trace && typeof trace === "object" ? trace : null;
+  }
+
+  function traceMetadataValue(trace, ...keys) {
+    if (!trace || typeof trace !== "object") return "";
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(trace, key) && trace[key] !== undefined && trace[key] !== null) return trace[key];
+    }
+    return "";
+  }
+
+  function traceRawResponseOmitted(trace) {
+    return Boolean(trace && (trace.raw_response_omitted === true || trace.rawResponseOmitted === true));
+  }
+
+  function projectTraceRevision(project) {
+    const trace = projectTextGeneration(project);
+    if (!trace) return "";
+    // The complete trace metadata makes the key safe across multiple saves in
+    // one timestamp bucket as well as retries with a different request.
+    return JSON.stringify([
+      traceMetadataValue(trace, "status", "state"),
+      traceMetadataValue(trace, "started_at", "startedAt"),
+      traceMetadataValue(trace, "completed_at", "completedAt"),
+      traceMetadataValue(trace, "updated_at", "updatedAt"),
+      traceMetadataValue(trace, "router_model", "routerModel"),
+      traceMetadataValue(trace, "actual_model", "actualModel"),
+      traceMetadataValue(trace, "system_prompt", "systemPrompt"),
+      traceMetadataValue(trace, "user_prompt", "userPrompt"),
+      traceMetadataValue(trace, "response_schema", "responseSchema"),
+      traceMetadataValue(trace, "error", "error_message")
+    ]);
+  }
+
+  function projectTraceDisclosureKey(id, revision) {
+    return id && revision ? `${id}\u0000${revision}` : "";
+  }
+
+  // Live project snapshots deliberately omit the potentially large raw model
+  // response. Keep a previously fetched response only when the trace record
+  // itself has not changed.
+  function mergeProjectRawTrace(previous, incoming) {
+    const incomingTrace = projectTextGeneration(incoming);
+    if (!traceRawResponseOmitted(incomingTrace)) return incoming;
+    const previousTrace = projectTextGeneration(previous);
+    if (!previousTrace || traceRawResponseOmitted(previousTrace)
+      || projectTraceRevision(previous) !== projectTraceRevision(incoming)) return incoming;
+    return {
+      ...incoming,
+      text_generation: {
+        ...incomingTrace,
+        raw_response: traceMetadataValue(previousTrace, "raw_response", "rawResponse", "response_raw", "response", "raw"),
+        raw_response_omitted: false
+      }
+    };
+  }
+
+  function mergeFetchedProjectRawTrace(latest, detailed) {
+    const latestTrace = projectTextGeneration(latest);
+    const detailedTrace = projectTextGeneration(detailed);
+    if (!latestTrace || !detailedTrace || traceRawResponseOmitted(detailedTrace)
+      || projectTraceRevision(latest) !== projectTraceRevision(detailed)) return latest;
+    return {
+      ...latest,
+      text_generation: {
+        ...latestTrace,
+        raw_response: traceMetadataValue(detailedTrace, "raw_response", "rawResponse", "response_raw", "response", "raw"),
+        raw_response_omitted: false
+      }
+    };
+  }
+
+  function invalidateProjectRawTraceRequests() {
+    state.projectTraceRequestEpoch += 1;
+    state.projectRawTraceOpenKey = "";
+    state.projectTraceFetches.forEach((controller) => controller.abort());
+    state.projectTraceFetches.clear();
+  }
+
+  function currentProjectMatchesTrace(id, revision, epoch) {
+    return state.authenticated
+      && !state.mustChangePassword
+      && state.currentView === "generate"
+      && state.mode === "project"
+      && state.projectTraceRequestEpoch === epoch
+      && state.currentProjectID === id
+      && state.displayedProjectID === id
+      && state.currentProjectRecord
+      && projectID(state.currentProjectRecord) === id
+      && projectTraceRevision(state.currentProjectRecord) === revision;
+  }
+
+  function fetchProjectRawTrace(id, revision) {
+    if (!id || !revision || !state.authenticated || state.mustChangePassword) return;
+    const key = projectTraceDisclosureKey(id, revision);
+    if (!key || state.projectTraceFetches.has(key)) return;
+    const epoch = state.projectTraceRequestEpoch;
+    if (!currentProjectMatchesTrace(id, revision, epoch)) return;
+    const controller = new AbortController();
+    state.projectTraceFetches.set(key, controller);
+    void request(`/api/projects/${encodeURIComponent(id)}`, { signal: controller.signal }).then((payload) => {
+      if (!currentProjectMatchesTrace(id, revision, epoch)) return;
+      const detailed = payload && payload.project ? payload.project : payload;
+      if (!detailed || projectID(detailed) !== id || projectTraceRevision(detailed) !== revision) return;
+      const latest = state.currentProjectRecord;
+      const merged = mergeFetchedProjectRawTrace(latest, detailed);
+      if (merged === latest) return;
+      // Apply only the raw trace to the latest snapshot so a delayed detail
+      // request cannot overwrite scene state, status, cost, or diagnostics.
+      state.currentProjectRecord = merged;
+      upsertProjectSnapshot(merged);
+      if (state.mode === "project") renderProject(merged, true);
+    }).catch((error) => {
+      if (!currentProjectMatchesTrace(id, revision, epoch) || controller.signal.aborted) return;
+      if (error.status !== 401 && error.status !== 423) toast("Unable to load the raw model response.", true);
+    }).finally(() => {
+      if (state.projectTraceFetches.get(key) === controller) state.projectTraceFetches.delete(key);
+    });
+  }
+
+  const terminalJobStatuses = new Set(["completed", "complete", "failed", "error"]);
+
+  function isTerminalJobStatus(status) {
+    return terminalJobStatuses.has(String(status || "").toLowerCase());
+  }
+
+  function jobStatusRank(status) {
+    const normalized = String(status || "").toLowerCase();
+    if (["completed", "complete", "failed", "error"].includes(normalized)) return 3;
+    if (["downloading", "combining", "assembling", "finalizing"].includes(normalized)) return 2;
+    if (["queued", "pending", "created"].includes(normalized)) return 0;
+    if (normalized === "download_failed") return 1;
+    return 1;
+  }
+
+  function snapshotTimestamp(record) {
+    const value = projectValue(record, "updated_at", "updatedAt", "last_updated_at", "lastUpdatedAt");
+    if (value === "") return null;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric < 100000000000 ? numeric * 1000 : numeric;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function snapshotProgress(record) {
+    const value = projectValue(record, "progress", "progress_percent", "percent");
+    const numeric = Number(value);
+    return value !== "" && value !== null && value !== undefined && Number.isFinite(numeric) ? numeric : null;
+  }
+
+  function retryCount(record) {
+    return Number(projectValue(record, "retry_count", "retries", "attempts", "attempt")) || 0;
+  }
+
+  function isStaleJobSnapshot(previous, incoming, kind) {
+    if (!previous || !incoming) return false;
+    try {
+      if (JSON.stringify(previous) === JSON.stringify(incoming)) return true;
+    } catch (_error) {
+      // Snapshot comparison below still rejects older timestamps and progress.
+    }
+
+    const previousTime = snapshotTimestamp(previous);
+    const incomingTime = snapshotTimestamp(incoming);
+    if (previousTime !== null && incomingTime !== null && incomingTime < previousTime) return true;
+    if (previousTime !== null && incomingTime !== null && incomingTime > previousTime) return false;
+
+    if (kind === "project") {
+      const oldScenes = projectScenes(previous);
+      const newScenes = projectScenes(incoming);
+      const oldByNumber = new Map(oldScenes.map((scene, index) => [
+        Number(projectValue(scene, "scene_number", "number", "scene")) || index + 1,
+        scene
+      ]));
+      for (const [index, scene] of newScenes.entries()) {
+        const number = Number(projectValue(scene, "scene_number", "number", "scene")) || index + 1;
+        const oldScene = oldByNumber.get(number);
+        if (oldScene && retryCount(scene) > retryCount(oldScene)) return false;
+      }
+    }
+    const retriesAdvanced = retryCount(incoming) > retryCount(previous);
+    if (retriesAdvanced) return false;
+
+    const previousStatus = String(projectValue(previous, "status") || "").toLowerCase();
+    const incomingStatus = String(projectValue(incoming, "status") || "").toLowerCase();
+    if (isTerminalJobStatus(previousStatus) && !isTerminalJobStatus(incomingStatus)) return true;
+    const sameOrderBucket = previousTime === null || incomingTime === null || incomingTime === previousTime;
+    if (sameOrderBucket) {
+      if (isTerminalJobStatus(previousStatus) && isTerminalJobStatus(incomingStatus) && previousStatus !== incomingStatus) return true;
+      if (jobStatusRank(incomingStatus) < jobStatusRank(previousStatus)) return true;
+    }
+
+    const previousProgress = snapshotProgress(previous);
+    const incomingProgress = snapshotProgress(incoming);
+    if (sameOrderBucket
+      && previousProgress !== null && incomingProgress !== null && incomingProgress < previousProgress) return true;
+
+    if (kind === "project" && sameOrderBucket) {
+      const oldScenes = projectScenes(previous);
+      const newScenes = projectScenes(incoming);
+      const oldByNumber = new Map(oldScenes.map((scene, index) => [
+        Number(projectValue(scene, "scene_number", "number", "scene")) || index + 1,
+        scene
+      ]));
+      for (const [index, scene] of newScenes.entries()) {
+        const number = Number(projectValue(scene, "scene_number", "number", "scene")) || index + 1;
+        const oldScene = oldByNumber.get(number);
+        const oldProgress = snapshotProgress(oldScene || {});
+        const newProgress = snapshotProgress(scene);
+        if (oldProgress !== null && newProgress !== null && newProgress < oldProgress) return true;
+        const oldSceneStatus = String(projectValue(oldScene, "status") || "").toLowerCase();
+        const newSceneStatus = String(projectValue(scene, "status") || "").toLowerCase();
+        if (oldScene && isTerminalJobStatus(oldSceneStatus) && isTerminalJobStatus(newSceneStatus)
+          && oldSceneStatus !== newSceneStatus) return true;
+        if (oldScene && jobStatusRank(newSceneStatus) < jobStatusRank(oldSceneStatus)) return true;
+      }
+    }
+    return false;
+  }
+
+  function upsertGenerationSnapshot(record) {
+    const id = String(record && record.id || "");
+    if (!id) return;
+    const index = state.generations.findIndex((item) => String(item.id) === id);
+    if (index >= 0) {
+      state.generations[index] = record;
+    } else if (id === state.currentGenerationID || id === state.displayedGenerationID) {
+      state.generations.unshift(record);
+    }
+  }
+
+  function upsertProjectSnapshot(project) {
+    const id = projectID(project);
+    if (!id) return;
+    const index = state.projects.findIndex((item) => projectID(item) === id);
+    if (index >= 0) state.projects[index] = project;
+    else if (id === state.currentProjectID || id === state.displayedProjectID) state.projects.unshift(project);
+  }
+
+  function preserveNewerSnapshots(incoming, previousRecords, currentRecord, kind, getID) {
+    const known = new Map(previousRecords.map((record) => [getID(record), record]));
+    const currentID = currentRecord && getID(currentRecord);
+    if (currentID) {
+      const knownCurrent = known.get(currentID);
+      if (!knownCurrent || !isStaleJobSnapshot(currentRecord, knownCurrent, kind)) known.set(currentID, currentRecord);
+    }
+    return incoming.map((record) => {
+      const previous = known.get(getID(record));
+      const candidate = kind === "project" ? mergeProjectRawTrace(previous, record) : record;
+      return previous && isStaleJobSnapshot(previous, candidate, kind) ? previous : candidate;
+    });
+  }
+
+  function refreshJobState() {
+    if (!state.authenticated || state.mustChangePassword) return Promise.resolve();
+    return Promise.allSettled([loadHistory(false, false), loadProjects(false)]);
+  }
+
+  function queueTerminalRefresh(kind) {
+    state.terminalRefreshKinds.add(kind);
+    if (state.terminalRefreshTimer) return;
+    state.terminalRefreshTimer = window.setTimeout(() => {
+      state.terminalRefreshTimer = 0;
+      const kinds = new Set(state.terminalRefreshKinds);
+      state.terminalRefreshKinds.clear();
+      const refreshes = [];
+      if (kinds.has("generation")) refreshes.push(loadHistory(false, false));
+      if (kinds.has("project")) refreshes.push(loadProjects(false));
+      void Promise.allSettled(refreshes);
+    }, 250);
+  }
+
+  function handleJobSnapshot(kind, event) {
+    if (!state.authenticated || state.mustChangePassword) return;
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch (_error) {
+      return;
+    }
+    let snapshot = kind === "generation" ? payload && payload.generation : payload && payload.project;
+    const id = String(payload && payload.id || (kind === "project" ? projectID(snapshot) : snapshot && snapshot.id) || "");
+    if (!snapshot || !id) return;
+
+    const selectedID = kind === "generation"
+      ? (state.displayedGenerationID || state.currentGenerationID)
+      : (state.displayedProjectID || state.currentProjectID);
+    const selected = selectedID === id;
+    const previous = kind === "generation"
+      ? state.generations.find((item) => String(item.id) === id) || (selected ? state.currentGenerationRecord : null)
+      : state.projects.find((item) => projectID(item) === id) || (selected ? state.currentProjectRecord : null);
+    if (kind === "project") {
+      snapshot = mergeProjectRawTrace(previous, snapshot);
+    }
+    if (isStaleJobSnapshot(previous, snapshot, kind)) return;
+    if (kind === "project" && selected && previous && projectTraceRevision(previous) !== projectTraceRevision(snapshot)) {
+      invalidateProjectRawTraceRequests();
+    }
+
+    const wasTerminal = previous && isTerminalJobStatus(projectValue(previous, "status"));
+    const status = String(projectValue(snapshot, "status") || "").toLowerCase();
+    const becameTerminal = isTerminalJobStatus(status) && !wasTerminal;
+    if (kind === "generation") {
+      upsertGenerationSnapshot(snapshot);
+      if (selected) {
+        state.currentGenerationRecord = snapshot;
+        if (state.mode === "single") setStatusRecord(snapshot);
+      }
+      if (status === "completed" || status === "failed" || status === "error") {
+        if (state.currentGenerationID === id) state.currentGenerationID = "";
+      }
+    } else {
+      upsertProjectSnapshot(snapshot);
+      if (selected) {
+        state.currentProjectRecord = snapshot;
+        if (state.mode === "project") renderProject(snapshot);
+      }
+    }
+
+    if (becameTerminal) {
+      queueTerminalRefresh(kind);
+      if (selected) {
+        const failed = status === "failed" || status === "error";
+        toast(kind === "generation"
+          ? (failed ? "Generation failed." : "Video saved successfully.")
+          : (failed ? "Project failed." : "30-second video saved."), failed);
+      }
+    }
+  }
+
+  function stopJobEventStream(reset = false) {
+    if (state.jobEventSource) {
+      state.jobEventSource.close();
+      state.jobEventSource = null;
+      state.jobStreamDisconnected = true;
+    }
+    state.jobStreamAuthCheckPending = false;
+    if (reset) {
+      state.jobStreamHasOpened = false;
+      state.jobStreamDisconnected = false;
+      window.clearTimeout(state.terminalRefreshTimer);
+      state.terminalRefreshTimer = 0;
+      state.terminalRefreshKinds.clear();
+    }
+  }
+
+  function startJobEventStream() {
+    if (!state.authenticated || state.mustChangePassword || state.jobEventSource || typeof window.EventSource !== "function") return;
+    const source = new window.EventSource("/api/events", { withCredentials: true });
+    state.jobEventSource = source;
+    source.addEventListener("open", () => {
+      if (state.jobEventSource !== source) return;
+      state.jobStreamHasOpened = true;
+      state.jobStreamDisconnected = false;
+      state.jobStreamAuthCheckPending = false;
+      // The normal API loads happen before subscription. Refresh after every
+      // successful open so a transition in that small gap is authoritative.
+      // The ready event stays informational and does not duplicate this read.
+      void refreshJobState();
+    });
+    source.addEventListener("generation", (event) => handleJobSnapshot("generation", event));
+    source.addEventListener("project", (event) => handleJobSnapshot("project", event));
+    source.addEventListener("ready", () => {});
+    source.addEventListener("ping", () => {});
+    source.addEventListener("error", () => {
+      if (state.jobEventSource !== source) return;
+      state.jobStreamDisconnected = true;
+      if (state.jobStreamAuthCheckPending) return;
+      state.jobStreamAuthCheckPending = true;
+      void request("/api/session").then((session) => {
+        if (state.jobEventSource !== source) return;
+        if (session && session.must_change_password && !state.mustChangePassword) {
+          stopJobEventStream();
+          applyPasswordGate(true);
+          navigate("settings");
+        }
+      }).catch(() => {
+        // Network errors leave EventSource's native reconnect active.
+      });
+    });
+  }
+
   function setGenerationMode(mode) {
+    const previousMode = state.mode;
     state.mode = mode === "single" ? "single" : "project";
+    if (previousMode === "project" && state.mode !== "project") invalidateProjectRawTraceRequests();
     const project = state.mode === "project";
     elements.modeOptions.forEach((button) => {
       const active = button.dataset.mode === state.mode;
@@ -475,6 +862,16 @@
       elements.statusEmpty.hidden = false;
     }
     updateModelOptions();
+    if (previousMode !== state.mode) {
+      if (project) {
+        if (state.currentProjectRecord && projectID(state.currentProjectRecord) === state.currentProjectID) {
+          renderProject(state.currentProjectRecord);
+        }
+      } else if (state.currentGenerationRecord
+        && String(state.currentGenerationRecord.id || "") === state.displayedGenerationID) {
+        setStatusRecord(state.currentGenerationRecord);
+      }
+    }
   }
 
   function selectedPromptCategory() {
@@ -516,11 +913,6 @@
       && Array.isArray(model.aspect_ratios) && model.aspect_ratios.includes("9:16");
   }
 
-  function stopHistoryRefresh() {
-    window.clearTimeout(state.historyRefreshTimer);
-    state.historyRefreshTimer = 0;
-  }
-
   function applyPasswordGate(required) {
     state.mustChangePassword = Boolean(required);
     $$(".nav-item").forEach((button) => {
@@ -560,9 +952,8 @@
   }
 
   function showLoggedOut() {
-    stopPolling();
-    stopProjectPolling();
-    stopHistoryRefresh();
+    stopJobEventStream(true);
+    invalidateProjectRawTraceRequests();
     resetVaultRestoreState();
     clearVaultClientState();
     clearGenerationDisplay();
@@ -571,6 +962,8 @@
     state.vaultConfigured = false;
     state.currentGenerationID = "";
     state.currentProjectID = "";
+    state.currentGenerationRecord = null;
+    state.currentProjectRecord = null;
     state.generations = [];
     state.projects = [];
     state.stats = null;
@@ -605,6 +998,8 @@
 
   function showAuthenticated(username, mustChangePassword) {
     resetVaultRestoreState();
+    stopJobEventStream(true);
+    invalidateProjectRawTraceRequests();
     state.authenticated = true;
     applyPasswordGate(mustChangePassword);
     elements.accountName.textContent = username || "sujanshrestha";
@@ -624,6 +1019,8 @@
       view = "settings";
       toast("Change your password before using the dashboard.", true);
     }
+    if (state.currentView === "generate" && view !== "generate") invalidateProjectRawTraceRequests();
+    state.currentView = view;
     $$(".view").forEach((node) => node.classList.toggle("active", node.dataset.page === view));
     $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === view));
     elements.pageTitle.textContent = viewMeta[view].title;
@@ -1088,15 +1485,6 @@
     return 0;
   }
 
-  function hasActiveJobs() {
-    const activeGenerationStatuses = new Set(["queued", "processing", "downloading", "download_failed"]);
-    const terminalProjectStatuses = new Set(["completed", "complete", "failed", "error"]);
-    const aggregateActive = state.stats ? state.stats.active : 0;
-    return aggregateActive > 0
-      || state.generations.some((record) => activeGenerationStatuses.has(record.status))
-      || state.projects.some((project) => !terminalProjectStatuses.has(String(projectValue(project, "status")).toLowerCase()));
-  }
-
   function normalizeStats(stats) {
     if (!stats || typeof stats !== "object") return null;
     const queued = numericStat(stats.queued, stats.Queued);
@@ -1110,15 +1498,6 @@
       active: explicitActive === undefined ? queued + processing + downloading : Number(explicitActive),
       totalCost: numericStat(stats.total_cost_usd, stats.total_cost, stats.cost_usd, stats.TotalCostUSD)
     };
-  }
-
-  function scheduleHistoryRefresh() {
-    stopHistoryRefresh();
-    if (!state.authenticated || state.mustChangePassword || document.hidden || !hasActiveJobs()) return;
-    state.historyRefreshTimer = window.setTimeout(() => {
-      state.historyRefreshTimer = 0;
-      void Promise.allSettled([loadHistory(false, false), loadProjects(false)]);
-    }, 7000);
   }
 
   function renderRecent() {
@@ -1182,7 +1561,7 @@
     }
     const video = make("video");
     video.controls = true;
-    video.preload = "metadata";
+    video.preload = "none";
     video.playsInline = true;
     video.addEventListener("error", showUnavailable, { once: true });
     video.src = videoURL;
@@ -1228,8 +1607,9 @@
     state.generations.forEach((record, index) => {
       const card = make("article", { className: "history-card" });
       const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
+      const videoReady = String(record.status || "").toLowerCase() === "completed" && Boolean(record.video_ready);
       let download;
-      const preview = historyPreview(record.video_ready, videoURL, record.status, () => download?.remove());
+      const preview = historyPreview(videoReady, videoURL, record.status, () => download?.remove());
 
       const body = make("div", { className: "history-body" });
       historyPrompt(body, "prompt", record.prompt);
@@ -1252,12 +1632,13 @@
       ));
 
       const actions = make("div", { className: "history-actions" });
-      if (record.video_ready) {
+      if (videoReady) {
         download = make("a", { className: "button secondary", text: "Download" });
-        download.href = `${videoURL}&download=1`;
+        download.href = videoURL;
+        download.download = `generation-${record.id}.mp4`;
         actions.append(download);
       }
-      if (record.status === "completed" && record.video_ready) {
+      if (videoReady) {
         const move = make("button", { className: "button secondary vault-move-button", text: "Move to Vault", type: "button" });
         move.addEventListener("click", () => moveHistoryItem("generation", record.id, move));
         actions.append(move);
@@ -1295,13 +1676,31 @@
         query.set("offset", String(offset));
       }
       const payload = await request(`/api/generations?${query.toString()}`);
-      const records = Array.isArray(payload && payload.generations) ? payload.generations : [];
+      const records = preserveNewerSnapshots(
+        Array.isArray(payload && payload.generations) ? payload.generations : [],
+        state.generations,
+        state.currentGenerationRecord,
+        "generation",
+        (record) => String(record && record.id || "")
+      );
       if (append) {
         const byID = new Map(state.generations.map((record) => [record.id, record]));
         records.forEach((record) => byID.set(record.id, record));
         state.generations = Array.from(byID.values());
       } else {
         state.generations = records;
+      }
+      if (!state.displayedGenerationID) {
+        const active = state.generations.find((record) => ["queued", "processing", "downloading", "download_failed"].includes(String(record.status || "").toLowerCase()));
+        if (active) {
+          state.currentGenerationID = String(active.id || "");
+          state.displayedGenerationID = state.currentGenerationID;
+          state.currentGenerationRecord = active;
+        }
+      }
+      if (state.mode === "single" && state.displayedGenerationID) {
+        const displayed = state.generations.find((record) => String(record.id) === state.displayedGenerationID);
+        if (displayed) setStatusRecord(displayed);
       }
       const aggregateStats = normalizeStats(payload && payload.stats);
       if (aggregateStats || !append) state.stats = aggregateStats;
@@ -1336,7 +1735,6 @@
     } finally {
       state.historyLoading = false;
       elements.refreshHistory.disabled = false;
-      scheduleHistoryRefresh();
     }
   }
 
@@ -1355,19 +1753,22 @@
   }
 
   function clearGenerationDisplay(id = "") {
-    const matchesCurrent = !id || state.currentGenerationID === id;
-    const matchesDisplay = !id || state.displayedGenerationID === id;
+    const normalizedID = String(id || "");
+    const matchesCurrent = !normalizedID || state.currentGenerationID === normalizedID;
+    const matchesDisplay = !normalizedID || state.displayedGenerationID === normalizedID;
     if (matchesCurrent) {
-      stopPolling();
       state.currentGenerationID = "";
+      state.currentGenerationRecord = null;
     }
     if (!matchesDisplay) return;
     state.displayedGenerationID = "";
+    state.currentGenerationRecord = null;
     elements.generatedVideo.pause();
     elements.generatedVideo.removeAttribute("src");
     elements.generatedVideo.load();
     elements.generatedVideo.hidden = true;
     elements.openVideo.removeAttribute("href");
+    elements.openVideo.removeAttribute("download");
     elements.openVideo.hidden = true;
     elements.singleTerminal.replaceChildren();
     elements.singleTerminalSection.hidden = true;
@@ -1381,19 +1782,23 @@
   }
 
   function clearProjectDisplay(id = "") {
-    const matchesCurrent = !id || state.currentProjectID === id;
-    const matchesDisplay = !id || state.displayedProjectID === id;
+    const normalizedID = String(id || "");
+    const matchesCurrent = !normalizedID || state.currentProjectID === normalizedID;
+    const matchesDisplay = !normalizedID || state.displayedProjectID === normalizedID;
+    if (matchesCurrent || matchesDisplay) invalidateProjectRawTraceRequests();
     if (matchesCurrent) {
-      stopProjectPolling();
       state.currentProjectID = "";
+      state.currentProjectRecord = null;
     }
     if (!matchesDisplay) return;
     state.displayedProjectID = "";
+    state.currentProjectRecord = null;
     elements.projectVideo.pause();
     elements.projectVideo.removeAttribute("src");
     elements.projectVideo.load();
     elements.projectFinal.hidden = true;
     elements.projectDownload.removeAttribute("href");
+    elements.projectDownload.removeAttribute("download");
     elements.projectStory.replaceChildren();
     elements.projectStory.hidden = true;
     elements.projectScenes.replaceChildren();
@@ -1451,8 +1856,19 @@
   }
 
   function setStatusRecord(record) {
-    state.displayedGenerationID = String(record.id || "");
-    const status = record.status || "processing";
+    const id = String(record.id || "");
+    const previous = state.generations.find((item) => String(item.id) === id)
+      || (state.currentGenerationRecord && String(state.currentGenerationRecord.id || "") === id ? state.currentGenerationRecord : null);
+    if (previous && isStaleJobSnapshot(previous, record, "generation")) record = previous;
+    state.displayedGenerationID = id;
+    state.currentGenerationRecord = record;
+    if (id) upsertGenerationSnapshot(record);
+    const status = String(record.status || "processing").toLowerCase();
+    if (["queued", "processing", "downloading", "download_failed"].includes(status)) {
+      state.currentGenerationID = id;
+    } else if (state.currentGenerationID === id) {
+      state.currentGenerationID = "";
+    }
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = false;
     elements.statusBadge.className = `badge ${statusClass(status)}`;
@@ -1493,38 +1909,12 @@
 
     if (status === "completed" && record.video_ready) {
       const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
-      elements.generatedVideo.src = videoURL;
+      if (elements.generatedVideo.getAttribute("src") !== videoURL) elements.generatedVideo.src = videoURL;
       elements.generatedVideo.hidden = false;
-      elements.openVideo.href = `${videoURL}&download=1`;
+      if (elements.openVideo.getAttribute("href") !== videoURL) elements.openVideo.href = videoURL;
+      elements.openVideo.download = `generation-${record.id}.mp4`;
       elements.openVideo.hidden = false;
     }
-  }
-
-  async function pollGeneration(id, delay = 0) {
-    stopPolling();
-    state.currentGenerationID = id;
-    state.pollTimer = window.setTimeout(async () => {
-      if (!state.authenticated || state.currentGenerationID !== id) return;
-      try {
-        const record = await request(`/status?id=${encodeURIComponent(id)}`);
-        setStatusRecord(record);
-        const terminal = record.status === "completed" || record.status === "failed";
-        if (terminal) {
-          state.currentGenerationID = "";
-          await loadHistory(false);
-          toast(record.status === "completed" ? "Video saved successfully." : "Generation failed.", record.status === "failed");
-          return;
-        }
-        pollGeneration(id, 3000);
-      } catch (error) {
-        if (error.status === 401) return;
-        elements.statusError.textContent = error.message;
-        elements.statusError.hidden = false;
-        elements.retryStatus.hidden = false;
-        elements.progressWrap.hidden = true;
-        elements.statusDetail.textContent = "Status updates are paused.";
-      }
-    }, delay);
   }
 
   function projectScenes(project) {
@@ -1687,6 +2077,7 @@
   function traceSection(title, value, options = {}) {
     const section = document.createElement("details");
     section.className = "trace-section";
+    if (options.open) section.open = true;
     const summary = document.createElement("summary");
     summary.append(make("span", { className: "trace-section-title", text: title }));
     if (options.meta) summary.append(make("span", { className: "trace-section-meta", text: options.meta }));
@@ -1698,6 +2089,11 @@
       body.append(traceField(options.label || title, options.json ? traceJSON(value) : traceText(value), { code: options.code !== false }));
     }
     section.append(body);
+    if (typeof options.onToggle === "function") {
+      section.addEventListener("toggle", () => {
+        if (section.isConnected && state.currentView === "generate" && state.mode === "project") options.onToggle(section.open);
+      });
+    }
     return section;
   }
 
@@ -1757,6 +2153,9 @@
     const userPrompt = firstTraceValue(generation, "user_prompt", "userPrompt", "prompt_user", "input_prompt");
     const schema = firstTraceValue(generation, "response_schema", "responseSchema", "json_schema", "jsonSchema", "schema", "output_schema", "outputSchema");
     const rawResponse = firstTraceValue(generation, "raw_response", "rawResponse", "response_raw", "response", "raw");
+    const rawResponseOmitted = traceRawResponseOmitted(generation);
+    const traceRevision = projectTraceRevision(project);
+    const rawDisclosureKey = projectTraceDisclosureKey(projectID(project), traceRevision);
     const retryCount = firstTraceValue(project, "retry_count", "retries", "attempts", "attempt");
     const runFields = [
       { label: "Project status", value: String(status || "queued").replaceAll("_", " ") },
@@ -1767,12 +2166,31 @@
     ].filter((field) => field.value !== "" && field.value !== undefined && field.value !== null);
     if (!runFields.length) runFields.push({ label: "Record", value: "No run metadata was recorded." });
 
+    const rawResponseSection = traceSection(
+      "Raw model response",
+      rawResponseOmitted ? "Open this section to load the recorded raw response." : rawResponse,
+      {
+        json: !rawResponseOmitted,
+        meta: rawResponseOmitted ? "Load on demand" : "",
+        open: rawDisclosureKey !== "" && state.projectRawTraceOpenKey === rawDisclosureKey,
+        onToggle: (open) => {
+          if (!rawDisclosureKey) return;
+          if (!open) {
+            if (state.projectRawTraceOpenKey === rawDisclosureKey) state.projectRawTraceOpenKey = "";
+            return;
+          }
+          state.projectRawTraceOpenKey = rawDisclosureKey;
+          if (rawResponseOmitted) fetchProjectRawTrace(projectID(project), traceRevision);
+        }
+      }
+    );
+
     elements.projectTraceSections.replaceChildren(
       traceSection("Text model", "", { fields: modelFields, meta: traceText(modelFields.find((field) => field.label === "Selected model")?.value) || "Audit metadata" }),
       traceSection("System prompt", systemPrompt, { code: false }),
       traceSection("User prompt", userPrompt, { code: false }),
       traceSection("JSON schema", schema, { json: true }),
-      traceSection("Raw model response", rawResponse, { json: true }),
+      rawResponseSection,
       traceSection("Story", story, { code: false }),
       traceSection("Full script", script, { code: false }),
       traceSection("Continuity bible", continuity, { code: false }),
@@ -1787,14 +2205,29 @@
     elements.projectTrace.hidden = false;
   }
 
-  function renderProject(project) {
+  function renderProject(project, authoritative = false) {
     if (!project) return;
+    const incomingID = projectID(project);
+    const displayedPrevious = state.currentProjectRecord && projectID(state.currentProjectRecord) === incomingID ? state.currentProjectRecord : null;
+    if (state.displayedProjectID && state.displayedProjectID !== incomingID) invalidateProjectRawTraceRequests();
+    const previous = state.projects.find((item) => projectID(item) === incomingID) || displayedPrevious;
+    const candidate = mergeProjectRawTrace(previous, project);
+    if (!authoritative && previous && isStaleJobSnapshot(previous, candidate, "project")) {
+      project = previous;
+    } else {
+      if (displayedPrevious && projectTraceRevision(displayedPrevious) !== projectTraceRevision(candidate)) {
+        invalidateProjectRawTraceRequests();
+      }
+      project = candidate;
+    }
     const scenes = projectScenes(project);
     const status = String(projectValue(project, "status") || "queued").toLowerCase();
     const id = projectID(project);
     const progress = projectProgress(project, scenes);
     state.displayedProjectID = id;
     state.currentProjectID = id;
+    state.currentProjectRecord = project;
+    upsertProjectSnapshot(project);
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = true;
     elements.projectStatus.hidden = false;
@@ -1855,46 +2288,31 @@
       elements.projectScenes.append(card);
     });
 
-    const videoReady = Boolean(projectValue(project, "video_ready", "final_video_ready")) || status === "completed" || status === "complete";
+    const videoReady = (Boolean(projectValue(project, "video_ready", "final_video_ready")) || status === "completed" || status === "complete")
+      && (status === "completed" || status === "complete");
     elements.projectFinal.hidden = !videoReady || !id;
     if (videoReady && id) {
       const videoURL = `/api/projects/${encodeURIComponent(id)}/video`;
-      elements.projectVideo.src = videoURL;
-      elements.projectDownload.href = `${videoURL}?download=1`;
-    }
-  }
-
-  async function pollProject(id, delay = 0) {
-    stopProjectPolling();
-    state.currentProjectID = id;
-    state.projectPollTimer = window.setTimeout(async () => {
-      if (!state.authenticated || state.currentProjectID !== id) return;
-      try {
-        const payload = await request(`/api/projects/${encodeURIComponent(id)}`);
-        const project = payload && payload.project ? payload.project : payload;
-        if (state.mode === "project") renderProject(project);
-        const status = String(projectValue(project, "status")).toLowerCase();
-        if (!["completed", "complete", "failed", "error"].includes(status)) pollProject(id, 3000);
-        else {
-          await loadProjects(false);
-          toast(status === "failed" || status === "error" ? "Project failed." : "30-second video saved.", status === "failed" || status === "error");
-        }
-      } catch (error) {
-        if (error.status === 401) return;
-        elements.projectError.hidden = false;
-        elements.projectError.textContent = error.message;
-        pollProject(id, 5000);
+      if (elements.projectVideo.getAttribute("src") !== videoURL) elements.projectVideo.src = videoURL;
+      if (elements.projectDownload.getAttribute("href") !== videoURL) elements.projectDownload.href = videoURL;
+      elements.projectDownload.download = `project-${id}.mp4`;
+    } else {
+      if (elements.projectVideo.getAttribute("src")) {
+        elements.projectVideo.pause();
+        elements.projectVideo.removeAttribute("src");
+        elements.projectVideo.load();
       }
-    }, delay);
+      elements.projectDownload.removeAttribute("href");
+      elements.projectDownload.removeAttribute("download");
+    }
   }
 
   async function retryProjectScene(id, number, button) {
     setButtonBusy(button, true, "Retryingâ€¦");
     try {
       const payload = await request(`/api/projects/${encodeURIComponent(id)}/scenes/${encodeURIComponent(number)}/retry`, { method: "POST" });
-      renderProject(payload && payload.project ? payload.project : payload);
+      renderProject(payload && payload.project ? payload.project : payload, true);
       toast(`Scene ${number} retry submitted.`);
-      pollProject(id, 1000);
     } catch (error) {
       setButtonBusy(button, false);
       if (error.status !== 401) toast(error.message, true);
@@ -1907,9 +2325,8 @@
     setButtonBusy(elements.retryProject, true, "Retrying...");
     try {
       const payload = await request(`/api/projects/${encodeURIComponent(id)}/retry`, { method: "POST" });
-      renderProject(payload && payload.project ? payload.project : payload);
+      renderProject(payload && payload.project ? payload.project : payload, true);
       toast("Project retry started.");
-      pollProject(id, 1000);
     } catch (error) {
       if (error.status !== 401) toast(error.message, true);
     } finally {
@@ -1921,13 +2338,22 @@
     if (!state.authenticated || state.mustChangePassword) return;
     try {
       const payload = await request("/api/projects");
-      state.projects = Array.isArray(payload) ? payload : (Array.isArray(payload && payload.projects) ? payload.projects : []);
-      const terminal = (project) => ["completed", "complete", "failed", "error"].includes(String(projectValue(project, "status")).toLowerCase());
+      const projects = Array.isArray(payload) ? payload : (Array.isArray(payload && payload.projects) ? payload.projects : []);
+      state.projects = preserveNewerSnapshots(
+        projects,
+        state.projects,
+        state.currentProjectRecord,
+        "project",
+        projectID
+      );
       const current = state.projects.find((project) => projectID(project) === state.currentProjectID);
-      if (!current || terminal(current)) {
-        const active = state.projects.find((project) => !terminal(project));
+      if (!current && state.currentProjectID) clearProjectDisplay(state.currentProjectID);
+      if (!state.currentProjectID) {
+        const active = state.projects.find((project) => !isTerminalJobStatus(projectValue(project, "status")));
         state.currentProjectID = active ? projectID(active) : "";
       }
+      const selectedProject = state.projects.find((project) => projectID(project) === state.currentProjectID);
+      if (selectedProject) state.currentProjectRecord = selectedProject;
       setGenerationMode(state.mode);
       elements.projectHistory.replaceChildren();
       if (state.projects.length) {
@@ -1941,7 +2367,7 @@
         state.projects.forEach((project, index) => {
           const id = projectID(project);
           const status = String(projectValue(project, "status") || "queued");
-          const videoReady = Boolean(projectValue(project, "final_video_ready"));
+          const videoReady = String(status).toLowerCase() === "completed" && Boolean(projectValue(project, "final_video_ready"));
           const videoURL = id ? `/api/projects/${encodeURIComponent(id)}/video` : "";
           const item = make("article", { className: "history-card" });
           let download;
@@ -1967,7 +2393,8 @@
           const actions = make("div", { className: "history-actions" });
           if (videoReady && videoURL) {
             download = make("a", { className: "button secondary", text: "Download" });
-            download.href = `${videoURL}?download=1`;
+            download.href = videoURL;
+            download.download = `project-${id}.mp4`;
             actions.append(download);
           }
           if (status === "completed" && videoReady) {
@@ -1976,9 +2403,9 @@
             actions.append(move);
           }
           const open = make("button", { className: "button secondary", type: "button", text: "Open" });
-          open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); pollProject(id, 0); });
+          open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); });
           actions.append(open);
-          if (["completed", "complete", "failed", "error"].includes(status.toLowerCase())) {
+          if (isTerminalJobStatus(status)) {
             const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
             remove.addEventListener("click", () => deleteProject(project));
             actions.append(remove);
@@ -1993,13 +2420,10 @@
           if (active) {
             setGenerationMode("project");
             renderProject(active);
-            const activeStatus = String(projectValue(active, "status")).toLowerCase();
-            if (!["completed", "complete", "failed", "error"].includes(activeStatus)) pollProject(state.currentProjectID, 0);
           }
         }
       }
       renderHistory();
-      scheduleHistoryRefresh();
     } catch (error) {
       if (notify && error.status !== 401 && error.status !== 404) toast(error.message, true);
     }
@@ -2046,7 +2470,6 @@
       elements.projectTopic.value = "";
       elements.projectTopicError.textContent = "";
       toast("Project submitted. Script generation has started.");
-      pollProject(id, 1000);
       loadProjects(false);
     } catch (error) {
       elements.projectError.hidden = false;
@@ -2119,7 +2542,6 @@
       elements.promptError.textContent = "";
       updateModelOptions();
       toast("Generation submitted.");
-      pollGeneration(record.id, 1000);
       loadHistory(false);
     } catch (error) {
       elements.statusBadge.className = "badge failed";
@@ -2375,6 +2797,10 @@
     }
   }
 
+  function vaultItemKey(item) {
+    return `${item.kind}:${item.id}`;
+  }
+
   async function openVaultVideo(item, button) {
     const generation = state.vaultGeneration;
     setButtonBusy(button, true, "Loading…");
@@ -2386,6 +2812,8 @@
       elements.vaultPlayerTitle.textContent = item.title || "Vault video";
       elements.vaultPlayer.src = state.vaultObjectURL;
       elements.vaultPlayerDialog.showModal();
+      state.vaultPlayerItemKey = vaultItemKey(item);
+      elements.vaultPlayerDownload.disabled = false;
     } catch (error) {
       if (error.status !== 401 && error.status !== 423) toast(error.message, true);
     } finally {
@@ -2395,16 +2823,31 @@
 
   async function downloadVaultVideo(item, button) {
     const generation = state.vaultGeneration;
+    const token = state.vaultToken;
     setButtonBusy(button, true, "Preparing…");
     try {
-      const blob = await fetchVaultVideo(item, true);
-      if (generation !== state.vaultGeneration || !state.vaultToken) return;
-      const url = URL.createObjectURL(blob);
-      const link = make("a", { attrs: { href: url, download: `${item.kind}-${item.id}.mp4` } });
-      document.body.append(link);
+      if (state.vaultLocking || !token) throw new APIError("Vault is locked", 423);
+      const reusePlayerVideo = Boolean(
+        state.vaultObjectURL
+        && state.vaultPlayerItemKey === vaultItemKey(item)
+        && elements.vaultPlayerDialog.open
+      );
+      if (generation !== state.vaultGeneration || token !== state.vaultToken || state.vaultLocking || !token) {
+        throw new APIError("Vault is locked", 423);
+      }
+      let url = reusePlayerVideo ? state.vaultObjectURL : "";
+      if (!url) {
+        const blob = await fetchVaultVideo(item, true);
+        if (generation !== state.vaultGeneration || token !== state.vaultToken || !state.vaultToken) return;
+        url = URL.createObjectURL(blob);
+      }
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${item.kind}-${item.id}.mp4`;
+      (reusePlayerVideo ? elements.vaultPlayerDialog : document.body).append(link);
       link.click();
       link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      if (!reusePlayerVideo) window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       if (error.status !== 401 && error.status !== 423) toast(error.message, true);
     } finally {
@@ -2549,6 +2992,8 @@
     }
     if (state.vaultObjectURL) URL.revokeObjectURL(state.vaultObjectURL);
     state.vaultObjectURL = "";
+    state.vaultPlayerItemKey = "";
+    if (elements.vaultPlayerDownload) elements.vaultPlayerDownload.disabled = true;
     if (elements.vaultPlayerDialog && elements.vaultPlayerDialog.open) elements.vaultPlayerDialog.close();
   }
 
@@ -2727,7 +3172,8 @@
       toast(wasForced ? "Password updated. Dashboard unlocked." : "Password updated. Other sessions were signed out.");
       if (wasForced) {
         navigate("overview");
-        await Promise.allSettled([loadHistory(false, false), loadModels(false), loadSettings(false)]);
+        await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false), loadSettings(false)]);
+        startJobEventStream();
       }
     } catch (error) {
       toast(error.message, true);
@@ -2753,7 +3199,8 @@
       showAuthenticated(session.username, session.must_change_password);
       if (!state.mustChangePassword) {
         await loadSettings(false);
-        await Promise.allSettled([loadHistory(false, false), loadModels(false)]);
+        await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false)]);
+        startJobEventStream();
       }
     } catch (error) {
       elements.loginError.textContent = error.message;
@@ -2838,6 +3285,10 @@
     elements.vaultLock.addEventListener("click", lockVault);
     elements.vaultGoSettings.addEventListener("click", () => navigate("settings"));
     elements.vaultPlayerClose.addEventListener("click", closeVaultPlayer);
+    elements.vaultPlayerDownload.addEventListener("click", () => {
+      const item = state.vaultItems.find((entry) => vaultItemKey(entry) === state.vaultPlayerItemKey);
+      if (item) void downloadVaultVideo(item, elements.vaultPlayerDownload);
+    });
     elements.vaultPlayerDialog.addEventListener("close", closeVaultPlayer);
     elements.modalConfigForm.addEventListener("submit", saveModalConfig);
     elements.modalAccountCancel.addEventListener("click", resetModalAccountForm);
@@ -2882,7 +3333,8 @@
       elements.promptError.textContent = count > 4000 ? "Prompt must be 4,000 characters or fewer." : "";
     });
     elements.retryStatus.addEventListener("click", () => {
-      if (state.currentGenerationID) pollGeneration(state.currentGenerationID, 0);
+      startJobEventStream();
+      void refreshJobState();
     });
     elements.menuButton.addEventListener("click", () => {
       const open = elements.sidebar.classList.toggle("open");
@@ -2896,22 +3348,17 @@
         elements.menuButton.setAttribute("aria-expanded", "false");
       }
     });
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) {
-        stopHistoryRefresh();
-      } else if (state.authenticated && !state.mustChangePassword) {
-        loadHistory(false, false);
-        loadProjects(false);
-      }
-    });
     window.addEventListener("pagehide", () => {
       if (!state.authenticated) return;
+      stopJobEventStream();
+      invalidateProjectRawTraceRequests();
       void requestVaultLock({ cache: "no-store", keepalive: true }).catch(() => {});
       renderVaultLocked();
     });
     window.addEventListener("pageshow", (event) => {
       if (!event.persisted || !state.authenticated) return;
       void secureVaultAfterPageRestore();
+      startJobEventStream();
     });
   }
 
@@ -2928,6 +3375,7 @@
       if (!state.mustChangePassword) {
         await loadSettings(false);
         await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false)]);
+        startJobEventStream();
       }
     } catch (error) {
       showLoggedOut();

@@ -93,8 +93,23 @@ func (c *ModalVideoClient) doJSON(ctx context.Context, method, path string, inpu
 }
 
 func (c *ModalVideoClient) GenerateVideo(ctx context.Context, request GenerateRequest) (*Generation, error) {
+	payload := struct {
+		Prompt        string `json:"prompt"`
+		Model         string `json:"model"`
+		Duration      int    `json:"duration,omitempty"`
+		Resolution    string `json:"resolution,omitempty"`
+		AspectRatio   string `json:"aspect_ratio,omitempty"`
+		GenerateAudio *bool  `json:"generate_audio,omitempty"`
+		CallbackURL   string `json:"callback_url,omitempty"`
+		CallbackToken string `json:"callback_token,omitempty"`
+	}{
+		Prompt: request.Prompt, Model: request.Model, Duration: request.Duration,
+		Resolution: request.Resolution, AspectRatio: request.AspectRatio,
+		GenerateAudio: request.GenerateAudio, CallbackURL: request.ModalCallbackURL,
+		CallbackToken: request.ModalCallbackToken,
+	}
 	var source openRouterGeneration
-	if err := c.doJSON(ctx, http.MethodPost, "/videos", request, &source); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/videos", payload, &source); err != nil {
 		return nil, err
 	}
 	generation, err := normalizeVideoGeneration(source, "Modal")

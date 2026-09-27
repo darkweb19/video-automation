@@ -18,6 +18,11 @@ type GenerateRequest struct {
 	Resolution    string `json:"resolution,omitempty"`
 	AspectRatio   string `json:"aspect_ratio,omitempty"`
 	GenerateAudio *bool  `json:"generate_audio,omitempty"`
+	// ModalCallbackURL and ModalCallbackToken are server-to-server delivery
+	// fields. They deliberately do not serialize through provider-neutral
+	// OpenRouter requests or any browser response.
+	ModalCallbackURL   string `json:"-"`
+	ModalCallbackToken string `json:"-"`
 }
 
 // Generation is the normalized state returned to the browser.
@@ -151,24 +156,26 @@ type StoryPlanScene struct {
 }
 
 type ProjectScene struct {
-	ProjectID            string `json:"project_id,omitempty"`
-	Number               int    `json:"number"`
-	Title                string `json:"title"`
-	Script               string `json:"script"`
-	Prompt               string `json:"prompt"`
-	Status               string `json:"status"`
-	Progress             int    `json:"progress"`
-	Attempts             int    `json:"attempts"`
-	ProviderGenerationID string `json:"provider_generation_id,omitempty"`
-	CostUSD              string `json:"cost_usd,omitempty"`
-	VideoPath            string `json:"-"`
-	VideoReady           bool   `json:"video_ready"`
-	SizeBytes            int64  `json:"size_bytes,omitempty"`
-	Error                string `json:"error,omitempty"`
-	DownloadAttempts     int    `json:"download_attempts,omitempty"`
-	NextAttemptAt        int64  `json:"next_attempt_at,omitempty"`
-	CreatedAt            int64  `json:"created_at"`
-	UpdatedAt            int64  `json:"updated_at"`
+	ProjectID                     string `json:"project_id,omitempty"`
+	Number                        int    `json:"number"`
+	Title                         string `json:"title"`
+	Script                        string `json:"script"`
+	Prompt                        string `json:"prompt"`
+	Status                        string `json:"status"`
+	Progress                      int    `json:"progress"`
+	Attempts                      int    `json:"attempts"`
+	ProviderGenerationID          string `json:"provider_generation_id,omitempty"`
+	CostUSD                       string `json:"cost_usd,omitempty"`
+	VideoPath                     string `json:"-"`
+	VideoReady                    bool   `json:"video_ready"`
+	SizeBytes                     int64  `json:"size_bytes,omitempty"`
+	Error                         string `json:"error,omitempty"`
+	DownloadAttempts              int    `json:"download_attempts,omitempty"`
+	NextAttemptAt                 int64  `json:"next_attempt_at,omitempty"`
+	ModalCallbackRecoveryAt       int64  `json:"-"`
+	ModalCallbackRecoveryAttempts int    `json:"-"`
+	CreatedAt                     int64  `json:"created_at"`
+	UpdatedAt                     int64  `json:"updated_at"`
 }
 
 type VideoProject struct {
@@ -210,11 +217,14 @@ type TextGenerationTrace struct {
 	UserPrompt     string `json:"user_prompt"`
 	ResponseSchema string `json:"response_schema"`
 	RawResponse    string `json:"raw_response,omitempty"`
-	Status         string `json:"status"`
-	Error          string `json:"error,omitempty"`
-	StartedAt      int64  `json:"started_at,omitempty"`
-	CompletedAt    int64  `json:"completed_at,omitempty"`
-	UpdatedAt      int64  `json:"updated_at"`
+	// RawResponseOmitted marks a live SSE snapshot whose raw provider response
+	// remains available from the authenticated project API on demand.
+	RawResponseOmitted bool   `json:"raw_response_omitted,omitempty"`
+	Status             string `json:"status"`
+	Error              string `json:"error,omitempty"`
+	StartedAt          int64  `json:"started_at,omitempty"`
+	CompletedAt        int64  `json:"completed_at,omitempty"`
+	UpdatedAt          int64  `json:"updated_at"`
 }
 
 // PipelineEvent records an auditable workflow transition. SceneNumber and

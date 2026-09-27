@@ -11,6 +11,9 @@ import uuid
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+from urllib.parse import urlparse
 
 import modal
 
@@ -55,6 +58,13 @@ TELEMETRY_INTERVAL_SECONDS = 10
 # per-request live invoice amount at completion time.
 A100_80GB_USD_PER_SECOND = 0.000694
 STATUS_POLL_RETRY_SECONDS = 2
+
+# Terminal delivery is deliberately bounded. The dashboard keeps a sparse,
+# restart-safe recovery watchdog for the exceptional case where all attempts
+# fail; it does not resume frequent provider polling.
+CALLBACK_DELIVERY_MAX_ATTEMPTS = 5
+CALLBACK_DELIVERY_TIMEOUT_SECONDS = 10
+CALLBACK_DELIVERY_MAX_RETRY_AFTER_SECONDS = 15
 
 
 # ============================================================
@@ -466,6 +476,25 @@ async def reconcile_modal_call(job: dict) -> dict:
             job,
         )
 
+        callback_url = job.get("callback_url")
+        callback_token = job.get("callback_token")
+        if (
+            isinstance(callback_url, str)
+            and isinstance(callback_token, str)
+            and callback_url
+            and callback_token
+        ):
+            schedule_terminal_callback(
+                job["id"],
+                callback_url,
+                callback_token,
+                terminal_callback_payload(
+                    job["id"],
+                    "failed",
+                    job.get("model", MODEL_ID),
+                ),
+            )
+
         log_event(
             "ERROR",
             "modal_worker_failed",
@@ -475,6 +504,174 @@ async def reconcile_modal_call(job: dict) -> dict:
         )
 
     return job
+
+
+# ============================================================
+# TERMINAL CALLBACK DELIVERY
+# ============================================================
+
+def terminal_callback_payload(job_id: str, status: str, model: str, cost=None) -> dict:
+    """Return the small, credential-free terminal callback contract."""
+    payload = {
+        "id": job_id,
+        "status": status,
+        "model": model,
+    }
+
+    if status == "completed":
+        payload["cost_usd"] = (
+            f"{float(cost):.6f}"
+            if cost is not None
+            else ""
+        )
+    else:
+        # Do not copy a worker exception into an external callback. The
+        # dashboard already turns provider failure into a safe operator message.
+        payload["error"] = "Video generation failed"
+
+    return payload
+
+
+class CallbackNoRedirectHandler(urllib_request.HTTPRedirectHandler):
+    """Keep the per-job callback capability bound to its original endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # urllib otherwise copies request headers, including the callback token,
+        # onto the redirect target. The dashboard callback URL is configured
+        # before submission and does not need redirect support.
+        return None
+
+
+def open_callback_request(request, timeout):
+    return urllib_request.build_opener(
+        CallbackNoRedirectHandler(),
+    ).open(
+        request,
+        timeout=timeout,
+    )
+
+
+@app.function(
+    image=api_image,
+    timeout=120,
+)
+def deliver_terminal_callback(
+    callback_url: str,
+    callback_token: str,
+    payload: dict,
+):
+    """POST a terminal result with bounded retries and no secret logging."""
+    body = json.dumps(
+        payload,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    for attempt in range(1, CALLBACK_DELIVERY_MAX_ATTEMPTS + 1):
+        retry_after = None
+        try:
+            outbound = urllib_request.Request(
+                callback_url,
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "X-Modal-Callback-Token": callback_token,
+                },
+            )
+            with open_callback_request(
+                outbound,
+                timeout=CALLBACK_DELIVERY_TIMEOUT_SECONDS,
+            ) as response:
+                status_code = response.getcode()
+                retry_after = response.headers.get("Retry-After")
+
+            if 200 <= status_code < 300:
+                log_event(
+                    "INFO",
+                    "callback_delivered",
+                    job=payload.get("id"),
+                    attempt=attempt,
+                )
+                return
+
+            if 300 <= status_code < 500 and status_code != 429:
+                log_event(
+                    "WARNING",
+                    "callback_rejected",
+                    job=payload.get("id"),
+                    status=status_code,
+                )
+                return
+
+        except urllib_error.HTTPError as error:
+            status_code = error.code
+            retry_after = error.headers.get("Retry-After")
+            if 300 <= status_code < 500 and status_code != 429:
+                log_event(
+                    "WARNING",
+                    "callback_rejected",
+                    job=payload.get("id"),
+                    status=status_code,
+                )
+                return
+
+        except Exception:
+            # Network errors are intentionally summarized without URL/token
+            # material. The next bounded attempt may use a fresh route.
+            pass
+
+        if attempt == CALLBACK_DELIVERY_MAX_ATTEMPTS:
+            break
+
+        delay_seconds = min(
+            2 ** (attempt - 1),
+            CALLBACK_DELIVERY_MAX_RETRY_AFTER_SECONDS,
+        )
+        try:
+            if retry_after is not None:
+                delay_seconds = min(
+                    max(1, int(retry_after)),
+                    CALLBACK_DELIVERY_MAX_RETRY_AFTER_SECONDS,
+                )
+        except (TypeError, ValueError):
+            pass
+        time.sleep(delay_seconds)
+
+    log_event(
+        "ERROR",
+        "callback_delivery_exhausted",
+        job=payload.get("id"),
+        attempts=CALLBACK_DELIVERY_MAX_ATTEMPTS,
+    )
+
+
+def schedule_terminal_callback(
+    job_id: str,
+    callback_url: str,
+    callback_token: str,
+    payload: dict,
+):
+    """Queue CPU-side delivery after the terminal job record is durable."""
+    try:
+        deliver_terminal_callback.spawn(
+            callback_url,
+            callback_token,
+            payload,
+        )
+        log_event(
+            "INFO",
+            "callback_delivery_scheduled",
+            job=job_id,
+        )
+    except Exception:
+        # The dashboard's delayed recovery query handles an invocation that
+        # cannot be scheduled at all. Do not include callback credentials here.
+        log_event(
+            "ERROR",
+            "callback_delivery_schedule_failed",
+            job=job_id,
+        )
 
 
 # ============================================================
@@ -674,6 +871,8 @@ class VideoGenerator:
         resolution: str,
         aspect_ratio: str,
         seed: int,
+        callback_url: str,
+        callback_token: str,
     ):
 
         started_at = time.time()
@@ -689,6 +888,8 @@ class VideoGenerator:
             "resolution": resolution,
             "aspect_ratio": aspect_ratio,
             "seed": seed,
+            "callback_url": callback_url,
+            "callback_token": callback_token,
             "created_at": int(
                 started_at
             ),
@@ -971,6 +1172,21 @@ class VideoGenerator:
                 job,
             )
 
+            # The terminal state is committed before delivery is scheduled.
+            # Pass the callback values directly through this invocation rather
+            # than depending on a later API container's view of the job file.
+            schedule_terminal_callback(
+                job_id,
+                callback_url,
+                callback_token,
+                terminal_callback_payload(
+                    job_id,
+                    "completed",
+                    model,
+                    usage_cost_usd,
+                ),
+            )
+
             log_event(
                 "INFO",
                 "job_completed",
@@ -1025,6 +1241,20 @@ class VideoGenerator:
             write_job(
                 job_id,
                 job,
+            )
+
+            # Failure follows the same durable-write-then-deliver ordering as
+            # success. The callback uses a generic error so worker internals
+            # never cross the dashboard boundary.
+            schedule_terminal_callback(
+                job_id,
+                callback_url,
+                callback_token,
+                terminal_callback_payload(
+                    job_id,
+                    "failed",
+                    model,
+                ),
             )
 
             raise
@@ -1112,6 +1342,62 @@ def api():
                         "Bearer"
                 },
             )
+
+    def validate_callback(
+        body: dict,
+    ):
+        callback_url = body.get(
+            "callback_url"
+        )
+        callback_token = body.get(
+            "callback_token"
+        )
+
+        if not isinstance(callback_url, str):
+            raise HTTPException(
+                status_code=400,
+                detail="callback_url is required",
+            )
+        callback_url = callback_url.strip()
+        try:
+            parsed = urlparse(callback_url)
+        except Exception:
+            parsed = None
+        if (
+            not callback_url
+            or len(callback_url) > 2048
+            or parsed is None
+            or parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="callback_url must be a public HTTPS URL",
+            )
+
+        if (
+            not isinstance(callback_token, str)
+            or len(callback_token) < 43
+            or len(callback_token) > 128
+            or not all(
+                character.isascii()
+                and (
+                    character.isalnum()
+                    or character in "-_"
+                )
+                for character in callback_token
+            )
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="callback_token is required",
+            )
+
+        return callback_url, callback_token
 
     # ========================================================
     # HEALTH
@@ -1204,6 +1490,16 @@ def api():
                 status_code=400,
                 detail="Invalid JSON",
             )
+
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="JSON body must be an object",
+            )
+
+        callback_url, callback_token = validate_callback(
+            body
+        )
 
         # ----------------------------------------------------
         # MODEL
@@ -1447,6 +1743,12 @@ def api():
             "seed":
                 seed,
 
+            "callback_url":
+                callback_url,
+
+            "callback_token":
+                callback_token,
+
             "created_at":
                 int(time.time()),
 
@@ -1488,6 +1790,10 @@ def api():
                     aspect_ratio=aspect_ratio,
 
                     seed=seed,
+
+                    callback_url=callback_url,
+
+                    callback_token=callback_token,
                 )
             )
 
@@ -1532,6 +1838,17 @@ def api():
             await write_job_async(
                 job_id,
                 job,
+            )
+
+            schedule_terminal_callback(
+                job_id,
+                callback_url,
+                callback_token,
+                terminal_callback_payload(
+                    job_id,
+                    "failed",
+                    model,
+                ),
             )
 
             log_event(

@@ -5,3 +5,5 @@ coverage.out
 .gocache/
 .gomodcache/
 /data/
+
+.DS_Store

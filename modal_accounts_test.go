@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -179,6 +180,7 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	callbackSeen := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer selected-account-key" {
 			t.Fatal("selected account was not used")
@@ -187,6 +189,15 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 		case "/videos/models":
 			_, _ = w.Write([]byte(`{"data":[{"id":"modal/model","supported_durations":[6],"supported_resolutions":["480p"],"supported_aspect_ratios":["9:16"]}]}`))
 		case "/videos":
+			body, _ := io.ReadAll(r.Body)
+			var submitted map[string]any
+			if json.Unmarshal(body, &submitted) != nil || submitted["callback_url"] != "https://dashboard.example/api/provider-callbacks/modal" {
+				t.Fatalf("callback URL missing from Modal request: %s", body)
+			}
+			if token, ok := submitted["callback_token"].(string); !ok || !validModalCallbackToken(token) {
+				t.Fatalf("callback token missing from Modal request: %s", body)
+			}
+			callbackSeen = true
 			_, _ = w.Write([]byte(`{"id":"selected_job","status":"queued","model":"modal/model"}`))
 		default:
 			t.Fatalf("unexpected provider path %q", r.URL.Path)
@@ -204,7 +215,7 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 	if err := store.SetSetting(videoProviderSetting, string(VideoProviderModal)); err != nil {
 		t.Fatal(err)
 	}
-	app := &dashboardApp{store: store, security: security}
+	app := &dashboardApp{store: store, security: security, callbackBaseURL: "https://dashboard.example"}
 
 	missing := httptest.NewRecorder()
 	missingRequest := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"a scene","model":"modal/model"}`))
@@ -220,6 +231,9 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 	app.generate(generated, generatedRequest)
 	if generated.Code != http.StatusAccepted {
 		t.Fatalf("generation status=%d body=%s", generated.Code, generated.Body.String())
+	}
+	if !callbackSeen {
+		t.Fatal("Modal submission did not include callback delivery fields")
 	}
 	record, err := store.Generation("selected_job")
 	if err != nil || record.ProviderConfigID == "" || record.VideoProvider != string(VideoProviderModal) {
@@ -382,7 +396,7 @@ func TestImmediateFailedSubmissionReturnsPersistedSafeEvent(t *testing.T) {
 	if err := store.SetSetting(videoProviderSetting, string(VideoProviderModal)); err != nil {
 		t.Fatal(err)
 	}
-	app := &dashboardApp{store: store, security: security}
+	app := &dashboardApp{store: store, security: security, callbackBaseURL: "https://dashboard.example"}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"fail safely","model":"modal/failed","duration":6,"modal_account_id":"modal_account_failure"}`))
 	request.Header.Set("Content-Type", "application/json")

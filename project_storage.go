@@ -106,7 +106,7 @@ func (s *Store) SaveStoryPlan(projectID string, plan StoryPlan) error {
 }
 
 const projectColumns = `id,topic,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at,in_vault`
-const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,progress,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,created_at,updated_at`
+const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,progress,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,modal_callback_recovery_at,modal_callback_recovery_attempts,created_at,updated_at`
 
 func appendPipelineEvent(execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
@@ -154,6 +154,18 @@ func scanTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextGener
 	return trace, err
 }
 
+// scanLiveTextGenerationTrace intentionally has no RawResponse scan target.
+// The response can be up to one MiB and is needed only when the dashboard
+// user opens its audit disclosure, not for every live project state change.
+func scanLiveTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextGenerationTrace, error) {
+	var trace TextGenerationTrace
+	err := scanner.Scan(&trace.RouterModel, &trace.ActualModel, &trace.SystemPrompt, &trace.UserPrompt, &trace.ResponseSchema, &trace.Status, &trace.Error, &trace.StartedAt, &trace.CompletedAt, &trace.UpdatedAt)
+	if err == nil {
+		trace.RawResponseOmitted = true
+	}
+	return trace, err
+}
+
 func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) {
 	var project VideoProject
 	err := scanner.Scan(&project.ID, &project.Topic, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt, &project.InVault)
@@ -163,17 +175,21 @@ func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) 
 
 func scanScene(scanner interface{ Scan(...any) error }) (ProjectScene, error) {
 	var scene ProjectScene
-	err := scanner.Scan(&scene.ProjectID, &scene.Number, &scene.Title, &scene.Script, &scene.Prompt, &scene.Status, &scene.Progress, &scene.Attempts, &scene.ProviderGenerationID, &scene.CostUSD, &scene.VideoPath, &scene.SizeBytes, &scene.Error, &scene.DownloadAttempts, &scene.NextAttemptAt, &scene.CreatedAt, &scene.UpdatedAt)
+	err := scanner.Scan(&scene.ProjectID, &scene.Number, &scene.Title, &scene.Script, &scene.Prompt, &scene.Status, &scene.Progress, &scene.Attempts, &scene.ProviderGenerationID, &scene.CostUSD, &scene.VideoPath, &scene.SizeBytes, &scene.Error, &scene.DownloadAttempts, &scene.NextAttemptAt, &scene.ModalCallbackRecoveryAt, &scene.ModalCallbackRecoveryAttempts, &scene.CreatedAt, &scene.UpdatedAt)
 	scene.VideoReady = scene.VideoPath != ""
 	return scene, err
 }
 
-func (s *Store) Project(id string) (VideoProject, error) {
-	project, err := scanProject(s.db.QueryRow(`SELECT `+projectColumns+` FROM video_projects WHERE id=?`, id))
+// loadProjectCoreAndScenes returns the fields required by the processor as
+// well as the project summary inputs. It deliberately leaves audit details to
+// loadProjectDetails so recurring worker scans do not hydrate large script
+// responses and event histories that the processor does not consume.
+func (s *Store) loadProjectCoreAndScenes(ctx context.Context, id string) (VideoProject, error) {
+	project, err := scanProject(s.db.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM video_projects WHERE id=?`, id))
 	if err != nil {
 		return VideoProject{}, err
 	}
-	rows, err := s.db.Query(`SELECT `+sceneColumns+` FROM project_scenes WHERE project_id=? ORDER BY scene_number`, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+sceneColumns+` FROM project_scenes WHERE project_id=? ORDER BY scene_number`, id)
 	if err != nil {
 		return VideoProject{}, err
 	}
@@ -188,27 +204,89 @@ func (s *Store) Project(id string) (VideoProject, error) {
 	if err := rows.Err(); err != nil {
 		return VideoProject{}, err
 	}
-	trace, err := scanTextGenerationTrace(s.db.QueryRow(`SELECT router_model,actual_model,system_prompt,user_prompt,response_schema,raw_response,status,error,started_at,completed_at,updated_at FROM project_text_generation WHERE project_id=?`, id))
+	return project, nil
+}
+
+// loadProjectDetails loads data retained for the API's full project view.
+// Callers that only advance work should use loadProjectCoreAndScenes instead.
+func (s *Store) loadProjectDetails(ctx context.Context, project *VideoProject) error {
+	trace, err := scanTextGenerationTrace(s.db.QueryRowContext(ctx, `SELECT router_model,actual_model,system_prompt,user_prompt,response_schema,raw_response,status,error,started_at,completed_at,updated_at FROM project_text_generation WHERE project_id=?`, project.ID))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return VideoProject{}, err
+		return err
 	}
 	if err == nil {
 		project.TextGeneration = trace
 	}
-	eventRows, err := s.db.Query(`SELECT id,stage,status,message,scene_number,attempt,created_at FROM project_pipeline_events WHERE project_id=? ORDER BY id`, id)
+	return s.loadProjectPipelineEvents(ctx, project)
+}
+
+// loadProjectLiveDetails preserves the trace metadata and pipeline diagnostics
+// used by the live dashboard while avoiding a raw script response allocation.
+func (s *Store) loadProjectLiveDetails(ctx context.Context, project *VideoProject) error {
+	trace, err := scanLiveTextGenerationTrace(s.db.QueryRowContext(ctx, `SELECT router_model,actual_model,system_prompt,user_prompt,response_schema,status,error,started_at,completed_at,updated_at FROM project_text_generation WHERE project_id=?`, project.ID))
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil {
+		project.TextGeneration = trace
+	}
+	return s.loadProjectPipelineEvents(ctx, project)
+}
+
+func (s *Store) loadProjectPipelineEvents(ctx context.Context, project *VideoProject) error {
+	eventRows, err := s.db.QueryContext(ctx, `SELECT id,stage,status,message,scene_number,attempt,created_at FROM project_pipeline_events WHERE project_id=? ORDER BY id`, project.ID)
 	if err != nil {
-		return VideoProject{}, err
+		return err
 	}
 	defer eventRows.Close()
 	project.PipelineEvents = make([]PipelineEvent, 0)
 	for eventRows.Next() {
 		var event PipelineEvent
 		if err := eventRows.Scan(&event.ID, &event.Stage, &event.Status, &event.Message, &event.SceneNumber, &event.Attempt, &event.CreatedAt); err != nil {
-			return VideoProject{}, err
+			return err
 		}
 		project.PipelineEvents = append(project.PipelineEvents, event)
 	}
 	if err := eventRows.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) loadProject(ctx context.Context, id string, includeDetails bool) (VideoProject, error) {
+	project, err := s.loadProjectCoreAndScenes(ctx, id)
+	if err != nil {
+		return VideoProject{}, err
+	}
+	if includeDetails {
+		if err := s.loadProjectDetails(ctx, &project); err != nil {
+			return VideoProject{}, err
+		}
+	}
+	s.populateProjectSummary(&project)
+	return project, nil
+}
+
+// Project returns the complete persisted project representation used by the
+// dashboard and API, including script-generation and pipeline audit data.
+func (s *Store) Project(id string) (VideoProject, error) {
+	return s.loadProject(context.Background(), id, true)
+}
+
+// projectForWorker contains all state needed to resume project processing,
+// without repeatedly loading data used only by the dashboard audit view.
+func (s *Store) projectForWorker(ctx context.Context, id string) (VideoProject, error) {
+	return s.loadProject(ctx, id, false)
+}
+
+// projectLiveSnapshot is the SSE view of a project. The full Project method
+// remains the API/audit view and includes the persisted raw script response.
+func (s *Store) projectLiveSnapshot(id string) (VideoProject, error) {
+	project, err := s.loadProjectCoreAndScenes(context.Background(), id)
+	if err != nil {
+		return VideoProject{}, err
+	}
+	if err := s.loadProjectLiveDetails(context.Background(), &project); err != nil {
 		return VideoProject{}, err
 	}
 	s.populateProjectSummary(&project)
@@ -278,6 +356,9 @@ func (s *Store) DeleteProject(id string) error {
 		_, _ = s.db.Exec(`UPDATE video_projects SET status=?,updated_at=? WHERE id=? AND status='deleting'`, status, time.Now().Unix(), id)
 		return err
 	}
+	if _, err := s.db.Exec(`DELETE FROM modal_callback_tokens WHERE project_id=?`, id); err != nil {
+		return err
+	}
 	return s.DeleteProviderConfigIfUnused(providerConfigID)
 }
 
@@ -318,6 +399,9 @@ func (s *Store) RecoverInterruptedProjectDeletes() error {
 			return err
 		}
 		if count, _ := result.RowsAffected(); count == 1 {
+			if _, err := s.db.Exec(`DELETE FROM modal_callback_tokens WHERE project_id=?`, item.id); err != nil {
+				return err
+			}
 			if err := s.DeleteProviderConfigIfUnused(item.providerConfigID); err != nil {
 				return err
 			}
@@ -347,7 +431,7 @@ func (s *Store) Projects(limit int) ([]VideoProject, error) {
 		return nil, err
 	}
 	for index := range projects {
-		full, err := s.Project(projects[index].ID)
+		full, err := s.projectLiveSnapshot(projects[index].ID)
 		if err != nil {
 			return nil, err
 		}
@@ -372,7 +456,7 @@ func (s *Store) PendingProjects(ctx context.Context) ([]VideoProject, error) {
 	}
 	var projects []VideoProject
 	for _, id := range ids {
-		project, err := s.Project(id)
+		project, err := s.projectForWorker(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -439,6 +523,19 @@ func (s *Store) MarkSceneSubmitting(projectID string, number int) error {
 }
 
 func (s *Store) SetSceneGeneration(projectID string, number int, generation Generation) error {
+	return s.setSceneGeneration(projectID, number, generation, "")
+}
+
+// SetSceneGenerationWithModalCallback atomically attaches a pre-registered
+// callback capability to the scene's provider generation ID.
+func (s *Store) SetSceneGenerationWithModalCallback(projectID string, number int, generation Generation, token string) error {
+	if !validModalCallbackToken(token) {
+		return errors.New("invalid Modal callback token")
+	}
+	return s.setSceneGeneration(projectID, number, generation, token)
+}
+
+func (s *Store) setSceneGeneration(projectID string, number int, generation Generation, callbackToken string) error {
 	status := generation.Status
 	if status == "completed" {
 		status = "downloading"
@@ -451,17 +548,38 @@ func (s *Store) SetSceneGeneration(projectID string, number int, generation Gene
 	if status == "failed" {
 		message = "Video provider reported that this scene failed. Retry the scene."
 	}
-	result, err := s.db.Exec(`UPDATE project_scenes SET provider_generation_id=?,status=?,progress=?,cost_usd=?,error=?,next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='submitting'`, generation.ID, status, progress, generation.CostUSD, message, time.Now().Unix(), projectID, number)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	recoveryAt := int64(0)
+	if callbackToken != "" && (status == "queued" || status == "processing") {
+		recoveryAt = modalCallbackRecoveryAt(time.Unix(now, 0), 0)
+	}
+	result, err := tx.Exec(`UPDATE project_scenes SET provider_generation_id=?,status=?,progress=?,cost_usd=?,error=?,next_attempt_at=0,modal_callback_recovery_at=?,modal_callback_recovery_attempts=0,updated_at=? WHERE project_id=? AND scene_number=? AND status='submitting'`, generation.ID, status, progress, generation.CostUSD, message, recoveryAt, now, projectID, number)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return sql.ErrNoRows
 	}
-	if status == "failed" {
-		return s.AppendPipelineEvent(projectID, "scene_submission", "failed", message, number, 0)
+	if callbackToken != "" {
+		result, err = tx.Exec(`UPDATE modal_callback_tokens SET generation_id=?,bound_at=? WHERE token_hash=? AND generation_id='' AND project_id=? AND scene_number=?`, generation.ID, now, modalCallbackTokenHash(callbackToken), projectID, number)
+		if err != nil {
+			return err
+		}
+		if count, _ := result.RowsAffected(); count != 1 {
+			return errors.New("Modal callback token is unavailable")
+		}
 	}
-	return s.AppendPipelineEvent(projectID, "scene_submission", "completed", "Video generation request accepted.", number, 0)
+	if status == "failed" {
+		_ = appendPipelineEvent(tx, projectID, "scene_submission", "failed", message, number, 0, now)
+	} else {
+		_ = appendPipelineEvent(tx, projectID, "scene_submission", "completed", "Video generation request accepted.", number, 0, now)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateScene(projectID string, number int, status, cost, message string) error {
@@ -534,6 +652,89 @@ func (s *Store) ScheduleSceneDownloadRetry(projectID string, number int) error {
 	return s.AppendPipelineEvent(projectID, "scene_download", "retry", "Scene download failed; retry scheduled.", number, attempts)
 }
 
+func (s *Store) ScheduleModalSceneRecovery(projectID string, number int) error {
+	var attempts int
+	err := s.db.QueryRow(`SELECT s.modal_callback_recovery_attempts FROM project_scenes s JOIN video_projects p ON p.id=s.project_id WHERE s.project_id=? AND s.scene_number=? AND p.video_provider='modal' AND p.status='generating' AND s.status IN ('queued','processing')`, projectID, number).Scan(&attempts)
+	if err != nil {
+		return err
+	}
+	attempts++
+	_, err = s.db.Exec(`UPDATE project_scenes SET modal_callback_recovery_attempts=?,modal_callback_recovery_at=?,updated_at=? WHERE project_id=? AND scene_number=? AND status IN ('queued','processing')`, attempts, modalCallbackRecoveryAt(time.Now(), attempts), time.Now().Unix(), projectID, number)
+	return err
+}
+
+func (s *Store) ClearModalSceneRecovery(projectID string, number int) error {
+	_, err := s.db.Exec(`UPDATE project_scenes SET modal_callback_recovery_at=0,updated_at=? WHERE project_id=? AND scene_number=?`, time.Now().Unix(), projectID, number)
+	return err
+}
+
+// ApplyModalSceneRecovery has the same compare-and-set semantics as the
+// single-generation watchdog. It cannot overwrite a callback-driven download
+// transition that happened while the status request was in flight.
+func (s *Store) ApplyModalSceneRecovery(projectID string, number int, generation Generation) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var projectStatus, sceneStatus, providerGenerationID string
+	var attempts int
+	err = tx.QueryRow(`SELECT p.status,s.status,s.provider_generation_id,s.modal_callback_recovery_attempts FROM project_scenes s JOIN video_projects p ON p.id=s.project_id WHERE s.project_id=? AND s.scene_number=? AND p.video_provider='modal'`, projectID, number).Scan(&projectStatus, &sceneStatus, &providerGenerationID, &attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if projectStatus != "generating" || (sceneStatus != "queued" && sceneStatus != "processing") || providerGenerationID != generation.ID {
+		return false, nil
+	}
+	now := time.Now()
+	updatedAt := now.Unix()
+	if generation.Status == "completed" {
+		result, updateErr := tx.Exec(`UPDATE project_scenes SET status='downloading',progress=100,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error='',modal_callback_recovery_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status IN ('queued','processing') AND provider_generation_id=?`, generation.CostUSD, generation.CostUSD, updatedAt, projectID, number, generation.ID)
+		if updateErr != nil {
+			return false, updateErr
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return false, nil
+		}
+		_ = appendPipelineEvent(tx, projectID, "scene_recovery", "completed", "Delayed Modal callback recovery found a completed scene.", number, 0, updatedAt)
+		return true, tx.Commit()
+	}
+	if generation.Status == "failed" {
+		message := "Video provider reported that this scene failed. Retry the scene."
+		result, updateErr := tx.Exec(`UPDATE project_scenes SET status='failed',cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error=?,modal_callback_recovery_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status IN ('queued','processing') AND provider_generation_id=?`, generation.CostUSD, generation.CostUSD, message, updatedAt, projectID, number, generation.ID)
+		if updateErr != nil {
+			return false, updateErr
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return false, nil
+		}
+		_ = appendPipelineEvent(tx, projectID, "scene_recovery", "failed", message, number, 0, updatedAt)
+		return true, tx.Commit()
+	}
+	if generation.Status != "queued" && generation.Status != "processing" {
+		generation.Status = "queued"
+	}
+	progress := -1
+	if generation.Progress != nil {
+		progress = min(100, max(0, *generation.Progress))
+	}
+	attempts++
+	result, updateErr := tx.Exec(`UPDATE project_scenes SET status=CASE WHEN status='processing' OR ?='processing' THEN 'processing' ELSE 'queued' END,progress=CASE WHEN ?<0 THEN progress ELSE MAX(progress,?) END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,modal_callback_recovery_attempts=?,modal_callback_recovery_at=?,updated_at=? WHERE project_id=? AND scene_number=? AND status IN ('queued','processing') AND provider_generation_id=?`, generation.Status, progress, progress, generation.CostUSD, generation.CostUSD, attempts, modalCallbackRecoveryAt(now, attempts), updatedAt, projectID, number, generation.ID)
+	if updateErr != nil {
+		return false, updateErr
+	}
+	count, _ := result.RowsAffected()
+	if count != 1 {
+		return false, nil
+	}
+	return true, tx.Commit()
+}
+
 func (s *Store) MarkSceneVideoReady(projectID string, number int, path string, size int64) error {
 	result, err := s.db.Exec(`UPDATE project_scenes SET status='completed',progress=100,video_path=?,size_bytes=?,error='',next_attempt_at=0,updated_at=? WHERE project_id=? AND scene_number=?`, path, size, time.Now().Unix(), projectID, number)
 	if err != nil {
@@ -564,6 +765,9 @@ func (s *Store) RetryScene(projectID string, number int) error {
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return sql.ErrNoRows
+	}
+	if _, err := tx.Exec(`DELETE FROM modal_callback_tokens WHERE project_id=? AND scene_number=?`, projectID, number); err != nil {
+		return err
 	}
 	if projectStatus == "failed" {
 		projectUpdate, err := tx.Exec(`UPDATE video_projects SET status='generating',error='',updated_at=? WHERE id=? AND status='failed'`, time.Now().Unix(), projectID)
