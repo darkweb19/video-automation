@@ -1,9 +1,76 @@
-# Project instructions
+# FrameVault Video Automation
 
-- This application is a Go HTTP server with an embedded static dashboard. Keep browser code in `static/` and preserve the existing same-origin authenticated API pattern.
-- Video generation is selected through persisted application settings. Implement providers behind `VideoService`; keep story/script generation on OpenRouter and provider-specific request handling inside provider clients.
-- Treat model capabilities as runtime data. Populate and consume `VideoModel` fields for duration, resolution, aspect ratio, audio, and pricing instead of spreading provider rules through the UI or processor.
-- API credentials must be encrypted at rest and never returned to the browser. Settings responses may expose configured booleans and non-secret configuration only. Never log credentials or read/print `.env` contents.
-- Keep the 30-second project preset at five six-second 9:16 scenes unless the product requirements change. Reject incompatible models clearly.
-- Persistent application data lives in SQLite and the configured data directory/Docker volume. Changes to settings storage must remain restart-safe and preserve existing records.
-- Useful local checks: `go test ./...`, `node --check static/app.js`, and `git diff --check`. Do not run paid provider generation as a routine check.
+## Project shape
+
+This is a Go HTTP application with an embedded static dashboard. SQLite stores application state and job metadata. Generated video files live in the configured data directory, which must be persistent in production. The optional Modal worker is a separate Python service; OpenRouter remains responsible for story and script generation.
+
+## Folder and file map
+
+| Path                                           | Purpose                                                                                                                                                                                                                                                                               |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main.go`                                      | Opens the data store, initializes security, starts the HTTP server on `0.0.0.0:8080`, and runs the background processor.                                                                                                                                                              |
+| `dashboard.go`                                 | Builds the authenticated dashboard API, settings and provider wiring, and routes for jobs, projects, and local media.                                                                                                                                                                 |
+| `handlers.go`                                  | Shared generation request validation and streaming of provider video content for the provider-facing handler.                                                                                                                                                                         |
+| `models.go`                                    | Core generation types, `VideoService` interfaces, provider identifiers, runtime model capability fields, and workflow constants.                                                                                                                                                      |
+| `openrouter.go`, `modal.go`                    | Provider-specific HTTP clients. Keep each provider's payloads, response normalization, and content fetching in its client.                                                                                                                                                            |
+| `script_generation.go`, `story_plan_choice.go` | OpenRouter story/script request, parsing, and plan validation.                                                                                                                                                                                                                        |
+| `processor.go`                                 | Durable background workflow for status checks, callbacks/recovery, downloads, retries, project scenes, and final assembly.                                                                                                                                                            |
+| `storage.go`, `project_storage.go`             | SQLite schema and additive migrations, settings, job/project state transitions, file paths, retry scheduling, and durable pipeline events. Worker, media, list, and live-event views avoid loading the large raw script response; `Store.Project` and the detail API remain complete. |
+| `combiner.go`                                  | FFmpeg command construction and file-based final assembly, with bounded diagnostic output and worker thread limits.                                                                                                                                                                   |
+| `events.go`                                    | Same-origin authenticated server-sent events for live job and project updates. Publishes only when a subscriber exists and suppresses snapshots whose meaningful fields have not changed.                                                                                             |
+| `security.go`, `vault.go`, `modal_callback.go` | Encrypted settings and sessions, Vault authorization and media access, and capability-authenticated Modal completion callbacks.                                                                                                                                                       |
+| `static/`                                      | Embedded dashboard assets. Keep browser code here; `app.js` uses the same-origin authenticated API.                                                                                                                                                                                   |
+| `modal/video.py`                               | Deployable Modal video-generation API and its worker/callback implementation.                                                                                                                                                                                                         |
+| `modal/callback_delivery_test.py`               | Dependency-free regression checks for Modal callback delivery and redirect handling.                                                                                                                                                                                                  |
+| `Dockerfile`, `docker-compose.yml`             | Production container image and local Compose setup. The image installs FFmpeg and runs as an unprivileged user.                                                                                                                                                                       |
+| `*_test.go`                                    | Unit, HTTP handler, storage, security, workflow recovery, and provider-client tests.                                                                                                                                                                                                  |
+| `README.md`                                    | User setup, provider configuration, storage, backup, and deployment instructions.                                                                                                                                                                                                     |
+
+There is no separate Railway manifest in the repository. Railway should build from the root `Dockerfile`.
+
+## Component patterns and workflow
+
+- Implement video providers behind `VideoService`; use the content-provider interface for streaming provider media. Do not put provider-specific API rules in the UI or processor.
+- Model capabilities are runtime data. Populate and validate duration, resolution, aspect ratio, audio, and pricing through `VideoModel` fields.
+- Keep the default project preset at five six-second scenes, 480p, and 9:16. The story plan is generated through OpenRouter regardless of the selected video provider.
+- Persist state before asynchronous provider work. The processor resumes polling, downloads, retries, and assembly from SQLite state after restart. Preserve immutable provider credential snapshots, attempt counters, clear terminal failures, and scene-level retry behavior.
+- `PendingProjects` should use `projectForWorker` to load only processor-required project and scene columns. Keep script-generation traces and pipeline audit history in `Store.Project` for API and dashboard callers; do not hydrate them on each five-second processor scan.
+- OpenRouter jobs use the processor's status polling. Modal completion uses authenticated callbacks; persisted delayed status checks are only recovery for missed callbacks or restarts.
+- Keep large media off Go heap buffers. Stream provider response bodies to a temporary file, sync and atomically rename it, and pass stored file paths to FFmpeg. Serve media from files with range support rather than reading the whole file into memory.
+- Browser calls stay same-origin and authenticated. Protect any media cache response with the same authorization and Vault checks as a normal response, including before returning `304 Not Modified`.
+- The existing authenticated `EventSource` is the live update transport. Cost-related changes make `PublishGeneration` and `PublishProject` return before SQLite reads when no SSE clients are connected. With clients connected, a bounded LRU retains SHA-256 fingerprints only; generation, project, and scene `updated_at` values are ignored for duplicate detection, while prompts, status, progress, costs, errors, trace metadata, and pipeline events remain meaningful. Live project list/SSE queries omit the potentially 1 MiB raw script response and mark it as omitted. The browser loads the full detail API only when the Raw model response disclosure opens, then merges the raw field onto the latest project state only if the trace revision still matches. `Store.Project` and its detail API retain the complete persisted response. If a subscriber queue fills, the server drains stale events and closes that connection; EventSource reconnects, refreshes authoritative APIs on each open, and recovers current state. Per-frame writes and flushes have a 15-second deadline where supported. Meaningful updates, audit metadata, SSE heartbeats, and reconnect refreshes still use Railway resources.
+- API credentials stay encrypted at rest and never go to the browser or logs. Settings may expose only configured flags and non-secret configuration. Never read or print `.env` contents.
+
+## Media storage and cost decisions
+
+Persistent media remains on the application data volume under `/data/videos` and `/data/projects`. This preserves restart recovery, retryable downloads, local playback, and existing Vault access rules without adding an object-storage service. Provider-to-Railway video downloads are inbound traffic, not Railway egress. Railway-to-client playback and downloads use Railway egress; uploading files from Railway to a future bucket would also use Railway egress. The local volume consumes persistent disk and retains scene clips and final videos until the user deletes the project.
+
+Final assembly stays in FFmpeg and keeps the existing 1080x1920 output, medium preset, and CRF 20. The processor runs one project combine at a time, uses one filter thread and caps decoder/encoder threads at four, and keeps failed-command diagnostics to a 4 KiB tail. The local macOS synthetic five-input graph benchmark measured peak RSS falling about 26% (745,000 to 550,000 KiB) and RSS integral falling about 15% (4.91M to 4.17M KiB·s), with wall time rising from 7.05 to 8.04 seconds. This is a local proxy, not a Railway bill projection. Codec frame buffers mean thread limits do not impose a hard RSS ceiling; measure the real integration and production after deploy. The trade-off is longer combine time under load, with at most one active combine. Do not reduce resolution or raise CRF as a cost shortcut without a product decision.
+
+Ordinary authenticated media uses `private, no-cache` revalidation and an ETag derived from the media item identity, current file path, size, and nanosecond modification time. Check current job/project access before evaluating conditional requests. Playback and download share the same URL and cache key. A local Playwright fixture confirmed preview plus download reused one `206` response (2,275 fixture bytes) and downloaded the exact bytes without a second request. This verifies same-client reuse for the tested path; first delivery, revalidation requests, and delivery to another client/device still use Railway egress, and production egress savings require live telemetry. The project and Vault media authorization checks use the lean project loader. Vault media remains `no-store`; the local Vault browser fixture confirmed download reused the already-open player's blob with no second media request. The Content Security Policy must allow `blob:` for local Vault player blobs.
+
+Direct object-storage delivery could reduce Railway egress, but would add storage and transfer charges elsewhere and require preserving private access, Vault revocation, expiration, and recovery semantics. It is not part of the selected architecture.
+
+The processor wakes on a five-second interval, but an empty queue returns without provider calls or media work. Keep idle work cheap. Do not replace callback completion with frequent Modal polling; the callback recovery watchdog is persisted and deliberately sparse.
+
+## Deployment and operations
+
+### Railway / container
+
+1. Build and deploy from the repository root using `Dockerfile`.
+2. Attach a persistent Railway volume at `/data`; SQLite, `secret.key`, downloaded clips, and project output all depend on it. Do not run multiple replicas against independent local volumes as if they shared job state.
+3. The application listens on fixed port `8080`; it does not consume Railway's `PORT` or Compose's host-side `APP_PORT`. Configure the Railway service's exposed target port accordingly.
+4. Set `PUBLIC_BASE_URL` to the public HTTPS dashboard origin when using Modal callbacks. It is not needed for OpenRouter-only use.
+5. Verify the deployment through `GET /health`. The container health check also requests this route.
+
+### Local development
+
+- Start the full container stack with `docker compose up -d --build`; local dashboard is at `http://localhost:8080`.
+- Compose stores application state in the named `video_automation_data` volume. Stop the application before making a backup or restore.
+- For a native Go run, set `DATA_DIR` to a writable directory and run `go run .`; FFmpeg must be installed locally.
+- The optional `OPENROUTER_API_KEY` environment variable is only a first-start bootstrap. Normal provider settings are stored through the authenticated Settings UI.
+- For Modal, deploy `modal/video.py` separately and configure its HTTPS endpoint and credential in Settings.
+
+## Routine checks
+
+Run `go test ./...`, `node --check static/app.js`, `python3 modal/callback_delivery_test.py`, and `git diff --check`. The Modal callback-delivery check requires only Python's standard library. Tests must not submit paid provider generations. For a complete user-facing check, run the dashboard and exercise authentication, generation/job state, media playback/download, project completion, and retry flows with mocked providers or a non-paid fixture.
