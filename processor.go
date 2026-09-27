@@ -20,6 +20,7 @@ type Processor struct {
 	downloadTimeout time.Duration
 	downloadSem     chan struct{}
 	projectSem      chan struct{}
+	combineSem      chan struct{}
 	combineRunner   commandRunner
 	mu              sync.Mutex
 	inFlight        map[string]struct{}
@@ -29,7 +30,7 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger}
+	app := &dashboardApp{store: store, security: security, logger: logger, callbackBaseURL: configuredCallbackBaseURL()}
 	if security != nil {
 		if err := store.GarbageCollectProviderConfigs(); err != nil {
 			logger.Error("provider configuration garbage collection failed", "error", err)
@@ -39,7 +40,7 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 			logger.Error("legacy provider snapshot backfill failed; legacy work will be skipped", "error", err)
 		}
 	}
-	return &Processor{app: app, interval: 5 * time.Second, logger: logger, downloadTimeout: 5 * time.Minute, downloadSem: make(chan struct{}, 2), projectSem: make(chan struct{}, 3), combineRunner: runCommand, inFlight: make(map[string]struct{})}
+	return &Processor{app: app, interval: 5 * time.Second, logger: logger, downloadTimeout: 5 * time.Minute, downloadSem: make(chan struct{}, 2), projectSem: make(chan struct{}, 3), combineSem: make(chan struct{}, 1), combineRunner: runCommand, inFlight: make(map[string]struct{})}
 }
 
 func (p *Processor) Run(ctx context.Context) {
@@ -81,13 +82,34 @@ func (p *Processor) process(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if record.Status == "downloading" || record.Status == "download_failed" {
+			provider, err := p.app.videoProviderForSnapshot(record.ProviderConfigID, VideoProviderID(record.VideoProvider))
+			if err != nil {
+				p.logger.Warn("generation processor waiting for immutable video provider configuration", "provider", record.VideoProvider, "error", err)
+				continue
+			}
+			p.startDownload(ctx, provider, record)
+			continue
+		}
+		if record.VideoProvider == string(VideoProviderModal) {
+			// Modal reports terminal state through the callback. The only
+			// fallback is this persisted, delayed watchdog for delivery loss or
+			// an app restart; it never performs five-second status polling.
+			if record.ModalCallbackRecoveryAt > time.Now().Unix() {
+				continue
+			}
+			provider, err := p.app.videoProviderForSnapshot(record.ProviderConfigID, VideoProviderID(record.VideoProvider))
+			if err != nil {
+				p.logger.Warn("Modal callback recovery waiting for immutable provider configuration", "generation_id", record.ID)
+				_ = p.app.store.ScheduleModalGenerationRecovery(record.ID)
+				continue
+			}
+			p.recoverModalGeneration(ctx, provider, record)
+			continue
+		}
 		provider, err := p.app.videoProviderForSnapshot(record.ProviderConfigID, VideoProviderID(record.VideoProvider))
 		if err != nil {
 			p.logger.Warn("generation processor waiting for immutable video provider configuration", "provider", record.VideoProvider, "error", err)
-			continue
-		}
-		if record.Status == "downloading" || record.Status == "download_failed" {
-			p.startDownload(ctx, provider, record)
 			continue
 		}
 		requestContext, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -113,8 +135,36 @@ func (p *Processor) process(ctx context.Context) {
 			record.CostUSD = generation.CostUSD
 			p.startDownload(ctx, provider, record)
 		}
+		p.app.store.PublishGeneration(record.ID)
 	}
 	p.processProjects(ctx, remoteProjects)
+}
+
+func (p *Processor) recoverModalGeneration(ctx context.Context, provider VideoService, record GenerationRecord) {
+	requestContext, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	generation, err := provider.GetGeneration(requestContext, record.ID)
+	if err != nil || generation == nil {
+		_ = p.app.store.ScheduleModalGenerationRecovery(record.ID)
+		return
+	}
+	if generation.ID == "" {
+		generation.ID = record.ID
+	}
+	updated, err := p.app.store.ApplyModalGenerationRecovery(record.ID, *generation)
+	if err != nil {
+		p.logger.Warn("Modal callback recovery update failed", "generation_id", record.ID)
+		return
+	}
+	if updated {
+		p.app.store.PublishGeneration(record.ID)
+		if generation.Status == "completed" {
+			refreshed, loadErr := p.app.store.Generation(record.ID)
+			if loadErr == nil && refreshed.Status == "downloading" {
+				p.startDownload(ctx, provider, refreshed)
+			}
+		}
+	}
 }
 
 func (p *Processor) processCombiningProjects(ctx context.Context, projects []VideoProject) {
@@ -123,7 +173,8 @@ func (p *Processor) processCombiningProjects(ctx context.Context, projects []Vid
 			continue
 		}
 		projectCopy := project
-		p.startProjectTask(ctx, project.ID+":combine", func(taskCtx context.Context) {
+		p.startCombineTask(ctx, project.ID+":combine", func(taskCtx context.Context) {
+			defer p.app.store.PublishProject(projectCopy.ID)
 			_ = p.app.store.AppendPipelineEvent(projectCopy.ID, "combine", "started", "Final video assembly started.", 0, 0)
 			inputs := make([]string, 0, ProjectSceneCount)
 			for _, scene := range projectCopy.Scenes {
@@ -160,6 +211,7 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 		switch project.Status {
 		case "planning":
 			p.startProjectTask(ctx, project.ID+":script", func(taskCtx context.Context) {
+				defer p.app.store.PublishProject(project.ID)
 				trace, traceErr := newTextGenerationTrace(project.Topic)
 				if traceErr != nil || p.app.store.SaveTextGenerationTrace(project.ID, trace) != nil {
 					_ = p.app.store.AppendPipelineEvent(project.ID, "text_request", "failed", "Unable to prepare script-generation request metadata.", 0, 0)
@@ -210,6 +262,7 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 				message := "The saved video provider configuration for this project is unavailable. Create a new project after checking Settings."
 				_ = p.app.store.AppendPipelineEventOnce(project.ID, "video_provider", "failed", message, 0, 0)
 				_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
+				p.app.store.PublishProject(project.ID)
 				p.logger.Warn("project processor cannot load immutable video provider configuration", "project_id", project.ID, "provider", project.VideoProvider)
 				continue
 			}
@@ -246,9 +299,17 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider VideoServ
 		case "queued", "processing":
 			active++
 			sceneCopy := scene
-			p.startProjectTask(ctx, fmt.Sprintf("%s:poll:%d", project.ID, scene.Number), func(taskCtx context.Context) {
-				p.pollScene(taskCtx, provider, sceneCopy)
-			})
+			if project.VideoProvider == string(VideoProviderModal) {
+				if scene.ModalCallbackRecoveryAt <= time.Now().Unix() {
+					p.startProjectTask(ctx, fmt.Sprintf("%s:modal-recovery:%d", project.ID, scene.Number), func(taskCtx context.Context) {
+						p.recoverModalScene(taskCtx, provider, sceneCopy)
+					})
+				}
+			} else {
+				p.startProjectTask(ctx, fmt.Sprintf("%s:poll:%d", project.ID, scene.Number), func(taskCtx context.Context) {
+					p.pollScene(taskCtx, provider, sceneCopy)
+				})
+			}
 		case "downloading", "download_failed":
 			active++
 			if scene.NextAttemptAt <= time.Now().Unix() {
@@ -260,8 +321,10 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider VideoServ
 	}
 	if len(project.Scenes) == ProjectSceneCount && complete == ProjectSceneCount {
 		_ = p.app.store.UpdateProjectStatus(project.ID, "combining", "")
+		p.app.store.PublishProject(project.ID)
 	} else if failed > 0 && active == 0 {
 		_ = p.app.store.UpdateProjectStatus(project.ID, "failed", fmt.Sprintf("Scene %d failed during video generation. Open its details and retry it.", firstFailedScene))
+		p.app.store.PublishProject(project.ID)
 	}
 }
 
@@ -269,22 +332,63 @@ func (p *Processor) submitScene(ctx context.Context, provider VideoService, proj
 	if err := p.app.store.MarkSceneSubmitting(project.ID, scene.Number); err != nil {
 		return
 	}
+	p.app.store.PublishProject(project.ID)
+	request := GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, Resolution: ProjectResolution, AspectRatio: ProjectAspectRatio}
+	callbackToken := ""
+	callbackRegistered := false
+	if project.VideoProvider == string(VideoProviderModal) {
+		callbackURL, err := p.app.modalCallbackURL()
+		if err != nil {
+			message := "Modal callbacks are not configured. Set PUBLIC_BASE_URL to the HTTPS dashboard URL, then retry this scene."
+			_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", message)
+			p.app.store.PublishProject(project.ID)
+			return
+		}
+		callbackToken, err = newModalCallbackToken()
+		if err == nil {
+			err = p.app.store.RegisterModalCallbackToken(callbackToken, project.ID, scene.Number)
+		}
+		if err != nil {
+			_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", "Unable to prepare a secure Modal callback. Retry this scene.")
+			p.app.store.PublishProject(project.ID)
+			return
+		}
+		callbackRegistered = true
+		request.ModalCallbackURL = callbackURL
+		request.ModalCallbackToken = callbackToken
+		defer func() {
+			if callbackRegistered {
+				p.app.store.DeleteModalCallbackToken(callbackToken)
+			}
+		}()
+	}
 	requestContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	generation, err := provider.GenerateVideo(requestContext, GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, Resolution: ProjectResolution, AspectRatio: ProjectAspectRatio})
+	generation, err := provider.GenerateVideo(requestContext, request)
 	if err != nil || generation == nil || !safeID(generation.ID) {
 		message := safeSceneSubmissionFailure(err)
 		_ = p.app.store.AppendPipelineEvent(project.ID, "scene_submission", "failed", message, scene.Number, 0)
 		_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", message)
+		p.app.store.PublishProject(project.ID)
 		p.logger.Warn("scene submission failed", "project_id", project.ID, "scene", scene.Number)
 		return
 	}
 	if generation.Status == "" {
 		generation.Status = "queued"
 	}
-	if err := p.app.store.SetSceneGeneration(project.ID, scene.Number, *generation); err != nil {
-		p.logger.Error("save scene generation failed", "project_id", project.ID, "scene", scene.Number)
+	if project.VideoProvider == string(VideoProviderModal) {
+		err = p.app.store.SetSceneGenerationWithModalCallback(project.ID, scene.Number, *generation, callbackToken)
+		if err == nil {
+			callbackRegistered = false
+		}
+	} else {
+		err = p.app.store.SetSceneGeneration(project.ID, scene.Number, *generation)
 	}
+	if err != nil {
+		p.logger.Error("save scene generation failed", "project_id", project.ID, "scene", scene.Number)
+		return
+	}
+	p.app.store.PublishProject(project.ID)
 }
 
 func (p *Processor) pollScene(ctx context.Context, provider VideoService, scene ProjectScene) {
@@ -311,6 +415,41 @@ func (p *Processor) pollScene(ctx context.Context, provider VideoService, scene 
 		scene.Status = status
 		scene.CostUSD = generation.CostUSD
 		p.startSceneDownload(ctx, provider, scene)
+	}
+	p.app.store.PublishProject(scene.ProjectID)
+}
+
+func (p *Processor) recoverModalScene(ctx context.Context, provider VideoService, scene ProjectScene) {
+	requestContext, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	generation, err := provider.GetGeneration(requestContext, scene.ProviderGenerationID)
+	if err != nil || generation == nil {
+		_ = p.app.store.ScheduleModalSceneRecovery(scene.ProjectID, scene.Number)
+		return
+	}
+	if generation.ID == "" {
+		generation.ID = scene.ProviderGenerationID
+	}
+	updated, err := p.app.store.ApplyModalSceneRecovery(scene.ProjectID, scene.Number, *generation)
+	if err != nil {
+		p.logger.Warn("Modal scene callback recovery update failed", "project_id", scene.ProjectID, "scene", scene.Number)
+		return
+	}
+	if !updated {
+		return
+	}
+	p.app.store.PublishProject(scene.ProjectID)
+	if generation.Status == "completed" {
+		project, loadErr := p.app.store.Project(scene.ProjectID)
+		if loadErr != nil {
+			return
+		}
+		for _, refreshed := range project.Scenes {
+			if refreshed.Number == scene.Number && refreshed.Status == "downloading" {
+				p.startSceneDownload(ctx, provider, refreshed)
+				return
+			}
+		}
 	}
 }
 
@@ -355,6 +494,7 @@ func safeSceneSubmissionFailure(err error) string {
 func (p *Processor) startSceneDownload(ctx context.Context, provider VideoService, scene ProjectScene) {
 	key := fmt.Sprintf("%s:download:%d", scene.ProjectID, scene.Number)
 	p.startProjectTask(ctx, key, func(taskCtx context.Context) {
+		defer p.app.store.PublishProject(scene.ProjectID)
 		_ = p.app.store.AppendPipelineEvent(scene.ProjectID, "scene_download", "started", "Downloading completed scene video.", scene.Number, scene.DownloadAttempts)
 		downloadCtx, cancel := context.WithTimeout(taskCtx, p.downloadTimeout)
 		defer cancel()
@@ -395,6 +535,41 @@ func (p *Processor) startSceneDownload(ctx context.Context, provider VideoServic
 			_ = os.Remove(finalPath)
 		}
 	})
+}
+
+// startCombineTask keeps the one memory-intensive FFmpeg combine independent
+// from projectSem. That leaves the project workers available for scene
+// submission, status work, and streaming downloads while a final video is
+// being encoded.
+func (p *Processor) startCombineTask(ctx context.Context, key string, task func(context.Context)) {
+	p.mu.Lock()
+	if _, exists := p.inFlight[key]; exists {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+	select {
+	case p.combineSem <- struct{}{}:
+	default:
+		return
+	}
+	p.mu.Lock()
+	if _, exists := p.inFlight[key]; exists {
+		p.mu.Unlock()
+		<-p.combineSem
+		return
+	}
+	p.inFlight[key] = struct{}{}
+	p.mu.Unlock()
+	go func() {
+		defer func() {
+			<-p.combineSem
+			p.mu.Lock()
+			delete(p.inFlight, key)
+			p.mu.Unlock()
+		}()
+		task(ctx)
+	}()
 }
 
 func (p *Processor) startProjectTask(ctx context.Context, key string, task func(context.Context)) {
@@ -457,6 +632,7 @@ func (p *Processor) startDownload(ctx context.Context, provider VideoService, re
 }
 
 func (p *Processor) download(ctx context.Context, provider VideoService, record GenerationRecord) {
+	defer p.app.store.PublishGeneration(record.ID)
 	response, err := provider.GetVideoContent(ctx, record.ID, "")
 	if err != nil {
 		p.downloadFailed(record.ID, err)
