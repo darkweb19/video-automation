@@ -459,7 +459,7 @@ func (a *dashboardApp) vaultVideo(w http.ResponseWriter, r *http.Request) {
 		}
 		videoPath, baseDir = record.VideoPath, a.store.videoDir
 	} else {
-		project, err := a.store.Project(id)
+		project, err := a.store.projectForWorker(r.Context(), id)
 		if err != nil || !project.InVault || project.Status != "completed" || !project.FinalVideoReady {
 			writeError(w, http.StatusNotFound, "Vault video not found")
 			return

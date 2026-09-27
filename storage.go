@@ -22,30 +22,33 @@ type Store struct {
 	dataDir    string
 	videoDir   string
 	projectDir string
+	events     *eventHub
 }
 
 type GenerationRecord struct {
-	ID               string            `json:"id"`
-	VideoProvider    string            `json:"video_provider"`
-	ProviderConfigID string            `json:"-"`
-	Prompt           string            `json:"prompt"`
-	Model            string            `json:"model"`
-	Duration         int               `json:"duration,omitempty"`
-	AspectRatio      string            `json:"aspect_ratio,omitempty"`
-	Status           string            `json:"status"`
-	Progress         int               `json:"progress,omitempty"`
-	CostUSD          string            `json:"cost_usd,omitempty"`
-	EstimatedCostUSD string            `json:"estimated_cost_usd,omitempty"`
-	VideoPath        string            `json:"-"`
-	InVault          bool              `json:"-"`
-	VideoReady       bool              `json:"video_ready"`
-	SizeBytes        int64             `json:"size_bytes,omitempty"`
-	Error            string            `json:"error,omitempty"`
-	DownloadAttempts int               `json:"download_attempts,omitempty"`
-	NextDownloadAt   int64             `json:"next_download_at,omitempty"`
-	CreatedAt        int64             `json:"created_at"`
-	UpdatedAt        int64             `json:"updated_at"`
-	Events           []GenerationEvent `json:"events"`
+	ID                            string            `json:"id"`
+	VideoProvider                 string            `json:"video_provider"`
+	ProviderConfigID              string            `json:"-"`
+	Prompt                        string            `json:"prompt"`
+	Model                         string            `json:"model"`
+	Duration                      int               `json:"duration,omitempty"`
+	AspectRatio                   string            `json:"aspect_ratio,omitempty"`
+	Status                        string            `json:"status"`
+	Progress                      int               `json:"progress,omitempty"`
+	CostUSD                       string            `json:"cost_usd,omitempty"`
+	EstimatedCostUSD              string            `json:"estimated_cost_usd,omitempty"`
+	VideoPath                     string            `json:"-"`
+	InVault                       bool              `json:"-"`
+	VideoReady                    bool              `json:"video_ready"`
+	SizeBytes                     int64             `json:"size_bytes,omitempty"`
+	Error                         string            `json:"error,omitempty"`
+	DownloadAttempts              int               `json:"download_attempts,omitempty"`
+	NextDownloadAt                int64             `json:"next_download_at,omitempty"`
+	ModalCallbackRecoveryAt       int64             `json:"-"`
+	ModalCallbackRecoveryAttempts int               `json:"-"`
+	CreatedAt                     int64             `json:"created_at"`
+	UpdatedAt                     int64             `json:"updated_at"`
+	Events                        []GenerationEvent `json:"events"`
 }
 
 // GenerationEvent is a backend-owned lifecycle entry. It intentionally never
@@ -264,7 +267,7 @@ func OpenStore(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, dataDir: dataDir, videoDir: videoDir, projectDir: projectDir}
+	store := &Store{db: db, dataDir: dataDir, videoDir: videoDir, projectDir: projectDir, events: newEventHub()}
 	if err := store.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -351,6 +354,16 @@ func (s *Store) migrate() error {
 			created_at INTEGER NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS generation_events_generation_id ON generation_events(generation_id,id);
+		CREATE TABLE IF NOT EXISTS modal_callback_tokens (
+			token_hash TEXT PRIMARY KEY,
+			generation_id TEXT NOT NULL DEFAULT '',
+			project_id TEXT NOT NULL DEFAULT '',
+			scene_number INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			bound_at INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS modal_callback_tokens_generation_id ON modal_callback_tokens(generation_id);
+		CREATE INDEX IF NOT EXISTS modal_callback_tokens_project_scene ON modal_callback_tokens(project_id,scene_number);
 		CREATE TABLE IF NOT EXISTS video_projects (
 			id TEXT PRIMARY KEY,
 			topic TEXT NOT NULL,
@@ -450,10 +463,22 @@ func (s *Store) migrate() error {
 	if err := s.addColumnIfMissing("generations", "in_vault", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := s.addColumnIfMissing("generations", "modal_callback_recovery_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("generations", "modal_callback_recovery_attempts", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := s.addColumnIfMissing("video_projects", "provider_config_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.addColumnIfMissing("video_projects", "in_vault", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("project_scenes", "modal_callback_recovery_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("project_scenes", "modal_callback_recovery_attempts", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES('video_provider','openrouter',unixepoch()) ON CONFLICT(key) DO NOTHING`)
@@ -602,6 +627,21 @@ func (s *Store) SetSetting(key, value string) error {
 }
 
 func (s *Store) InsertGeneration(record GenerationRecord) error {
+	return s.insertGeneration(record, "")
+}
+
+// InsertGenerationWithModalCallback binds a pre-registered, one-use
+// capability to the accepted provider job in the same SQLite transaction as
+// the generation row. A callback that races this transaction can safely be
+// retried because its token already exists in modal_callback_tokens.
+func (s *Store) InsertGenerationWithModalCallback(record GenerationRecord, token string) error {
+	if !validModalCallbackToken(token) {
+		return errors.New("invalid Modal callback token")
+	}
+	return s.insertGeneration(record, token)
+}
+
+func (s *Store) insertGeneration(record GenerationRecord, callbackToken string) error {
 	now := time.Now().Unix()
 	if record.VideoProvider == "" {
 		record.VideoProvider = string(VideoProviderOpenRouter)
@@ -617,10 +657,23 @@ func (s *Store) InsertGeneration(record GenerationRecord) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO generations(id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,progress,cost_usd,estimated_cost_usd,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		record.ID, record.VideoProvider, record.ProviderConfigID, record.Prompt, record.Model, record.Duration, record.AspectRatio, record.Status, record.Progress, record.CostUSD, record.EstimatedCostUSD, record.Error, now, now)
+	recoveryAt := int64(0)
+	if callbackToken != "" && (record.Status == "queued" || record.Status == "processing") {
+		recoveryAt = modalCallbackRecoveryAt(time.Unix(now, 0), 0)
+	}
+	_, err = tx.Exec(`INSERT INTO generations(id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,progress,cost_usd,estimated_cost_usd,error,modal_callback_recovery_at,modal_callback_recovery_attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		record.ID, record.VideoProvider, record.ProviderConfigID, record.Prompt, record.Model, record.Duration, record.AspectRatio, record.Status, record.Progress, record.CostUSD, record.EstimatedCostUSD, record.Error, recoveryAt, 0, now, now)
 	if err != nil {
 		return err
+	}
+	if callbackToken != "" {
+		result, bindErr := tx.Exec(`UPDATE modal_callback_tokens SET generation_id=?,bound_at=? WHERE token_hash=? AND generation_id='' AND project_id='' AND scene_number=0`, record.ID, now, modalCallbackTokenHash(callbackToken))
+		if bindErr != nil {
+			return bindErr
+		}
+		if count, _ := result.RowsAffected(); count != 1 {
+			return errors.New("Modal callback token is unavailable")
+		}
 	}
 	message := "Generation request accepted"
 	if record.Status == "failed" {
@@ -633,11 +686,35 @@ func (s *Store) InsertGeneration(record GenerationRecord) error {
 	return tx.Commit()
 }
 
-const generationColumns = `id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,progress,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,created_at,updated_at,in_vault`
+// RegisterModalCallbackToken happens before the upstream request. It makes
+// the very small window between Modal accepting a job and the local insert
+// observable as a transient callback target rather than a lost completion.
+func (s *Store) RegisterModalCallbackToken(token, projectID string, sceneNumber int) error {
+	if !validModalCallbackToken(token) {
+		return errors.New("invalid Modal callback token")
+	}
+	if projectID == "" {
+		if sceneNumber != 0 {
+			return errors.New("invalid Modal callback target")
+		}
+	} else if !safeID(projectID) || sceneNumber < 1 || sceneNumber > ProjectSceneCount {
+		return errors.New("invalid Modal callback target")
+	}
+	_, err := s.db.Exec(`INSERT INTO modal_callback_tokens(token_hash,project_id,scene_number,created_at) VALUES(?,?,?,?)`, modalCallbackTokenHash(token), projectID, sceneNumber, time.Now().Unix())
+	return err
+}
+
+func (s *Store) DeleteModalCallbackToken(token string) {
+	if validModalCallbackToken(token) {
+		_, _ = s.db.Exec(`DELETE FROM modal_callback_tokens WHERE token_hash=? AND generation_id=''`, modalCallbackTokenHash(token))
+	}
+}
+
+const generationColumns = `id,video_provider,provider_config_id,prompt,model,duration,aspect_ratio,status,progress,cost_usd,estimated_cost_usd,video_path,size_bytes,error,download_attempts,next_download_at,modal_callback_recovery_at,modal_callback_recovery_attempts,created_at,updated_at,in_vault`
 
 func scanGeneration(scanner interface{ Scan(...any) error }) (GenerationRecord, error) {
 	var record GenerationRecord
-	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.ProviderConfigID, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.Progress, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.CreatedAt, &record.UpdatedAt, &record.InVault)
+	err := scanner.Scan(&record.ID, &record.VideoProvider, &record.ProviderConfigID, &record.Prompt, &record.Model, &record.Duration, &record.AspectRatio, &record.Status, &record.Progress, &record.CostUSD, &record.EstimatedCostUSD, &record.VideoPath, &record.SizeBytes, &record.Error, &record.DownloadAttempts, &record.NextDownloadAt, &record.ModalCallbackRecoveryAt, &record.ModalCallbackRecoveryAttempts, &record.CreatedAt, &record.UpdatedAt, &record.InVault)
 	record.VideoReady = record.VideoPath != ""
 	return record, err
 }
@@ -841,6 +918,228 @@ func (s *Store) GenerationEvents(id string) ([]GenerationEvent, error) {
 	return events, rows.Err()
 }
 
+// ApplyModalCompletionCallback accepts only a terminal callback tied to a
+// pre-registered capability. It is deliberately monotonic: once local work
+// has moved to download, failed, or completed, a late/conflicting terminal
+// callback cannot roll state backward.
+func (s *Store) ApplyModalCompletionCallback(callback modalCompletionCallback, token string) (modalCallbackOutcome, error) {
+	if !validModalCallbackToken(token) {
+		return modalCallbackOutcome{}, ErrModalCallbackUnauthorized
+	}
+	if !safeID(callback.ID) || (callback.Status != "completed" && callback.Status != "failed") {
+		return modalCallbackOutcome{}, ErrModalCallbackInvalidTarget
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return modalCallbackOutcome{}, err
+	}
+	defer tx.Rollback()
+
+	var generationID, projectID string
+	var sceneNumber int
+	err = tx.QueryRow(`SELECT generation_id,project_id,scene_number FROM modal_callback_tokens WHERE token_hash=?`, modalCallbackTokenHash(token)).Scan(&generationID, &projectID, &sceneNumber)
+	if errors.Is(err, sql.ErrNoRows) {
+		return modalCallbackOutcome{}, ErrModalCallbackUnauthorized
+	}
+	if err != nil {
+		return modalCallbackOutcome{}, err
+	}
+	if generationID == "" {
+		// The provider completed quickly enough to beat the local INSERT. Modal
+		// treats the handler's 503 as retryable, and the durable token survives
+		// a process restart until the response is saved or cleaned up.
+		return modalCallbackOutcome{}, ErrModalCallbackPending
+	}
+	if subtle.ConstantTimeCompare([]byte(generationID), []byte(callback.ID)) != 1 {
+		return modalCallbackOutcome{}, ErrModalCallbackUnauthorized
+	}
+
+	if projectID == "" {
+		outcome, applyErr := applyModalGenerationCompletion(tx, callback)
+		if applyErr != nil {
+			return modalCallbackOutcome{}, applyErr
+		}
+		if err := tx.Commit(); err != nil {
+			return modalCallbackOutcome{}, err
+		}
+		return outcome, nil
+	}
+	outcome, applyErr := applyModalSceneCompletion(tx, projectID, sceneNumber, callback)
+	if applyErr != nil {
+		return modalCallbackOutcome{}, applyErr
+	}
+	if err := tx.Commit(); err != nil {
+		return modalCallbackOutcome{}, err
+	}
+	return outcome, nil
+}
+
+func applyModalGenerationCompletion(tx *sql.Tx, callback modalCompletionCallback) (modalCallbackOutcome, error) {
+	var provider, status string
+	if err := tx.QueryRow(`SELECT video_provider,status FROM generations WHERE id=?`, callback.ID).Scan(&provider, &status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return modalCallbackOutcome{}, ErrModalCallbackUnavailable
+		}
+		return modalCallbackOutcome{}, err
+	}
+	if provider != string(VideoProviderModal) || status == "deleting" {
+		return modalCallbackOutcome{}, ErrModalCallbackUnavailable
+	}
+	outcome := modalCallbackOutcome{GenerationID: callback.ID}
+	if status != "queued" && status != "processing" {
+		// This includes duplicate completed delivery after downloading or a
+		// stale failed delivery after completion. The accepted terminal state
+		// wins and Modal can stop retrying.
+		outcome.Ignored = true
+		return outcome, nil
+	}
+	now := time.Now().Unix()
+	if callback.Status == "completed" {
+		_, err := tx.Exec(`UPDATE generations SET status='downloading',progress=100,model=CASE WHEN ?='' THEN model ELSE ? END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error='',modal_callback_recovery_at=0,updated_at=? WHERE id=? AND status IN ('queued','processing')`, callback.Model, callback.Model, callback.CostUSD, callback.CostUSD, now, callback.ID)
+		if err != nil {
+			return modalCallbackOutcome{}, err
+		}
+		_ = appendGenerationEvent(tx, callback.ID, "provider", "completed", "Video provider completed generation.", 100)
+		_ = appendGenerationEvent(tx, callback.ID, "download", "downloading", "Downloading completed video.", 100)
+		return outcome, nil
+	}
+
+	message := sanitizeProviderFailure(callback.Error)
+	if message == "" {
+		message = "Video generation failed"
+	}
+	_, err := tx.Exec(`UPDATE generations SET status='failed',model=CASE WHEN ?='' THEN model ELSE ? END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error=?,modal_callback_recovery_at=0,updated_at=? WHERE id=? AND status IN ('queued','processing')`, callback.Model, callback.Model, callback.CostUSD, callback.CostUSD, message, now, callback.ID)
+	if err != nil {
+		return modalCallbackOutcome{}, err
+	}
+	_ = appendGenerationEvent(tx, callback.ID, "provider", "failed", message, 0)
+	return outcome, nil
+}
+
+func applyModalSceneCompletion(tx *sql.Tx, projectID string, sceneNumber int, callback modalCompletionCallback) (modalCallbackOutcome, error) {
+	var provider, projectStatus, sceneStatus, providerGenerationID string
+	err := tx.QueryRow(`SELECT p.video_provider,p.status,s.status,s.provider_generation_id FROM project_scenes s JOIN video_projects p ON p.id=s.project_id WHERE s.project_id=? AND s.scene_number=?`, projectID, sceneNumber).Scan(&provider, &projectStatus, &sceneStatus, &providerGenerationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return modalCallbackOutcome{}, ErrModalCallbackUnavailable
+	}
+	if err != nil {
+		return modalCallbackOutcome{}, err
+	}
+	if provider != string(VideoProviderModal) || projectStatus != "generating" || subtle.ConstantTimeCompare([]byte(providerGenerationID), []byte(callback.ID)) != 1 {
+		return modalCallbackOutcome{}, ErrModalCallbackUnavailable
+	}
+	outcome := modalCallbackOutcome{ProjectID: projectID}
+	if sceneStatus != "queued" && sceneStatus != "processing" {
+		outcome.Ignored = true
+		return outcome, nil
+	}
+	now := time.Now().Unix()
+	if callback.Status == "completed" {
+		_, err = tx.Exec(`UPDATE project_scenes SET status='downloading',progress=100,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error='',modal_callback_recovery_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status IN ('queued','processing')`, callback.CostUSD, callback.CostUSD, now, projectID, sceneNumber)
+		if err != nil {
+			return modalCallbackOutcome{}, err
+		}
+		_ = appendPipelineEvent(tx, projectID, "scene_callback", "completed", "Video provider completed this scene; downloading video.", sceneNumber, 0, now)
+		return outcome, nil
+	}
+	message := "Video provider reported that this scene failed. Retry the scene."
+	_, err = tx.Exec(`UPDATE project_scenes SET status='failed',cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error=?,modal_callback_recovery_at=0,updated_at=? WHERE project_id=? AND scene_number=? AND status IN ('queued','processing')`, callback.CostUSD, callback.CostUSD, message, now, projectID, sceneNumber)
+	if err != nil {
+		return modalCallbackOutcome{}, err
+	}
+	_ = appendPipelineEvent(tx, projectID, "scene_callback", "failed", message, sceneNumber, 0, now)
+	return outcome, nil
+}
+
+// ScheduleModalGenerationRecovery is the deliberately infrequent fallback
+// for a lost callback or worker restart. It is not part of the five-second
+// processor loop; the timestamp is durable and advances exponentially.
+func (s *Store) ScheduleModalGenerationRecovery(id string) error {
+	var attempts int
+	if err := s.db.QueryRow(`SELECT modal_callback_recovery_attempts FROM generations WHERE id=? AND video_provider='modal' AND status IN ('queued','processing')`, id).Scan(&attempts); err != nil {
+		return err
+	}
+	attempts++
+	_, err := s.db.Exec(`UPDATE generations SET modal_callback_recovery_attempts=?,modal_callback_recovery_at=?,updated_at=? WHERE id=? AND video_provider='modal' AND status IN ('queued','processing')`, attempts, modalCallbackRecoveryAt(time.Now(), attempts), time.Now().Unix(), id)
+	return err
+}
+
+func (s *Store) ClearModalGenerationRecovery(id string) error {
+	_, err := s.db.Exec(`UPDATE generations SET modal_callback_recovery_at=0,updated_at=? WHERE id=?`, time.Now().Unix(), id)
+	return err
+}
+
+// ApplyModalGenerationRecovery is a compare-and-set recovery update. A
+// callback may complete while the rare watchdog is waiting on Modal, so every
+// write is conditioned on the job still being remotely active.
+func (s *Store) ApplyModalGenerationRecovery(id string, generation Generation) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var status string
+	var attempts int
+	err = tx.QueryRow(`SELECT status,modal_callback_recovery_attempts FROM generations WHERE id=? AND video_provider='modal'`, id).Scan(&status, &attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if status != "queued" && status != "processing" {
+		return false, nil
+	}
+	now := time.Now()
+	updatedAt := now.Unix()
+	if generation.Status == "completed" {
+		result, updateErr := tx.Exec(`UPDATE generations SET status='downloading',progress=100,model=CASE WHEN ?='' THEN model ELSE ? END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error='',modal_callback_recovery_at=0,updated_at=? WHERE id=? AND video_provider='modal' AND status IN ('queued','processing')`, generation.Model, generation.Model, generation.CostUSD, generation.CostUSD, updatedAt, id)
+		if updateErr != nil {
+			return false, updateErr
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return false, nil
+		}
+		_ = appendGenerationEvent(tx, id, "provider_recovery", "completed", "Delayed Modal callback recovery found a completed generation.", 100)
+		_ = appendGenerationEvent(tx, id, "download", "downloading", "Downloading completed video.", 100)
+		return true, tx.Commit()
+	}
+	if generation.Status == "failed" {
+		message := sanitizeProviderFailure(generation.Error)
+		if message == "" {
+			message = "Video generation failed"
+		}
+		result, updateErr := tx.Exec(`UPDATE generations SET status='failed',model=CASE WHEN ?='' THEN model ELSE ? END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,error=?,modal_callback_recovery_at=0,updated_at=? WHERE id=? AND video_provider='modal' AND status IN ('queued','processing')`, generation.Model, generation.Model, generation.CostUSD, generation.CostUSD, message, updatedAt, id)
+		if updateErr != nil {
+			return false, updateErr
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return false, nil
+		}
+		_ = appendGenerationEvent(tx, id, "provider_recovery", "failed", message, 0)
+		return true, tx.Commit()
+	}
+	if generation.Status != "queued" && generation.Status != "processing" {
+		generation.Status = "queued"
+	}
+	progress := -1
+	if generation.Progress != nil {
+		progress = min(100, max(0, *generation.Progress))
+	}
+	attempts++
+	result, updateErr := tx.Exec(`UPDATE generations SET status=CASE WHEN status='processing' OR ?='processing' THEN 'processing' ELSE 'queued' END,progress=CASE WHEN ?<0 THEN progress ELSE MAX(progress,?) END,model=CASE WHEN ?='' THEN model ELSE ? END,cost_usd=CASE WHEN ?='' THEN cost_usd ELSE ? END,modal_callback_recovery_attempts=?,modal_callback_recovery_at=?,updated_at=? WHERE id=? AND video_provider='modal' AND status IN ('queued','processing')`, generation.Status, progress, progress, generation.Model, generation.Model, generation.CostUSD, generation.CostUSD, attempts, modalCallbackRecoveryAt(now, attempts), updatedAt, id)
+	if updateErr != nil {
+		return false, updateErr
+	}
+	count, _ := result.RowsAffected()
+	if count != 1 {
+		return false, nil
+	}
+	return true, tx.Commit()
+}
+
 func (s *Store) UpdateGeneration(id, status, model, cost, message string) error {
 	return s.UpdateGenerationProgress(id, status, model, cost, message, -1)
 }
@@ -994,6 +1293,9 @@ func (s *Store) FinishDelete(id string) error {
 	if count != 1 {
 		return sql.ErrNoRows
 	}
+	if _, err := s.db.Exec(`DELETE FROM modal_callback_tokens WHERE generation_id=?`, id); err != nil {
+		return err
+	}
 	return s.DeleteProviderConfigIfUnused(record.ProviderConfigID)
 }
 
@@ -1006,6 +1308,9 @@ func (s *Store) DeleteGeneration(id string) (GenerationRecord, error) {
 		return record, ErrVaultItemInVault
 	}
 	_, err = s.db.Exec(`DELETE FROM generations WHERE id=?`, id)
+	if err == nil {
+		_, err = s.db.Exec(`DELETE FROM modal_callback_tokens WHERE generation_id=?`, id)
+	}
 	if err == nil {
 		err = s.DeleteProviderConfigIfUnused(record.ProviderConfigID)
 	}

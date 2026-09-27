@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,6 +33,7 @@ type dashboardApp struct {
 	logger                    *slog.Logger
 	vault                     *vaultRuntime
 	baseURL                   string
+	callbackBaseURL           string
 	limiter                   *loginThrottle
 	recoveryLimiter           *loginThrottle
 	legacySnapshotBackfillErr error
@@ -40,7 +43,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger, vault: newVaultRuntime(), limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
+	app := &dashboardApp{store: store, security: security, logger: logger, vault: newVaultRuntime(), callbackBaseURL: configuredCallbackBaseURL(), limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
 	if err := store.RecoverInterruptedProjectDeletes(); err != nil {
 		logger.Error("recover interrupted project deletions failed")
 	}
@@ -52,6 +55,9 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.HandleFunc("GET /static/project.css", app.static("static/project.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/history-settings.css", app.static("static/history-settings.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /health", app.health)
+	// Modal is an external worker and does not have a browser session. Its
+	// callback is authenticated by a per-job capability token instead.
+	mux.HandleFunc("POST /api/provider-callbacks/modal", app.modalCompletionCallback)
 	mux.HandleFunc("POST /api/login", app.login)
 	mux.HandleFunc("POST /api/password/recover", app.recoverPassword)
 	mux.HandleFunc("GET /api/session", app.session)
@@ -61,6 +67,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("POST /generate", app.requirePasswordChanged(http.HandlerFunc(app.generate)))
 	mux.Handle("GET /status", app.requirePasswordChanged(http.HandlerFunc(app.status)))
 	mux.Handle("GET /api/generations", app.requirePasswordChanged(http.HandlerFunc(app.history)))
+	mux.Handle("GET /api/events", app.requirePasswordChanged(http.HandlerFunc(app.events)))
 	mux.Handle("GET /api/vault/status", app.requirePasswordChanged(http.HandlerFunc(app.vaultStatus)))
 	mux.Handle("POST /api/vault/unlock", app.requirePasswordChanged(http.HandlerFunc(app.unlockVault)))
 	mux.Handle("POST /api/vault/lock", app.requirePasswordChanged(http.HandlerFunc(app.lockVault)))
@@ -104,7 +111,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -681,6 +688,14 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	callbackURL := ""
+	if providerID == VideoProviderModal {
+		callbackURL, err = a.modalCallbackURL()
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+	}
 	provider, providerID, providerConfigID, err := a.videoProviderSnapshotForAccount(providerID, input.ModalAccountID)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
@@ -705,6 +720,26 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 	if err := validateOptions(request, model); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	callbackToken := ""
+	callbackRegistered := false
+	if providerID == VideoProviderModal {
+		callbackToken, err = newModalCallbackToken()
+		if err == nil {
+			err = a.store.RegisterModalCallbackToken(callbackToken, "", 0)
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "unable to prepare secure Modal callback")
+			return
+		}
+		callbackRegistered = true
+		request.ModalCallbackURL = callbackURL
+		request.ModalCallbackToken = callbackToken
+		defer func() {
+			if callbackRegistered {
+				a.store.DeleteModalCallbackToken(callbackToken)
+			}
+		}()
 	}
 	generation, err := provider.GenerateVideo(r.Context(), request)
 	if err != nil {
@@ -748,7 +783,15 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 			record.Error = "Video generation failed"
 		}
 	}
-	if err := a.store.InsertGeneration(record); err != nil {
+	if providerID == VideoProviderModal {
+		err = a.store.InsertGenerationWithModalCallback(record, callbackToken)
+		if err == nil {
+			callbackRegistered = false // token is now bound to the durable record.
+		}
+	} else {
+		err = a.store.InsertGeneration(record)
+	}
+	if err != nil {
 		a.logger.Error("save generation failed", "generation_id", generation.ID)
 		writeError(w, http.StatusInternalServerError, "unable to save generation")
 		return
@@ -782,6 +825,66 @@ func (a *dashboardApp) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, record)
+}
+
+// modalCompletionCallback is deliberately outside browser authentication.
+// Each callback has an opaque, per-job capability token registered before
+// Modal is asked to create the job. It accepts terminal state only.
+func (a *dashboardApp) modalCompletionCallback(w http.ResponseWriter, r *http.Request) {
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
+	tokens := r.Header.Values("X-Modal-Callback-Token")
+	if len(tokens) != 1 || !validModalCallbackToken(tokens[0]) {
+		writeError(w, http.StatusUnauthorized, "invalid callback authentication")
+		return
+	}
+	var callback modalCompletionCallback
+	if decodeJSONBody(w, r, &callback) != nil {
+		return
+	}
+	callback.ID = strings.TrimSpace(callback.ID)
+	callback.Status = strings.ToLower(strings.TrimSpace(callback.Status))
+	callback.Model = strings.TrimSpace(callback.Model)
+	callback.CostUSD = strings.TrimSpace(callback.CostUSD)
+	if !safeID(callback.ID) || (callback.Status != "completed" && callback.Status != "failed") || len(callback.Model) > 300 || !validModalCallbackCost(callback.CostUSD) {
+		writeError(w, http.StatusBadRequest, "a terminal callback id and status are required")
+		return
+	}
+
+	outcome, err := a.store.ApplyModalCompletionCallback(callback, tokens[0])
+	switch {
+	case errors.Is(err, ErrModalCallbackPending):
+		// Modal retries this short-lived race after the server has committed the
+		// provider response and token binding.
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "callback target is not ready")
+		return
+	case errors.Is(err, ErrModalCallbackUnauthorized):
+		writeError(w, http.StatusUnauthorized, "invalid callback authentication")
+		return
+	case errors.Is(err, ErrModalCallbackInvalidTarget):
+		writeError(w, http.StatusBadRequest, "invalid callback target")
+		return
+	case errors.Is(err, ErrModalCallbackUnavailable):
+		// A valid callback for a deleted job is intentionally terminal from
+		// Modal's point of view. Do not reveal whether an ID ever existed.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case err != nil:
+		a.logger.Error("Modal completion callback persistence failed")
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusServiceUnavailable, "callback persistence is temporarily unavailable")
+		return
+	}
+	if outcome.GenerationID != "" {
+		a.store.PublishGeneration(outcome.GenerationID)
+	}
+	if outcome.ProjectID != "" {
+		a.store.PublishProject(outcome.ProjectID)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *dashboardApp) history(w http.ResponseWriter, r *http.Request) {
@@ -912,6 +1015,12 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if providerID == VideoProviderModal {
+		if _, err := a.modalCallbackURL(); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 	}
 	provider, providerID, providerConfigID, err := a.videoProviderSnapshotForAccount(providerID, input.ModalAccountID)
 	if err != nil {
@@ -1064,8 +1173,8 @@ func (a *dashboardApp) projectVideo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid project id")
 		return
 	}
-	project, err := a.store.Project(id)
-	if err != nil || project.InVault || !project.FinalVideoReady {
+	project, err := a.store.projectForWorker(r.Context(), id)
+	if err != nil || project.InVault || project.Status != "completed" || !project.FinalVideoReady {
 		writeError(w, http.StatusNotFound, "final video not found")
 		return
 	}
@@ -1086,13 +1195,7 @@ func (a *dashboardApp) projectVideo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "unable to read final video")
 		return
 	}
-	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "private, no-store")
-	if r.URL.Query().Get("download") == "1" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="project-%s.mp4"`, id))
-	}
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
-	http.ServeContent(w, r, filepath.Base(clean), info.ModTime(), file)
+	serveVersionedVideo(w, r, file, info, "project", id, clean, "video/mp4", fmt.Sprintf("project-%s.mp4", id))
 }
 
 func (a *dashboardApp) deleteGeneration(w http.ResponseWriter, r *http.Request) {
@@ -1147,7 +1250,7 @@ func (a *dashboardApp) video(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := a.store.Generation(id)
-	if err != nil || record.InVault || record.VideoPath == "" {
+	if err != nil || record.InVault || record.Status != "completed" || record.VideoPath == "" {
 		writeError(w, http.StatusNotFound, "video not found")
 		return
 	}
@@ -1172,13 +1275,37 @@ func (a *dashboardApp) video(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = "video/mp4"
 	}
+	serveVersionedVideo(w, r, file, info, "generation", id, cleanPath, contentType, fmt.Sprintf("generation-%s.mp4", id))
+}
+
+// serveVersionedVideo permits the browser to keep a private copy and revalidate
+// it on reuse. The callers authenticate first, load the current record, and
+// check Vault membership before reaching ServeContent, so its conditional 304
+// and range responses cannot bypass authorization or the current file state.
+func serveVersionedVideo(w http.ResponseWriter, r *http.Request, file *os.File, info os.FileInfo, kind, id, cleanPath, contentType, downloadName string) {
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", videoFileETag(kind, id, cleanPath, info))
 	if r.URL.Query().Get("download") == "1" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="generation-%s.mp4"`, id))
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, downloadName))
 	}
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	http.ServeContent(w, r, filepath.Base(cleanPath), info.ModTime(), file)
+}
+
+// videoFileETag binds the validator to a single stored media item and its
+// current on-disk version. Nanosecond modification time distinguishes retries
+// that replace final.mp4 quickly, even when the replacement has the same size.
+func videoFileETag(kind, id, cleanPath string, info os.FileInfo) string {
+	identity := strings.Join([]string{
+		kind,
+		id,
+		filepath.Clean(cleanPath),
+		strconv.FormatInt(info.Size(), 10),
+		strconv.FormatInt(info.ModTime().UnixNano(), 10),
+	}, "\x00")
+	digest := sha256.Sum256([]byte(identity))
+	return `"` + hex.EncodeToString(digest[:]) + `"`
 }
 
 func (a *dashboardApp) settings(w http.ResponseWriter, _ *http.Request) {
