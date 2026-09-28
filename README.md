@@ -143,6 +143,8 @@ https://<your-modal-endpoint>/api/v1
 
 Each Modal deployment has its own endpoint and key. The key is encrypted at rest and is never returned to the browser. Add, edit, or delete named accounts in Settings, and mark one account as the default; the Generate screen lets you choose the account separately for each 30-second project or single clip. Existing jobs retain the encrypted credential snapshot captured at submission. The supplied Modal service currently exposes one static model, `modal/wan2.2-lightning-a14b`, with durations from 1 to 15 seconds, 480p/720p, 9:16/16:9, and no generated audio. Its API does not report a video usage charge; Modal infrastructure usage is billed separately by Modal.
 
+For SkyReels V2 deployment steps and model limits, see the [worker README](workers/modal/README.md).
+
 ## Dashboard behavior
 
 For OpenRouter, the model list includes provider-supplied per-second pricing where available, such as `$0.50/sec`; otherwise it shows `From …/sec` or `Price unavailable`. The dashboard shows estimates only when the active provider supplies pricing. Modal's API returns no per-video price, so its compute cost is billed separately by Modal. History stores the cost value reported by the selected provider; confirm the provider's billing dashboard for actual charges.
