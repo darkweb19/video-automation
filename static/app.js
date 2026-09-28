@@ -559,6 +559,35 @@
     state.vaultRestoreLockFailed = false;
   }
 
+  function isCompactNavigation() {
+    return window.matchMedia("(max-width: 760px)").matches;
+  }
+
+  function syncNavigationAccessibility() {
+    const compact = isCompactNavigation();
+    if (!compact) elements.sidebar.classList.remove("open");
+    const open = compact && elements.sidebar.classList.contains("open");
+    const hidden = compact && !open;
+    elements.sidebar.toggleAttribute("inert", hidden);
+    elements.sidebar.setAttribute("aria-hidden", String(hidden));
+    elements.menuButton.setAttribute("aria-expanded", String(open));
+    elements.menuButton.setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
+  }
+
+  function setNavigationOpen(open, options = {}) {
+    const compact = isCompactNavigation();
+    const visible = compact && Boolean(open);
+    elements.sidebar.classList.toggle("open", visible);
+    syncNavigationAccessibility();
+    if (options.returnFocus && compact) elements.menuButton.focus({ preventScroll: true });
+  }
+
+  function focusPageTitle() {
+    window.requestAnimationFrame(() => {
+      if (!elements.appShell.hidden) elements.pageTitle.focus({ preventScroll: true });
+    });
+  }
+
   function showLoggedOut() {
     stopPolling();
     stopProjectPolling();
@@ -581,6 +610,7 @@
     state.historyNextBeforeCreated = 0;
     state.historyNextBeforeID = "";
     applyPasswordGate(false);
+    setNavigationOpen(false);
     elements.appShell.hidden = true;
     elements.loginScreen.hidden = false;
     elements.loginPassword.value = "";
@@ -607,7 +637,7 @@
     resetVaultRestoreState();
     state.authenticated = true;
     applyPasswordGate(mustChangePassword);
-    elements.accountName.textContent = username || "sujanshrestha";
+    elements.accountName.textContent = username || "Signed in";
     elements.loginScreen.hidden = true;
     elements.appShell.hidden = false;
     elements.loginError.textContent = "";
@@ -624,12 +654,23 @@
       view = "settings";
       toast("Change your password before using the dashboard.", true);
     }
+    const previousView = $(".view.active")?.dataset.page || "";
+    const metadata = viewMeta[view];
     $$(".view").forEach((node) => node.classList.toggle("active", node.dataset.page === view));
-    $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === view));
-    elements.pageTitle.textContent = viewMeta[view].title;
-    elements.pageKicker.textContent = viewMeta[view].kicker;
-    elements.sidebar.classList.remove("open");
-    elements.menuButton.setAttribute("aria-expanded", "false");
+    $$(".nav-item").forEach((node) => {
+      const active = node.dataset.view === view;
+      node.classList.toggle("active", active);
+      if (active) node.setAttribute("aria-current", "page");
+      else node.removeAttribute("aria-current");
+    });
+    elements.pageTitle.textContent = metadata.title;
+    elements.pageKicker.textContent = metadata.kicker;
+    document.title = metadata.title + " | FrameVault";
+    setNavigationOpen(false);
+    if (previousView !== view) {
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      focusPageTitle();
+    }
     if (view === "settings" && !state.mustChangePassword) loadSettings(false);
     if (view === "vault" && !state.mustChangePassword) loadVault();
     if (view === "history" && !state.mustChangePassword) {
@@ -2812,6 +2853,7 @@
   }
 
   function bindEvents() {
+    syncNavigationAccessibility();
     elements.loginForm.addEventListener("submit", submitLogin);
     elements.recoveryForm.addEventListener("submit", submitRecovery);
     elements.showRecovery.addEventListener("click", showRecoveryView);
@@ -2885,17 +2927,28 @@
       if (state.currentGenerationID) pollGeneration(state.currentGenerationID, 0);
     });
     elements.menuButton.addEventListener("click", () => {
-      const open = elements.sidebar.classList.toggle("open");
-      elements.menuButton.setAttribute("aria-expanded", String(open));
+      setNavigationOpen(!elements.sidebar.classList.contains("open"));
     });
     $$(".nav-item").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
     $$('[data-go]').forEach((button) => button.addEventListener("click", () => navigate(button.dataset.go)));
+    document.addEventListener("pointerdown", (event) => {
+      if (!isCompactNavigation() || !elements.sidebar.classList.contains("open")) return;
+      if (elements.sidebar.contains(event.target) || elements.menuButton.contains(event.target)) return;
+      setNavigationOpen(false);
+    });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        elements.sidebar.classList.remove("open");
-        elements.menuButton.setAttribute("aria-expanded", "false");
+      if (event.key !== "Escape") return;
+      if (!elements.modelMenu.hidden) {
+        closeModelMenu();
+        elements.modelTrigger.focus({ preventScroll: true });
+        return;
+      }
+      if (isCompactNavigation() && elements.sidebar.classList.contains("open")) {
+        event.preventDefault();
+        setNavigationOpen(false, { returnFocus: true });
       }
     });
+    window.addEventListener("resize", syncNavigationAccessibility);
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         stopHistoryRefresh();
