@@ -66,17 +66,21 @@
       <div class="content">
         <section class="view active" data-page="overview">
           <div class="hero">
-            <div><p class="eyebrow light">AI video workspace</p><h2>Create, track, and protect every generation.</h2><p>Your files remain inside your private Docker volume.</p></div>
-            <button class="button light" data-go="generate">Create video <span>→</span></button>
+            <div class="hero-copy"><p class="eyebrow light">Video workspace</p><h2>Turn a topic into a video.</h2><p>Generate one clip or build a 30-second Short from five connected scenes.</p><button class="button light" data-go="generate">Create video</button></div>
+            <div class="hero-facts" role="group" aria-label="30-second project format">
+              <div><strong>30 sec</strong><span>Finished project</span></div>
+              <div><strong>5 × 6 sec</strong><span>Connected scenes</span></div>
+              <div><strong>9:16</strong><span>Vertical output</span></div>
+            </div>
           </div>
-          <div class="stats-grid">
-            <article class="stat-card"><div class="stat-icon violet">▤</div><div><span>Total generations</span><strong id="stat-total">0</strong></div></article>
-            <article class="stat-card"><div class="stat-icon green">✓</div><div><span>Completed</span><strong id="stat-completed">0</strong></div></article>
-            <article class="stat-card"><div class="stat-icon amber">◷</div><div><span>In progress</span><strong id="stat-active">0</strong></div></article>
-            <article class="stat-card"><div class="stat-icon blue">$</div><div><span>Total cost</span><strong id="stat-cost">$0.00</strong></div></article>
-          </div>
-          <section class="panel">
-            <div class="panel-head"><div><h2>Recent generations</h2><p>Latest activity from your workspace</p></div><button class="text-button" data-go="history">View all →</button></div>
+          <section class="stats-grid" aria-label="Workspace activity">
+            <article class="stat-card"><span>Total generations</span><strong id="stat-total">0</strong></article>
+            <article class="stat-card"><span>Completed</span><strong id="stat-completed">0</strong></article>
+            <article class="stat-card"><span>In progress</span><strong id="stat-active">0</strong></article>
+            <article class="stat-card"><span>Provider-reported cost</span><strong id="stat-cost">$0.00</strong></article>
+          </section>
+          <section class="panel overview-recent" aria-labelledby="recent-heading">
+            <div class="panel-head"><div><h2 id="recent-heading">Recent generations</h2><p>Your latest completed and active work</p></div><button class="text-button" data-go="history">View history</button></div>
             <div id="recent-list" class="recent-list"><div class="empty">No generations yet.</div></div>
           </section>
         </section>
