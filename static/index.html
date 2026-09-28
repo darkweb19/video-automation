@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FrameVault — Video dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260925-1">
-  <link rel="stylesheet" href="/static/model-picker.css?v=20260923-1">
-  <link rel="stylesheet" href="/static/project.css?v=20260923-1">
-  <link rel="stylesheet" href="/static/history-settings.css?v=20260925-2">
+  <title>FrameVault — Video workspace</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260928-1">
+  <link rel="stylesheet" href="/static/model-picker.css?v=20260928-1">
+  <link rel="stylesheet" href="/static/project.css?v=20260928-1">
+  <link rel="stylesheet" href="/static/history-settings.css?v=20260928-1">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -44,23 +44,23 @@
   </section>
 
   <div id="app-shell" class="app-shell" hidden>
-    <aside class="sidebar">
+    <aside id="workspace-navigation" class="sidebar">
       <div class="brand"><div class="brand-mark small">F</div><span>FrameVault</span></div>
       <nav aria-label="Main navigation">
-        <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span>Overview</button>
-        <button class="nav-item" data-view="generate"><span class="nav-icon">＋</span>Generate</button>
-        <button class="nav-item" data-view="history"><span class="nav-icon">▤</span>History</button>
-        <button class="nav-item" data-view="vault"><span class="nav-icon">▣</span>Vault</button>
-        <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span>Settings</button>
+        <button class="nav-item active" data-view="overview"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Overview</button>
+        <button class="nav-item" data-view="generate"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M9 3v12M3 9h12"></path></svg></span>Generate</button>
+        <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="M9 5.5V9l2.5 1.5"></path></svg></span>History</button>
+        <button class="nav-item" data-view="vault"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="3" y="7.5" width="12" height="8" rx="1.5"></rect><path d="M5.5 7.5V5a3.5 3.5 0 0 1 7 0v2.5"></path></svg></span>Vault</button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"></path><circle cx="6" cy="5" r="1.5"></circle><circle cx="11" cy="9" r="1.5"></circle><circle cx="7" cy="13" r="1.5"></circle></svg></span>Settings</button>
       </nav>
-      <div class="sidebar-foot"><span class="status-dot"></span><span>Docker storage active</span></div>
+      <div class="sidebar-foot"><span class="status-dot" aria-hidden="true"></span><span>Private workspace</span></div>
     </aside>
 
     <main class="main">
       <header class="topbar">
-        <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation">☰</button>
-        <div><p class="eyebrow" id="page-kicker">Workspace</p><h1 id="page-title">Overview</h1></div>
-        <div class="account"><div class="avatar">SS</div><div class="account-copy"><strong id="account-name">sujanshrestha</strong><span>Administrator</span></div><button id="logout" class="text-button">Log out</button></div>
+        <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation" aria-controls="workspace-navigation" aria-expanded="false">☰</button>
+        <div><p class="eyebrow" id="page-kicker">Workspace</p><h1 id="page-title" tabindex="-1">Overview</h1></div>
+        <div class="account"><div class="avatar" aria-hidden="true"></div><div class="account-copy"><strong id="account-name">Signed in</strong><span>Private workspace</span></div><button id="logout" class="text-button">Log out</button></div>
       </header>
 
       <div class="content">
@@ -151,7 +151,7 @@
               </div>
               <div id="project-status" hidden>
                 <div id="project-progress-wrap" class="progress-wrap"><div id="project-progress-bar" class="progress-bar"></div></div>
-                <p id="project-status-detail" class="subtle">Preparing your projectâ€¦</p>
+                <p id="project-status-detail" class="subtle">Preparing your project…</p>
                 <div id="project-error" class="alert error" role="alert" hidden></div>
                 <button id="retry-project" class="button secondary" type="button" hidden>Retry project</button>
                 <section id="project-pipeline" class="project-pipeline" aria-labelledby="project-pipeline-title">
@@ -280,6 +280,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260925-2" defer></script>
+  <script src="/static/app.js?v=20260928-1" defer></script>
 </body>
 </html>
