@@ -1,34 +1,31 @@
-/* Archive and configuration views */
-:root {
-  --console-bg: #111820;
-  --console-line: #26323d;
-  --console-muted: #8290a0;
-}
-
+/* Archive, Vault, and configuration use the same quiet monochrome system. */
 .history-page-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  margin: 2px 0 24px;
+  margin: 2px 0 26px;
 }
 
 .history-page-head h2 {
   margin: 0 0 6px;
-  font-size: clamp(22px, 2.4vw, 29px);
-  letter-spacing: -.035em;
+  color: var(--ink, #000);
+  font-size: clamp(24px, 2.4vw, 32px);
+  font-weight: 650;
+  letter-spacing: -.04em;
 }
 
 .history-page-head p {
+  max-width: 58ch;
   margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.55;
+  color: var(--muted, #6e6e73);
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .history-library {
   display: grid;
-  gap: 23px;
+  gap: 26px;
 }
 
 .project-history {
@@ -37,6 +34,7 @@
 
 .history-grid,
 .project-history-list {
+  display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
 }
@@ -48,36 +46,46 @@
 .history-card {
   display: flex;
   min-width: 0;
+  overflow: hidden;
   flex-direction: column;
-  border-color: #dfe3eb;
-  border-radius: 11px;
-  box-shadow: 0 2px 5px rgba(23, 32, 51, .035);
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 16px;
+  background: var(--white, #fff);
+  box-shadow: none;
 }
 
 .history-preview {
   position: relative;
   height: auto;
-  aspect-ratio: 16 / 9;
-  background: #0d1218;
+  aspect-ratio: 16 / 10;
+  background: var(--ink, #000);
 }
 
 .history-preview video {
   width: 100%;
   height: 100%;
   max-height: none;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--ink, #000);
   object-fit: contain;
 }
 
 .history-preview-empty {
+  display: grid;
   align-content: center;
+  justify-items: center;
   gap: 9px;
-  padding: 16px;
-  color: #d9e0e8;
+  padding: 18px;
+  color: var(--white, #fff);
+  text-align: center;
 }
 
 .history-preview-empty .badge {
-  background: #26313b;
-  color: #edf2f7;
+  border: 1px solid var(--graphite, #3a3a3c);
+  background: var(--graphite, #3a3a3c);
+  color: var(--white, #fff);
 }
 
 .history-body {
@@ -85,61 +93,90 @@
   flex: 1;
   min-width: 0;
   flex-direction: column;
-  padding: 16px;
+  padding: 18px;
 }
 
 .history-title {
-  min-height: 42px;
-  font-size: 14px;
+  display: -webkit-box;
+  overflow: hidden;
+  min-height: 44px;
+  margin: 0 0 14px;
+  color: var(--ink, #000);
+  font-size: 15px;
+  font-weight: 600;
   line-height: 1.45;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .history-prompt-details {
-  margin-bottom: 15px;
+  margin: -2px 0 16px;
 }
 
 .history-prompt-details summary {
   display: inline-flex;
   align-items: center;
+  min-height: 30px;
   gap: 7px;
-  min-height: 28px;
-  padding: 0 8px;
-  border-radius: 6px;
-  background: #f2f1ff;
-  font-size: 10px;
+  padding: 0 9px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 999px;
+  background: var(--cloud, #f5f5f7);
+  color: var(--graphite, #3a3a3c);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .history-prompt-details summary::before {
-  color: var(--primary);
+  color: currentColor;
   content: "+";
   font-size: 14px;
+  font-weight: 400;
   line-height: 1;
 }
 
 .history-prompt-details[open] summary::before {
-  content: "-";
+  content: "−";
+}
+
+.history-prompt-details p {
+  margin: 10px 0 0;
+  color: var(--graphite, #3a3a3c);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .history-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px 10px;
-  margin: 0 0 15px;
-  padding: 13px 0;
-  border-top: 1px solid #edf0f4;
-  border-bottom: 1px solid #edf0f4;
+  margin: 0 0 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--rule, #d2d2d7);
+  border-bottom: 1px solid var(--rule, #d2d2d7);
+}
+
+.history-meta span {
+  color: var(--muted, #6e6e73);
+  font-size: 11px;
 }
 
 .history-meta strong {
   display: block;
   overflow: hidden;
-  color: var(--ink);
-  font-size: 11px;
-  font-weight: 650;
+  margin-top: 3px;
+  color: var(--ink, #000);
+  font-size: 12px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .history-terminal-section {
-  margin: 0 0 15px;
+  margin: 0 0 16px;
   padding: 0;
   border: 0;
 }
@@ -148,11 +185,12 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-height: 34px;
   gap: 10px;
-  min-height: 32px;
   margin: 0;
   padding: 3px 2px;
-  border-radius: 6px;
+  border-radius: 7px;
+  color: var(--graphite, #3a3a3c);
   cursor: pointer;
   list-style: none;
 }
@@ -161,12 +199,8 @@
   display: none;
 }
 
-.history-terminal-head:hover .history-terminal-action {
-  color: var(--primary-dark);
-}
-
 .history-terminal-section[open] > .history-terminal-head {
-  margin-bottom: 8px;
+  margin-bottom: 9px;
 }
 
 .history-terminal-head h4 {
@@ -174,24 +208,24 @@
   align-items: center;
   gap: 8px;
   margin: 0;
-  color: #465163;
-  font-size: 10px;
-  font-weight: 750;
+  color: var(--graphite, #3a3a3c);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .history-terminal-head h4::before {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--primary);
+  background: var(--ink, #000);
   content: "";
 }
 
 .history-terminal-count {
-  color: var(--muted);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
   margin-left: auto;
+  color: var(--muted, #6e6e73);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .history-terminal-action {
@@ -199,9 +233,9 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 7px;
-  color: var(--primary);
-  font-size: 10px;
-  font-weight: 650;
+  color: var(--graphite, #3a3a3c);
+  font-size: 11px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -219,15 +253,15 @@
 }
 
 .history-terminal-section .job-terminal {
-  max-height: 190px;
+  max-height: 196px;
   padding: 5px 0;
-  border: 1px solid var(--console-line);
-  border-left: 3px solid #7668ed;
-  border-radius: 7px;
-  background: var(--console-bg);
-  color: #dce4ec;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-left: 3px solid var(--ink, #000);
+  border-radius: 10px;
+  background: var(--cloud, #f5f5f7);
+  color: var(--graphite, #3a3a3c);
   counter-reset: history-event;
-  scrollbar-color: #43505c var(--console-bg);
+  scrollbar-color: var(--muted, #6e6e73) var(--cloud, #f5f5f7);
   scrollbar-width: thin;
 }
 
@@ -236,90 +270,102 @@
   grid-template-areas:
     "index time stage status"
     ". message message message";
-  gap: 2px 7px;
-  padding: 6px 8px;
-  border-bottom-color: #202a34;
+  gap: 3px 7px;
+  padding: 7px 9px;
+  border-bottom-color: var(--rule, #d2d2d7);
   counter-increment: history-event;
 }
 
 .history-terminal-section .terminal-line::before {
   grid-area: index;
-  color: #8190a0;
+  color: var(--muted, #6e6e73);
   content: counter(history-event, decimal-leading-zero);
-  font: 9px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
   font-variant-numeric: tabular-nums;
 }
 
 .history-terminal-section .terminal-line time {
   grid-area: time;
-  color: var(--console-muted);
-  font-size: 9px;
+  color: var(--muted, #6e6e73);
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
 
 .history-terminal-section .terminal-stage {
   grid-area: stage;
   overflow: hidden;
-  color: #aebacd;
-  font-size: 9px;
+  color: var(--graphite, #3a3a3c);
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-transform: none;
 }
 
-.history-terminal-section .terminal-status {
-  grid-area: status;
-  color: #79d2a5;
-  font-size: 9px;
-  letter-spacing: .01em;
-  text-transform: none;
-}
-
+.history-terminal-section .terminal-status,
 .history-terminal-section .terminal-status.terminal-failed,
 .history-terminal-section .terminal-status.terminal-error,
 .history-terminal-section .terminal-status.terminal-warning,
-.history-terminal-section .terminal-status.terminal-download_failed {
-  color: #ff958e;
-}
-
+.history-terminal-section .terminal-status.terminal-download_failed,
 .history-terminal-section .terminal-status.terminal-queued,
 .history-terminal-section .terminal-status.terminal-processing,
 .history-terminal-section .terminal-status.terminal-retry {
-  color: #b8adff;
+  grid-area: status;
+  color: var(--ink, #000);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .history-terminal-section .terminal-message {
   grid-area: message;
   padding-top: 1px;
-  color: #dce4ec;
-  font-size: 10px;
+  color: var(--graphite, #3a3a3c);
+  font-size: 11px;
   line-height: 1.45;
 }
 
 .history-terminal-section .terminal-empty {
-  padding: 12px 10px;
-  color: #aebacd;
+  padding: 13px 11px;
+  color: var(--muted, #6e6e73);
 }
 
 .history-error {
+  color: var(--graphite, #3a3a3c);
   line-height: 1.5;
 }
 
 .history-actions {
+  display: flex;
+  gap: 8px;
   margin-top: auto;
-  padding-top: 12px;
+  padding-top: 13px;
 }
 
 .history-actions .button {
+  flex: 1;
   min-height: 36px;
+}
+
+.history-actions .danger-button {
+  border-color: var(--graphite, #3a3a3c) !important;
+  color: var(--graphite, #3a3a3c) !important;
+}
+
+.history-actions .danger-button:hover {
+  background: var(--cloud, #f5f5f7) !important;
+  border-color: var(--ink, #000) !important;
+  color: var(--ink, #000) !important;
 }
 
 .history-page-head .button:focus-visible,
 .history-actions .button:focus-visible,
 .history-prompt-details summary:focus-visible,
 .history-terminal-head:focus-visible,
-.settings-grid button:focus-visible {
-  outline: 3px solid rgba(102, 86, 232, .32);
+.settings-grid button:focus-visible,
+.vault-player-dialog button:focus-visible,
+.vault-code-form input:focus-visible,
+.vault-settings-panel input:focus-visible {
+  outline: 3px solid var(--ink, #000);
   outline-offset: 2px;
 }
 
@@ -331,9 +377,11 @@
 .settings-grid > .panel {
   grid-column: span 6;
   min-width: 0;
-  padding: 22px;
-  border-radius: 12px;
-  box-shadow: 0 2px 7px rgba(24, 32, 50, .035);
+  padding: 24px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 16px;
+  background: var(--white, #fff);
+  box-shadow: none;
 }
 
 .settings-grid > .settings-provider-panel,
@@ -342,7 +390,7 @@
 }
 
 .settings-provider-panel {
-  border-top: 3px solid var(--primary);
+  border-top: 3px solid var(--ink, #000) !important;
 }
 
 .settings-provider-controls {
@@ -358,15 +406,21 @@
 
 .settings-provider-controls .provider-actions {
   justify-content: flex-start;
-  min-height: 41px;
+  min-height: 42px;
   padding-bottom: 0;
 }
 
 .settings-key-panel .key-display {
-  min-height: 50px;
-  margin: 0 0 17px;
-  border: 1px solid #eceef3;
-  background: #f7f8fa;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 52px;
+  margin: 0 0 18px;
+  padding: 14px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 12px;
+  background: var(--cloud, #f5f5f7);
 }
 
 .settings-key-panel .stack .field:last-of-type,
@@ -375,20 +429,32 @@
 }
 
 .settings-account-panel .modal-account-list {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .settings-account-panel .modal-account-row {
+  display: flex;
   align-items: flex-start;
   min-width: 0;
   flex-direction: column;
+  padding: 15px;
+  border-color: var(--rule, #d2d2d7);
+  border-radius: 12px;
+  background: var(--cloud, #f5f5f7);
 }
 
 .settings-account-panel .modal-account-copy {
+  display: grid;
+  gap: 4px;
   width: 100%;
 }
 
 .settings-account-panel .modal-account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   width: 100%;
 }
 
@@ -397,8 +463,9 @@
 }
 
 .settings-account-panel .modal-account-form {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 18px;
+  gap: 14px 18px;
 }
 
 .settings-account-panel .modal-account-form h3,
@@ -412,6 +479,364 @@
 
 .settings-password-panel .stack {
   gap: 2px;
+}
+
+.modal-account-copy strong {
+  color: var(--ink, #000);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.modal-account-copy span,
+.modal-account-copy small {
+  overflow-wrap: anywhere;
+  color: var(--muted, #6e6e73);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.modal-account-copy .modal-default-badge {
+  width: max-content;
+  padding: 3px 7px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 999px;
+  background: var(--white, #fff);
+  color: var(--graphite, #3a3a3c);
+  font-size: 10px;
+}
+
+.modal-account-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.modal-account-empty {
+  padding: 22px 14px;
+  border: 1px dashed var(--rule, #d2d2d7);
+  border-radius: 12px;
+  color: var(--muted, #6e6e73);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.history-section-heading {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 0;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--rule, #d2d2d7);
+}
+
+.history-section-heading h3 {
+  margin: 0;
+  color: var(--ink, #000);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.history-count {
+  display: grid;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 999px;
+  background: var(--cloud, #f5f5f7);
+  color: var(--graphite, #3a3a3c);
+  font-size: 11px;
+  font-weight: 600;
+  place-items: center;
+}
+
+.history-generation-heading {
+  margin-top: 8px;
+}
+
+.history-grid > .empty {
+  grid-column: 1 / -1;
+}
+
+/* Vault */
+.vault-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.vault-page-head h2 {
+  margin: 0 0 5px;
+  color: var(--ink, #000);
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -.03em;
+}
+
+.vault-page-head p,
+.vault-collection-head p {
+  margin: 0;
+  color: var(--muted, #6e6e73);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.vault-lock-panel {
+  display: grid;
+  min-height: 400px;
+  padding: 38px 22px;
+  border-color: var(--ink, #000);
+  background: var(--ink, #000);
+  color: var(--white, #fff);
+  place-items: center;
+}
+
+.vault-gate {
+  width: min(100%, 360px);
+  text-align: center;
+}
+
+.vault-gate-mark {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  margin: 0 auto 17px;
+  border: 1px solid var(--graphite, #3a3a3c);
+  border-radius: 16px;
+  background: var(--graphite, #3a3a3c);
+  color: var(--white, #fff);
+  font-size: 24px;
+  place-items: center;
+}
+
+.vault-gate h3,
+.vault-empty h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.vault-gate h3 {
+  color: var(--white, #fff);
+}
+
+.vault-gate > p,
+.vault-empty p {
+  margin: 0 auto;
+  color: var(--muted, #6e6e73);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.vault-gate > p {
+  color: var(--rule, #d2d2d7);
+}
+
+.vault-code-form {
+  margin: 22px 0 0;
+  text-align: left;
+}
+
+.vault-code-form label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--white, #fff);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.vault-code-form input {
+  height: 58px;
+  padding-left: calc(.72em + 12px);
+  border-color: var(--white, #fff);
+  background: var(--white, #fff);
+  color: var(--ink, #000);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: .72em;
+  text-align: center;
+}
+
+.vault-code-form input:focus-visible {
+  border-color: var(--white, #fff);
+  outline: 3px solid var(--white, #fff);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+.vault-code-form .button {
+  margin-top: 12px;
+}
+
+.vault-code-form .button.primary {
+  border-color: var(--white, #fff);
+  background: var(--white, #fff);
+  color: var(--ink, #000);
+}
+
+.vault-code-form .button.primary:hover {
+  background: var(--cloud, #f5f5f7);
+}
+
+.vault-code-form .button.primary:focus-visible {
+  outline-color: var(--white, #fff);
+}
+
+.vault-code-form .form-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--rule, #d2d2d7);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.vault-code-form .form-error:not([hidden])::before {
+  display: grid;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  content: "!";
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+}
+
+.vault-gate-foot {
+  margin-top: 19px !important;
+  color: var(--rule, #d2d2d7) !important;
+  font-size: 11px !important;
+}
+
+.vault-settings-link {
+  margin: 18px auto 0;
+  color: var(--white, #fff);
+}
+
+.vault-collection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 2px 0 15px;
+}
+
+.vault-collection-head h3 {
+  margin: 0 0 4px;
+  color: var(--ink, #000);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.vault-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.vault-preview {
+  display: grid;
+  height: 178px;
+  align-content: center;
+  gap: 9px;
+  background: var(--ink, #000);
+  color: var(--white, #fff);
+  place-items: center;
+}
+
+.vault-preview-mark {
+  font-size: 30px;
+  line-height: 1;
+}
+
+.vault-preview-kind {
+  color: var(--rule, #d2d2d7);
+  font-size: 11px;
+}
+
+.vault-card .history-title {
+  min-height: 42px;
+}
+
+.vault-actions {
+  flex-wrap: wrap;
+}
+
+.vault-actions .button {
+  min-width: 0;
+  min-height: 35px;
+  padding: 7px 9px;
+  font-size: 11px;
+}
+
+.vault-empty {
+  padding: 40px 18px;
+  border-color: var(--rule, #d2d2d7);
+  background: var(--cloud, #f5f5f7);
+  text-align: center;
+}
+
+.vault-empty-mark {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 14px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 14px;
+  background: var(--white, #fff);
+  color: var(--ink, #000);
+  font-size: 22px;
+  place-items: center;
+}
+
+.vault-empty .button {
+  margin-top: 18px;
+}
+
+.vault-player-dialog {
+  width: min(820px, calc(100vw - 28px));
+  max-width: none;
+  max-height: calc(100vh - 28px);
+  padding: 0;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 16px;
+  background: var(--white, #fff);
+  color: var(--ink, #000);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, .35);
+}
+
+.vault-player-dialog::backdrop {
+  background: rgba(0, 0, 0, .72);
+}
+
+.vault-player-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+}
+
+.vault-player-head h2 {
+  overflow: hidden;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-player-dialog video {
+  width: 100%;
+  max-height: calc(100vh - 90px);
+  margin: 0;
+  border-radius: 0;
+  background: var(--ink, #000);
 }
 
 @media (max-width: 1080px) {
@@ -428,7 +853,7 @@
 
   .settings-provider-controls {
     grid-template-columns: 1fr;
-    gap: 14px;
+    gap: 15px;
   }
 }
 
@@ -436,19 +861,20 @@
   .history-page-head {
     align-items: flex-start;
     flex-direction: column;
-    gap: 14px;
-    margin-bottom: 20px;
+    gap: 15px;
+    margin-bottom: 22px;
   }
 
   .history-grid,
   .project-history-list,
+  .vault-grid,
   .settings-account-panel .modal-account-list,
   .settings-account-panel .modal-account-form {
     grid-template-columns: 1fr;
   }
 
   .settings-grid > .panel {
-    padding: 18px;
+    padding: 19px;
   }
 
   .settings-account-panel .modal-account-form h3,
@@ -458,48 +884,27 @@
 
   .history-terminal-section .terminal-line {
     grid-template-columns: 19px 57px minmax(0, 1fr) auto;
-    gap: 2px 5px;
+    gap: 3px 5px;
   }
 
   .history-terminal-section .terminal-stage {
     display: block;
   }
-}
 
-/* Vault */
-.vault-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}
-.vault-page-head h2{margin:0 0 5px;font-size:19px}
-.vault-page-head p,.vault-collection-head p{margin:0;color:var(--muted);font-size:12px}
-.vault-lock-panel{display:grid;place-items:center;min-height:390px;padding:36px 22px;background:#f7f8fd;border-color:#dfe3f1}
-.vault-gate{width:min(100%,360px);text-align:center}
-.vault-gate-mark{display:grid;place-items:center;width:54px;height:54px;margin:0 auto 16px;border-radius:15px;background:#20243a;color:#d5d8ff;font-size:25px}
-.vault-gate h3,.vault-empty h3{margin:0 0 7px;font-size:17px}
-.vault-gate>p,.vault-empty p{margin:0 auto;color:var(--muted);font-size:12px;line-height:1.55}
-.vault-code-form{margin:21px 0 0;text-align:left}
-.vault-code-form label{display:block;margin-bottom:7px;font-size:12px;font-weight:700}
-.vault-code-form input{height:58px;text-align:center;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:24px;font-weight:700;letter-spacing:.72em;padding-left:calc(.72em + 12px);background:#fff}
-.vault-code-form .button{margin-top:11px}
-.vault-gate-foot{margin-top:18px!important;font-size:10px!important}
-.vault-settings-link{margin:18px auto 0}
-.vault-collection-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:2px 0 14px}
-.vault-collection-head h3{margin:0 0 4px;font-size:14px}
-.vault-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
-.vault-preview{display:grid;place-items:center;align-content:center;gap:8px;height:170px;background:#1c2032;color:#bec3e7}
-.vault-preview-mark{font-size:30px;line-height:1}
-.vault-preview-kind{font-size:11px;color:#aeb5ca}
-.vault-card .history-title{min-height:40px}
-.vault-actions{flex-wrap:wrap}
-.vault-actions .button{min-width:0;min-height:35px;padding:7px 9px;font-size:11px}
-.vault-empty{text-align:center;padding:38px 18px}
-.vault-empty-mark{display:grid;place-items:center;width:48px;height:48px;margin:0 auto 13px;border-radius:13px;background:#eeeefe;color:var(--primary);font-size:22px}
-.vault-empty .button{margin-top:17px}
-.vault-player-dialog{width:min(820px,calc(100vw - 28px));max-width:none;max-height:calc(100vh - 28px);padding:0;border:0;border-radius:14px;background:#fff;color:var(--ink);box-shadow:0 28px 80px rgba(8,12,24,.35)}
-.vault-player-dialog::backdrop{background:rgba(17,21,36,.78)}
-.vault-player-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px}
-.vault-player-head h2{overflow:hidden;margin:0;font-size:14px;text-overflow:ellipsis;white-space:nowrap}
-.vault-player-dialog video{width:100%;max-height:calc(100vh - 90px);margin:0;border-radius:0;background:#0c0f18}
-.vault-player-dialog button:focus-visible{outline:3px solid rgba(102,86,232,.42);outline-offset:3px}
-.vault-code-form input:focus-visible,.vault-settings-panel input:focus-visible{outline:3px solid rgba(102,86,232,.28);outline-offset:1px}
-@media(min-width:1021px){.history-grid,.project-history-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(min-width:761px) and (max-width:1020px){.history-grid,.project-history-list,.vault-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:760px){.vault-page-head{align-items:center}.vault-lock-panel{min-height:350px;padding:26px 18px}.vault-grid,.history-grid,.project-history-list{grid-template-columns:1fr}.vault-actions .button{flex:1}.vault-player-head{padding:13px 14px}}
+  .vault-page-head {
+    align-items: center;
+  }
+
+  .vault-lock-panel {
+    min-height: 360px;
+    padding: 28px 18px;
+  }
+
+  .vault-actions .button {
+    flex: 1;
+  }
+
+  .vault-player-head {
+    padding: 14px;
+  }
+}
