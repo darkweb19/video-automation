@@ -53,7 +53,7 @@ docker compose exec video-automation /app/video-automation recovery-code
 For a local development server:
 
 ```bash
-go run . recovery-code
+go run ./cmd/video-automation recovery-code
 ```
 
 Open **Forgot password?** on the sign-in card, then enter the code and a new password. The code expires after 15 minutes, works once, and generating a replacement invalidates the previous code. A successful reset signs out every existing session. Recovery codes are stored only as hashes.
@@ -138,11 +138,11 @@ Choose **Modal** or **OpenRouter** in **Settings > Video generation**. The provi
 
 OpenRouter's API key is shared between story/script generation and OpenRouter video generation. It remains configured when Modal is selected, because story/script generation continues to use OpenRouter.
 
-For Modal video, deploy the supplied `video.py` service in the Modal account that will run generation. Run these commands from the directory containing `video.py`. Create the Modal secret named `video-api-secret` with its required `MODAL_VIDEO_API_KEY`, then deploy the service:
+For Modal video, deploy the supplied `workers/modal/video.py` service in the Modal account that will run generation. Run these commands from the repository root. Create the Modal secret named `video-api-secret` with its required `MODAL_VIDEO_API_KEY`, then deploy the service:
 
 ```bash
 modal secret create video-api-secret MODAL_VIDEO_API_KEY="your-secret-value"
-modal deploy video.py
+modal deploy workers/modal/video.py
 ```
 
 In **Settings > Modal accounts**, add an account name, its deployment endpoint, and the matching API key. The endpoint should end in `/api/v1`, for example:
@@ -163,7 +163,32 @@ Jobs are stored before provider polling begins. OpenRouter jobs are polled by th
 
 Completed videos can be moved from History into the separate Vault tab; this hides them from regular History without moving or copying their files. Set the four-digit Vault code in Settings first. Enter the code to list, play, or download Vault videos. The Vault locks when you refresh the page or choose **Lock Vault**. Change the code in Settings with the current code; keep it safe, because a forgotten code cannot be recovered in this version. Returning a Vault video restores it to History.
 
+## Code organization
+
+The Go service layout keeps its executable entrypoint under `cmd/` and its private implementation under `internal/`:
+
+- `cmd/video-automation/main.go` starts `internal/app.Run()`.
+- `internal/app/` contains the cohesive backend package: HTTP routes, provider clients, generation and project processing, SQLite storage, security, and Go tests. Keep these related implementation files in one package while they share internal types and lifecycle; split into more packages only when a stable boundary exists, so implementation details do not become exported APIs.
+- `internal/webui/embed.go` embeds `internal/webui/static/`; the dashboard continues to use the same `/static/...` URLs.
+- `workers/modal/` contains the separately deployed Python worker and its dependency-free callback checks.
+- `docs/architecture/` records architecture decisions.
+
+Run the server natively with `DATA_DIR` set to a writable location; FFmpeg must be installed:
+
+```bash
+DATA_DIR=/path/to/video-data go run ./cmd/video-automation
+```
+
 ## Verification
+
+Run the routine local checks from the repository root:
+
+```bash
+go test ./...
+node --check internal/webui/static/app.js
+python3 workers/modal/callback_delivery_test.py
+git diff --check
+```
 
 Confirm the image, container health, and protected dashboard:
 
@@ -175,4 +200,4 @@ docker compose exec video-automation wget -q -O - http://127.0.0.1:8080/health
 
 `docker compose ps` should show the service as healthy. Open the dashboard in a browser, sign in, change the initial password, save and test the OpenRouter key, choose a video provider, and test its connection. Add a Modal account before selecting one for a submission. OpenRouter video calls may be paid; Modal infrastructure usage is billed separately, and model availability/pricing can change.
 
-For non-Docker development, set `DATA_DIR` to a writable directory and run `go run .`; the server listens on `0.0.0.0:8080`. The Go server has no port override.
+For non-Docker development, set `DATA_DIR` to a writable directory and run `go run ./cmd/video-automation`; the server listens on `0.0.0.0:8080`. The Go server has no port override.

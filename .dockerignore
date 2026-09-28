@@ -7,5 +7,5 @@ data
 *.exe
 *.test
 coverage.out
-SESSION.md
+docs/SESSION.md
 README.md

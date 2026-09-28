@@ -6,34 +6,40 @@ FrameVault is a Go HTTP application with an embedded dashboard. SQLite holds set
 
 ## Repository structure and key files
 
-Application source is in the repository root. `static/` contains the embedded browser dashboard, `modal/` contains the separate Python worker, and `*_test.go` contains Go unit, HTTP, storage, security, and workflow tests.
+The executable entrypoint is under `cmd/`; the private backend package and Go tests are under `internal/app/`. `internal/webui/` embeds the browser dashboard, `workers/modal/` contains the separate Python worker, and `docs/` holds session notes and architecture decisions.
 
 | File or folder | Responsibility |
 | --- | --- |
-| `main.go` | Opens the data store and security state, serves HTTP on port 8080, and starts the background processor. |
-| `dashboard.go` | Dashboard app shell, shared route registration, health endpoint, and embedded static files. |
-| `dashboard_auth.go` | Authentication guards, sessions, password handling, and request throttles. |
-| `dashboard_providers.go` | Provider setup, model capabilities, and immutable credential snapshots. |
-| `dashboard_generation.go` | Generation submission, status, callback, history, and random-prompt routes. |
-| `dashboard_projects.go` | Project lifecycle, scene retry, and project API routes. |
-| `dashboard_media.go` | Local media playback, downloads, caching, and deletion routes. |
-| `dashboard_settings.go` | Settings and account-management routes. |
-| `handlers.go` | Shared provider-facing generation validation and streamed video responses. |
-| `models.go` | Core generation types, `VideoService` interfaces, provider identifiers, model capabilities, and workflow constants. |
-| `openrouter.go`, `modal.go` | Provider-specific HTTP requests, response normalization, and content fetching. |
-| `script_generation.go`, `story_plan_choice.go` | OpenRouter story/script requests, parsing, and story-plan validation. |
-| `processor.go` | Processor setup, five-second work loop, job/project scans, status polling, and Modal generation recovery. |
-| `processor_projects.go` | Project story planning, scene submission and recovery, and coordination of final assembly. |
-| `processor_downloads.go` | Streaming scene and generation downloads, atomic file storage, and retry handling. |
-| `processor_tasks.go` | Bounded background task coordination for project work and FFmpeg assembly. |
-| `storage.go`, `project_storage.go` | SQLite schema, additive migrations, settings, state transitions, worker reads, paths, retries, and pipeline events. |
-| `combiner.go` | FFmpeg command construction and file-based final assembly. |
-| `events.go` | Authenticated server-sent events for job and project updates. |
-| `security.go`, `vault.go`, `modal_callback.go` | Encrypted settings and sessions, Vault authorization, and authenticated Modal callbacks. |
-| `static/` | Browser assets; `app.js` calls the same-origin authenticated API. |
-| `modal/video.py` | Deployable Modal generation worker and callback delivery. |
+| `cmd/video-automation/main.go` | Small executable entrypoint that calls `internal/app.Run()`. |
+| `internal/app/run.go` | Opens the data store and security state, serves HTTP on port 8080, and starts the background processor. |
+| `internal/app/dashboard.go` | Dashboard app shell, shared route registration, and health endpoint. |
+| `internal/app/dashboard_auth.go` | Authentication guards, sessions, password handling, and request throttles. |
+| `internal/app/dashboard_providers.go` | Provider setup, model capabilities, and immutable credential snapshots. |
+| `internal/app/dashboard_generation.go` | Generation submission, status, callback, history, and random-prompt routes. |
+| `internal/app/dashboard_projects.go` | Project lifecycle, scene retry, and project API routes. |
+| `internal/app/dashboard_media.go` | Local media playback, downloads, caching, and deletion routes. |
+| `internal/app/dashboard_settings.go` | Settings and account-management routes. |
+| `internal/app/handlers.go` | Shared provider-facing generation validation and streamed video responses. |
+| `internal/app/models.go` | Core generation types, `VideoService` interfaces, provider identifiers, model capabilities, and workflow constants. |
+| `internal/app/openrouter.go`, `internal/app/modal.go` | Provider-specific HTTP requests, response normalization, and content fetching. |
+| `internal/app/script_generation.go`, `internal/app/story_plan_choice.go` | OpenRouter story/script requests, parsing, and story-plan validation. |
+| `internal/app/processor.go` | Processor setup, five-second work loop, job/project scans, status polling, and Modal generation recovery. |
+| `internal/app/processor_projects.go` | Project story planning, scene submission and recovery, and coordination of final assembly. |
+| `internal/app/processor_downloads.go` | Streaming scene and generation downloads, atomic file storage, and retry handling. |
+| `internal/app/processor_tasks.go` | Bounded background task coordination for project work and FFmpeg assembly. |
+| `internal/app/storage.go`, `internal/app/project_storage.go` | SQLite schema, additive migrations, settings, state transitions, worker reads, paths, retries, and pipeline events. |
+| `internal/app/combiner.go` | FFmpeg command construction and file-based final assembly. |
+| `internal/app/events.go` | Authenticated server-sent events for job and project updates. |
+| `internal/app/security.go`, `internal/app/vault.go`, `internal/app/modal_callback.go` | Encrypted settings and sessions, Vault authorization, and authenticated Modal callbacks. |
+| `internal/webui/embed.go`, `internal/webui/static/` | Embedded browser assets; `app.js` calls the same-origin authenticated API and keeps the existing `/static/...` paths. |
+| `workers/modal/video.py` | Deployable Modal generation worker and callback delivery. |
+| `workers/modal/callback_delivery_test.py` | Dependency-free regression checks for Modal callback delivery and redirect handling. |
+| `internal/app/*_test.go` | Unit, HTTP handler, storage, security, workflow recovery, and provider-client tests. |
+| `docs/architecture/001-go-service-layout.md`, `docs/SESSION.md` | Accepted Go service layout decision and project session notes. |
 | `Dockerfile`, `docker-compose.yml` | Production container build and local Compose stack. |
-| `README.md` | Setup, provider configuration, storage, backup, and deployment instructions. |
+| `README.md` | Setup, provider configuration, storage, backup, development, and deployment instructions. |
+
+Keep the backend in one cohesive `internal/app` package while routes, providers, processor, storage, and security share application types and lifecycle. This keeps implementation details private and avoids exporting package internals just to divide files; split packages when a stable dependency boundary appears. The command package should remain a small startup wrapper.
 
 There is no Railway manifest in the repository. Railway builds from the root `Dockerfile`.
 
@@ -51,15 +57,15 @@ There is no Railway manifest in the repository. Railway builds from the root `Do
 
 ## Deployment and local development
 
-- Build Railway deployments from the repository root with `Dockerfile`. Attach a persistent volume at `/data` for SQLite, `secret.key`, downloaded clips, and project output. Run one replica against that local state.
+- Build Railway deployments from the repository root with `Dockerfile`, which builds `./cmd/video-automation` and keeps the runtime binary at `/app/video-automation`. Attach a persistent volume at `/data` for SQLite, `secret.key`, downloaded clips, and project output. Run one replica against that local state.
 - The application binds fixed port `8080`; configure the service target port accordingly. The app does not read Railway's `PORT` or Compose's host-side `APP_PORT`.
 - Set `PUBLIC_BASE_URL` to the public HTTPS dashboard origin when using Modal callbacks. Check deployment health at `GET /health`.
-- Start local Compose with `docker compose up -d --build`. For native Go development, set `DATA_DIR` to a writable directory and run `go run .`; FFmpeg must be installed.
+- Start local Compose with `docker compose up -d --build`. For native Go development, set `DATA_DIR` to a writable directory and run `go run ./cmd/video-automation`; FFmpeg must be installed. Generate a local password recovery code with `go run ./cmd/video-automation recovery-code`.
 - `OPENROUTER_API_KEY` is only a first-start bootstrap option. Configure normal provider settings through the authenticated Settings UI.
 
 ## Project rules and verification
 
 - Keep media on the persistent application volume. Do not add object storage, change output quality, or alter provider/workflow semantics without a product decision.
 - Keep idle processor work cheap and Modal callback recovery sparse. Do not replace callback completion with frequent polling.
-- Tests must not submit paid provider generations. Before handing off changes, run `go test ./...`, `node --check static/app.js`, `python3 modal/callback_delivery_test.py`, and `git diff --check`.
+- Tests must not submit paid provider generations. Before handing off changes, run `go test ./...`, `node --check internal/webui/static/app.js`, `python3 workers/modal/callback_delivery_test.py`, and `git diff --check`.
 - The main thread is the CTO/lead: decide architecture, delegate implementation, and review results; it does not directly implement code. Use Terra Max for large or complex engineering tasks and Luna Max for focused, straightforward changes.
