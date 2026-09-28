@@ -35,7 +35,7 @@
 .history-grid,
 .project-history-list {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
   gap: 18px;
 }
 
@@ -336,6 +336,7 @@
 
 .history-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: auto;
   padding-top: 13px;
@@ -739,10 +740,6 @@
   font-weight: 650;
 }
 
-.vault-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
 .vault-preview {
   display: grid;
   height: 178px;
@@ -841,13 +838,6 @@
   margin: 0;
   border-radius: 0;
   background: var(--ink, #000);
-}
-
-@media (max-width: 1080px) {
-  .history-grid,
-  .project-history-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 900px) {
