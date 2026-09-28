@@ -492,6 +492,7 @@
       const active = button.dataset.mode === state.mode;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
     });
     elements.projectInputs.hidden = !project;
     elements.projectOptions.hidden = !project;
@@ -511,6 +512,24 @@
     }
     updateModelOptions();
     syncGenerationModeDisplay();
+  }
+
+  function moveGenerationMode(event) {
+    const tabs = elements.modeOptions;
+    const current = tabs.indexOf(event.currentTarget);
+    if (current < 0) return;
+    let next = current;
+    if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+    else if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = tabs.length - 1;
+    else return;
+
+    event.preventDefault();
+    const target = tabs[next];
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.click();
   }
 
   function selectedPromptCategory() {
@@ -2975,10 +2994,13 @@
     elements.promptCategory.addEventListener("input", updatePromptCategory);
     elements.randomPrompt.addEventListener("click", generateRandomPrompt);
     elements.retryProject.addEventListener("click", retryCurrentProject);
-    elements.modeOptions.forEach((button) => button.addEventListener("click", () => {
-      setGenerationMode(button.dataset.mode);
-      if (state.videoProvider === "modal") void loadModels(false);
-    }));
+    elements.modeOptions.forEach((button) => {
+      button.addEventListener("click", () => {
+        setGenerationMode(button.dataset.mode);
+        if (state.videoProvider === "modal") void loadModels(false);
+      });
+      button.addEventListener("keydown", moveGenerationMode);
+    });
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
     elements.vaultCodeForm.addEventListener("submit", saveVaultCode);
     [elements.vaultCurrentCode, elements.vaultNewCode, elements.vaultConfirmCode, elements.vaultCode].forEach((input) => {
