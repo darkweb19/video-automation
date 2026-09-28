@@ -47,7 +47,7 @@
     <aside id="workspace-navigation" class="sidebar">
       <div class="brand"><div class="brand-mark small">F</div><span>FrameVault</span></div>
       <nav aria-label="Main navigation">
-        <button class="nav-item active" data-view="overview"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Overview</button>
+        <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Overview</button>
         <button class="nav-item" data-view="generate"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M9 3v12M3 9h12"></path></svg></span>Generate</button>
         <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="M9 5.5V9l2.5 1.5"></path></svg></span>History</button>
         <button class="nav-item" data-view="vault"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="3" y="7.5" width="12" height="8" rx="1.5"></rect><path d="M5.5 7.5V5a3.5 3.5 0 0 1 7 0v2.5"></path></svg></span>Vault</button>
@@ -88,17 +88,17 @@
         <section class="view" data-page="generate">
           <div class="two-column">
             <section class="panel generator-panel">
-              <div class="panel-head"><div><h2>New generation</h2><p>Configure your video request</p></div></div>
+              <div class="panel-head"><div><h2>New video</h2><p>Choose a format, add your idea, and set the output.</p></div></div>
               <div id="generation-mode" class="mode-switch" role="tablist" aria-label="Generation type">
                 <button class="mode-option active" type="button" data-mode="project" role="tab" aria-selected="true">30-second project</button>
                 <button class="mode-option" type="button" data-mode="single" role="tab" aria-selected="false">Single clip</button>
               </div>
               <form id="generator-form" novalidate>
                 <div id="project-inputs">
-                  <div class="field"><div class="label-row"><label for="project-topic">Topic or story idea</label><span>Auto-scripted</span></div><textarea id="project-topic" rows="7" placeholder="What should this 30-second Short be about?" required></textarea><p id="project-topic-error" class="form-error"></p></div>
-                  <p class="field-hint">We generate the story, full script, and five connected six-second scenes automatically.</p>
+                  <div class="field"><div class="label-row"><label for="project-topic">Topic or story idea</label><span>Auto-scripted</span></div><textarea id="project-topic" rows="7" placeholder="What should this 30-second Short be about?" aria-describedby="project-topic-note project-topic-error" required></textarea><p id="project-topic-error" class="form-error" role="alert" aria-live="polite"></p></div>
+                  <p id="project-topic-note" class="field-hint">We turn your idea into a story, script, and five connected six-second scenes.</p>
                 </div>
-                <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" required></textarea><p id="prompt-error" class="form-error"></p></div>
+                <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count" aria-live="polite">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" aria-describedby="prompt-count prompt-error" required></textarea><p id="prompt-error" class="form-error" role="alert" aria-live="polite"></p></div>
                 <div class="random-prompt-controls field">
                   <label for="prompt-category">Category: <strong id="prompt-category-name" aria-live="polite">Kid Animation</strong></label>
                   <input id="prompt-category" type="range" min="0" max="5" step="1" value="0" aria-valuetext="Kid Animation">
@@ -114,7 +114,7 @@
                     <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
                   </div>
                   <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models…</option></select>
-                  <small id="project-model-note">Choose a model that supports six-second clips and 9:16 output.</small>
+                  <small id="project-model-note" aria-live="polite">Choose a model that supports six-second clips at 480p in 9:16.</small>
                 </div>
                 <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
                 <div id="modal-account-project-field" class="field modal-account-field" hidden>
@@ -133,14 +133,14 @@
                   <div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div>
                   <div id="audio-option" class="field audio-option" hidden><label class="checkbox-label" for="generate-audio"><input id="generate-audio" type="checkbox"> Generate audio</label></div>
                 </div>
-                <div id="project-options" class="project-options"><span>Output</span><strong>Vertical 9:16 · 30 seconds · 5 scenes</strong></div>
+                <div id="project-options" class="project-options"><span>Project output</span><strong>30-second 9:16 video · 5 × 6-second scenes at 480p</strong></div>
                 <div class="estimate"><span>Estimated generation cost</span><strong id="cost-estimate">Unavailable</strong><small>Costs are shown when the selected video provider supplies pricing.</small></div>
                 <button id="generate" class="button primary full" type="submit" disabled>Generate 30-second project</button>
               </form>
             </section>
             <aside class="panel status-panel">
               <div class="panel-head"><div><h2>Generation status</h2><p>Live progress and result</p></div><span id="status-badge" class="badge neutral">Idle</span></div>
-              <div id="status-empty" class="status-empty"><div class="status-orb">▶</div><h3>Ready when you are</h3><p>Your generated video will appear here and be saved automatically.</p></div>
+              <div id="status-empty" class="status-empty"><div class="status-stage" aria-hidden="true"><span class="status-stage-frame"></span><span>Video preview</span></div><h3>Ready when you are</h3><p>Progress and your preview will appear here when generation starts.</p></div>
               <div id="status-active" hidden>
                 <div id="progress-wrap" class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
                 <p id="status-detail" class="subtle"></p>
