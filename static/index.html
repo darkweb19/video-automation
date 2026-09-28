@@ -150,7 +150,7 @@
                   <ol id="single-terminal" class="job-terminal" aria-live="polite"></ol>
                 </section>
                 <button id="retry-status" class="button secondary" type="button" hidden>Retry status</button>
-                <video id="generated-video" controls playsinline preload="metadata" hidden></video>
+                <video id="generated-video" aria-label="Generated video preview" controls playsinline preload="metadata" hidden></video>
                 <a id="open-video" class="button secondary full" hidden>Download video</a>
               </div>
               <div id="project-status" hidden>
@@ -172,7 +172,7 @@
                   <div class="trace-heading"><div><h3 id="project-trace-title">Generation details</h3><p>Recorded inputs, outputs, and retry history.</p></div></div>
                   <div id="project-trace-sections" class="trace-sections"></div>
                 </section>
-                <div id="project-final" class="project-final" hidden><video id="project-video" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a></div>
+                <div id="project-final" class="project-final" hidden><video id="project-video" aria-label="30-second project preview" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a></div>
               </div>
             </aside>
           </div>
@@ -227,11 +227,12 @@
               <h2 id="vault-player-title">Vault video</h2>
               <button id="vault-player-close" class="button secondary" type="button">Close</button>
             </div>
-            <video id="vault-player" controls playsinline preload="metadata"></video>
+            <video id="vault-player" aria-label="Selected protected video" controls playsinline preload="metadata"></video>
           </dialog>
         </section>
 
-        <section class="view" data-page="settings">
+        <section class="view" data-page="settings" aria-labelledby="settings-view-heading">
+          <h2 id="settings-view-heading" class="visually-hidden">Settings</h2>
           <div class="settings-grid">
             <section class="panel settings-provider-panel">
               <div class="panel-head"><div><h2>Video generation</h2><p>Select the provider used for new video jobs.</p></div></div>

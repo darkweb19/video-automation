@@ -478,6 +478,8 @@ video {
   display: flex;
   width: var(--sidebar-width);
   flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 28px 16px 20px;
   border-right: 1px solid var(--rule);
   background: var(--white);
@@ -1275,7 +1277,39 @@ video {
 
 @media (max-width: 1000px) {
   .hero {
-    grid-template-columns: minmax(0, 1.1fr) minmax(200px, 0.9fr);
+    grid-template-columns: minmax(0, 1fr);
+    gap: 28px;
+  }
+
+  .hero-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-content: start;
+    gap: 10px;
+    border-top: 1px solid rgb(255 255 255 / 24%);
+    border-left: 0;
+    padding: 14px 0 0;
+  }
+
+  .hero-facts > div {
+    padding: 0;
+  }
+
+  .hero-facts > div + div {
+    border-top: 0;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stat-card:nth-child(3) {
+    padding-left: 0;
+    border-top: 1px solid var(--rule);
+    border-left: 0;
+  }
+
+  .stat-card:nth-child(4) {
+    border-top: 1px solid var(--rule);
   }
 
   .stat-card {
@@ -1298,6 +1332,7 @@ video {
   }
 
   .sidebar {
+    top: 92px;
     transform: translateX(-102%);
     transition: transform 180ms ease;
   }
@@ -1335,6 +1370,10 @@ video {
 
   .panel {
     padding: 20px;
+  }
+
+  .form-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .hero {
@@ -1412,6 +1451,27 @@ video {
     grid-column: 2;
     grid-row: 1;
   }
+
+  .terminal-line {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "time status"
+      "stage stage"
+      "message message";
+    gap: 4px 8px;
+  }
+
+  .terminal-stage {
+    max-width: none;
+  }
+
+  .terminal-status {
+    text-align: right;
+  }
+
+  .status-stage {
+    min-height: 200px;
+  }
 }
 
 @media (max-width: 520px) {
@@ -1444,5 +1504,10 @@ video {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .progress-bar.indeterminate {
+    transform: none !important;
+    animation: none !important;
   }
 }
