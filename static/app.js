@@ -176,6 +176,11 @@
     displayedGenerationStatus: "",
     pollTimer: 0,
     mode: "project",
+    submissionPending: false,
+    projectSubmissionPending: false,
+    projectSubmissionFailed: false,
+    singleSubmissionPending: false,
+    singleSubmissionFailed: false,
     projects: [],
     currentProjectID: "",
     displayedProjectID: "",
@@ -466,8 +471,8 @@
 
   function syncGenerationModeDisplay() {
     const project = state.mode === "project";
-    const hasSingleResult = displayedGenerationAvailable();
-    const hasProjectResult = displayedProjectAvailable();
+    const hasSingleResult = displayedGenerationAvailable() || state.singleSubmissionPending || state.singleSubmissionFailed;
+    const hasProjectResult = displayedProjectAvailable() || state.projectSubmissionPending || state.projectSubmissionFailed;
     const hasSelectedResult = project ? hasProjectResult : hasSingleResult;
 
     elements.statusActive.hidden = project || !hasSingleResult;
@@ -479,10 +484,12 @@
       return;
     }
 
-    const status = project ? state.displayedProjectStatus : state.displayedGenerationStatus;
+    const status = project
+      ? (state.projectSubmissionPending ? "submitting" : state.projectSubmissionFailed ? "failed" : state.displayedProjectStatus)
+      : (state.singleSubmissionPending ? "submitting" : state.singleSubmissionFailed ? "failed" : state.displayedGenerationStatus);
     if (!status) return;
     elements.statusBadge.className = "badge " + statusClass(status);
-    elements.statusBadge.textContent = status.replaceAll("_", " ");
+    elements.statusBadge.textContent = status === "submitting" ? "Submitting" : status.replaceAll("_", " ");
   }
 
   function setGenerationMode(mode) {
@@ -500,7 +507,7 @@
     elements.singleOptions.hidden = project;
     elements.prompt.hidden = project;
     elements.prompt.closest(".field").hidden = project;
-    elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
+    if (!state.submissionPending) elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
     elements.modalAccountProjectField.hidden = state.videoProvider !== "modal" || !project;
     elements.modalAccountSingleField.hidden = state.videoProvider !== "modal" || project;
     if (project) {
@@ -620,6 +627,7 @@
 
   function syncNavigationAccessibility() {
     const compact = isCompactNavigation();
+    const focusWasInSidebar = elements.sidebar.contains(document.activeElement);
     if (!compact) elements.sidebar.classList.remove("open");
     const open = compact && elements.sidebar.classList.contains("open");
     const hidden = compact && !open;
@@ -627,6 +635,7 @@
     elements.sidebar.setAttribute("aria-hidden", String(hidden));
     elements.menuButton.setAttribute("aria-expanded", String(open));
     elements.menuButton.setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
+    if (hidden && focusWasInSidebar) elements.menuButton.focus({ preventScroll: true });
   }
 
   function setNavigationOpen(open, options = {}) {
@@ -719,6 +728,7 @@
       toast("Change your password before using the dashboard.", true);
     }
     const previousView = $(".view.active")?.dataset.page || "";
+    const navigationWasOpen = isCompactNavigation() && elements.sidebar.classList.contains("open");
     const metadata = viewMeta[view];
     $$(".view").forEach((node) => node.classList.toggle("active", node.dataset.page === view));
     $$(".nav-item").forEach((node) => {
@@ -731,10 +741,8 @@
     elements.pageKicker.textContent = metadata.kicker;
     document.title = metadata.title + " | FrameVault";
     setNavigationOpen(false);
-    if (previousView !== view) {
-      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-      focusPageTitle();
-    }
+    if (previousView !== view) window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    if (previousView !== view || navigationWasOpen) focusPageTitle();
     if (view === "settings" && !state.mustChangePassword) loadSettings(false);
     if (view === "vault" && !state.mustChangePassword) loadVault();
     if (view === "history" && !state.mustChangePassword) {
@@ -928,6 +936,7 @@
     state.models.forEach((model) => {
       const option = make("button", { className: "model-option", type: "button" });
       option.dataset.value = model.id;
+      option.tabIndex = -1;
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", String(model.id === elements.model.value));
       option.append(modelOptionContent(model));
@@ -939,6 +948,15 @@
 
   function selectedModel() {
     return state.models.find((model) => model.id === elements.model.value) || null;
+  }
+
+  function updateGenerateAvailability() {
+    const model = selectedModel();
+    elements.generate.disabled = state.submissionPending || !model
+      || (state.mode === "project" && !supportsProject(model));
+    if (!state.submissionPending) {
+      elements.generate.textContent = state.mode === "project" ? "Generate 30-second project" : "Generate video";
+    }
   }
 
   function fillSelect(select, values, formatter, fallbackLabel) {
@@ -969,7 +987,7 @@
       fillSelect(elements.aspectRatio, [], String, "Provider default");
       elements.resolutionField.hidden = true;
       elements.audioOption.hidden = true;
-      elements.generate.disabled = true;
+      updateGenerateAvailability();
       updateEstimate();
       return;
     }
@@ -981,7 +999,7 @@
     elements.audioOption.hidden = model.audio !== true;
     if (model.audio !== true) elements.generateAudio.checked = false;
     const projectCompatible = supportsProject(model);
-    elements.generate.disabled = state.mode === "project" && !projectCompatible;
+    updateGenerateAvailability();
     updateModalAccountSelectors();
     elements.projectModelNote.textContent = projectCompatible
       ? "This model supports the five-scene 6-second, 480p, 9:16 project preset."
@@ -1516,6 +1534,10 @@
   function clearGenerationDisplay(id = "") {
     const matchesCurrent = !id || state.currentGenerationID === id;
     const matchesDisplay = !id || state.displayedGenerationID === id;
+    if (!id) {
+      state.singleSubmissionPending = false;
+      state.singleSubmissionFailed = false;
+    }
     if (matchesCurrent) {
       stopPolling();
       state.currentGenerationID = "";
@@ -1543,6 +1565,10 @@
   function clearProjectDisplay(id = "") {
     const matchesCurrent = !id || state.currentProjectID === id;
     const matchesDisplay = !id || state.displayedProjectID === id;
+    if (!id) {
+      state.projectSubmissionPending = false;
+      state.projectSubmissionFailed = false;
+    }
     if (matchesCurrent) {
       stopProjectPolling();
       state.currentProjectID = "";
@@ -1670,6 +1696,7 @@
       if (!state.authenticated || state.currentGenerationID !== id) return;
       try {
         const record = await request(`/status?id=${encodeURIComponent(id)}`);
+        if (!state.authenticated || state.currentGenerationID !== id) return;
         setStatusRecord(record);
         const terminal = record.status === "completed" || record.status === "failed";
         if (terminal) {
@@ -1680,7 +1707,7 @@
         }
         pollGeneration(id, 3000);
       } catch (error) {
-        if (error.status === 401) return;
+        if (error.status === 401 || state.currentGenerationID !== id) return;
         elements.statusError.textContent = error.message;
         elements.statusError.hidden = false;
         elements.retryStatus.hidden = false;
@@ -2036,6 +2063,7 @@
       if (!state.authenticated || state.currentProjectID !== id) return;
       try {
         const payload = await request(`/api/projects/${encodeURIComponent(id)}`);
+        if (!state.authenticated || state.currentProjectID !== id) return;
         const project = payload && payload.project ? payload.project : payload;
         if (state.mode === "project") renderProject(project);
         const status = String(projectValue(project, "status")).toLowerCase();
@@ -2045,7 +2073,7 @@
           toast(status === "failed" || status === "error" ? "Project failed." : "30-second video saved.", status === "failed" || status === "error");
         }
       } catch (error) {
-        if (error.status === 401) return;
+        if (error.status === 401 || state.currentProjectID !== id) return;
         elements.projectError.hidden = false;
         elements.projectError.textContent = error.message;
         pollProject(id, 5000);
@@ -2172,6 +2200,7 @@
   }
 
   async function submitProject() {
+    if (state.submissionPending) return;
     const topic = elements.projectTopic.value.trim();
     const topicLength = Array.from(topic).length;
     elements.projectTopicError.textContent = "";
@@ -2190,6 +2219,10 @@
       toast("Choose a model that supports 6-second clips at 480p in 9:16.", true);
       return;
     }
+    clearProjectDisplay();
+    state.submissionPending = true;
+    state.projectSubmissionPending = true;
+    state.projectSubmissionFailed = false;
     setButtonBusy(elements.generate, true, "Building project...");
     elements.statusEmpty.hidden = true;
     elements.projectStatus.hidden = false;
@@ -2208,6 +2241,8 @@
       const payload = await request("/api/projects", { method: "POST", body: JSON.stringify(requestBody) });
       const project = payload && payload.project ? payload.project : payload;
       const id = projectID(project);
+      state.projectSubmissionPending = false;
+      state.projectSubmissionFailed = false;
       renderProject(project);
       if (!id) throw new APIError("Project was created without an id.", 500);
       elements.projectTopic.value = "";
@@ -2216,20 +2251,25 @@
       pollProject(id, 1000);
       loadProjects(false);
     } catch (error) {
+      state.projectSubmissionPending = false;
+      state.projectSubmissionFailed = true;
       elements.projectError.hidden = false;
       elements.projectError.textContent = error.message;
       elements.statusBadge.className = "badge failed";
       elements.statusBadge.textContent = "Failed";
+      syncGenerationModeDisplay();
       if (error.status !== 401) toast(error.message, true);
     } finally {
+      state.submissionPending = false;
       setButtonBusy(elements.generate, false);
-      const currentModel = selectedModel();
-      elements.generate.disabled = !currentModel || (state.mode === "project" && !supportsProject(currentModel));
+      updateGenerateAvailability();
+      syncGenerationModeDisplay();
     }
   }
 
   async function submitGeneration(event) {
     event.preventDefault();
+    if (state.submissionPending) return;
     if (state.mode === "project") {
       await submitProject();
       return;
@@ -2266,6 +2306,10 @@
     if (elements.aspectRatio.value) requestBody.aspect_ratio = elements.aspectRatio.value;
     if (elements.generateAudio.checked) requestBody.generate_audio = true;
 
+    clearGenerationDisplay();
+    state.submissionPending = true;
+    state.singleSubmissionPending = true;
+    state.singleSubmissionFailed = false;
     setButtonBusy(elements.generate, true, "Submitting…");
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = false;
@@ -2281,8 +2325,10 @@
 
     try {
       const record = await request("/generate", { method: "POST", body: JSON.stringify(requestBody) });
+      state.singleSubmissionPending = false;
+      state.singleSubmissionFailed = false;
       setStatusRecord(record);
-      elements.generatorForm.reset();
+      elements.prompt.value = "";
       elements.promptCount.textContent = "0 / 4000";
       elements.promptError.textContent = "";
       updateModelOptions();
@@ -2290,16 +2336,21 @@
       pollGeneration(record.id, 1000);
       loadHistory(false);
     } catch (error) {
+      state.singleSubmissionPending = false;
+      state.singleSubmissionFailed = true;
       elements.statusBadge.className = "badge failed";
       elements.statusBadge.textContent = "Failed";
       elements.progressWrap.hidden = true;
       elements.statusDetail.textContent = "The request was not submitted.";
       elements.statusError.textContent = error.message;
       elements.statusError.hidden = false;
+      syncGenerationModeDisplay();
       if (error.status !== 401) toast(error.message, true);
     } finally {
+      state.submissionPending = false;
       setButtonBusy(elements.generate, false);
-      elements.generate.disabled = !elements.model.value;
+      updateGenerateAvailability();
+      syncGenerationModeDisplay();
     }
   }
 
@@ -3047,9 +3098,10 @@
       } else if (event.key === "Escape") {
         closeModelMenu();
         elements.modelTrigger.focus({ preventScroll: true });
-      } else if (event.key === "Tab") {
-        closeModelMenu();
       }
+    });
+    elements.modelPicker.addEventListener("focusout", (event) => {
+      if (!elements.modelPicker.contains(event.relatedTarget)) closeModelMenu();
     });
     document.addEventListener("click", (event) => {
       if (!elements.modelPicker.contains(event.target)) closeModelMenu();
@@ -3072,7 +3124,15 @@
     document.addEventListener("pointerdown", (event) => {
       if (!isCompactNavigation() || !elements.sidebar.classList.contains("open")) return;
       if (elements.sidebar.contains(event.target) || elements.menuButton.contains(event.target)) return;
-      setNavigationOpen(false);
+      setNavigationOpen(false, { returnFocus: true });
+    });
+    elements.sidebar.addEventListener("focusout", () => {
+      window.requestAnimationFrame(() => {
+        if (isCompactNavigation() && elements.sidebar.classList.contains("open")
+          && !elements.sidebar.contains(document.activeElement)) {
+          setNavigationOpen(false);
+        }
+      });
     });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
