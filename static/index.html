@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FrameVault — Video workspace</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260928-1">
-  <link rel="stylesheet" href="/static/model-picker.css?v=20260928-1">
-  <link rel="stylesheet" href="/static/project.css?v=20260928-1">
-  <link rel="stylesheet" href="/static/history-settings.css?v=20260928-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260929-1">
+  <link rel="stylesheet" href="/static/model-picker.css?v=20260929-1">
+  <link rel="stylesheet" href="/static/project.css?v=20260929-1">
+  <link rel="stylesheet" href="/static/history-settings.css?v=20260929-1">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -107,7 +107,7 @@
                 <div class="field model-field">
                   <label id="model-label" for="model-trigger">Video model and price</label>
                   <div id="model-picker" class="model-picker">
-                    <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
+                    <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
                       <span id="model-trigger-content" class="model-trigger-content"><span class="model-placeholder">Loading models…</span></span>
                       <span class="model-chevron" aria-hidden="true"></span>
                     </button>
@@ -180,7 +180,7 @@
 
         <section class="view" data-page="history">
           <div class="history-page-head">
-            <div><h2>Generation history</h2><p>Videos, project runs, and the process logs saved with each run.</p></div>
+            <div><h2 class="visually-hidden">Generation history</h2><p>Videos, project runs, and the process logs saved with each run.</p></div>
             <button id="refresh-history" class="button secondary">Refresh history</button>
           </div>
           <div class="history-library">
@@ -191,7 +191,7 @@
 
         <section class="view" data-page="vault">
           <div class="vault-page-head">
-            <div><h2>Vault</h2><p>Videos you moved out of History.</p></div>
+            <div><h2 class="visually-hidden">Vault</h2><p>Videos you moved out of History.</p></div>
             <button id="vault-lock" class="button secondary" type="button" hidden>Lock Vault</button>
           </div>
           <div id="vault-locked" class="panel vault-lock-panel">
@@ -285,6 +285,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260928-1" defer></script>
+  <script src="/static/app.js?v=20260929-1" defer></script>
 </body>
 </html>

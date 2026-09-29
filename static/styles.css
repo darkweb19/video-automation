@@ -609,6 +609,10 @@ video {
   margin-bottom: 4px;
 }
 
+#page-title:focus:not(:focus-visible) {
+  outline: none;
+}
+
 .account {
   display: flex;
   align-items: center;
@@ -1475,6 +1479,14 @@ video {
 }
 
 @media (max-width: 520px) {
+  .hero-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hero-facts > div:last-child {
+    grid-column: 1 / -1;
+  }
+
   .account {
     gap: 8px;
   }

@@ -371,6 +371,7 @@
 }
 
 .settings-grid {
+  display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: 18px;
 }
@@ -900,5 +901,29 @@
 
   .vault-player-head {
     padding: 14px;
+  }
+}
+
+@media (max-width: 520px) {
+  .history-terminal-section .terminal-line {
+    grid-template-columns: 19px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "index time status"
+      ". stage stage"
+      ". message message";
+    gap: 4px 6px;
+  }
+
+  .history-terminal-section .terminal-stage {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .history-meta strong {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }
