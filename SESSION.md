@@ -20,7 +20,7 @@
 
 ## Next steps
 1. Rebuild the app/container and visually review Overview, Generate, History, Vault, and Settings on desktop and mobile, including keyboard navigation.
-2. Push the local `feat/apple-monochrome-dashboard` branch and open a PR when requested; no remote push or deployment ran in this session.
+2. Open a PR from `feat/apple-monochrome-dashboard` when requested; deployment still requires its own preflight.
 3. For SkyReels deployment, run preflight in the intended Modal account and follow `workers/modal/README.md`; check credits before an explicitly authorized live generation.
 
 ## Gotchas
