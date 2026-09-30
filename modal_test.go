@@ -50,6 +50,98 @@ func TestModalVideoClientUsesNormalizedAPI(t *testing.T) {
 	}
 }
 
+func TestLegacyModalAcknowledgmentFailsCallbackJobWithoutResubmitting(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postCount := 0
+	submittedID := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/videos" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		postCount++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		jobID, ok := body["job_id"].(string)
+		if !ok || !strings.HasPrefix(jobID, "gen_") || body["callback_url"] == nil || body["callback_token"] == nil {
+			t.Fatalf("callback submission missing durable identifiers: %#v", body)
+		}
+		submittedID = jobID
+		// An older worker ignores the callback fields and creates its own id.
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": jobID + "_legacy", "status": "pending"})
+	}))
+	defer server.Close()
+
+	configID := "provider_config_legacy_callback_ack"
+	encryptedAPIKey, err := security.EncryptSetting("video_provider_config."+configID, "legacy-worker-api-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertProviderConfig(ProviderConfig{ID: configID, Provider: string(VideoProviderModal), BaseURL: server.URL, EncryptedAPIKey: encryptedAPIKey}); err != nil {
+		t.Fatal(err)
+	}
+	app := &dashboardApp{store: store, security: security}
+	t.Setenv("VIDEO_CALLBACK_BASE_URL", "https://dashboard.example.test")
+	job, err := app.prepareCallbackJob(GenerateRequest{Prompt: "A kite", Model: "modal/model", Duration: 6}, configID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.insertCallbackGeneration(job, ""); err != nil {
+		t.Fatal(err)
+	}
+	p := NewProcessor(store, security, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p.submitCallbackJob(context.Background(), job)
+
+	record, err := store.Generation(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "failed" || !strings.Contains(record.Error, "does not support callback jobs") {
+		t.Fatalf("legacy worker mismatch was not persisted clearly: %+v", record)
+	}
+	if submittedID != job.ID {
+		t.Fatalf("request id = %q, durable id = %q", submittedID, job.ID)
+	}
+	p.processCallbackJobs(context.Background())
+	if postCount != 1 {
+		t.Fatalf("legacy worker was submitted %d times; want exactly 1", postCount)
+	}
+}
+
+func TestCallbackSubmissionDoesNotFollowRedirectWithBearerBody(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			redirectedRequests := 0
+			second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				redirectedRequests++
+				body, _ := io.ReadAll(r.Body)
+				t.Errorf("callback submission body reached redirect target: %q", body)
+			}))
+			defer second.Close()
+			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Redirect(w, httptest.NewRequest(http.MethodPost, "/videos", nil), second.URL+"/videos", status)
+			}))
+			defer first.Close()
+
+			client := NewModalVideoClient(first.URL, "modal-test-key")
+			_, err := client.SubmitVideo(context.Background(), GenerateRequest{Prompt: "a kite", Model: "modal/model", Duration: 6}, VideoCallbackSubmission{
+				JobID: "gen_callback_redirect", CallbackURL: "https://dashboard.example.test/api/video-callbacks/gen_callback_redirect", CallbackToken: strings.Repeat("a", 64),
+			})
+			if !errors.Is(err, errCallbackSubmissionRedirect) {
+				t.Fatalf("redirect error = %v", err)
+			}
+			if redirectedRequests != 0 {
+				t.Fatalf("redirect target received %d callback submission requests", redirectedRequests)
+			}
+		})
+	}
+}
+
 func TestProviderSnapshotsPersist(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.InsertGeneration(GenerationRecord{ID: "modal_job", VideoProvider: string(VideoProviderModal), Prompt: "test", Model: "modal/wan", Status: "queued"}); err != nil {

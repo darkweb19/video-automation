@@ -175,6 +175,7 @@ func TestModalAccountsAndGenerationEventsNeverExposeSecrets(t *testing.T) {
 
 func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 	store := newTestStore(t)
+	t.Setenv("VIDEO_CALLBACK_BASE_URL", "https://dashboard.example.test/")
 	security, err := NewSecurity(store)
 	if err != nil {
 		t.Fatal(err)
@@ -221,8 +222,12 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 	if generated.Code != http.StatusAccepted {
 		t.Fatalf("generation status=%d body=%s", generated.Code, generated.Body.String())
 	}
-	record, err := store.Generation("selected_job")
-	if err != nil || record.ProviderConfigID == "" || record.VideoProvider != string(VideoProviderModal) {
+	var response GenerationRecord
+	if err := json.NewDecoder(generated.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Generation(response.ID)
+	if err != nil || record.ProviderConfigID == "" || record.VideoProvider != string(VideoProviderModal) || record.Status != "queued" {
 		t.Fatalf("generation record=%#v err=%v", record, err)
 	}
 
@@ -354,8 +359,9 @@ func TestSwitchingActiveModalAccountAllowsPriorAccountDeletion(t *testing.T) {
 	}
 }
 
-func TestImmediateFailedSubmissionReturnsPersistedSafeEvent(t *testing.T) {
+func TestAsyncCallbackFailureReturnsPersistedSafeEvent(t *testing.T) {
 	store := newTestStore(t)
+	t.Setenv("VIDEO_CALLBACK_BASE_URL", "https://dashboard.example.test")
 	security, err := NewSecurity(store)
 	if err != nil {
 		t.Fatal(err)
@@ -364,8 +370,6 @@ func TestImmediateFailedSubmissionReturnsPersistedSafeEvent(t *testing.T) {
 		switch r.URL.Path {
 		case "/videos/models":
 			_, _ = w.Write([]byte(`{"data":[{"id":"modal/failed","supported_durations":[6]}]}`))
-		case "/videos":
-			_, _ = w.Write([]byte(`{"id":"failed_immediately","status":"failed","progress":42,"error":"Authorization: Bearer exposed-provider-secret"}`))
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -394,12 +398,39 @@ func TestImmediateFailedSubmissionReturnsPersistedSafeEvent(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Status != "failed" || response.Progress != 42 || len(response.Events) != 1 || strings.Contains(response.Error, "exposed-provider-secret") || !strings.Contains(response.Error, "Video provider") {
-		t.Fatalf("unsafe/incomplete failed response: %#v", response)
+	if response.Status != "queued" || response.ID == "" {
+		t.Fatalf("Modal request was not persisted before provider dispatch: %#v", response)
 	}
-	persisted, err := store.Generation(response.ID)
-	if err != nil || persisted.Error != response.Error || len(persisted.Events) != 1 {
-		t.Fatalf("failed submission was not durably persisted: %#v err=%v", persisted, err)
+	job, err := store.callbackJob(response.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := security.DecryptSetting("video_callback."+job.ID, job.EncryptedToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackBody, err := json.Marshal(videoCallback{ID: response.ID, Status: "failed", Sequence: 1, Progress: 42, ErrorCode: "generation_failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackRequest := httptest.NewRequest(http.MethodPost, "/api/video-callbacks/"+response.ID, strings.NewReader(string(callbackBody)))
+	callbackRequest.Header.Set("Authorization", "Bearer "+token)
+	callbackRequest.Header.Set("Content-Type", "application/json")
+	callbackResponse := httptest.NewRecorder()
+	NewDashboardHandler(store, security, nil).ServeHTTP(callbackResponse, callbackRequest)
+	if callbackResponse.Code != http.StatusNoContent {
+		t.Fatalf("callback status=%d body=%s", callbackResponse.Code, callbackResponse.Body.String())
+	}
+	failed, err := store.Generation(response.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "failed" || failed.Progress != 42 || len(failed.Events) != 2 || strings.Contains(failed.Error, "exposed-provider-secret") || !strings.Contains(failed.Error, "Modal could not generate") {
+		t.Fatalf("unsafe/incomplete failed response: %#v", failed)
+	}
+	serialized, err := json.Marshal(failed)
+	if err != nil || strings.Contains(string(serialized), token) {
+		t.Fatalf("callback credential leaked into generation response: %s err=%v", serialized, err)
 	}
 }
 
