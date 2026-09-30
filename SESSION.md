@@ -1,32 +1,30 @@
-# Session handoff — 2026-09-29
+# Session handoff — 2026-09-30
 
 ## What was done
-- Continued the existing Apple-inspired monochrome dashboard using frontend-design, Terra MAX, and Luna MAX.
-- Finished responsive wrapping, sentence-case preset labels, Settings grid layout, visible keyboard focus, and model-picker accessibility in `static/`.
-- Preserved submission progress/errors across format switches, blocked duplicate submissions, rejected stale poll responses, and retained new project ideas when a clip finishes.
-- Added eleven dependency-free UI regression cases in `tests/dashboard-ui.test.cjs` and recorded the design system in `docs/frontend-redesign.md`.
-- Merged the UI checkout into the active `feat/apple-monochrome-dashboard` branch; existing SkyReels worker commits remain intact.
-- Verified the integrated tree with Go tests/vet/build, JavaScript syntax, all eleven UI tests, diff checks, and an isolated HTTP smoke run for final assets, auth, settings, History, and Vault flows.
+- Added random project/single prompt generation using five shuffled OpenRouter `:free` text models, bounded to 12 seconds per attempt and 70 seconds overall, with mocked fallback/error tests.
+- Added authenticated Modal completion callbacks for new jobs, durable same-ID claims/recovery, callback retries, and legacy polling compatibility across Go, Wan, and SkyReels workers.
+- Capped local single/project-scene downloads at five attempts with persisted actionable failure state and scene retry tests.
+- Updated root and worker documentation for user setup, callback rollout, runtime capabilities, and developer checks.
+- Verified Go tests/vet/build, gofmt, both Python offline suites (Wan 19; SkyReels 23), JavaScript syntax/UI (11), and `git diff --check`.
+- Independent review cleared both Modal callback workers with no remaining findings.
+- Created local implementation commit `1fb9ad1` and documentation commit `78cd0ff`; nothing was pushed.
 
 ## Decisions locked
-- Retain the existing monochrome design: black/white/cloud gray, system typography, left-aligned content, minimal controls, and light white-card toasts.
-- Keep browser code in `static/` and preserve same-origin authenticated APIs and encrypted credentials. No backend or storage changes were needed.
-- Keep the fixed project preset at five six-second 480p 9:16 scenes; model capabilities and prices remain runtime data.
-- No invented usage, prices, or video thumbnails are added. Synthetic data appears only in test fixtures.
-- Keep story/script generation on OpenRouter. The pending SkyReels deployment remains configured through Modal accounts with an `/api/v1` endpoint.
+- The 30-second project remains five six-second 480p 9:16 scenes; OpenRouter remains the story/script provider.
+- Random prompt fallback is limited to the five documented free OpenRouter text models; there is no paid fallback.
+- New Modal jobs use callbacks; OpenRouter and legacy Modal jobs retain polling. Unknown/ambiguous Modal dispatch acknowledgments remain pending and are never resubmitted under the same job ID.
+- Callback delivery requires a public HTTPS dashboard origin in `VIDEO_CALLBACK_BASE_URL`; deploy updated callback-capable workers before Go submits callback fields.
+- No live provider calls, paid generation, deployment, or push occurred.
 
 ## Open questions
-- No implementation questions. Fresh desktop/mobile visual sign-off remains pending because the browser was unavailable.
+- None.
 
 ## Next steps
-1. Rebuild the app/container and visually review Overview, Generate, History, Vault, and Settings on desktop and mobile, including keyboard navigation.
-2. Open a PR from `feat/apple-monochrome-dashboard` when requested; deployment still requires its own preflight.
-3. For SkyReels deployment, run preflight in the intended Modal account and follow `workers/modal/README.md`; check credits before an explicitly authorized live generation.
+1. For an authorized rollout, run preflight, deploy both Modal workers, configure the public HTTPS callback origin on the Go host, then update Go.
+2. Do not push or deploy without explicit authorization.
 
 ## Gotchas
-- Browser discovery returned no available browser, so no fresh screenshots or rendered-layout claims were made.
-- Local Go checks need `GOCACHE` set to the workspace `.gocache`; use `node --test tests/dashboard-ui.test.cjs` for UI regressions.
-- The HTTP smoke script/binary are ignored local files under `.gocache`; its temporary SQLite data was removed and server stopped.
-- The UI checkout remains at `.worktrees/apple-dashboard`; the integrated changes are also in the main workspace.
-- The pre-existing untracked `modal/__pycache__/` directory was left untouched.
-- No paid provider generation or cloud deployment ran. Never read or print `.env` contents or credentials.
+- Set `$env:GOCACHE = Join-Path (Get-Location) '.gocache'` before Go checks in this PowerShell workspace.
+- `VIDEO_CALLBACK_BASE_URL` is optional at startup and for OpenRouter, but required for Modal submissions; it must be a public HTTPS origin without path/query/fragment/userinfo.
+- Preserve the pre-existing untracked `modal/__pycache__/`; generated caches and ignored `.gocache` are not part of the planned commits.
+- Never read or print `.env` contents or credentials. No live generation/deployment has been tested.
