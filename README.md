@@ -155,6 +155,8 @@ Each Modal deployment has its own endpoint and key. The key is encrypted at rest
 
 The supplied service requires `callback_url` and `callback_token` on video creation. The dashboard supplies both internally after `PUBLIC_BASE_URL` is configured; do not add the callback token to a Modal secret, browser setting, proxy log, or source file. On completion or failure, Modal writes the terminal job state first and sends a bounded-retry HTTPS callback. If delivery is exhausted, the dashboard uses a sparse persisted recovery check after the callback deadline and backs it off after each attempt. This recovery survives restarts and is separate from normal OpenRouter status polling.
 
+For SkyReels V2 deployment steps and model limits, see the [worker README](workers/modal/README.md).
+
 ## Dashboard behavior
 
 For OpenRouter, the model list includes provider-supplied per-second pricing where available, such as `$0.50/sec`; otherwise it shows `From …/sec` or `Price unavailable`. The dashboard shows estimates only when the active provider supplies pricing. Modal's API returns no per-video price, so its compute cost is billed separately by Modal. History stores the cost value reported by the selected provider; confirm the provider's billing dashboard for actual charges.

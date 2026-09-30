@@ -1,48 +1,87 @@
+/* Project progress remains operational, but uses a quiet monochrome hierarchy. */
 .scene-progress-label {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 700;
+  color: var(--muted, #6e6e73);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .scene-progress {
-  height: 5px;
-  margin-top: 9px;
+  height: 4px;
+  margin-top: 10px;
   overflow: hidden;
-  border-radius: 99px;
-  background: #eceef3;
+  border-radius: 999px;
+  background: var(--cloud, #f5f5f7);
 }
 
 .scene-progress-bar {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #7766ee, #9a8cff);
-  transition: width 0.25s ease;
+  background: var(--ink, #000);
+  transition: width .2s ease;
+}
+
+.project-options {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  margin: 16px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 14px;
+  background: var(--cloud, #f5f5f7);
+}
+
+.project-options span {
+  color: var(--muted, #6e6e73);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.4;
+  text-transform: none;
+}
+
+.project-options strong {
+  color: var(--ink, #000);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.project-pipeline,
+.project-trace {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule, #d2d2d7);
 }
 
 .project-pipeline {
-  margin: 20px 0 18px;
-  padding-top: 17px;
-  border-top: 1px solid #edf0f4;
+  margin-bottom: 20px;
 }
 
 .trace-heading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 16px;
+  margin-bottom: 13px;
 }
 
 .trace-heading h3 {
   margin: 0;
-  font-size: 12px;
+  color: var(--ink, #000);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -.01em;
 }
 
 .trace-heading p,
 .trace-caption {
   margin: 3px 0 0;
-  color: var(--muted);
-  font-size: 10px;
+  color: var(--muted, #6e6e73);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .pipeline-list {
@@ -56,18 +95,18 @@
 .pipeline-item {
   position: relative;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  gap: 9px;
-  min-height: 52px;
+  grid-template-columns: 26px minmax(0, 1fr);
+  min-height: 58px;
+  gap: 11px;
 }
 
 .pipeline-item:not(:last-child)::before {
   position: absolute;
-  top: 20px;
+  top: 24px;
   bottom: 0;
-  left: 10px;
+  left: 12px;
   width: 1px;
-  background: #e2e5ec;
+  background: var(--rule, #d2d2d7);
   content: "";
 }
 
@@ -75,124 +114,213 @@
   z-index: 1;
   display: grid;
   place-items: center;
-  width: 21px;
-  height: 21px;
-  border: 1px solid #dfe2e9;
+  width: 25px;
+  height: 25px;
+  border: 1px solid var(--rule, #d2d2d7);
   border-radius: 50%;
-  background: #fff;
-  color: #8991a0;
+  background: var(--white, #fff);
+  color: var(--muted, #6e6e73);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .pipeline-completed .pipeline-marker {
-  border-color: #b9e5d1;
-  background: #e7f7f0;
-  color: var(--success);
+  border-color: var(--ink, #000);
+  background: var(--ink, #000);
+  color: var(--white, #fff);
 }
 
 .pipeline-processing .pipeline-marker,
 .pipeline-queued .pipeline-marker {
-  border-color: #d6cffd;
-  background: #f1efff;
-  color: var(--primary);
+  border-color: var(--graphite, #3a3a3c);
+  background: var(--cloud, #f5f5f7);
+  color: var(--graphite, #3a3a3c);
 }
 
 .pipeline-failed .pipeline-marker,
 .pipeline-download_failed .pipeline-marker {
-  border-color: #f0c3c0;
-  background: #ffeded;
-  color: var(--danger);
+  border-color: var(--graphite, #3a3a3c);
+  background: var(--graphite, #3a3a3c);
+  color: var(--white, #fff);
 }
 
 .pipeline-copy {
   min-width: 0;
-  padding: 1px 0 13px;
+  padding: 2px 0 16px;
 }
 
 .pipeline-title {
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-height: 21px;
+  min-width: 0;
+  min-height: 25px;
+  gap: 9px;
 }
 
 .pipeline-title strong {
-  font-size: 11px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink, #000);
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .pipeline-title .badge {
   margin-left: auto;
-  padding: 3px 7px;
-  font-size: 9px;
+  padding: 4px 8px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 999px;
+  background: var(--cloud, #f5f5f7);
+  color: var(--graphite, #3a3a3c);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .pipeline-copy p {
-  margin: 3px 0 0;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.45;
+  margin: 4px 0 0;
+  color: var(--muted, #6e6e73);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .pipeline-meta {
   display: block;
-  margin-top: 4px;
-  color: #8a92a0;
-  font-size: 9px;
+  margin-top: 5px;
+  color: var(--muted, #6e6e73);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .pipeline-error {
-  margin-top: 5px;
-  color: var(--danger);
-  font-size: 10px;
-  line-height: 1.4;
+  margin-top: 6px;
+  color: var(--graphite, #3a3a3c);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
 }
 
 .pipeline-event-details {
-  margin-top: 5px;
-  font-size: 10px;
+  margin-top: 7px;
+  font-size: 12px;
 }
 
 .pipeline-event-details summary {
-  color: var(--primary);
+  color: var(--ink, #000);
   cursor: pointer;
-  font-weight: 700;
+  font-weight: 600;
 }
 
-.project-trace {
-  margin-top: 20px;
-  padding-top: 17px;
-  border-top: 1px solid #edf0f4;
+.project-story {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 14px;
+  background: var(--cloud, #f5f5f7);
+  color: var(--graphite, #3a3a3c);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
-.project-trace > .trace-heading {
-  margin-bottom: 11px;
+.project-story strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink, #000);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.project-scenes {
+  display: grid;
+  gap: 10px;
+}
+
+.scene-card {
+  padding: 15px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 14px;
+  background: var(--white, #fff);
+}
+
+.scene-card.scene-completed {
+  border-color: var(--ink, #000);
+}
+
+.scene-card.scene-failed,
+.scene-card.scene-download_failed {
+  border-color: var(--graphite, #3a3a3c);
+  background: var(--cloud, #f5f5f7);
+}
+
+.scene-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.scene-head strong {
+  color: var(--ink, #000);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.scene-head .badge {
+  margin-left: auto;
+}
+
+.scene-copy,
+.scene-prompt {
+  margin: 9px 0 0;
+  color: var(--graphite, #3a3a3c);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.scene-prompt {
+  color: var(--muted, #6e6e73);
+}
+
+.scene-retry {
+  margin-top: 12px;
+  min-height: 34px;
+  padding: 6px 11px;
+  font-size: 12px;
+}
+
+.project-final {
+  margin-top: 22px;
+}
+
+.project-final video {
+  max-height: 360px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 14px;
+  background: var(--ink, #000);
 }
 
 .trace-sections {
   display: grid;
-  gap: 7px;
+  gap: 9px;
 }
 
 .trace-section {
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fff;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 12px;
+  background: var(--white, #fff);
 }
 
 .trace-section summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 9px;
-  min-height: 37px;
-  padding: 9px 11px;
-  color: var(--ink);
+  min-height: 44px;
+  gap: 10px;
+  padding: 10px 13px;
+  color: var(--ink, #000);
   cursor: pointer;
   list-style: none;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .trace-section summary::-webkit-details-marker {
@@ -200,10 +328,11 @@
 }
 
 .trace-section summary::before {
-  width: 12px;
-  color: var(--muted);
+  width: 14px;
+  color: var(--graphite, #3a3a3c);
   content: "+";
-  font-size: 15px;
+  font-size: 16px;
+  font-weight: 400;
   line-height: 1;
 }
 
@@ -213,7 +342,7 @@
 
 .trace-section summary:focus-visible,
 .pipeline-event-details summary:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--ink, #000);
   outline-offset: -2px;
 }
 
@@ -224,9 +353,9 @@
 .trace-section-meta {
   overflow: hidden;
   max-width: 58%;
-  color: var(--muted);
-  font-size: 9px;
-  font-weight: 500;
+  color: var(--muted, #6e6e73);
+  font-size: 11px;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -234,9 +363,9 @@
 .trace-section-body {
   display: grid;
   gap: 10px;
-  padding: 0 11px 11px;
-  border-top: 1px solid #f0f1f4;
-  background: #fcfcfd;
+  padding: 0 13px 13px;
+  border-top: 1px solid var(--rule, #d2d2d7);
+  background: var(--cloud, #f5f5f7);
 }
 
 .trace-field {
@@ -245,19 +374,17 @@
 
 .trace-label {
   display: block;
-  margin: 9px 0 4px;
-  color: var(--muted);
-  font-size: 9px;
-  font-weight: 750;
-  letter-spacing: .02em;
-  text-transform: uppercase;
+  margin: 11px 0 4px;
+  color: var(--muted, #6e6e73);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .trace-value,
 .trace-code {
   margin: 0;
-  color: #394254;
-  font-size: 10px;
+  color: var(--graphite, #3a3a3c);
+  font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -266,20 +393,44 @@
 .trace-code {
   max-height: 240px;
   overflow: auto;
-  padding: 9px;
-  border: 1px solid #e8eaf0;
-  border-radius: 6px;
-  background: #f7f7fa;
+  padding: 10px;
+  border: 1px solid var(--rule, #d2d2d7);
+  border-radius: 9px;
+  background: var(--white, #fff);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 @media (max-width: 760px) {
+  .project-options {
+    gap: 4px;
+    padding: 13px;
+  }
+
+  .pipeline-item {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .pipeline-marker {
+    width: 23px;
+    height: 23px;
+  }
+
+  .pipeline-item:not(:last-child)::before {
+    left: 11px;
+  }
+
   .trace-section-meta {
     max-width: 42%;
   }
 
   .pipeline-title .badge {
     flex-shrink: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene-progress-bar {
+    transition: none;
   }
 }
