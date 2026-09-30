@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -123,6 +124,7 @@ func safeStoryPlanSaveFailure(err error) string {
 func (p *Processor) processProjectScenes(ctx context.Context, provider VideoService, project VideoProject) {
 	complete, failed, active := 0, 0, 0
 	firstFailedScene := 0
+	firstFailedError := ""
 	for _, scene := range project.Scenes {
 		switch scene.Status {
 		case "completed":
@@ -131,6 +133,7 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider VideoServ
 			failed++
 			if firstFailedScene == 0 {
 				firstFailedScene = scene.Number
+				firstFailedError = strings.TrimSpace(scene.Error)
 			}
 		case "pending":
 			active++
@@ -140,6 +143,10 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider VideoServ
 			})
 		case "queued", "processing":
 			active++
+			callbackJob, callbackErr := p.app.store.hasCallbackJob(scene.ProviderGenerationID)
+			if callbackJob || callbackErr != nil {
+				continue
+			}
 			sceneCopy := scene
 			if project.VideoProvider == string(VideoProviderModal) {
 				if scene.ModalCallbackRecoveryAt <= time.Now().Unix() {
@@ -165,12 +172,40 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider VideoServ
 		_ = p.app.store.UpdateProjectStatus(project.ID, "combining", "")
 		p.app.store.PublishProject(project.ID)
 	} else if failed > 0 && active == 0 {
-		_ = p.app.store.UpdateProjectStatus(project.ID, "failed", fmt.Sprintf("Scene %d failed during video generation. Open its details and retry it.", firstFailedScene))
+		message := fmt.Sprintf("Scene %d failed. Open its details and retry it.", firstFailedScene)
+		if firstFailedError != "" {
+			message = fmt.Sprintf("Scene %d failed: %s Open its details and retry this scene.", firstFailedScene, firstFailedError)
+		}
+		_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
 		p.app.store.PublishProject(project.ID)
 	}
 }
 
 func (p *Processor) submitScene(ctx context.Context, provider VideoService, project VideoProject, scene ProjectScene) {
+	if _, ok := provider.(CallbackVideoProvider); ok {
+		request := GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, Resolution: ProjectResolution, AspectRatio: ProjectAspectRatio}
+		job, err := p.app.prepareCallbackJob(request, project.ProviderConfigID)
+		if err != nil {
+			message := callbackConfigurationError(err)
+			_ = p.app.store.AppendPipelineEvent(project.ID, "scene_submission", "failed", message, scene.Number, 0)
+			_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", message)
+			p.app.store.PublishProject(project.ID)
+			return
+		}
+		job.ProjectID, job.SceneNumber = project.ID, scene.Number
+		if err := p.app.store.insertCallbackScene(job); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				message := "Unable to save the secure Modal callback job. Retry this scene."
+				_ = p.app.store.AppendPipelineEvent(project.ID, "scene_submission", "failed", message, scene.Number, 0)
+				_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", message)
+				p.logger.Error("persist Modal callback scene failed", "project_id", project.ID, "scene", scene.Number)
+			}
+			p.app.store.PublishProject(project.ID)
+			return
+		}
+		p.app.store.PublishProject(project.ID)
+		return
+	}
 	if err := p.app.store.MarkSceneSubmitting(project.ID, scene.Number); err != nil {
 		return
 	}

@@ -24,7 +24,7 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger, callbackBaseURL: configuredCallbackBaseURL()}
+	app := &dashboardApp{store: store, security: security, logger: logger, callbackBaseURL: configuredCallbackBaseURL(), videoCallbackBaseURL: configuredVideoCallbackBaseURL()}
 	if security != nil {
 		if err := store.GarbageCollectProviderConfigs(); err != nil {
 			logger.Error("provider configuration garbage collection failed", "error", err)
@@ -52,6 +52,7 @@ func (p *Processor) Run(ctx context.Context) {
 }
 
 func (p *Processor) process(ctx context.Context) {
+	p.processCallbackJobs(ctx)
 	records, err := p.app.store.PendingGenerations(ctx)
 	if err != nil {
 		p.logger.Error("load pending generations failed")
@@ -83,6 +84,13 @@ func (p *Processor) process(ctx context.Context) {
 				continue
 			}
 			p.startDownload(ctx, provider, record)
+			continue
+		}
+		callbackJob, callbackErr := p.app.store.hasCallbackJob(record.ID)
+		if callbackJob || callbackErr != nil {
+			// Callback jobs wait for their authenticated terminal callback or the
+			// durable callback deadline. Legacy generations keep their existing
+			// provider-status recovery path below.
 			continue
 		}
 		if record.VideoProvider == string(VideoProviderModal) {

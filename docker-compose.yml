@@ -24,8 +24,9 @@ services:
       - "127.0.0.1:${APP_PORT:-8080}:8080"
     environment:
       DATA_DIR: /data
-      # Required before submitting Modal jobs. This must be the public HTTPS
-      # URL of the reverse proxy that can receive Modal completion callbacks.
+      # Required for new durable Modal callback jobs. Set this to the public
+      # HTTPS origin that Modal can reach; PUBLIC_BASE_URL remains a fallback.
+      VIDEO_CALLBACK_BASE_URL: ${VIDEO_CALLBACK_BASE_URL:-}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Optional first-run bootstrap only. Prefer the authenticated Settings UI.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}

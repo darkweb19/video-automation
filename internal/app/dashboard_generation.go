@@ -73,14 +73,6 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	callbackURL := ""
-	if providerID == VideoProviderModal {
-		callbackURL, err = a.modalCallbackURL()
-		if err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
-	}
 	provider, providerID, providerConfigID, err := a.videoProviderSnapshotForAccount(providerID, input.ModalAccountID)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
@@ -106,9 +98,35 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if _, ok := provider.(CallbackVideoProvider); ok {
+		job, prepareErr := a.prepareCallbackJob(request, providerConfigID)
+		if prepareErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, callbackConfigurationError(prepareErr))
+			return
+		}
+		if err := a.store.insertCallbackGeneration(job, estimateCost(request.Duration, model.PricePerSecond)); err != nil {
+			writeError(w, http.StatusInternalServerError, "unable to save callback generation")
+			return
+		}
+		persisted = true
+		record, err := a.store.Generation(job.ID)
+		if err != nil {
+			a.logger.Error("reload saved callback generation failed", "generation_id", job.ID)
+			writeError(w, http.StatusInternalServerError, "unable to load saved generation")
+			return
+		}
+		a.store.PublishGeneration(job.ID)
+		writeJSON(w, http.StatusAccepted, record)
+		return
+	}
 	callbackToken := ""
 	callbackRegistered := false
 	if providerID == VideoProviderModal {
+		callbackURL, callbackErr := a.modalCallbackURL()
+		if callbackErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, callbackErr.Error())
+			return
+		}
 		callbackToken, err = newModalCallbackToken()
 		if err == nil {
 			err = a.store.RegisterModalCallbackToken(callbackToken, "", 0)
