@@ -1804,6 +1804,7 @@
       continuity: "Continuity",
       scene_submission: "Scene submission",
       scene_poll: "Scene polling",
+      scene_callback: "Scene callback",
       scene_download: "Scene download",
       scene_retry: "Scene retry",
       combine: "Final video",
