@@ -1,16 +1,20 @@
+import asyncio
+import hashlib
+import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
 import threading
 import time
-import traceback
 import uuid
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import modal
 
@@ -55,6 +59,31 @@ TELEMETRY_INTERVAL_SECONDS = 10
 # per-request live invoice amount at completion time.
 A100_80GB_USD_PER_SECOND = 0.000694
 STATUS_POLL_RETRY_SECONDS = 2
+CALLBACK_REQUEST_TIMEOUT_SECONDS = 5
+CALLBACK_RETRY_DELAYS_SECONDS = (0, 0.25, 0.75, 1.5)
+CALLBACK_JOB_ID = re.compile(r"^gen_[a-f0-9]{32}$")
+CALLBACK_TOKEN = re.compile(r"^[a-fA-F0-9]{64}$")
+CLAIMS_DICT_NAME = "video-generation-job-claims"
+CLAIM_RECOVERY_SECONDS = 60
+TRANSIENT_MODAL_CALL_ERRORS = (
+    modal.exception.ClientClosed,
+    modal.exception.ConnectionError,
+    modal.exception.InternalError,
+    modal.exception.InternalFailure,
+    modal.exception.ResourceExhaustedError,
+    modal.exception.ServiceError,
+    modal.exception.TimeoutError,
+    OSError,
+)
+DEFINITIVE_MODAL_REJECTIONS = (
+    modal.exception.InvalidError,
+    modal.exception.AuthError,
+    modal.exception.PermissionDeniedError,
+    modal.exception.NotFoundError,
+    modal.exception.VersionError,
+    modal.exception.UnimplementedError,
+    modal.exception.RequestSizeError,
+)
 
 
 # ============================================================
@@ -94,6 +123,11 @@ model_volume = modal.Volume.from_name(
 
 jobs_volume = modal.Volume.from_name(
     "video-generation-jobs",
+    create_if_missing=True,
+)
+
+job_claims = modal.Dict.from_name(
+    CLAIMS_DICT_NAME,
     create_if_missing=True,
 )
 
@@ -157,6 +191,7 @@ api_image = (
     )
     .pip_install(
         "fastapi[standard]",
+        "httpx",
     )
 )
 
@@ -337,6 +372,13 @@ def job_json_path(
     )
 
 
+def job_call_path(job_id: str) -> Path:
+    """Separate dispatch metadata from the mutable public job status record."""
+    if not isinstance(job_id, str) or not CALLBACK_JOB_ID.fullmatch(job_id):
+        raise ValueError("invalid callback job id")
+    return Path(JOBS_DIR, f"{job_id}.call.json")
+
+
 def job_video_path(
     job_id: str,
 ) -> Path:
@@ -378,6 +420,43 @@ async def write_job_async(job_id: str, data: dict):
     await jobs_volume.commit.aio()
 
 
+async def write_modal_dispatch_state_async(job_id: str, state: str, call_id: str = ""):
+    """Mirror only dispatch state and Modal FunctionCall ID into the jobs volume."""
+    if state not in {"dispatching", "dispatched", "dispatch_failed"}:
+        raise ValueError("invalid GPU dispatch state")
+    if call_id and not isinstance(call_id, str):
+        raise ValueError("invalid Modal call ID")
+    path = job_call_path(job_id)
+    temp = Path(f"{path}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(
+            json.dumps({"dispatch_state": state, "modal_call_id": call_id}),
+            encoding="utf-8",
+        )
+        os.replace(temp, path)
+        await jobs_volume.commit.aio()
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+async def read_modal_dispatch_state_async(job_id: str) -> dict:
+    """Read the callback-safe call-ID mirror; no callback credentials are stored."""
+    path = job_call_path(job_id)
+    await jobs_volume.reload.aio()
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "dispatch_state": str(data.get("dispatch_state", "")),
+        "modal_call_id": str(data.get("modal_call_id", "")),
+    }
+
+
 def _read_job_file(job_id: str):
     path = job_json_path(job_id)
     if not path.exists():
@@ -395,6 +474,351 @@ async def read_job_async(job_id: str):
     """Async API-side read; fixes Modal AsyncUsageWarning."""
     await jobs_volume.reload.aio()
     return _read_job_file(job_id)
+
+
+class WorkerDispatchError(Exception):
+    """The GPU method could not be queued by Modal."""
+
+
+class WorkerDispatchInterrupted(WorkerDispatchError):
+    """A claimed dispatch could not be recovered without risking a duplicate."""
+
+
+class CallbackDeliveryError(RuntimeError):
+    """A terminal callback could not be delivered after bounded HTTP retries."""
+
+
+class SupervisorStateError(RuntimeError):
+    """Persisted job state is missing or temporarily unreadable."""
+
+
+class CallbackWaitDeferredError(RuntimeError):
+    """The Modal control plane could not yet confirm the child GPU result."""
+
+
+def definitive_modal_rejection(error):
+    """Only classify SDK errors known to reject a function before enqueue."""
+    return isinstance(error, DEFINITIVE_MODAL_REJECTIONS)
+
+
+def validate_callback_submission(job_id, callback_url, callback_token):
+    """Validate Go's client-assigned ID and narrowly scoped callback target."""
+    if not isinstance(job_id, str) or not CALLBACK_JOB_ID.fullmatch(job_id):
+        raise ValueError("job_id must be a generated video ID")
+    if not isinstance(callback_url, str) or len(callback_url) > 2048:
+        raise ValueError("callback_url must be a valid HTTPS callback URL")
+    try:
+        parsed = urlsplit(callback_url)
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError("callback_url must be a valid HTTPS callback URL") from error
+    hostname = (parsed.hostname or "").lower()
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or "." not in hostname
+        or hostname == "localhost"
+        or hostname.endswith((".localhost", ".local"))
+        or (address is not None and not address.is_global)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or "?" in callback_url
+        or "#" in callback_url
+        or parsed.path != f"/api/video-callbacks/{job_id}"
+    ):
+        raise ValueError("callback_url must be the HTTPS callback endpoint for this job")
+    if not isinstance(callback_token, str) or not CALLBACK_TOKEN.fullmatch(callback_token):
+        raise ValueError("callback_token must be a 32-byte hex bearer token")
+
+
+def callback_submission_from_body(body):
+    """Return callback fields when all are present; preserve old no-callback clients."""
+    fields = ("job_id", "callback_url", "callback_token")
+    supplied = [field in body for field in fields]
+    if not any(supplied):
+        return None
+    if not all(supplied):
+        raise ValueError("job_id, callback_url, and callback_token must be provided together")
+    job_id, callback_url, callback_token = (body[field] for field in fields)
+    validate_callback_submission(job_id, callback_url, callback_token)
+    return job_id, callback_url, callback_token
+
+
+def callback_request_fingerprint(
+    prompt,
+    model,
+    duration,
+    resolution,
+    aspect_ratio,
+    callback_url,
+    callback_token,
+    seed=None,
+    seed_was_supplied=False,
+):
+    """Hash normalized request identity without retaining callback credentials."""
+    request = {
+        "prompt": prompt.strip(),
+        "model": model,
+        "duration": int(duration),
+        "resolution": str(resolution).lower(),
+        "aspect_ratio": str(aspect_ratio),
+    }
+    if seed_was_supplied:
+        request["seed"] = int(seed)
+    canonical = json.dumps(
+        {
+            "request": request,
+            "callback_url": callback_url,
+            "callback_token_hash": hashlib.sha256(callback_token.encode("ascii")).hexdigest(),
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def get_claim(key):
+    return await job_claims.get.aio(key)
+
+
+async def put_claim(key, value, skip_if_exists=False):
+    return await job_claims.put.aio(key, value, skip_if_exists=skip_if_exists)
+
+
+def terminal_callback_event(job_id, job):
+    """Rebuild a terminal notification from persisted state for safe redelivery."""
+    status = job.get("status")
+    if status == "completed":
+        return _callback_event(job_id, "completed", 2, 100, "completed", job=job)
+    if status == "failed":
+        code = classify_worker_failure(RuntimeError("persisted failure"), job)
+        progress = min(99, max(5, int(job.get("progress", 5) or 5)))
+        stage = str(job.get("failure_stage") or job.get("stage") or "failed")
+        return _callback_event(job_id, "failed", 2, progress, stage, error_code=code)
+    return None
+
+
+def request_matches_job(job, request, compare_seed=True):
+    """Check a repeated submission without storing callback credentials."""
+    fields = ("prompt", "model", "duration", "resolution", "aspect_ratio")
+    if any(job.get(field) != request.get(field) for field in fields):
+        return False
+    return not compare_seed or job.get("seed") == request.get("seed")
+
+
+def classify_worker_failure(error, job=None):
+    """Map worker failures to the stable, non-sensitive callback vocabulary."""
+    job = job or {}
+    existing = job.get("error_code")
+    allowed = {
+        "out_of_memory",
+        "worker_startup_failed",
+        "generation_timeout",
+        "generation_failed",
+        "encoding_failed",
+        "storage_failed",
+        "dispatch_failed",
+        "dispatch_interrupted",
+    }
+    if existing in allowed:
+        return existing
+    if isinstance(error, WorkerDispatchInterrupted):
+        return "dispatch_interrupted"
+    if isinstance(error, WorkerDispatchError):
+        return "dispatch_failed"
+    if isinstance(error, asyncio.CancelledError):
+        return "dispatch_interrupted"
+
+    error_type = type(error).__name__.lower()
+    message = str(error).lower()
+    failed_stage = str(job.get("failure_stage") or job.get("stage") or "").lower()
+    if any(term in error_type or term in message for term in ("out of memory", "cuda oom", "outofmemory")):
+        return "out_of_memory"
+    if any(term in error_type or term in message for term in ("timeout", "timed out", "deadline exceeded")):
+        return "generation_timeout"
+    if any(term in message for term in ("volume commit", "storage", "no space left", "disk full")) or isinstance(error, OSError):
+        return "storage_failed"
+    if failed_stage == "encoding":
+        return "encoding_failed"
+    if failed_stage in {"", "queued", "pending", "preparing", "startup", "starting"}:
+        return "worker_startup_failed"
+    return "generation_failed"
+
+
+async def post_video_callback_once(callback_url, callback_token, payload):
+    """Make one bounded callback request; redirects are deliberately disabled."""
+    import httpx
+
+    async with httpx.AsyncClient(
+        timeout=CALLBACK_REQUEST_TIMEOUT_SECONDS,
+        follow_redirects=False,
+    ) as client:
+        response = await client.post(
+            callback_url,
+            headers={"Authorization": f"Bearer {callback_token}"},
+            json=payload,
+        )
+        return response.status_code
+
+
+async def deliver_video_callback(
+    callback_url,
+    callback_token,
+    payload,
+    post_once=None,
+    sleep=asyncio.sleep,
+):
+    """Retry transient delivery failures only, without leaking target or token."""
+    post_once = post_once or post_video_callback_once
+    for delay in CALLBACK_RETRY_DELAYS_SECONDS:
+        if delay:
+            await sleep(delay)
+        try:
+            status = await post_once(callback_url, callback_token, payload)
+        except Exception:
+            status = None
+        if isinstance(status, int) and 200 <= status < 300:
+            return True
+        if status is not None and status not in {408, 425, 429, 500, 502, 503, 504}:
+            return False
+    return False
+
+
+def _callback_event(job_id, status, sequence, progress, stage, error_code="", job=None):
+    event = {
+        "id": job_id,
+        "status": status,
+        "sequence": sequence,
+        "progress": progress,
+        "stage": stage,
+    }
+    if error_code:
+        event["error_code"] = error_code
+    if status == "completed" and job and job.get("usage_cost_usd") is not None:
+        event["cost_usd"] = str(job["usage_cost_usd"])
+    return event
+
+
+async def run_callback_supervisor(
+    job_id,
+    callback_url,
+    callback_token,
+    run_generation,
+    read_job_fn,
+    write_job_fn,
+    post_once=None,
+    sleep=asyncio.sleep,
+):
+    """Await GPU startup/runtime, persist terminal state, then notify Go.
+
+    A Modal function retry re-enters here with the same inputs. Terminal results
+    are read first and only their callback is retried; generation is never
+    dispatched again after a result has been persisted.
+    """
+
+    try:
+        job = await read_job_fn(job_id)
+    except Exception as error:
+        raise SupervisorStateError("Persisted video state could not be read") from error
+    if not isinstance(job, dict):
+        raise SupervisorStateError("Persisted video state is not available yet")
+
+    event = terminal_callback_event(job_id, job)
+    if event is not None:
+        if not await deliver_video_callback(
+            callback_url,
+            callback_token,
+            event,
+            post_once=post_once,
+            sleep=sleep,
+        ):
+            raise CallbackDeliveryError("Persisted terminal callback delivery failed")
+        return event
+
+    await deliver_video_callback(
+        callback_url,
+        callback_token,
+        _callback_event(job_id, "processing", 1, 5, "starting"),
+        post_once=post_once,
+        sleep=sleep,
+    )
+
+    caught_error = None
+    try:
+        await run_generation()
+    except asyncio.CancelledError:
+        # Modal may stop this supervisor at its execution deadline while the
+        # separately spawned GPU call is still running. Leave the job pending
+        # and let Modal retry this same input; it will reattach by FunctionCall
+        # ID instead of publishing a false terminal failure.
+        raise
+    except CallbackWaitDeferredError:
+        # A transient Modal RPC error says nothing about the child GPU result.
+        # Leave the persisted state unchanged so a managed function retry can
+        # reattach to the exact same FunctionCall.
+        raise
+    except SupervisorStateError:
+        # Missing/unreadable coordination state is not a generation outcome.
+        raise
+    except Exception as error:
+        caught_error = error
+
+    try:
+        job = await read_job_fn(job_id)
+    except Exception as error:
+        raise SupervisorStateError("Persisted video state could not be reloaded") from error
+    if not isinstance(job, dict):
+        raise SupervisorStateError("Persisted video state disappeared during generation")
+
+    # The GPU worker may have committed a terminal outcome before its FunctionCall
+    # result was observed (for example, if the supervisor was interrupted). The
+    # persisted terminal result is authoritative over a later transport error.
+    event = terminal_callback_event(job_id, job)
+    if event is None:
+        if caught_error is None:
+            caught_error = RuntimeError("GPU worker ended without a terminal result")
+
+        error_code = classify_worker_failure(caught_error, job)
+        failure_stage = str(job.get("failure_stage") or job.get("stage") or "failed")
+        failed_job = dict(job)
+        failed_job.update(
+            {
+                "id": job_id,
+                "status": "failed",
+                "stage": "failed",
+                "failure_stage": failure_stage,
+                "error_code": error_code,
+                "error": "Video generation failed; check the worker logs for this job.",
+                "completed_at": int(time.time()),
+            }
+        )
+        try:
+            await write_job_fn(job_id, failed_job)
+        except Exception as error:
+            log_event("ERROR", "callback_job_persist_failed", job=job_id, code="storage_failed")
+            raise SupervisorStateError("Terminal video failure could not be persisted") from error
+
+        event = terminal_callback_event(job_id, failed_job)
+
+    if not await deliver_video_callback(
+        callback_url,
+        callback_token,
+        event,
+        post_once=post_once,
+        sleep=sleep,
+    ):
+        raise CallbackDeliveryError("Persisted terminal callback delivery failed")
+
+    if event["status"] == "failed":
+        log_event("WARNING", "callback_job_failed", job=job_id, code=event["error_code"])
+    return event
 
 
 # ============================================================
@@ -700,7 +1124,7 @@ class VideoGenerator:
                             "WARNING",
                             "telemetry_persist_failed",
                             job=job_id,
-                            error=repr(telemetry_error),
+                            error_type=type(telemetry_error).__name__,
                         )
 
             telemetry_thread = threading.Thread(
@@ -906,18 +1330,24 @@ class VideoGenerator:
 
         except Exception as error:
 
+            failed_stage = str(job.get("stage") or "unknown")
+            error_code = classify_worker_failure(
+                error,
+                {"failure_stage": failed_stage},
+            )
+
             if "telemetry_stop" in locals():
                 telemetry_stop.set()
             if "telemetry_thread" in locals():
                 telemetry_thread.join(timeout=2)
 
-            traceback.print_exc()
             log_event(
                 "ERROR",
                 "job_failed",
                 job=job_id,
-                stage=job.get("stage"),
-                error=repr(error),
+                stage=failed_stage,
+                code=error_code,
+                error_type=type(error).__name__,
             )
 
             job.update(
@@ -927,6 +1357,12 @@ class VideoGenerator:
 
                     "stage":
                         "failed",
+
+                    "failure_stage":
+                        failed_stage,
+
+                    "error_code":
+                        error_code,
 
                     "progress":
                         job.get("progress", 0),
@@ -948,6 +1384,203 @@ class VideoGenerator:
             )
 
             raise
+
+
+@app.function(
+    image=api_image,
+    volumes={JOBS_DIR: jobs_volume},
+    secrets=[api_secret],
+    # VideoGenerator allows 30 minutes for class startup and 60 minutes for
+    # generation; leave headroom so a healthy child can finish before retry.
+    timeout=7200,
+    retries=modal.Retries(
+        max_retries=240,
+        backoff_coefficient=2.0,
+        initial_delay=1.0,
+        max_delay=60.0,
+    ),
+)
+async def callback_video_supervisor(
+    job_id,
+    prompt,
+    model,
+    duration,
+    resolution,
+    aspect_ratio,
+    seed,
+    callback_url,
+    callback_token,
+    request_fingerprint,
+):
+    """CPU orchestration keeps GPU cold-start/runtime errors observable."""
+
+    async def run_generation():
+        gpu_key = f"gpu:{job_id}"
+        try:
+            gpu_claim = await get_claim(gpu_key)
+        except TRANSIENT_MODAL_CALL_ERRORS as error:
+            raise CallbackWaitDeferredError("Modal GPU claim lookup will be retried") from error
+        call = None
+        if gpu_claim is None:
+            new_claim = {
+                "fingerprint": request_fingerprint,
+                "state": "dispatching",
+                "claimed_at": int(time.time()),
+                "modal_call_id": "",
+            }
+            try:
+                acquired = await put_claim(gpu_key, new_claim, skip_if_exists=True)
+            except TRANSIENT_MODAL_CALL_ERRORS as error:
+                raise CallbackWaitDeferredError("Modal GPU claim update will be retried") from error
+            if acquired:
+                try:
+                    await write_modal_dispatch_state_async(job_id, "dispatching")
+                except Exception as error:
+                    await put_claim(gpu_key, {**new_claim, "state": "dispatch_failed"})
+                    raise WorkerDispatchError("GPU dispatch state could not be persisted") from error
+                try:
+                    call = await (
+                        VideoGenerator()
+                        .generate
+                        .spawn.aio(
+                            job_id=job_id,
+                            prompt=prompt,
+                            model=model,
+                            duration=duration,
+                            resolution=resolution,
+                            aspect_ratio=aspect_ratio,
+                            seed=seed,
+                        )
+                    )
+                except Exception as error:
+                    if definitive_modal_rejection(error):
+                        try:
+                            await put_claim(
+                                gpu_key,
+                                {
+                                    **new_claim,
+                                    "state": "dispatch_failed",
+                                },
+                            )
+                            await write_modal_dispatch_state_async(job_id, "dispatch_failed")
+                        except Exception as persist_error:
+                            log_event(
+                                "ERROR",
+                                "gpu_dispatch_rejection_persist_failed",
+                                job=job_id,
+                                error_type=type(persist_error).__name__,
+                            )
+                        raise WorkerDispatchError() from error
+                    log_event("WARNING", "gpu_dispatch_outcome_ambiguous", job=job_id, error_type=type(error).__name__)
+                    raise CallbackWaitDeferredError("Modal GPU dispatch outcome is not yet known") from error
+
+                call_id = getattr(call, "object_id", "")
+                if not isinstance(call_id, str) or not call_id:
+                    log_event("WARNING", "gpu_call_reference_missing", job=job_id)
+                    raise CallbackWaitDeferredError("Modal GPU call reference is not yet available")
+                try:
+                    await write_modal_dispatch_state_async(job_id, "dispatched", call_id)
+                except Exception as error:
+                    # The accepted call is still available in memory. Preserve
+                    # it and await completion instead of publishing failure;
+                    # the Dict claim remains the primary idempotency marker.
+                    log_event(
+                        "WARNING",
+                        "gpu_call_reference_save_failed",
+                        job=job_id,
+                        error_type=type(error).__name__,
+                    )
+                gpu_claim = {
+                    **new_claim,
+                    "state": "dispatched",
+                    "modal_call_id": call_id,
+                }
+                try:
+                    await put_claim(gpu_key, gpu_claim)
+                except Exception as error:
+                    # The in-memory FunctionCall can still complete; a later
+                    # Modal retry can fall back to the jobs-volume sidecar.
+                    log_event(
+                        "WARNING",
+                        "gpu_call_claim_save_failed",
+                        job=job_id,
+                        error_type=type(error).__name__,
+                    )
+            else:
+                try:
+                    gpu_claim = await get_claim(gpu_key)
+                except TRANSIENT_MODAL_CALL_ERRORS as error:
+                    raise CallbackWaitDeferredError("Modal GPU claim reload will be retried") from error
+
+        if not isinstance(gpu_claim, dict):
+            raise WorkerDispatchInterrupted("GPU dispatch claim could not be recovered")
+        if gpu_claim.get("fingerprint") != request_fingerprint:
+            raise WorkerDispatchInterrupted("GPU dispatch claim does not match this request")
+        if gpu_claim.get("state") == "dispatch_failed":
+            raise WorkerDispatchError()
+
+        call_id = gpu_claim.get("modal_call_id")
+        if not call_id:
+            try:
+                dispatch_state = await read_modal_dispatch_state_async(job_id)
+            except Exception as error:
+                raise SupervisorStateError("GPU dispatch reference could not be read") from error
+            call_id = dispatch_state.get("modal_call_id", "")
+        deadline = time.monotonic() + CLAIM_RECOVERY_SECONDS
+        while not call_id and gpu_claim.get("state") == "dispatching":
+            if time.monotonic() >= deadline:
+                raise CallbackWaitDeferredError("GPU dispatch is claimed but its call reference is not available")
+            await asyncio.sleep(0.25)
+            try:
+                gpu_claim = await get_claim(gpu_key)
+            except TRANSIENT_MODAL_CALL_ERRORS as error:
+                raise CallbackWaitDeferredError("Modal GPU claim reload will be retried") from error
+            if not isinstance(gpu_claim, dict):
+                raise SupervisorStateError("GPU dispatch claim could not be read")
+            if gpu_claim.get("fingerprint") != request_fingerprint:
+                raise WorkerDispatchInterrupted("GPU dispatch claim does not match this request")
+            try:
+                persisted_job = await read_job_async(job_id)
+            except Exception as error:
+                raise SupervisorStateError("Persisted GPU state could not be reloaded") from error
+            if isinstance(persisted_job, dict) and persisted_job.get("status") in {"completed", "failed"}:
+                return
+            call_id = gpu_claim.get("modal_call_id")
+            if not call_id:
+                try:
+                    dispatch_state = await read_modal_dispatch_state_async(job_id)
+                except Exception as error:
+                    raise SupervisorStateError("GPU dispatch reference could not be reloaded") from error
+                call_id = dispatch_state.get("modal_call_id", "")
+
+        if not isinstance(call_id, str) or not call_id:
+            raise CallbackWaitDeferredError("GPU dispatch still has no Modal call reference")
+        try:
+            if call is None:
+                call = modal.FunctionCall.from_id(call_id)
+            await call.get.aio()
+        except TRANSIENT_MODAL_CALL_ERRORS as error:
+            raise CallbackWaitDeferredError("Modal could not confirm the GPU result yet") from error
+
+    result = await run_callback_supervisor(
+        job_id=job_id,
+        callback_url=callback_url,
+        callback_token=callback_token,
+        run_generation=run_generation,
+        read_job_fn=read_job_async,
+        write_job_fn=write_job_async,
+    )
+    request_claim_key = f"request:{job_id}"
+    request_claim = await get_claim(request_claim_key)
+    if isinstance(request_claim, dict):
+        await put_claim(
+            request_claim_key,
+            {
+                **request_claim,
+                "state": result["status"],
+            },
+        )
+    return result
 
 
 # ============================================================
@@ -1123,6 +1756,12 @@ def api():
             raise HTTPException(
                 status_code=400,
                 detail="Invalid JSON",
+            )
+
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="JSON request body must be an object",
             )
 
         # ----------------------------------------------------
@@ -1331,10 +1970,17 @@ def api():
         # GENERATION ID
         # ----------------------------------------------------
 
-        job_id = (
-            "gen_"
-            + uuid.uuid4().hex
-        )
+        try:
+            callback_submission = callback_submission_from_body(body)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+
+        if callback_submission:
+            job_id, callback_url, callback_token = callback_submission
+        else:
+            job_id = "gen_" + uuid.uuid4().hex
+            callback_url = ""
+            callback_token = ""
 
         job = {
             "id":
@@ -1374,64 +2020,299 @@ def api():
                 "",
         }
 
-        await write_job_async(
-            job_id,
-            job,
-        )
+        request_claim_key = ""
+        request_fingerprint = ""
+        request_claim = None
+        owns_request_claim = False
+        if callback_submission:
+            request_fingerprint = callback_request_fingerprint(
+                prompt,
+                model,
+                duration,
+                resolution,
+                aspect_ratio,
+                callback_url,
+                callback_token,
+                seed=seed,
+                seed_was_supplied=(raw_seed is not None and int(raw_seed) >= 0),
+            )
+            request_claim_key = f"request:{job_id}"
+            request_claim = {
+                "fingerprint": request_fingerprint,
+                "state": "claiming",
+                "claimed_at": int(time.time()),
+                "supervisor_call_id": "",
+            }
+            try:
+                owns_request_claim = await put_claim(
+                    request_claim_key,
+                    request_claim,
+                    skip_if_exists=True,
+                )
+            except Exception as error:
+                log_event("WARNING", "callback_claim_unavailable", job=job_id, error_type=type(error).__name__)
+                raise HTTPException(status_code=503, detail="The video request could not be claimed; retry shortly")
+            if not owns_request_claim:
+                try:
+                    request_claim = await get_claim(request_claim_key)
+                except Exception as error:
+                    log_event("WARNING", "callback_claim_read_failed", job=job_id, error_type=type(error).__name__)
+                    raise HTTPException(status_code=503, detail="The video request state is temporarily unavailable")
+                if not isinstance(request_claim, dict):
+                    raise HTTPException(status_code=503, detail="The video request state is temporarily unavailable")
+                if request_claim.get("fingerprint") != request_fingerprint:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This job_id was already used for a different video request",
+                    )
+
+        try:
+            existing_job = await read_job_async(job_id)
+        except Exception as error:
+            if callback_submission:
+                log_event("WARNING", "callback_job_read_failed", job=job_id, error_type=type(error).__name__)
+                raise HTTPException(status_code=503, detail="The saved video request is temporarily unavailable")
+            raise HTTPException(status_code=503, detail="The saved video request is temporarily unavailable")
+
+        if existing_job is not None:
+            if not request_matches_job(
+                existing_job,
+                job,
+                compare_seed=raw_seed is not None and int(raw_seed) >= 0,
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This job_id was already used for a different video request",
+                )
+            if callback_submission:
+                event = terminal_callback_event(job_id, existing_job)
+                if event is None:
+                    if not request_claim.get("supervisor_call_id") and request_claim.get("state") not in {
+                        "supervisor_queued",
+                        "completed",
+                        "failed",
+                    }:
+                        # A queued supervisor reference may have been accepted
+                        # even if saving its Dict metadata failed. Keep the job
+                        # alive and let Go retry this same ID or receive its
+                        # eventual callback; never terminalize a live child.
+                        raise HTTPException(
+                            status_code=503,
+                            detail="The video supervisor is still being recorded; retry this request shortly",
+                            headers={"Retry-After": "2"},
+                        )
+                    event = _callback_event(
+                        job_id,
+                        "processing",
+                        1,
+                        max(5, int(existing_job.get("progress", 5) or 5)),
+                        str(existing_job.get("stage") or "starting"),
+                    )
+                delivered = await deliver_video_callback(callback_url, callback_token, event)
+                if event["sequence"] == 2 and not delivered:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="The saved video result callback could not be delivered; retry this request",
+                    )
+            ack = {
+                "id": job_id,
+                "status": existing_job.get("status", "pending"),
+                "stage": existing_job.get("stage", "queued"),
+                "model": model,
+                "progress": existing_job.get("progress", 0),
+            }
+            if callback_submission and event["sequence"] == 2 and event["status"] == "failed":
+                ack.update({"status": "failed", "stage": "failed", "progress": event["progress"]})
+            if ack["status"] == "in_progress":
+                ack["status"] = "processing"
+            if not callback_submission:
+                ack["poll_after_seconds"] = STATUS_POLL_RETRY_SECONDS
+            return ack
+
+        if callback_submission and not owns_request_claim:
+            claim_age = int(time.time()) - int(request_claim.get("claimed_at", 0))
+            if claim_age < CLAIM_RECOVERY_SECONDS:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The video request is still being claimed; retry shortly",
+                    headers={"Retry-After": "2"},
+                )
+            failed_job = dict(job)
+            failed_job.update(
+                {
+                    "status": "failed",
+                    "stage": "failed",
+                    "failure_stage": "dispatch",
+                    "error_code": "dispatch_interrupted",
+                    "error": "The video worker request was interrupted before it could be recorded.",
+                    "completed_at": int(time.time()),
+                }
+            )
+            await write_job_async(job_id, failed_job)
+            request_claim = {**request_claim, "state": "failed"}
+            await put_claim(request_claim_key, request_claim)
+            event = terminal_callback_event(job_id, failed_job)
+            delivered = await deliver_video_callback(callback_url, callback_token, event)
+            if not delivered:
+                raise HTTPException(status_code=503, detail="The interrupted video request failure could not be delivered")
+            return {
+                "id": job_id,
+                "status": "failed",
+                "stage": "failed",
+                "model": model,
+                "progress": event["progress"],
+            }
+
+        try:
+            await write_job_async(job_id, job)
+        except Exception as error:
+            if callback_submission:
+                log_event("WARNING", "callback_job_write_failed", job=job_id, error_type=type(error).__name__)
+            raise HTTPException(status_code=503, detail="The video request could not be saved; retry shortly")
+
+        if callback_submission:
+            request_claim = {**request_claim, "state": "recorded"}
+            try:
+                await put_claim(request_claim_key, request_claim)
+            except Exception as error:
+                log_event("WARNING", "callback_claim_update_failed", job=job_id, error_type=type(error).__name__)
+                raise HTTPException(status_code=503, detail="The video request state could not be saved; retry shortly")
 
         # ----------------------------------------------------
         # START GPU WORK
         # ----------------------------------------------------
 
-        try:
-
-            await (
-                VideoGenerator()
-                .generate
-                .spawn.aio(
+        if callback_submission:
+            try:
+                supervisor_call = await callback_video_supervisor.spawn.aio(
                     job_id=job_id,
-
                     prompt=prompt,
-
                     model=model,
-
                     duration=duration,
-
                     resolution=resolution,
-
                     aspect_ratio=aspect_ratio,
-
                     seed=seed,
+                    callback_url=callback_url,
+                    callback_token=callback_token,
+                    request_fingerprint=request_fingerprint,
                 )
-            )
-
-        except Exception as error:
-
-            job.update(
-                {
+            except Exception as error:
+                if not definitive_modal_rejection(error):
+                    # Modal may have accepted the supervisor input while its
+                    # enqueue acknowledgement was lost. Keep the durable job
+                    # pending; same-ID retries must not enqueue a second call.
+                    log_event(
+                        "WARNING",
+                        "callback_supervisor_dispatch_ambiguous",
+                        job=job_id,
+                        error_type=type(error).__name__,
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail="The Modal submission outcome is not yet known; retry this same job ID",
+                    )
+                error_code = "dispatch_failed"
+                job.update(
+                    {
+                        "status": "failed",
+                        "stage": "failed",
+                        "failure_stage": "dispatch",
+                        "error_code": error_code,
+                        "error": "Modal could not queue the video worker.",
+                        "completed_at": int(time.time()),
+                    }
+                )
+                await write_job_async(job_id, job)
+                try:
+                    request_claim = {**request_claim, "state": "failed"}
+                    await put_claim(request_claim_key, request_claim)
+                except Exception:
+                    log_event("ERROR", "callback_claim_failure_update_failed", job=job_id, code=error_code)
+                log_event(
+                    "ERROR",
+                    "callback_supervisor_dispatch_failed",
+                    job=job_id,
+                    error_type=type(error).__name__,
+                )
+                event = _callback_event(
+                    job_id,
+                    "failed",
+                    2,
+                    5,
+                    "dispatch",
+                    error_code=error_code,
+                )
+                delivered = await deliver_video_callback(callback_url, callback_token, event)
+                if not delivered:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="The video worker could not be queued and its failure callback could not be delivered; retry this request",
+                    )
+                return {
+                    "id": job_id,
                     "status": "failed",
-                    "error": str(error),
+                    "stage": "failed",
+                    "model": model,
+                    "progress": 5,
                 }
-            )
 
-            await write_job_async(
-                job_id,
-                job,
-            )
-
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Could not start "
-                    "video generation"
-                ),
-            )
+            supervisor_call_id = getattr(supervisor_call, "object_id", "")
+            if not isinstance(supervisor_call_id, str) or not supervisor_call_id:
+                # The call may already be accepted even if the SDK failed to
+                # return its reference. Do not publish a false terminal failure
+                # or risk a second supervisor/GPU submission for this ID.
+                log_event("WARNING", "callback_supervisor_reference_missing", job=job_id)
+            else:
+                request_claim = {
+                    **request_claim,
+                    "state": "supervisor_queued",
+                    "supervisor_call_id": supervisor_call_id,
+                }
+                try:
+                    await put_claim(request_claim_key, request_claim)
+                except Exception as error:
+                    # Enqueue succeeded. The supervisor still has its original
+                    # inputs and its own retry policy; metadata-write failure
+                    # must not overwrite a live job with dispatch_failed.
+                    log_event(
+                        "WARNING",
+                        "callback_supervisor_reference_save_failed",
+                        job=job_id,
+                        error_type=type(error).__name__,
+                    )
+        else:
+            try:
+                await (
+                    VideoGenerator()
+                    .generate
+                    .spawn.aio(
+                        job_id=job_id,
+                        prompt=prompt,
+                        model=model,
+                        duration=duration,
+                        resolution=resolution,
+                        aspect_ratio=aspect_ratio,
+                        seed=seed,
+                    )
+                )
+            except Exception as error:
+                job.update(
+                    {
+                        "status": "failed",
+                        "error": str(error),
+                    }
+                )
+                await write_job_async(job_id, job)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not start video generation",
+                )
 
         # ----------------------------------------------------
         # OpenRouter-style generation response
         # ----------------------------------------------------
 
-        return {
+        response = {
             "id":
                 job_id,
 
@@ -1447,9 +2328,10 @@ def api():
             "progress":
                 0,
 
-            "poll_after_seconds":
-                STATUS_POLL_RETRY_SECONDS,
         }
+        if not callback_submission:
+            response["poll_after_seconds"] = STATUS_POLL_RETRY_SECONDS
+        return response
 
     # ========================================================
     # POLL VIDEO
