@@ -636,20 +636,46 @@ func sceneProgressMilestone(progress int) int {
 }
 
 func (s *Store) ScheduleSceneDownloadRetry(projectID string, number int) error {
-	var attempts int
-	if err := s.db.QueryRow(`SELECT download_attempts FROM project_scenes WHERE project_id=? AND scene_number=?`, projectID, number).Scan(&attempts); err != nil {
-		return err
-	}
-	attempts++
-	backoff := time.Second * time.Duration(1<<min(attempts-1, 8))
-	if backoff > 5*time.Minute {
-		backoff = 5 * time.Minute
-	}
-	_, err := s.db.Exec(`UPDATE project_scenes SET status='download_failed',download_attempts=?,next_attempt_at=?,error='Scene download will retry automatically',updated_at=? WHERE project_id=? AND scene_number=?`, attempts, time.Now().Add(backoff).Unix(), time.Now().Unix(), projectID, number)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	return s.AppendPipelineEvent(projectID, "scene_download", "retry", "Scene download failed; retry scheduled.", number, attempts)
+	defer tx.Rollback()
+	var attempts int
+	if err := tx.QueryRow(`SELECT download_attempts FROM project_scenes WHERE project_id=? AND scene_number=? AND status IN ('downloading','download_failed')`, projectID, number).Scan(&attempts); err != nil {
+		return err
+	}
+	attempts++
+	status := "download_failed"
+	message := fmt.Sprintf("Scene video download failed (attempt %d of %d); another automatic attempt is scheduled.", attempts, maxVideoDownloadAttempts)
+	var nextAttemptAt int64
+	if attempts >= maxVideoDownloadAttempts {
+		status = "failed"
+		message = "The scene video could not be downloaded after 5 attempts. Check the provider, then retry this scene."
+	} else {
+		backoff := time.Second * time.Duration(1<<min(attempts-1, 8))
+		if backoff > 5*time.Minute {
+			backoff = 5 * time.Minute
+		}
+		nextAttemptAt = time.Now().Add(backoff).Unix()
+	}
+	result, err := tx.Exec(`UPDATE project_scenes SET status=?,download_attempts=?,next_attempt_at=?,error=?,updated_at=? WHERE project_id=? AND scene_number=? AND status IN ('downloading','download_failed')`, status, attempts, nextAttemptAt, message, time.Now().Unix(), projectID, number)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count != 1 {
+		return sql.ErrNoRows
+	}
+	eventStatus := "retry"
+	if status == "failed" {
+		eventStatus = "failed"
+	}
+	if err := appendPipelineEvent(tx, projectID, "scene_download", eventStatus, message, number, attempts, time.Now().Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ScheduleModalSceneRecovery(projectID string, number int) error {
