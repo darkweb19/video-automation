@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -25,24 +24,8 @@ const (
 	maxGeneratedScenePrompt    = 2200
 	randomProjectTokens        = 1024
 	randomSingleTokens         = 2048
-	randomPromptTimeout        = 70 * time.Second
-	randomPromptAttemptTimeout = 12 * time.Second
-	randomPromptBackoffBase    = 100 * time.Millisecond
-	randomPromptBackoffMax     = 500 * time.Millisecond
+	randomPromptTimeout        = 105 * time.Second
 )
-
-// Keep these explicit free variants together so random prompt fallback can
-// never route to a paid text model. OpenRouter model availability can change;
-// unavailable or rate-limited variants are skipped within the endpoint budget.
-var randomPromptModels = [...]string{
-	"inclusionai/ling-3.0-flash:free",
-	"nvidia/nemotron-3.5-lightning:free",
-	"qwen/qwen3.8-27b:free",
-	"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-	"liquid/lfm-2.5-2.6b:free",
-}
-
-var errRandomPromptUnusable = errors.New("OpenRouter returned unusable random prompt content")
 
 const scriptSystemPrompt = `You are a short-form visual storyteller and video prompt director. Create a complete silent 30-second vertical video plan from the user's topic. The final video has exactly five sequential scenes, each exactly six seconds. There is no narration, dialogue, subtitles, music, logos, or on-screen text. Tell the story only through visible action.
 
@@ -254,11 +237,9 @@ func parseStoryPlanText(content string) (StoryPlan, error) {
 	return StoryPlan{}, fmt.Errorf("OpenRouter did not return a valid JSON story plan with exactly %d scenes", ProjectSceneCount)
 }
 
-// GenerateRandomPrompt tries the configured free text variants in a shuffled
-// order. Each model gets one bounded attempt; temporary failures move to the
-// next free variant, while auth and invalid-request failures stop immediately.
-// It returns only usable browser text: the API key, model, and response remain
-// server-side.
+// GenerateRandomPrompt uses the same OpenRouter free-text route as project
+// planning. It deliberately returns only usable browser text: the API key,
+// routed model, and provider response remain server-side.
 func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input RandomPromptRequest) (string, error) {
 	input.Category = strings.TrimSpace(input.Category)
 	if !validRandomPromptCategory(input.Category) {
@@ -269,43 +250,8 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 	}
 
 	systemPrompt, userPrompt, maxTokens := randomPromptInstructions(input.Mode, input.Category)
-	operationCtx, cancelOperation := context.WithTimeout(ctx, randomPromptTimeout)
-	defer cancelOperation()
-	models := append([]string(nil), randomPromptModels[:]...)
-	rand.Shuffle(len(models), func(i, j int) {
-		models[i], models[j] = models[j], models[i]
-	})
-
-	for attempt, model := range models {
-		if err := operationCtx.Err(); err != nil {
-			return "", err
-		}
-		attemptCtx, cancelAttempt := context.WithTimeout(operationCtx, randomPromptAttemptTimeout)
-		prompt, err := c.generateRandomPromptAttempt(attemptCtx, input, model, systemPrompt, userPrompt, maxTokens)
-		cancelAttempt()
-		if err == nil {
-			return prompt, nil
-		}
-		if err := operationCtx.Err(); err != nil {
-			return "", err
-		}
-
-		retry, backoff := randomPromptRetryPolicy(err)
-		if !retry || attempt == len(models)-1 {
-			return "", err
-		}
-		if backoff {
-			if err := waitRandomPromptBackoff(operationCtx, attempt); err != nil {
-				return "", err
-			}
-		}
-	}
-	return "", errors.New("OpenRouter free text models are unavailable")
-}
-
-func (c *OpenRouterClient) generateRandomPromptAttempt(ctx context.Context, input RandomPromptRequest, model, systemPrompt, userPrompt string, maxTokens int) (string, error) {
 	request := map[string]any{
-		"model":                 model,
+		"model":                 ScriptModel,
 		"messages":              []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
 		"temperature":           1,
 		"max_completion_tokens": maxTokens,
@@ -356,72 +302,17 @@ func (c *OpenRouterClient) generateRandomPromptAttempt(ctx context.Context, inpu
 		}
 	}
 	if prompt == "" {
-		return "", fmt.Errorf("%w: no text in the response choices", errRandomPromptUnusable)
+		return "", errors.New("OpenRouter returned no text in its random prompt choices")
 	}
 	if len(prompt) >= 2 && prompt[0] == '"' && prompt[len(prompt)-1] == '"' {
 		prompt = strings.TrimSpace(prompt[1 : len(prompt)-1])
 	}
-	if prompt == "" {
-		return "", fmt.Errorf("%w: prompt is empty after removing surrounding quotes", errRandomPromptUnusable)
-	}
 	if input.Mode == RandomPromptModeProject {
 		prompt = fitRandomProjectTopic(prompt)
 	} else if utf8.RuneCountInString(prompt) > MaxPromptLength {
-		return "", fmt.Errorf("%w: prompt exceeds %d characters", errRandomPromptUnusable, MaxPromptLength)
+		return "", fmt.Errorf("OpenRouter random prompt exceeds %d characters", MaxPromptLength)
 	}
 	return prompt, nil
-}
-
-func randomPromptRetryPolicy(err error) (retry, backoff bool) {
-	if errors.Is(err, errRandomPromptUnusable) {
-		return true, false
-	}
-	var upstream *upstreamError
-	if errors.As(err, &upstream) {
-		switch status := upstream.StatusCode; {
-		case status == http.StatusNotFound:
-			// The model may have been removed since the free-model list was set.
-			return true, false
-		case status == http.StatusRequestTimeout,
-			status == http.StatusConflict,
-			status == http.StatusTooEarly,
-			status == http.StatusTooManyRequests,
-			status >= http.StatusInternalServerError:
-			return true, true
-		default:
-			// Auth errors and other 4xx responses indicate a key or request issue.
-			return false, false
-		}
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true, true
-	}
-	// Transport, body-read, and malformed-response errors can be isolated to a
-	// single model/provider, so try the next explicitly free model.
-	return true, true
-}
-
-func waitRandomPromptBackoff(ctx context.Context, failedAttempt int) error {
-	delay := randomPromptBackoffDelay(failedAttempt)
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func randomPromptBackoffDelay(failedAttempt int) time.Duration {
-	delay := randomPromptBackoffBase
-	for i := 0; i < failedAttempt && delay < randomPromptBackoffMax; i++ {
-		delay *= 2
-	}
-	if delay > randomPromptBackoffMax {
-		return randomPromptBackoffMax
-	}
-	return delay
 }
 
 // OpenRouter normally returns message.content as a string, but compatible

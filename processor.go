@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -58,7 +57,6 @@ func (p *Processor) Run(ctx context.Context) {
 }
 
 func (p *Processor) process(ctx context.Context) {
-	p.processCallbackJobs(ctx)
 	records, err := p.app.store.PendingGenerations(ctx)
 	if err != nil {
 		p.logger.Error("load pending generations failed")
@@ -90,10 +88,6 @@ func (p *Processor) process(ctx context.Context) {
 		}
 		if record.Status == "downloading" || record.Status == "download_failed" {
 			p.startDownload(ctx, provider, record)
-			continue
-		}
-		callback, callbackErr := p.app.store.hasCallbackJob(record.ID)
-		if callback || callbackErr != nil {
 			continue
 		}
 		requestContext, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -251,10 +245,6 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider VideoServ
 			})
 		case "queued", "processing":
 			active++
-			callback, err := p.app.store.hasCallbackJob(scene.ProviderGenerationID)
-			if callback || err != nil {
-				continue
-			}
 			sceneCopy := scene
 			p.startProjectTask(ctx, fmt.Sprintf("%s:poll:%d", project.ID, scene.Number), func(taskCtx context.Context) {
 				p.pollScene(taskCtx, provider, sceneCopy)
@@ -276,18 +266,6 @@ func (p *Processor) processProjectScenes(ctx context.Context, provider VideoServ
 }
 
 func (p *Processor) submitScene(ctx context.Context, provider VideoService, project VideoProject, scene ProjectScene) {
-	if _, ok := provider.(CallbackVideoProvider); ok {
-		job, err := p.app.prepareCallbackJob(GenerateRequest{Prompt: scene.Prompt, Model: project.Model, Duration: ProjectSceneSeconds, Resolution: ProjectResolution, AspectRatio: ProjectAspectRatio}, project.ProviderConfigID)
-		if err != nil {
-			_ = p.app.store.UpdateScene(project.ID, scene.Number, "failed", "", callbackConfigurationError(err))
-			return
-		}
-		job.ProjectID, job.SceneNumber = project.ID, scene.Number
-		if err := p.app.store.insertCallbackScene(job); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			p.logger.Error("persist scene callback job failed", "project_id", project.ID, "scene", scene.Number)
-		}
-		return
-	}
 	if err := p.app.store.MarkSceneSubmitting(project.ID, scene.Number); err != nil {
 		return
 	}

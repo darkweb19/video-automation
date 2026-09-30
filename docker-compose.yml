@@ -24,7 +24,6 @@ services:
       - "127.0.0.1:${APP_PORT:-8080}:8080"
     environment:
       DATA_DIR: /data
-      VIDEO_CALLBACK_BASE_URL: ${VIDEO_CALLBACK_BASE_URL:-}
       # Optional first-run bootstrap only. Prefer the authenticated Settings UI.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     volumes:

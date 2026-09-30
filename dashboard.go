@@ -52,7 +52,6 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.HandleFunc("GET /static/project.css", app.static("static/project.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/history-settings.css", app.static("static/history-settings.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /health", app.health)
-	mux.HandleFunc("POST /api/video-callbacks/{id}", app.videoCallback)
 	mux.HandleFunc("POST /api/login", app.login)
 	mux.HandleFunc("POST /api/password/recover", app.recoverPassword)
 	mux.HandleFunc("GET /api/session", app.session)
@@ -707,25 +706,6 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, ok := provider.(CallbackVideoProvider); ok {
-		job, prepareErr := a.prepareCallbackJob(request, providerConfigID)
-		if prepareErr != nil {
-			writeError(w, http.StatusUnprocessableEntity, callbackConfigurationError(prepareErr))
-			return
-		}
-		if err := a.store.insertCallbackGeneration(job, estimateCost(request.Duration, model.PricePerSecond)); err != nil {
-			writeError(w, http.StatusInternalServerError, "unable to save callback generation")
-			return
-		}
-		persisted = true
-		record, err := a.store.Generation(job.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "unable to load saved generation")
-			return
-		}
-		writeJSON(w, http.StatusAccepted, record)
-		return
-	}
 	generation, err := provider.GenerateVideo(r.Context(), request)
 	if err != nil {
 		a.logger.Error("generation submission failed", "model", request.Model)
@@ -965,12 +945,6 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeError(w, http.StatusBadRequest, "select a video model that supports 6-second clips at 480p in 9:16")
 		return
-	}
-	if _, ok := provider.(CallbackVideoProvider); ok {
-		if _, err := callbackBaseURL(); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
 	}
 	project, err := a.store.InsertProjectWithProviderConfig(input.Topic, string(providerID), providerConfigID, model.ID)
 	if err != nil {

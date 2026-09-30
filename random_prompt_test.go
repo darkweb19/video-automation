@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,29 +20,12 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 	return fn(request)
 }
 
-func TestGenerateRandomPromptUsesQueuedTextClientWithinBoundedBudget(t *testing.T) {
+func TestGenerateRandomPromptUsesQueuedTextClientOnFirstRequest(t *testing.T) {
 	if defaultOpenRouterStoryHTTPClient.Timeout <= randomPromptTimeout {
 		t.Fatalf("text client timeout %s does not cover the %s prompt budget", defaultOpenRouterStoryHTTPClient.Timeout, randomPromptTimeout)
 	}
 	if randomPromptTimeout >= 2*time.Minute {
 		t.Fatalf("prompt budget %s exceeds server write deadline", randomPromptTimeout)
-	}
-	worstCase := randomPromptAttemptTimeout * time.Duration(len(randomPromptModels))
-	for failedAttempt := 0; failedAttempt < len(randomPromptModels)-1; failedAttempt++ {
-		worstCase += randomPromptBackoffDelay(failedAttempt)
-	}
-	if worstCase > randomPromptTimeout {
-		t.Fatalf("worst-case model attempts take %s, beyond the %s prompt budget", worstCase, randomPromptTimeout)
-	}
-	if len(randomPromptModels) != 5 {
-		t.Fatalf("random prompt model count = %d, want five", len(randomPromptModels))
-	}
-	seenModels := make(map[string]bool, len(randomPromptModels))
-	for _, model := range randomPromptModels {
-		if !strings.HasSuffix(model, ":free") || seenModels[model] {
-			t.Fatalf("random prompt model %q is not a unique free variant", model)
-		}
-		seenModels[model] = true
 	}
 	client := NewOpenRouterClient("test-key")
 	if client.storyClient() != defaultOpenRouterStoryHTTPClient {
@@ -71,7 +53,7 @@ func TestGenerateRandomPromptUsesQueuedTextClientWithinBoundedBudget(t *testing.
 	}
 }
 
-func TestGenerateRandomPromptUsesFreeModelForBothModes(t *testing.T) {
+func TestGenerateRandomPromptUsesLingModelForBothModes(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		input      RandomPromptRequest
@@ -135,14 +117,7 @@ func TestGenerateRandomPromptUsesFreeModelForBothModes(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				modelIsFree := false
-				for _, model := range randomPromptModels {
-					if body.Model == model {
-						modelIsFree = true
-						break
-					}
-				}
-				if !modelIsFree || body.MaxTokens != test.maxTokens || len(body.Messages) != 2 || !strings.HasPrefix(body.Messages[1].Content, test.userPrefix) || !strings.Contains(body.Messages[1].Content, test.input.Category) || !strings.Contains(body.Messages[0].Content, test.systemText) {
+				if body.Model != "inclusionai/ling-3.0-flash-fin:free" || body.MaxTokens != test.maxTokens || len(body.Messages) != 2 || !strings.HasPrefix(body.Messages[1].Content, test.userPrefix) || !strings.Contains(body.Messages[1].Content, test.input.Category) || !strings.Contains(body.Messages[0].Content, test.systemText) {
 					t.Fatalf("unexpected request body: %#v", body)
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": test.content}}}})
@@ -155,154 +130,6 @@ func TestGenerateRandomPromptUsesFreeModelForBothModes(t *testing.T) {
 				t.Fatalf("prompt = %q, error = %v", prompt, err)
 			}
 		})
-	}
-}
-
-func TestGenerateRandomPromptFallsBackAcrossShuffledFreeModels(t *testing.T) {
-	var requestedModels []string
-	client := NewOpenRouterClient("test-key")
-	client.BaseURL = "https://openrouter.test/api/v1"
-	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		var request struct {
-			Model string `json:"model"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			return nil, err
-		}
-		requestedModels = append(requestedModels, request.Model)
-		deadline, ok := r.Context().Deadline()
-		if !ok || time.Until(deadline) > randomPromptAttemptTimeout || time.Until(deadline) <= 0 {
-			t.Errorf("attempt deadline = %v, present = %v", deadline, ok)
-		}
-		if len(requestedModels) < len(randomPromptModels) {
-			return &http.Response{
-				StatusCode: http.StatusServiceUnavailable,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"temporary model outage"}}`)),
-			}, nil
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"A lantern drifts through a snowy village."}}]}`)),
-		}, nil
-	})}
-
-	prompt, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject})
-	if err != nil || prompt != "A lantern drifts through a snowy village." {
-		t.Fatalf("fallback prompt = %q, error = %v", prompt, err)
-	}
-	if len(requestedModels) != len(randomPromptModels) {
-		t.Fatalf("requested %d models, want all %d: %v", len(requestedModels), len(randomPromptModels), requestedModels)
-	}
-	seen := make(map[string]bool, len(requestedModels))
-	for _, requested := range requestedModels {
-		if !strings.HasSuffix(requested, ":free") || seen[requested] {
-			t.Fatalf("fallback requested non-free or repeated model %q in %v", requested, requestedModels)
-		}
-		seen[requested] = true
-	}
-	for _, configured := range randomPromptModels {
-		if !seen[configured] {
-			t.Fatalf("fallback omitted %q: %v", configured, requestedModels)
-		}
-	}
-}
-
-func TestGenerateRandomPromptDoesNotRetryAuthOrInvalidRequests(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusBadRequest} {
-		t.Run(fmt.Sprintf("HTTP %d", status), func(t *testing.T) {
-			requests := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				requests++
-				w.WriteHeader(status)
-				_, _ = io.WriteString(w, `{"error":{"message":"request rejected"}}`)
-			}))
-			defer server.Close()
-
-			client := testClient(server)
-			_, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeSingle})
-			var upstream *upstreamError
-			if !errors.As(err, &upstream) || upstream.StatusCode != status {
-				t.Fatalf("generation error = %v, want upstream HTTP %d", err, status)
-			}
-			if requests != 1 {
-				t.Fatalf("sent %d requests after HTTP %d, want one", requests, status)
-			}
-		})
-	}
-}
-
-func TestGenerateRandomPromptBackoffHonorsCallerDeadline(t *testing.T) {
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer server.Close()
-
-	client := testClient(server)
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
-	_, err := client.GenerateRandomPrompt(ctx, RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("generation error = %v, want caller deadline", err)
-	}
-	if requests != 1 {
-		t.Fatalf("sent %d requests after caller deadline, want one", requests)
-	}
-}
-
-func TestGenerateRandomPromptFallsThroughQuotedEmptyContent(t *testing.T) {
-	requests := 0
-	client := NewOpenRouterClient("test-key")
-	client.BaseURL = "https://openrouter.test/api/v1"
-	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		requests++
-		content := `{"choices":[{"message":{"content":"\"\""}}]}`
-		if requests > 1 {
-			content = `{"choices":[{"message":{"content":"A red kite circles above a quiet beach."}}]}`
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(content)),
-		}, nil
-	})}
-
-	prompt, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeSingle})
-	if err != nil || prompt != "A red kite circles above a quiet beach." {
-		t.Fatalf("fallback prompt = %q, error = %v", prompt, err)
-	}
-	if requests != 2 {
-		t.Fatalf("sent %d requests for quoted empty content, want one fallback", requests)
-	}
-}
-
-func TestGenerateRandomPromptFallsBackFromOversizedSinglePrompt(t *testing.T) {
-	requests := 0
-	client := NewOpenRouterClient("test-key")
-	client.BaseURL = "https://openrouter.test/api/v1"
-	client.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		requests++
-		content := strings.Repeat("x", MaxPromptLength+1)
-		if requests > 1 {
-			content = "A single clip follows a paper boat downstream in the rain, ending beneath a warm streetlamp, vertical 9:16."
-		}
-		body := `{"choices":[{"message":{"content":"` + content + `"}}]}`
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(body)),
-		}, nil
-	})}
-
-	prompt, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeSingle})
-	if err != nil || prompt == "" || utf8.RuneCountInString(prompt) > MaxPromptLength {
-		t.Fatalf("single prompt = %q (%d runes), error = %v", prompt, utf8.RuneCountInString(prompt), err)
-	}
-	if requests != 2 {
-		t.Fatalf("sent %d requests for oversized single prompt, want one fallback", requests)
 	}
 }
 

@@ -58,18 +58,6 @@ func (c *ModalVideoClient) contentClient() *http.Client {
 }
 
 func (c *ModalVideoClient) doJSON(ctx context.Context, method, path string, input, output any) error {
-	return c.doJSONWithClient(ctx, c.client(), method, path, input, output)
-}
-
-func (c *ModalVideoClient) doJSONWithoutRedirects(ctx context.Context, method, path string, input, output any) error {
-	client := *c.client()
-	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	return c.doJSONWithClient(ctx, &client, method, path, input, output)
-}
-
-func (c *ModalVideoClient) doJSONWithClient(ctx context.Context, client *http.Client, method, path string, input, output any) error {
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -87,7 +75,7 @@ func (c *ModalVideoClient) doJSONWithClient(ctx context.Context, client *http.Cl
 	if input != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	response, err := client.Do(req)
+	response, err := c.client().Do(req)
 	if err != nil {
 		return fmt.Errorf("Modal request: %w", err)
 	}
@@ -120,42 +108,6 @@ func (c *ModalVideoClient) GenerateVideo(ctx context.Context, request GenerateRe
 		generation.Model = request.Model
 	}
 	return generation, nil
-}
-
-// SubmitVideo accepts a durable client-assigned id. Completion is delivered to
-// the callback URL; the acknowledgment is never treated as the terminal state.
-func (c *ModalVideoClient) SubmitVideo(ctx context.Context, request GenerateRequest, callback VideoCallbackSubmission) (*Generation, error) {
-	input := struct {
-		GenerateRequest
-		VideoCallbackSubmission
-	}{request, callback}
-	var source openRouterGeneration
-	if err := c.doJSONWithoutRedirects(ctx, http.MethodPost, "/videos", input, &source); err != nil {
-		var upstream *upstreamError
-		if errors.As(err, &upstream) && upstream.StatusCode >= 300 && upstream.StatusCode < 400 {
-			return nil, errCallbackSubmissionRedirect
-		}
-		// A 2xx response with a non-JSON/invalid acknowledgment means the
-		// worker may already have accepted a billable job. Retrying could create
-		// more jobs on a legacy deployment that ignores callback fields.
-		if !isUpstreamRequestError(err) && strings.HasPrefix(err.Error(), "decode Modal response:") {
-			return nil, errCallbackWorkerUnsupported
-		}
-		return nil, err
-	}
-	if source.ID != callback.JobID {
-		return nil, errCallbackWorkerUnsupported
-	}
-	generation, err := normalizeVideoGeneration(source, "Modal")
-	if err != nil || generation == nil {
-		return nil, errCallbackWorkerUnsupported
-	}
-	return generation, nil
-}
-
-func isUpstreamRequestError(err error) bool {
-	var upstream *upstreamError
-	return errors.As(err, &upstream)
 }
 
 func (c *ModalVideoClient) GetGeneration(ctx context.Context, id string) (*Generation, error) {
