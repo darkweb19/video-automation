@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -73,6 +74,39 @@ class _Dispatch:
         return SimpleNamespace(object_id="fc-offline-test")
 
 
+class _AtomicDict:
+    def __init__(self) -> None:
+        self.values: dict[str, dict[str, object]] = {}
+        self.lock = asyncio.Lock()
+        self.put = SimpleNamespace(aio=self._put)
+        self.get = SimpleNamespace(aio=self._get)
+
+    async def _put(self, key, value, *, skip_if_exists=False):
+        async with self.lock:
+            if skip_if_exists and key in self.values:
+                return False
+            self.values[key] = dict(value)
+            return True
+
+    async def _get(self, key, default=None):
+        async with self.lock:
+            value = self.values.get(key, default)
+            return dict(value) if isinstance(value, dict) else value
+
+
+class _FailNthPutAtomicDict(_AtomicDict):
+    def __init__(self, fail_on: int) -> None:
+        super().__init__()
+        self.fail_on = fail_on
+        self.put_calls = 0
+
+    async def _put(self, key, value, *, skip_if_exists=False):
+        self.put_calls += 1
+        if self.put_calls == self.fail_on:
+            raise OSError("injected Dict metadata write failure")
+        return await super()._put(key, value, skip_if_exists=skip_if_exists)
+
+
 class _VideoGeneratorFactory:
     dispatch: _Dispatch
 
@@ -87,6 +121,7 @@ class SkyReelsAPITests(unittest.IsolatedAsyncioTestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.jobs_dir = Path(self.temp_dir.name)
         self.dispatch = _Dispatch()
+        self.supervisor_dispatch = _Dispatch()
         self.original_generator = WORKER.VideoGenerator
         self.original_reconcile = WORKER.reconcile_modal_call
 
@@ -96,6 +131,7 @@ class SkyReelsAPITests(unittest.IsolatedAsyncioTestCase):
         self.patches = [
             patch.object(WORKER, "JOBS_DIR", str(self.jobs_dir)),
             patch.object(WORKER, "jobs_volume", _Volume()),
+            patch.object(WORKER, "callback_submission_claims", _AtomicDict()),
             patch.object(WORKER, "reconcile_modal_call", no_remote_reconcile),
             patch.dict(os.environ, {"MODAL_VIDEO_API_KEY": API_KEY}),
         ]
@@ -104,6 +140,12 @@ class SkyReelsAPITests(unittest.IsolatedAsyncioTestCase):
         _VideoGeneratorFactory.dispatch = self.dispatch
         self.generator_patch = patch.object(WORKER, "VideoGenerator", _VideoGeneratorFactory())
         self.generator_patch.start()
+        self.supervisor_patch = patch.object(
+            WORKER,
+            "callback_video_supervisor",
+            SimpleNamespace(spawn=SimpleNamespace(aio=self.supervisor_dispatch.aio)),
+        )
+        self.supervisor_patch.start()
 
         app = WORKER.create_api()
         self.client = httpx.AsyncClient(
@@ -113,6 +155,7 @@ class SkyReelsAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
+        self.supervisor_patch.stop()
         self.generator_patch.stop()
         for active_patch in reversed(self.patches):
             active_patch.stop()
@@ -132,6 +175,13 @@ class SkyReelsAPITests(unittest.IsolatedAsyncioTestCase):
         }
         body.update(updates)
         return body
+
+    def callback_fields(self, job_id: str = "gen_0123456789abcdef0123456789abcdef") -> dict[str, str]:
+        return {
+            "job_id": job_id,
+            "callback_url": f"https://dashboard.example.test/api/video-callbacks/{job_id}",
+            "callback_token": "a" * 64,
+        }
 
     def assert_error_envelope(self, response: httpx.Response) -> str:
         try:
@@ -153,6 +203,560 @@ class SkyReelsAPITests(unittest.IsolatedAsyncioTestCase):
         job_id = response.json().get("id", "")
         self.assertTrue(WORKER.safe_job_id(job_id), response.json())
         return job_id, response
+
+    async def callback_submit(self, **updates) -> httpx.Response:
+        response = await self.client.post(
+            BASE_PATH,
+            headers=self.auth(),
+            json=self.request_body(**self.callback_fields(), **updates),
+        )
+        return response
+
+    async def test_callback_submission_is_idempotent_secret_safe_and_returns_client_id(self) -> None:
+        callback = self.callback_fields()
+        delivered: list[dict[str, object]] = []
+
+        async def callback_ok(_url, _token, payload):
+            delivered.append(dict(payload))
+            return True
+
+        with patch.object(WORKER, "deliver_video_callback", callback_ok):
+            accepted = await self.client.post(
+                BASE_PATH,
+                headers=self.auth(),
+                json=self.request_body(**callback),
+            )
+            self.assertEqual(accepted.status_code, 202, accepted.text)
+            self.assertEqual(accepted.json()["id"], callback["job_id"])
+            self.assertEqual(accepted.json()["status"], "pending")
+            self.assertNotIn("callback_token", accepted.text)
+            self.assertEqual(len(self.supervisor_dispatch.calls), 1)
+            self.assertEqual(self.supervisor_dispatch.calls[0]["job_id"], callback["job_id"])
+            self.assertEqual(self.supervisor_dispatch.calls[0]["callback_token"], callback["callback_token"])
+            self.assertEqual(self.dispatch.calls, [])
+
+            persisted = (self.jobs_dir / f"{callback['job_id']}.json").read_text(encoding="utf-8")
+            self.assertNotIn(callback["callback_token"], persisted)
+            self.assertIn(WORKER.callback_token_hash(callback["callback_token"]), persisted)
+            self.assertEqual(delivered, [])
+            claim = WORKER.callback_submission_claims.values[f"request:{callback['job_id']}"]
+            self.assertEqual(claim["state"], "supervisor_queued")
+            self.assertNotIn(callback["callback_token"], json.dumps(claim))
+
+            duplicate = await self.client.post(
+                BASE_PATH,
+                headers=self.auth(),
+                json=self.request_body(**callback),
+            )
+            self.assertEqual(duplicate.status_code, 202, duplicate.text)
+            self.assertEqual(duplicate.json()["id"], callback["job_id"])
+            self.assertEqual(len(self.supervisor_dispatch.calls), 1)
+            self.assertEqual(delivered[-1]["sequence"], 1)
+            self.assertEqual(delivered[-1]["status"], "processing")
+
+            changed = await self.client.post(
+                BASE_PATH,
+                headers=self.auth(),
+                json=self.request_body(**callback, prompt="A different prompt"),
+            )
+            self.assertEqual(changed.status_code, 409, changed.text)
+            self.assertEqual(len(self.supervisor_dispatch.calls), 1)
+
+            job = await WORKER.read_job_async(callback["job_id"])
+            job.update({"status": "completed", "stage": "completed", "progress": 100})
+            await WORKER.write_job_async(callback["job_id"], job)
+            replay = await self.client.post(
+                BASE_PATH,
+                headers=self.auth(),
+                json=self.request_body(**callback),
+            )
+            self.assertEqual(replay.status_code, 202, replay.text)
+            self.assertEqual(replay.json()["id"], callback["job_id"])
+            self.assertEqual(len(self.supervisor_dispatch.calls), 1)
+            self.assertEqual(delivered[-1]["sequence"], 2)
+            self.assertEqual(delivered[-1]["status"], "completed")
+
+    async def test_supervisor_handle_metadata_failure_keeps_accepted_job_queued(self) -> None:
+        job_id = "gen_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        claims = _FailNthPutAtomicDict(fail_on=3)
+        callback_attempts: list[dict[str, object]] = []
+
+        async def should_not_deliver(_url, _token, payload):
+            callback_attempts.append(dict(payload))
+            return 204
+
+        with (
+            patch.object(WORKER, "callback_submission_claims", claims),
+            patch.object(WORKER, "deliver_video_callback", should_not_deliver),
+        ):
+            response = await self.client.post(
+                BASE_PATH,
+                headers=self.auth(),
+                json=self.request_body(**self.callback_fields(job_id)),
+            )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["id"], job_id)
+        self.assertEqual(len(self.supervisor_dispatch.calls), 1)
+        self.assertEqual(claims.values[f"request:{job_id}"]["state"], "recorded")
+        job = await WORKER.read_job_async(job_id)
+        self.assertEqual(job["status"], "pending")
+        self.assertEqual(callback_attempts, [])
+
+    async def test_supervisor_spawn_lost_ack_keeps_job_pending_and_dedupes(self) -> None:
+        callback = self.callback_fields("gen_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        delivered: list[dict[str, object]] = []
+        self.supervisor_dispatch.error = RuntimeError("injected unknown transport-like supervisor error")
+
+        async def callback_ok(_url, _token, payload):
+            delivered.append(dict(payload))
+            return 204
+
+        with patch.object(WORKER, "deliver_video_callback", callback_ok):
+            body = self.request_body(**callback)
+            accepted = await self.client.post(BASE_PATH, headers=self.auth(), json=body)
+            self.assertEqual(accepted.status_code, 202, accepted.text)
+            self.assertEqual(accepted.json()["id"], callback["job_id"])
+            job = await WORKER.read_job_async(callback["job_id"])
+            self.assertEqual(job["status"], "pending")
+            self.assertEqual(len(self.supervisor_dispatch.calls), 1)
+            self.assertEqual(delivered, [])
+
+            duplicate = await self.client.post(BASE_PATH, headers=self.auth(), json=body)
+
+        self.assertEqual(duplicate.status_code, 202, duplicate.text)
+        self.assertEqual(len(self.supervisor_dispatch.calls), 1)
+        self.assertEqual([event["status"] for event in delivered], ["processing"])
+
+    async def test_lost_gpu_spawn_ack_defers_then_delivers_late_terminal_without_duplicate(self) -> None:
+        job_id = "gen_cccccccccccccccccccccccccccccccc"
+        callback_url = f"https://dashboard.example.test/api/video-callbacks/{job_id}"
+        callback_token = "c" * 64
+        job = {
+            "id": job_id,
+            "status": "pending",
+            "stage": "queued",
+            "progress": 0,
+            "model": WORKER.MODEL_ID,
+            "callback_url": callback_url,
+            "callback_token_hash": WORKER.callback_token_hash(callback_token),
+            "callback_sequence": 0,
+        }
+        await WORKER.write_job_async(job_id, job)
+        self.dispatch.error = RuntimeError("injected unknown transport-like GPU error after child acceptance")
+
+        async def run_gpu():
+            await WORKER.run_callback_gpu_generation(
+                job_id,
+                "A kite over a park",
+                WORKER.MODEL_ID,
+                6,
+                "480p",
+                "9:16",
+                7,
+                callback_url,
+                callback_token,
+            )
+
+        with self.assertRaises(WORKER.CallbackWaitDeferredError):
+            await run_gpu()
+        with self.assertRaises(WORKER.CallbackWaitDeferredError):
+            await run_gpu()
+        self.assertEqual(len(self.dispatch.calls), 1)
+        self.assertEqual((await WORKER.read_job_async(job_id))["status"], "pending")
+
+        # Simulate the accepted child finishing after the supervisor lost the
+        # spawn acknowledgment. Retry entry must see this durable result first.
+        completed = await WORKER.read_job_async(job_id)
+        completed.update({"status": "completed", "stage": "completed", "progress": 100})
+        await WORKER.write_job_async(job_id, completed)
+        delivered: list[dict[str, object]] = []
+
+        async def callback_ok(_url, _token, payload):
+            delivered.append(dict(payload))
+            return 204
+
+        event = await WORKER.run_callback_supervisor(
+            job_id,
+            callback_url,
+            callback_token,
+            run_gpu,
+            WORKER.read_job_async,
+            WORKER.write_job_async,
+            post_once=callback_ok,
+            sleep=lambda _delay: asyncio.sleep(0),
+        )
+        self.assertEqual(event["status"], "completed")
+        self.assertEqual(event["sequence"], 2)
+        self.assertEqual([payload["status"] for payload in delivered], ["completed"])
+        self.assertEqual(len(self.dispatch.calls), 1)
+
+    async def test_concurrent_identical_callback_posts_never_spawn_twice(self) -> None:
+        callback = self.callback_fields("gen_fedcba9876543210fedcba9876543210")
+        async def callback_ok(_url, _token, _payload):
+            return True
+
+        with patch.object(WORKER, "deliver_video_callback", callback_ok):
+            responses = await asyncio.gather(
+                *[
+                    self.client.post(
+                        BASE_PATH,
+                        headers=self.auth(),
+                        json=self.request_body(**callback),
+                    )
+                    for _ in range(2)
+                ]
+            )
+        self.assertIn(202, [response.status_code for response in responses])
+        self.assertTrue(all(response.status_code in {202, 503} for response in responses))
+        self.assertEqual(len(self.supervisor_dispatch.calls), 1)
+        self.assertEqual(self.dispatch.calls, [])
+
+    async def test_stale_claim_without_job_is_failed_and_callback_is_recoverable(self) -> None:
+        callback = self.callback_fields("gen_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        options = {
+            "model": WORKER.MODEL_ID,
+            "prompt": self.request_body()["prompt"],
+            "duration": 6,
+            "resolution": "480p",
+            "aspect_ratio": "9:16",
+            "seed": 123,
+        }
+        fingerprint = WORKER.callback_request_fingerprint(
+            options,
+            callback["callback_url"],
+            WORKER.callback_token_hash(callback["callback_token"]),
+            compare_seed=False,
+        )
+        WORKER.callback_submission_claims.values[f"request:{callback['job_id']}"] = {
+            "fingerprint": fingerprint,
+            "state": "claiming",
+            "claimed_at": int(WORKER.time.time()) - WORKER.CALLBACK_CLAIM_STALE_SECONDS - 1,
+            "supervisor_call_id": "",
+        }
+        delivered: list[dict[str, object]] = []
+
+        async def callback_ok(_url, _token, payload):
+            delivered.append(dict(payload))
+            return True
+
+        with patch.object(WORKER, "deliver_video_callback", callback_ok):
+            response = await self.client.post(
+                BASE_PATH,
+                headers=self.auth(),
+                json=self.request_body(**callback),
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["id"], callback["job_id"])
+        self.assertEqual(response.json()["status"], "failed")
+        self.assertEqual(delivered[-1]["sequence"], 2)
+        self.assertEqual(delivered[-1]["status"], "failed")
+        self.assertEqual(delivered[-1]["error_code"], "dispatch_interrupted")
+        persisted = await WORKER.read_job_async(callback["job_id"])
+        self.assertEqual(persisted["status"], "failed")
+        self.assertNotIn(callback["callback_token"], json.dumps(persisted))
+        self.assertEqual(self.supervisor_dispatch.calls, [])
+
+    async def test_callback_fields_are_all_required_and_callback_url_is_public_https(self) -> None:
+        callback = self.callback_fields()
+        invalid = [
+            {"job_id": callback["job_id"]},
+            {**callback, "callback_url": "http://dashboard.example.test/api/video-callbacks/" + callback["job_id"]},
+            {**callback, "callback_url": "https://127.0.0.1/api/video-callbacks/" + callback["job_id"]},
+            {**callback, "callback_url": callback["callback_url"] + "?token=hidden"},
+            {**callback, "callback_token": "short"},
+        ]
+        for fields in invalid:
+            response = await self.client.post(
+                BASE_PATH,
+                headers=self.auth(),
+                json=self.request_body(**fields),
+            )
+            with self.subTest(fields=fields):
+                self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.supervisor_dispatch.calls, [])
+
+    async def test_callback_supervisor_persists_startup_failure_and_redelivers_terminal_without_regeneration(self) -> None:
+        job = {
+            "id": "gen_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": "pending",
+            "stage": "queued",
+            "progress": 0,
+        }
+        callbacks: list[dict[str, object]] = []
+        writes: list[dict[str, object]] = []
+
+        async def read_job(_job_id):
+            return dict(job)
+
+        async def write_job(_job_id, value):
+            job.clear()
+            job.update(value)
+            writes.append(dict(value))
+
+        async def post_ok(_url, _token, payload):
+            callbacks.append(dict(payload))
+            return 204
+
+        async def startup_error():
+            raise RuntimeError("private Modal startup detail")
+
+        event = await WORKER.run_callback_supervisor(
+            job["id"],
+            "https://dashboard.example.test/api/video-callbacks/" + job["id"],
+            "b" * 64,
+            startup_error,
+            read_job,
+            write_job,
+            post_once=post_ok,
+            sleep=lambda _delay: asyncio.sleep(0),
+        )
+        self.assertEqual(event["status"], "failed")
+        self.assertEqual(event["error_code"], "worker_startup_failed")
+        self.assertEqual(job["status"], "failed")
+        self.assertNotIn("private Modal startup detail", json.dumps(job))
+        self.assertEqual([callback["sequence"] for callback in callbacks], [1, 2])
+
+        runs = 0
+        async def forbidden_gpu_rerun():
+            nonlocal runs
+            runs += 1
+
+        callback_count = len(callbacks)
+        redelivered = await WORKER.run_callback_supervisor(
+            job["id"],
+            "https://dashboard.example.test/api/video-callbacks/" + job["id"],
+            "b" * 64,
+            forbidden_gpu_rerun,
+            read_job,
+            write_job,
+            post_once=post_ok,
+            sleep=lambda _delay: asyncio.sleep(0),
+        )
+        self.assertEqual(redelivered["sequence"], 2)
+        self.assertEqual(runs, 0)
+        self.assertEqual(callbacks[callback_count]["status"], "failed")
+
+    async def test_callback_supervisor_retry_exhaustion_leaves_terminal_result_for_replay(self) -> None:
+        job = {"id": "gen_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "status": "pending", "stage": "queued"}
+        runs = 0
+
+        async def read_job(_job_id):
+            return dict(job)
+
+        async def write_job(_job_id, value):
+            job.clear()
+            job.update(value)
+
+        async def gpu_completed():
+            nonlocal runs
+            runs += 1
+            job.update({"status": "completed", "stage": "completed", "progress": 100})
+
+        async def callback_unavailable(_url, _token, _payload):
+            return 503
+
+        with self.assertRaisesRegex(RuntimeError, "terminal callback delivery failed"):
+            await WORKER.run_callback_supervisor(
+                job["id"],
+                "https://dashboard.example.test/api/video-callbacks/" + job["id"],
+                "c" * 64,
+                gpu_completed,
+                read_job,
+                write_job,
+                post_once=callback_unavailable,
+                sleep=lambda _delay: asyncio.sleep(0),
+            )
+        self.assertEqual(runs, 1)
+        self.assertEqual(job["status"], "completed")
+
+        delivered: list[dict[str, object]] = []
+        async def callback_ok(_url, _token, payload):
+            delivered.append(dict(payload))
+            return 204
+
+        replay = await WORKER.run_callback_supervisor(
+            job["id"],
+            "https://dashboard.example.test/api/video-callbacks/" + job["id"],
+            "c" * 64,
+            gpu_completed,
+            read_job,
+            write_job,
+            post_once=callback_ok,
+            sleep=lambda _delay: asyncio.sleep(0),
+        )
+        self.assertEqual(replay["status"], "completed")
+        self.assertEqual(replay["sequence"], 2)
+        self.assertEqual(runs, 1)
+        self.assertEqual(delivered[0]["sequence"], 2)
+
+    async def test_callback_supervisor_read_error_does_not_start_or_overwrite_job(self) -> None:
+        runs = 0
+        writes = 0
+
+        async def run_generation():
+            nonlocal runs
+            runs += 1
+
+        async def read_error(_job_id):
+            raise OSError("transient volume read error")
+
+        async def write_job(_job_id, _job):
+            nonlocal writes
+            writes += 1
+
+        with self.assertRaisesRegex(OSError, "transient volume read error"):
+            await WORKER.run_callback_supervisor(
+                "gen_cccccccccccccccccccccccccccccccc",
+                "https://dashboard.example.test/api/video-callbacks/gen_cccccccccccccccccccccccccccccccc",
+                "d" * 64,
+                run_generation,
+                read_error,
+                write_job,
+                post_once=lambda *_args: asyncio.sleep(0, result=204),
+                sleep=lambda _delay: asyncio.sleep(0),
+            )
+        self.assertEqual(runs, 0)
+        self.assertEqual(writes, 0)
+
+    async def test_callback_supervisor_defers_transient_modal_wait_without_terminalizing(self) -> None:
+        job = {
+            "id": "gen_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "status": "pending",
+            "stage": "queued",
+            "progress": 0,
+        }
+        writes: list[dict[str, object]] = []
+        callbacks: list[dict[str, object]] = []
+
+        async def read_job(_job_id):
+            return dict(job)
+
+        async def write_job(_job_id, value):
+            job.clear()
+            job.update(value)
+            writes.append(dict(value))
+
+        async def wait_error():
+            raise WORKER.modal.exception.ConnectionError("temporary Modal RPC failure")
+
+        async def run_generation():
+            await WORKER.wait_for_callback_gpu_call(
+                job["id"],
+                SimpleNamespace(get=SimpleNamespace(aio=wait_error)),
+            )
+
+        async def post_ok(_url, _token, payload):
+            callbacks.append(dict(payload))
+            return 204
+
+        with self.assertRaises(WORKER.CallbackWaitDeferredError):
+            await WORKER.run_callback_supervisor(
+                job["id"],
+                "https://dashboard.example.test/api/video-callbacks/" + job["id"],
+                "f" * 64,
+                run_generation,
+                read_job,
+                write_job,
+                post_once=post_ok,
+                sleep=lambda _delay: asyncio.sleep(0),
+            )
+
+        self.assertEqual(job["status"], "pending")
+        self.assertEqual(job["callback_sequence"], 1)
+        self.assertEqual([value["callback_sequence"] for value in writes], [1])
+        self.assertEqual([value["sequence"] for value in callbacks], [1])
+
+    async def test_callback_supervisor_cancellation_preserves_pending_job(self) -> None:
+        job = {
+            "id": "gen_dddddddddddddddddddddddddddddddd",
+            "status": "pending",
+            "stage": "queued",
+            "progress": 0,
+        }
+        callbacks: list[dict[str, object]] = []
+
+        async def read_job(_job_id):
+            return dict(job)
+
+        async def write_job(_job_id, value):
+            job.clear()
+            job.update(value)
+
+        async def cancelled_generation():
+            raise asyncio.CancelledError()
+
+        async def post_ok(_url, _token, payload):
+            callbacks.append(dict(payload))
+            return 204
+
+        with self.assertRaises(asyncio.CancelledError):
+            await WORKER.run_callback_supervisor(
+                job["id"],
+                "https://dashboard.example.test/api/video-callbacks/" + job["id"],
+                "d" * 64,
+                cancelled_generation,
+                read_job,
+                write_job,
+                post_once=post_ok,
+                sleep=lambda _delay: asyncio.sleep(0),
+            )
+
+        self.assertEqual(job["status"], "pending")
+        self.assertEqual(job["callback_sequence"], 1)
+        self.assertEqual([event["status"] for event in callbacks], ["processing"])
+
+    async def test_callback_post_disables_redirects_and_retry_policy_is_sdk_valid(self) -> None:
+        seen_options: dict[str, object] = {}
+
+        class _CallbackHTTPClient:
+            def __init__(self, **kwargs) -> None:
+                seen_options.update(kwargs)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args) -> None:
+                return None
+
+            async def post(self, *_args, **_kwargs):
+                return SimpleNamespace(status_code=307)
+
+        with patch("httpx.AsyncClient", _CallbackHTTPClient):
+            status = await WORKER.post_video_callback_once(
+                "https://dashboard.example.test/api/video-callbacks/gen_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "e" * 64,
+                {"id": "gen_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "status": "completed"},
+            )
+        self.assertEqual(status, 307)
+        self.assertIs(seen_options.get("follow_redirects"), False)
+        # Constructing the actual installed SDK policy also validates its
+        # supported delay bounds; module import uses this same configuration.
+        policy = WORKER.modal.Retries(
+            max_retries=240,
+            backoff_coefficient=2.0,
+            initial_delay=1.0,
+            max_delay=60.0,
+        )
+        self.assertEqual(policy.max_retries, 240)
+
+    def test_spawn_error_classification_only_terminalizes_known_rejections(self) -> None:
+        self.assertTrue(
+            WORKER.definitive_modal_rejection(
+                WORKER.modal.exception.InvalidError("invalid Modal request")
+            )
+        )
+        self.assertTrue(
+            WORKER.definitive_modal_rejection(
+                WORKER.modal.exception.AuthError("invalid Modal credentials")
+            )
+        )
+        self.assertFalse(WORKER.definitive_modal_rejection(RuntimeError("unknown transport failure")))
+        self.assertFalse(
+            WORKER.definitive_modal_rejection(
+                WORKER.modal.exception.ConnectionError("connection interrupted")
+            )
+        )
 
     async def test_models_advertise_the_project_combination_and_auth_is_required(self) -> None:
         health = await self.client.get("/health")
