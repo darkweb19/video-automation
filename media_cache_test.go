@@ -152,7 +152,9 @@ func TestProjectMediaValidatorChangesWhenRetryReplacesFinalFile(t *testing.T) {
 	if err := os.WriteFile(path, secondBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	secondTime := firstTime.Add(time.Nanosecond)
+	// Keep the replacement within the same second while using a representable
+	// Windows timestamp delta.
+	secondTime := firstTime.Add(time.Millisecond)
 	if err := os.Chtimes(path, secondTime, secondTime); err != nil {
 		t.Fatal(err)
 	}

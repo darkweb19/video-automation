@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FrameVault — Video dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260925-1">
-  <link rel="stylesheet" href="/static/model-picker.css?v=20260923-1">
-  <link rel="stylesheet" href="/static/project.css?v=20260923-1">
-  <link rel="stylesheet" href="/static/history-settings.css?v=20260925-2">
+  <title>FrameVault — Video workspace</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260929-1">
+  <link rel="stylesheet" href="/static/model-picker.css?v=20260929-1">
+  <link rel="stylesheet" href="/static/project.css?v=20260929-1">
+  <link rel="stylesheet" href="/static/history-settings.css?v=20260929-1">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -44,39 +44,43 @@
   </section>
 
   <div id="app-shell" class="app-shell" hidden>
-    <aside class="sidebar">
+    <aside id="workspace-navigation" class="sidebar">
       <div class="brand"><div class="brand-mark small">F</div><span>FrameVault</span></div>
       <nav aria-label="Main navigation">
-        <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span>Overview</button>
-        <button class="nav-item" data-view="generate"><span class="nav-icon">＋</span>Generate</button>
-        <button class="nav-item" data-view="history"><span class="nav-icon">▤</span>History</button>
-        <button class="nav-item" data-view="vault"><span class="nav-icon">▣</span>Vault</button>
-        <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span>Settings</button>
+        <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Overview</button>
+        <button class="nav-item" data-view="generate"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M9 3v12M3 9h12"></path></svg></span>Generate</button>
+        <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="M9 5.5V9l2.5 1.5"></path></svg></span>History</button>
+        <button class="nav-item" data-view="vault"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="3" y="7.5" width="12" height="8" rx="1.5"></rect><path d="M5.5 7.5V5a3.5 3.5 0 0 1 7 0v2.5"></path></svg></span>Vault</button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"></path><circle cx="6" cy="5" r="1.5"></circle><circle cx="11" cy="9" r="1.5"></circle><circle cx="7" cy="13" r="1.5"></circle></svg></span>Settings</button>
       </nav>
-      <div class="sidebar-foot"><span class="status-dot"></span><span>Docker storage active</span></div>
+      <div class="sidebar-foot"><span class="status-dot" aria-hidden="true"></span><span>Private workspace</span></div>
     </aside>
 
     <main class="main">
       <header class="topbar">
-        <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation">☰</button>
-        <div><p class="eyebrow" id="page-kicker">Workspace</p><h1 id="page-title">Overview</h1></div>
-        <div class="account"><div class="avatar">SS</div><div class="account-copy"><strong id="account-name">sujanshrestha</strong><span>Administrator</span></div><button id="logout" class="text-button">Log out</button></div>
+        <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation" aria-controls="workspace-navigation" aria-expanded="false">☰</button>
+        <div><p class="eyebrow" id="page-kicker">Workspace</p><h1 id="page-title" tabindex="-1">Overview</h1></div>
+        <div class="account"><div class="avatar" aria-hidden="true"></div><div class="account-copy"><strong id="account-name">Signed in</strong><span>Private workspace</span></div><button id="logout" class="text-button">Log out</button></div>
       </header>
 
       <div class="content">
         <section class="view active" data-page="overview">
           <div class="hero">
-            <div><p class="eyebrow light">AI video workspace</p><h2>Create, track, and protect every generation.</h2><p>Your files remain inside your private Docker volume.</p></div>
-            <button class="button light" data-go="generate">Create video <span>→</span></button>
+            <div class="hero-copy"><p class="eyebrow light">Video workspace</p><h2>Turn a topic into a video.</h2><p>Generate one clip or build a 30-second Short from five connected scenes.</p><button class="button light" data-go="generate">Create video</button></div>
+            <div class="hero-facts" role="group" aria-label="30-second project format">
+              <div><strong>30 sec</strong><span>Finished project</span></div>
+              <div><strong>5 × 6 sec</strong><span>Connected scenes</span></div>
+              <div><strong>9:16</strong><span>Vertical output</span></div>
+            </div>
           </div>
-          <div class="stats-grid">
-            <article class="stat-card"><div class="stat-icon violet">▤</div><div><span>Total generations</span><strong id="stat-total">0</strong></div></article>
-            <article class="stat-card"><div class="stat-icon green">✓</div><div><span>Completed</span><strong id="stat-completed">0</strong></div></article>
-            <article class="stat-card"><div class="stat-icon amber">◷</div><div><span>In progress</span><strong id="stat-active">0</strong></div></article>
-            <article class="stat-card"><div class="stat-icon blue">$</div><div><span>Total cost</span><strong id="stat-cost">$0.00</strong></div></article>
-          </div>
-          <section class="panel">
-            <div class="panel-head"><div><h2>Recent generations</h2><p>Latest activity from your workspace</p></div><button class="text-button" data-go="history">View all →</button></div>
+          <section class="stats-grid" aria-label="Workspace activity">
+            <article class="stat-card"><span>Total generations</span><strong id="stat-total">0</strong></article>
+            <article class="stat-card"><span>Completed</span><strong id="stat-completed">0</strong></article>
+            <article class="stat-card"><span>In progress</span><strong id="stat-active">0</strong></article>
+            <article class="stat-card"><span>Provider-reported cost</span><strong id="stat-cost">$0.00</strong></article>
+          </section>
+          <section class="panel overview-recent" aria-labelledby="recent-heading">
+            <div class="panel-head"><div><h2 id="recent-heading">Recent generations</h2><p>Your latest completed and active work</p></div><button class="text-button" data-go="history">View history</button></div>
             <div id="recent-list" class="recent-list"><div class="empty">No generations yet.</div></div>
           </section>
         </section>
@@ -84,17 +88,17 @@
         <section class="view" data-page="generate">
           <div class="two-column">
             <section class="panel generator-panel">
-              <div class="panel-head"><div><h2>New generation</h2><p>Configure your video request</p></div></div>
+              <div class="panel-head"><div><h2>New video</h2><p>Choose a format, add your idea, and set the output.</p></div></div>
               <div id="generation-mode" class="mode-switch" role="tablist" aria-label="Generation type">
                 <button class="mode-option active" type="button" data-mode="project" role="tab" aria-selected="true">30-second project</button>
                 <button class="mode-option" type="button" data-mode="single" role="tab" aria-selected="false">Single clip</button>
               </div>
               <form id="generator-form" novalidate>
                 <div id="project-inputs">
-                  <div class="field"><div class="label-row"><label for="project-topic">Topic or story idea</label><span>Auto-scripted</span></div><textarea id="project-topic" rows="7" placeholder="What should this 30-second Short be about?" required></textarea><p id="project-topic-error" class="form-error"></p></div>
-                  <p class="field-hint">We generate the story, full script, and five connected six-second scenes automatically.</p>
+                  <div class="field"><div class="label-row"><label for="project-topic">Topic or story idea</label><span>Auto-scripted</span></div><textarea id="project-topic" rows="7" placeholder="What should this 30-second Short be about?" aria-describedby="project-topic-note project-topic-error" required></textarea><p id="project-topic-error" class="form-error" role="alert" aria-live="polite"></p></div>
+                  <p id="project-topic-note" class="field-hint">We turn your idea into a story, script, and five connected six-second scenes.</p>
                 </div>
-                <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" required></textarea><p id="prompt-error" class="form-error"></p></div>
+                <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count" aria-live="polite">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" aria-describedby="prompt-count prompt-error" required></textarea><p id="prompt-error" class="form-error" role="alert" aria-live="polite"></p></div>
                 <div class="random-prompt-controls field">
                   <label for="prompt-category">Category: <strong id="prompt-category-name" aria-live="polite">Kid Animation</strong></label>
                   <input id="prompt-category" type="range" min="0" max="5" step="1" value="0" aria-valuetext="Kid Animation">
@@ -103,14 +107,14 @@
                 <div class="field model-field">
                   <label id="model-label" for="model-trigger">Video model and price</label>
                   <div id="model-picker" class="model-picker">
-                    <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
+                    <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
                       <span id="model-trigger-content" class="model-trigger-content"><span class="model-placeholder">Loading models…</span></span>
                       <span class="model-chevron" aria-hidden="true"></span>
                     </button>
                     <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
                   </div>
                   <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models…</option></select>
-                  <small id="project-model-note">Choose a model that supports six-second clips and 9:16 output.</small>
+                  <small id="project-model-note" aria-live="polite">Choose a model that supports six-second clips at 480p in 9:16.</small>
                 </div>
                 <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
                 <div id="modal-account-project-field" class="field modal-account-field" hidden>
@@ -129,14 +133,14 @@
                   <div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div>
                   <div id="audio-option" class="field audio-option" hidden><label class="checkbox-label" for="generate-audio"><input id="generate-audio" type="checkbox"> Generate audio</label></div>
                 </div>
-                <div id="project-options" class="project-options"><span>Output</span><strong>Vertical 9:16 · 30 seconds · 5 scenes</strong></div>
+                <div id="project-options" class="project-options"><span>Project output</span><strong>30-second 9:16 video · 5 × 6-second scenes at 480p</strong></div>
                 <div class="estimate"><span>Estimated generation cost</span><strong id="cost-estimate">Unavailable</strong><small>Costs are shown when the selected video provider supplies pricing.</small></div>
                 <button id="generate" class="button primary full" type="submit" disabled>Generate 30-second project</button>
               </form>
             </section>
             <aside class="panel status-panel">
               <div class="panel-head"><div><h2>Generation status</h2><p>Live progress and result</p></div><span id="status-badge" class="badge neutral">Idle</span></div>
-              <div id="status-empty" class="status-empty"><div class="status-orb">▶</div><h3>Ready when you are</h3><p>Your generated video will appear here and be saved automatically.</p></div>
+              <div id="status-empty" class="status-empty"><div class="status-stage" aria-hidden="true"><span class="status-stage-frame"></span><span>Video preview</span></div><h3>Ready when you are</h3><p>Progress and your preview will appear here when generation starts.</p></div>
               <div id="status-active" hidden>
                 <div id="progress-wrap" class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
                 <p id="status-detail" class="subtle"></p>
@@ -146,12 +150,12 @@
                   <ol id="single-terminal" class="job-terminal" aria-live="polite"></ol>
                 </section>
                 <button id="retry-status" class="button secondary" type="button" hidden>Retry status</button>
-                <video id="generated-video" controls playsinline preload="metadata" hidden></video>
+                <video id="generated-video" aria-label="Generated video preview" controls playsinline preload="metadata" hidden></video>
                 <a id="open-video" class="button secondary full" hidden>Download video</a>
               </div>
               <div id="project-status" hidden>
                 <div id="project-progress-wrap" class="progress-wrap"><div id="project-progress-bar" class="progress-bar"></div></div>
-                <p id="project-status-detail" class="subtle">Preparing your projectâ€¦</p>
+                <p id="project-status-detail" class="subtle">Preparing your project…</p>
                 <div id="project-error" class="alert error" role="alert" hidden></div>
                 <button id="retry-project" class="button secondary" type="button" hidden>Retry project</button>
                 <section id="project-pipeline" class="project-pipeline" aria-labelledby="project-pipeline-title">
@@ -168,7 +172,7 @@
                   <div class="trace-heading"><div><h3 id="project-trace-title">Generation details</h3><p>Recorded inputs, outputs, and retry history.</p></div></div>
                   <div id="project-trace-sections" class="trace-sections"></div>
                 </section>
-                <div id="project-final" class="project-final" hidden><video id="project-video" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a></div>
+                <div id="project-final" class="project-final" hidden><video id="project-video" aria-label="30-second project preview" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a></div>
               </div>
             </aside>
           </div>
@@ -176,7 +180,7 @@
 
         <section class="view" data-page="history">
           <div class="history-page-head">
-            <div><h2>Generation history</h2><p>Videos, project runs, and the process logs saved with each run.</p></div>
+            <div><h2 class="visually-hidden">Generation history</h2><p>Videos, project runs, and the process logs saved with each run.</p></div>
             <button id="refresh-history" class="button secondary">Refresh history</button>
           </div>
           <div class="history-library">
@@ -187,7 +191,7 @@
 
         <section class="view" data-page="vault">
           <div class="vault-page-head">
-            <div><h2>Vault</h2><p>Videos you moved out of History.</p></div>
+            <div><h2 class="visually-hidden">Vault</h2><p>Videos you moved out of History.</p></div>
             <button id="vault-lock" class="button secondary" type="button" hidden>Lock Vault</button>
           </div>
           <div id="vault-locked" class="panel vault-lock-panel">
@@ -226,11 +230,12 @@
                 <button id="vault-player-close" class="button secondary" type="button">Close</button>
               </div>
             </div>
-            <video id="vault-player" controls playsinline preload="metadata"></video>
+            <video id="vault-player" aria-label="Selected protected video" controls playsinline preload="metadata"></video>
           </dialog>
         </section>
 
-        <section class="view" data-page="settings">
+        <section class="view" data-page="settings" aria-labelledby="settings-view-heading">
+          <h2 id="settings-view-heading" class="visually-hidden">Settings</h2>
           <div class="settings-grid">
             <section class="panel settings-provider-panel">
               <div class="panel-head"><div><h2>Video generation</h2><p>Select the provider used for new video jobs.</p></div></div>
@@ -283,6 +288,6 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260925-2" defer></script>
+  <script src="/static/app.js?v=20260929-1" defer></script>
 </body>
 </html>

@@ -174,11 +174,18 @@
     currentGenerationID: "",
     displayedGenerationID: "",
     currentGenerationRecord: null,
+    displayedGenerationStatus: "",
     mode: "project",
     currentView: "",
+    submissionPending: false,
+    projectSubmissionPending: false,
+    projectSubmissionFailed: false,
+    singleSubmissionPending: false,
+    singleSubmissionFailed: false,
     projects: [],
     currentProjectID: "",
     displayedProjectID: "",
+    displayedProjectStatus: "",
     currentProjectRecord: null,
     projectTraceFetches: new Map(),
     projectTraceRequestEpoch: 0,
@@ -381,12 +388,14 @@
   function setButtonBusy(button, busy, busyText) {
     if (!button) return;
     if (busy) {
-      button.dataset.originalText = button.textContent;
-      button.textContent = busyText;
+      if (!button.dataset.originalText) button.dataset.originalText = button.textContent;
+      if (busyText) button.textContent = busyText;
       button.disabled = true;
+      button.setAttribute("aria-busy", "true");
     } else {
       button.textContent = button.dataset.originalText || button.textContent;
       button.disabled = false;
+      button.removeAttribute("aria-busy");
       delete button.dataset.originalText;
     }
   }
@@ -395,6 +404,8 @@
     window.clearTimeout(state.toastTimer);
     elements.toast.textContent = message;
     elements.toast.classList.toggle("error", isError);
+    elements.toast.setAttribute("role", isError ? "alert" : "status");
+    elements.toast.setAttribute("aria-live", isError ? "assertive" : "polite");
     elements.toast.hidden = false;
     state.toastTimer = window.setTimeout(() => {
       elements.toast.hidden = true;
@@ -830,6 +841,42 @@
     });
   }
 
+  function displayedGenerationAvailable() {
+    return Boolean(state.displayedGenerationID);
+  }
+
+  function displayedProjectAvailable() {
+    return Boolean(state.displayedProjectID);
+  }
+
+  function resetGenerationStatusBadge() {
+    elements.statusBadge.className = "badge neutral";
+    elements.statusBadge.textContent = "Idle";
+  }
+
+  function syncGenerationModeDisplay() {
+    const project = state.mode === "project";
+    const hasSingleResult = displayedGenerationAvailable() || state.singleSubmissionPending || state.singleSubmissionFailed;
+    const hasProjectResult = displayedProjectAvailable() || state.projectSubmissionPending || state.projectSubmissionFailed;
+    const hasSelectedResult = project ? hasProjectResult : hasSingleResult;
+
+    elements.statusActive.hidden = project || !hasSingleResult;
+    elements.projectStatus.hidden = !project || !hasProjectResult;
+    elements.statusEmpty.hidden = hasSelectedResult;
+
+    if (!hasSelectedResult) {
+      resetGenerationStatusBadge();
+      return;
+    }
+
+    const status = project
+      ? (state.projectSubmissionPending ? "submitting" : state.projectSubmissionFailed ? "failed" : state.displayedProjectStatus)
+      : (state.singleSubmissionPending ? "submitting" : state.singleSubmissionFailed ? "failed" : state.displayedGenerationStatus);
+    if (!status) return;
+    elements.statusBadge.className = "badge " + statusClass(status);
+    elements.statusBadge.textContent = status === "submitting" ? "Submitting" : status.replaceAll("_", " ");
+  }
+
   function setGenerationMode(mode) {
     const previousMode = state.mode;
     state.mode = mode === "single" ? "single" : "project";
@@ -839,6 +886,7 @@
       const active = button.dataset.mode === state.mode;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
     });
     elements.projectInputs.hidden = !project;
     elements.projectOptions.hidden = !project;
@@ -846,20 +894,15 @@
     elements.singleOptions.hidden = project;
     elements.prompt.hidden = project;
     elements.prompt.closest(".field").hidden = project;
-    elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
-    elements.statusActive.hidden = project;
+    if (!state.submissionPending) elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
     elements.modalAccountProjectField.hidden = state.videoProvider !== "modal" || !project;
     elements.modalAccountSingleField.hidden = state.videoProvider !== "modal" || project;
-    elements.projectStatus.hidden = !project || !state.currentProjectID;
     if (project) {
       const selected = state.models.find((model) => model.id === elements.model.value);
       if (state.models.length && !supportsProject(selected)) {
         const fallback = state.models.find(supportsProject);
         if (fallback) selectModel(fallback.id);
       }
-      elements.statusEmpty.hidden = Boolean(state.currentProjectID);
-    } else {
-      elements.statusEmpty.hidden = false;
     }
     updateModelOptions();
     if (previousMode !== state.mode) {
@@ -872,6 +915,25 @@
         setStatusRecord(state.currentGenerationRecord);
       }
     }
+    syncGenerationModeDisplay();
+  }
+
+  function moveGenerationMode(event) {
+    const tabs = elements.modeOptions;
+    const current = tabs.indexOf(event.currentTarget);
+    if (current < 0) return;
+    let next = current;
+    if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+    else if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = tabs.length - 1;
+    else return;
+
+    event.preventDefault();
+    const target = tabs[next];
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.click();
   }
 
   function selectedPromptCategory() {
@@ -951,6 +1013,45 @@
     state.vaultRestoreLockFailed = false;
   }
 
+  function isCompactNavigation() {
+    return window.matchMedia("(max-width: 760px)").matches;
+  }
+
+  function syncNavigationAccessibility() {
+    const compact = isCompactNavigation();
+    const focusWasInSidebar = elements.sidebar.contains(document.activeElement);
+    if (!compact) elements.sidebar.classList.remove("open");
+    const open = compact && elements.sidebar.classList.contains("open");
+    const hidden = compact && !open;
+    elements.sidebar.toggleAttribute("inert", hidden);
+    elements.sidebar.setAttribute("aria-hidden", String(hidden));
+    elements.menuButton.setAttribute("aria-expanded", String(open));
+    elements.menuButton.setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
+    if (hidden && focusWasInSidebar) elements.menuButton.focus({ preventScroll: true });
+  }
+
+  function setNavigationOpen(open, options = {}) {
+    const compact = isCompactNavigation();
+    const visible = compact && Boolean(open);
+    elements.sidebar.classList.toggle("open", visible);
+    syncNavigationAccessibility();
+    if (visible) {
+      const current = $(".nav-item[aria-current='page']:not(:disabled)", elements.sidebar)
+        || $(".nav-item:not(:disabled)", elements.sidebar);
+      if (current) current.focus({ preventScroll: true });
+    } else if (options.returnFocus && compact) {
+      elements.menuButton.focus({ preventScroll: true });
+    }
+  }
+
+  function focusPageTitle() {
+    window.requestAnimationFrame(() => {
+      if (!elements.appShell.hidden && !state.mustChangePassword) {
+        elements.pageTitle.focus({ preventScroll: true });
+      }
+    });
+  }
+
   function showLoggedOut() {
     stopJobEventStream(true);
     invalidateProjectRawTraceRequests();
@@ -974,8 +1075,10 @@
     state.historyNextBeforeCreated = 0;
     state.historyNextBeforeID = "";
     applyPasswordGate(false);
+    setNavigationOpen(false);
     elements.appShell.hidden = true;
     elements.loginScreen.hidden = false;
+    document.title = "FrameVault | Sign in";
     elements.loginPassword.value = "";
     showLoginView(false);
     window.setTimeout(() => elements.loginUsername.focus(), 0);
@@ -1002,7 +1105,7 @@
     invalidateProjectRawTraceRequests();
     state.authenticated = true;
     applyPasswordGate(mustChangePassword);
-    elements.accountName.textContent = username || "sujanshrestha";
+    elements.accountName.textContent = username || "Signed in";
     elements.loginScreen.hidden = true;
     elements.appShell.hidden = false;
     elements.loginError.textContent = "";
@@ -1021,12 +1124,22 @@
     }
     if (state.currentView === "generate" && view !== "generate") invalidateProjectRawTraceRequests();
     state.currentView = view;
+    const previousView = $(".view.active")?.dataset.page || "";
+    const navigationWasOpen = isCompactNavigation() && elements.sidebar.classList.contains("open");
+    const metadata = viewMeta[view];
     $$(".view").forEach((node) => node.classList.toggle("active", node.dataset.page === view));
-    $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === view));
-    elements.pageTitle.textContent = viewMeta[view].title;
-    elements.pageKicker.textContent = viewMeta[view].kicker;
-    elements.sidebar.classList.remove("open");
-    elements.menuButton.setAttribute("aria-expanded", "false");
+    $$(".nav-item").forEach((node) => {
+      const active = node.dataset.view === view;
+      node.classList.toggle("active", active);
+      if (active) node.setAttribute("aria-current", "page");
+      else node.removeAttribute("aria-current");
+    });
+    elements.pageTitle.textContent = metadata.title;
+    elements.pageKicker.textContent = metadata.kicker;
+    document.title = metadata.title + " | FrameVault";
+    setNavigationOpen(false);
+    if (previousView !== view) window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    if (previousView !== view || navigationWasOpen) focusPageTitle();
     if (view === "settings" && !state.mustChangePassword) loadSettings(false);
     if (view === "vault" && !state.mustChangePassword) loadVault();
     if (view === "history" && !state.mustChangePassword) {
@@ -1120,6 +1233,39 @@
     return `${prefix}$${formatPriceNumber(pricing.price)}${suffix}`;
   }
 
+  function compactCapabilityValues(values, detailed = false) {
+    const unique = [...new Set((Array.isArray(values) ? values : [])
+      .map((value) => String(value).trim())
+      .filter(Boolean))];
+    if (!unique.length) return "";
+    if (detailed) return unique.join(", ");
+    return unique.length === 1 ? unique[0] : unique[0] + " +" + String(unique.length - 1);
+  }
+
+  function modelCapabilityLabel(model, detailed = false) {
+    const labels = [];
+    const durations = [...new Set((Array.isArray(model && model.durations) ? model.durations : [])
+      .map(Number)
+      .filter((value) => Number.isFinite(value) && value > 0))]
+      .sort((a, b) => a - b);
+    if (durations.length) {
+      const first = durations[0];
+      const last = durations[durations.length - 1];
+      const contiguous = durations.every((value, index) => index === 0 || value === durations[index - 1] + 1);
+      if (durations.length === 1) labels.push(String(first) + " sec");
+      else if (detailed) labels.push(durations.map((value) => String(value) + " sec").join(", "));
+      else if (contiguous) labels.push(String(first) + "-" + String(last) + " sec");
+      else labels.push(String(first) + " sec +" + String(durations.length - 1));
+    }
+    const resolution = compactCapabilityValues(model && model.resolutions, detailed);
+    if (resolution) labels.push(resolution);
+    const aspectRatio = compactCapabilityValues(model && model.aspect_ratios, detailed);
+    if (aspectRatio) labels.push(aspectRatio);
+    if (model && model.audio === true) labels.push("Audio");
+    if (model && model.audio === false) labels.push("Silent");
+    return labels.join(", ");
+  }
+
   function providerMark(model) {
     const provider = providerDetails(model);
     return make("span", { className: `provider-mark ${provider.className}`, text: provider.initials });
@@ -1134,6 +1280,12 @@
     copy.append(make("span", {
       text: compact ? `${provider.name} · ${modelPriceLabel(model)}` : provider.name
     }));
+    const capabilities = modelCapabilityLabel(model);
+    if (capabilities) {
+      const capability = make("span", { className: "model-capability", text: capabilities });
+      capability.title = modelCapabilityLabel(model, true);
+      copy.append(capability);
+    }
     fragment.append(copy);
     if (!compact) fragment.append(make("span", { className: "model-option-price", text: modelPriceLabel(model) }));
     return fragment;
@@ -1181,6 +1333,7 @@
     state.models.forEach((model) => {
       const option = make("button", { className: "model-option", type: "button" });
       option.dataset.value = model.id;
+      option.tabIndex = -1;
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", String(model.id === elements.model.value));
       option.append(modelOptionContent(model));
@@ -1192,6 +1345,15 @@
 
   function selectedModel() {
     return state.models.find((model) => model.id === elements.model.value) || null;
+  }
+
+  function updateGenerateAvailability() {
+    const model = selectedModel();
+    elements.generate.disabled = state.submissionPending || !model
+      || (state.mode === "project" && !supportsProject(model));
+    if (!state.submissionPending) {
+      elements.generate.textContent = state.mode === "project" ? "Generate 30-second project" : "Generate video";
+    }
   }
 
   function fillSelect(select, values, formatter, fallbackLabel) {
@@ -1222,7 +1384,7 @@
       fillSelect(elements.aspectRatio, [], String, "Provider default");
       elements.resolutionField.hidden = true;
       elements.audioOption.hidden = true;
-      elements.generate.disabled = true;
+      updateGenerateAvailability();
       updateEstimate();
       return;
     }
@@ -1234,7 +1396,7 @@
     elements.audioOption.hidden = model.audio !== true;
     if (model.audio !== true) elements.generateAudio.checked = false;
     const projectCompatible = supportsProject(model);
-    elements.generate.disabled = state.mode === "project" && !projectCompatible;
+    updateGenerateAvailability();
     updateModalAccountSelectors();
     elements.projectModelNote.textContent = projectCompatible
       ? "This model supports the five-scene 6-second, 480p, 9:16 project preset."
@@ -1500,11 +1662,21 @@
     };
   }
 
+  function emptyState(message, actionLabel = "") {
+    const empty = make("div", { className: "empty" });
+    empty.append(make("p", { text: message }));
+    if (actionLabel) {
+      const action = make("button", { className: "button secondary empty-action", type: "button", text: actionLabel });
+      action.addEventListener("click", () => navigate("generate"));
+      empty.append(action);
+    }
+    return empty;
+  }
   function renderRecent() {
     elements.recentList.replaceChildren();
     const recent = state.generations.slice(0, 5);
     if (!recent.length) {
-      elements.recentList.append(make("div", { className: "empty", text: "No generations yet." }));
+      elements.recentList.append(emptyState("No generations yet."));
       return;
     }
     recent.forEach((record) => {
@@ -1543,7 +1715,7 @@
     return formatUSD(total);
   }
 
-  function historyPreview(videoReady, videoURL, status, onUnavailable = () => {}) {
+  function historyPreview(videoReady, videoURL, status, onUnavailable = () => {}, label = "Generated video") {
     const preview = make("div", { className: "history-preview" });
     const showUnavailable = () => {
       const normalized = String(status || "").toLowerCase();
@@ -1563,6 +1735,7 @@
     video.controls = true;
     video.preload = "none";
     video.playsInline = true;
+    video.setAttribute("aria-label", label);
     video.addEventListener("error", showUnavailable, { once: true });
     video.src = videoURL;
     preview.append(video);
@@ -1583,7 +1756,7 @@
   function renderHistory() {
     elements.historyGrid.replaceChildren();
     if (!state.generations.length && !state.projects.length) {
-      elements.historyGrid.append(make("div", { className: "empty", text: "No generations yet." }));
+      elements.historyGrid.append(emptyState("No generations yet.", "Create a video"));
       return;
     }
 
@@ -1609,7 +1782,10 @@
       const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
       const videoReady = String(record.status || "").toLowerCase() === "completed" && Boolean(record.video_ready);
       let download;
-      const preview = historyPreview(videoReady, videoURL, record.status, () => download?.remove());
+      const previewLabel = record.prompt
+        ? "Generated video: " + record.prompt.slice(0, 120)
+        : "Generated video";
+      const preview = historyPreview(videoReady, videoURL, record.status, () => download?.remove(), previewLabel);
 
       const body = make("div", { className: "history-body" });
       historyPrompt(body, "prompt", record.prompt);
@@ -1756,6 +1932,10 @@
     const normalizedID = String(id || "");
     const matchesCurrent = !normalizedID || state.currentGenerationID === normalizedID;
     const matchesDisplay = !normalizedID || state.displayedGenerationID === normalizedID;
+    if (!normalizedID) {
+      state.singleSubmissionPending = false;
+      state.singleSubmissionFailed = false;
+    }
     if (matchesCurrent) {
       state.currentGenerationID = "";
       state.currentGenerationRecord = null;
@@ -1763,6 +1943,7 @@
     if (!matchesDisplay) return;
     state.displayedGenerationID = "";
     state.currentGenerationRecord = null;
+    state.displayedGenerationStatus = "";
     elements.generatedVideo.pause();
     elements.generatedVideo.removeAttribute("src");
     elements.generatedVideo.load();
@@ -1778,7 +1959,7 @@
     elements.retryStatus.hidden = true;
     elements.progressWrap.hidden = true;
     elements.statusDetail.textContent = "";
-    if (state.mode === "single") elements.statusEmpty.hidden = false;
+    syncGenerationModeDisplay();
   }
 
   function clearProjectDisplay(id = "") {
@@ -1786,6 +1967,10 @@
     const matchesCurrent = !normalizedID || state.currentProjectID === normalizedID;
     const matchesDisplay = !normalizedID || state.displayedProjectID === normalizedID;
     if (matchesCurrent || matchesDisplay) invalidateProjectRawTraceRequests();
+    if (!normalizedID) {
+      state.projectSubmissionPending = false;
+      state.projectSubmissionFailed = false;
+    }
     if (matchesCurrent) {
       state.currentProjectID = "";
       state.currentProjectRecord = null;
@@ -1793,6 +1978,7 @@
     if (!matchesDisplay) return;
     state.displayedProjectID = "";
     state.currentProjectRecord = null;
+    state.displayedProjectStatus = "";
     elements.projectVideo.pause();
     elements.projectVideo.removeAttribute("src");
     elements.projectVideo.load();
@@ -1813,7 +1999,7 @@
     elements.retryProject.hidden = true;
     elements.projectStatusDetail.textContent = "";
     elements.projectStatus.hidden = true;
-    if (state.mode === "project") elements.statusEmpty.hidden = false;
+    syncGenerationModeDisplay();
   }
 
   async function moveHistoryItem(kind, id, button) {
@@ -1869,6 +2055,7 @@
     } else if (state.currentGenerationID === id) {
       state.currentGenerationID = "";
     }
+    state.displayedGenerationStatus = status;
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = false;
     elements.statusBadge.className = `badge ${statusClass(status)}`;
@@ -1915,6 +2102,7 @@
       elements.openVideo.download = `generation-${record.id}.mp4`;
       elements.openVideo.hidden = false;
     }
+    syncGenerationModeDisplay();
   }
 
   function projectScenes(project) {
@@ -2225,6 +2413,7 @@
     const id = projectID(project);
     const progress = projectProgress(project, scenes);
     state.displayedProjectID = id;
+    state.displayedProjectStatus = status;
     state.currentProjectID = id;
     state.currentProjectRecord = project;
     upsertProjectSnapshot(project);
@@ -2305,10 +2494,11 @@
       elements.projectDownload.removeAttribute("href");
       elements.projectDownload.removeAttribute("download");
     }
+    syncGenerationModeDisplay();
   }
 
   async function retryProjectScene(id, number, button) {
-    setButtonBusy(button, true, "Retryingâ€¦");
+    setButtonBusy(button, true, "Retrying...");
     try {
       const payload = await request(`/api/projects/${encodeURIComponent(id)}/scenes/${encodeURIComponent(number)}/retry`, { method: "POST" });
       renderProject(payload && payload.project ? payload.project : payload, true);
@@ -2371,7 +2561,8 @@
           const videoURL = id ? `/api/projects/${encodeURIComponent(id)}/video` : "";
           const item = make("article", { className: "history-card" });
           let download;
-          const preview = historyPreview(videoReady, videoURL, status, () => download?.remove());
+          const topic = String(projectValue(project, "topic") || "30-second project").slice(0, 120);
+          const preview = historyPreview(videoReady, videoURL, status, () => download?.remove(), "Project video: " + topic);
           const body = make("div", { className: "history-body" });
           historyPrompt(body, "topic", projectValue(project, "topic"));
           const metadata = make("div", { className: "history-meta" });
@@ -2430,6 +2621,7 @@
   }
 
   async function submitProject() {
+    if (state.submissionPending) return;
     const topic = elements.projectTopic.value.trim();
     const topicLength = Array.from(topic).length;
     elements.projectTopicError.textContent = "";
@@ -2441,18 +2633,23 @@
     const model = selectedModel();
     if (!model) {
       toast("Select an available model first.", true);
+      elements.modelTrigger.focus({ preventScroll: true });
       return;
     }
     if (!supportsProject(model)) {
       toast("Choose a model that supports 6-second clips at 480p in 9:16.", true);
       return;
     }
-    setButtonBusy(elements.generate, true, "Building projectâ€¦");
+    clearProjectDisplay();
+    state.submissionPending = true;
+    state.projectSubmissionPending = true;
+    state.projectSubmissionFailed = false;
+    setButtonBusy(elements.generate, true, "Building project...");
     elements.statusEmpty.hidden = true;
     elements.projectStatus.hidden = false;
     elements.statusBadge.className = "badge queued";
     elements.statusBadge.textContent = "Submitting";
-    elements.projectStatusDetail.textContent = "Generating story and five-scene scriptâ€¦";
+    elements.projectStatusDetail.textContent = "Generating story and five-scene script...";
     elements.projectError.hidden = true;
     elements.projectScenes.replaceChildren();
     try {
@@ -2465,6 +2662,8 @@
       const payload = await request("/api/projects", { method: "POST", body: JSON.stringify(requestBody) });
       const project = payload && payload.project ? payload.project : payload;
       const id = projectID(project);
+      state.projectSubmissionPending = false;
+      state.projectSubmissionFailed = false;
       renderProject(project);
       if (!id) throw new APIError("Project was created without an id.", 500);
       elements.projectTopic.value = "";
@@ -2472,20 +2671,25 @@
       toast("Project submitted. Script generation has started.");
       loadProjects(false);
     } catch (error) {
+      state.projectSubmissionPending = false;
+      state.projectSubmissionFailed = true;
       elements.projectError.hidden = false;
       elements.projectError.textContent = error.message;
       elements.statusBadge.className = "badge failed";
       elements.statusBadge.textContent = "Failed";
+      syncGenerationModeDisplay();
       if (error.status !== 401) toast(error.message, true);
     } finally {
+      state.submissionPending = false;
       setButtonBusy(elements.generate, false);
-      const currentModel = selectedModel();
-      elements.generate.disabled = !currentModel || (state.mode === "project" && !supportsProject(currentModel));
+      updateGenerateAvailability();
+      syncGenerationModeDisplay();
     }
   }
 
   async function submitGeneration(event) {
     event.preventDefault();
+    if (state.submissionPending) return;
     if (state.mode === "project") {
       await submitProject();
       return;
@@ -2504,6 +2708,7 @@
     }
     if (!elements.model.value) {
       toast("Select an available model first.", true);
+      elements.modelTrigger.focus({ preventScroll: true });
       return;
     }
 
@@ -2521,6 +2726,10 @@
     if (elements.aspectRatio.value) requestBody.aspect_ratio = elements.aspectRatio.value;
     if (elements.generateAudio.checked) requestBody.generate_audio = true;
 
+    clearGenerationDisplay();
+    state.submissionPending = true;
+    state.singleSubmissionPending = true;
+    state.singleSubmissionFailed = false;
     setButtonBusy(elements.generate, true, "Submitting…");
     elements.statusEmpty.hidden = true;
     elements.statusActive.hidden = false;
@@ -2536,24 +2745,31 @@
 
     try {
       const record = await request("/generate", { method: "POST", body: JSON.stringify(requestBody) });
+      state.singleSubmissionPending = false;
+      state.singleSubmissionFailed = false;
       setStatusRecord(record);
-      elements.generatorForm.reset();
+      elements.prompt.value = "";
       elements.promptCount.textContent = "0 / 4000";
       elements.promptError.textContent = "";
       updateModelOptions();
       toast("Generation submitted.");
       loadHistory(false);
     } catch (error) {
+      state.singleSubmissionPending = false;
+      state.singleSubmissionFailed = true;
       elements.statusBadge.className = "badge failed";
       elements.statusBadge.textContent = "Failed";
       elements.progressWrap.hidden = true;
       elements.statusDetail.textContent = "The request was not submitted.";
       elements.statusError.textContent = error.message;
       elements.statusError.hidden = false;
+      syncGenerationModeDisplay();
       if (error.status !== 401) toast(error.message, true);
     } finally {
+      state.submissionPending = false;
       setButtonBusy(elements.generate, false);
-      elements.generate.disabled = !elements.model.value;
+      updateGenerateAvailability();
+      syncGenerationModeDisplay();
     }
   }
 
@@ -3259,6 +3475,7 @@
   }
 
   function bindEvents() {
+    syncNavigationAccessibility();
     elements.loginForm.addEventListener("submit", submitLogin);
     elements.recoveryForm.addEventListener("submit", submitRecovery);
     elements.showRecovery.addEventListener("click", showRecoveryView);
@@ -3272,10 +3489,13 @@
     elements.promptCategory.addEventListener("input", updatePromptCategory);
     elements.randomPrompt.addEventListener("click", generateRandomPrompt);
     elements.retryProject.addEventListener("click", retryCurrentProject);
-    elements.modeOptions.forEach((button) => button.addEventListener("click", () => {
-      setGenerationMode(button.dataset.mode);
-      if (state.videoProvider === "modal") void loadModels(false);
-    }));
+    elements.modeOptions.forEach((button) => {
+      button.addEventListener("click", () => {
+        setGenerationMode(button.dataset.mode);
+        if (state.videoProvider === "modal") void loadModels(false);
+      });
+      button.addEventListener("keydown", moveGenerationMode);
+    });
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
     elements.vaultCodeForm.addEventListener("submit", saveVaultCode);
     [elements.vaultCurrentCode, elements.vaultNewCode, elements.vaultConfirmCode, elements.vaultCode].forEach((input) => {
@@ -3317,10 +3537,19 @@
         event.preventDefault();
         const direction = event.key === "ArrowDown" ? 1 : -1;
         options[(index + direction + options.length) % options.length].focus();
+      } else if (event.key === "Home" && options.length) {
+        event.preventDefault();
+        options[0].focus();
+      } else if (event.key === "End" && options.length) {
+        event.preventDefault();
+        options[options.length - 1].focus();
       } else if (event.key === "Escape") {
         closeModelMenu();
-        elements.modelTrigger.focus();
+        elements.modelTrigger.focus({ preventScroll: true });
       }
+    });
+    elements.modelPicker.addEventListener("focusout", (event) => {
+      if (!elements.modelPicker.contains(event.relatedTarget)) closeModelMenu();
     });
     document.addEventListener("click", (event) => {
       if (!elements.modelPicker.contains(event.target)) closeModelMenu();
@@ -3337,16 +3566,38 @@
       void refreshJobState();
     });
     elements.menuButton.addEventListener("click", () => {
-      const open = elements.sidebar.classList.toggle("open");
-      elements.menuButton.setAttribute("aria-expanded", String(open));
+      setNavigationOpen(!elements.sidebar.classList.contains("open"));
     });
     $$(".nav-item").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
     $$('[data-go]').forEach((button) => button.addEventListener("click", () => navigate(button.dataset.go)));
+    document.addEventListener("pointerdown", (event) => {
+      if (!isCompactNavigation() || !elements.sidebar.classList.contains("open")) return;
+      if (elements.sidebar.contains(event.target) || elements.menuButton.contains(event.target)) return;
+      setNavigationOpen(false, { returnFocus: true });
+    });
+    elements.sidebar.addEventListener("focusout", () => {
+      window.requestAnimationFrame(() => {
+        if (isCompactNavigation() && elements.sidebar.classList.contains("open")
+          && !elements.sidebar.contains(document.activeElement)) {
+          setNavigationOpen(false);
+        }
+      });
+    });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        elements.sidebar.classList.remove("open");
-        elements.menuButton.setAttribute("aria-expanded", "false");
+      if (event.key !== "Escape") return;
+      if (!elements.modelMenu.hidden) {
+        closeModelMenu();
+        elements.modelTrigger.focus({ preventScroll: true });
+        return;
       }
+      if (isCompactNavigation() && elements.sidebar.classList.contains("open")) {
+        event.preventDefault();
+        setNavigationOpen(false, { returnFocus: true });
+      }
+    });
+    window.addEventListener("resize", syncNavigationAccessibility);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && state.authenticated && !state.mustChangePassword) void refreshJobState();
     });
     window.addEventListener("pagehide", () => {
       if (!state.authenticated) return;
