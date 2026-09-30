@@ -2,7 +2,11 @@
 
 A self-hosted dashboard for generating video with a selectable Modal or OpenRouter provider, tracking jobs after the browser closes, and storing completed MP4 files locally in a Docker-managed volume. It uses SQLite for metadata and no external storage service. OpenRouter remains the separate provider for story and script generation.
 
-The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's `inclusionai/ling-3.0-flash-fin:free` model generates the plan through a tool call, with plain-text parsing as a fallback. The application validates the plan, including its story, script, continuity bible, and five scene prompts. The selected video provider generates five independent six-second 480p clips in 9:16. FFmpeg normalizes and joins them into one silent 1080×1920 MP4. The original single-clip workflow remains available.
+The default dashboard workflow creates a complete 30-second YouTube Short from a topic or story idea. OpenRouter's `inclusionai/ling-3.0-flash-fin:free` model generates the plan through a tool call, with plain-text parsing as a fallback. The application validates the plan, including its story, script, continuity bible, and five scene prompts. The selected video provider generates five independent six-second 480p clips in 9:16. FFmpeg normalizes and joins them into one silent 1080x1920 MP4. The original single-clip workflow remains available.
+
+The Generate screen can also create a random idea for the five-scene project or a prompt for one clip from a selected category. The result fills the current topic or prompt field; no video job starts until you submit. It tries a shuffled set of five explicit free OpenRouter text models and returns the first usable result. Free-model availability and rate limits can change; the helper never falls back to a paid model. See OpenRouter's [free model catalog](https://openrouter.ai/collections/free-models/) and [rate-limit documentation](https://openrouter.ai/docs/api_reference/limits).
+
+The current random-prompt allowlist is `inclusionai/ling-3.0-flash:free`, `nvidia/nemotron-3.5-lightning:free`, `qwen/qwen3.8-27b:free`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`, and `liquid/lfm-2.5-2.6b:free`. For maintainers, the allowlist lives in `script_generation.go`; each model attempt is limited to 12 seconds under a 70-second total deadline. The order is shuffled per request. Unavailable models and unusable output fall through to another free variant, while authentication and invalid-request errors stop immediately. No paid-model fallback is configured. Free availability and rate limits can change; check OpenRouter's [free-model catalog](https://openrouter.ai/collections/free-models/) and [free-tier limits](https://openrouter.ai/docs/api_reference/limits) before changing this list.
 
 ## Docker quick start
 
@@ -60,7 +64,7 @@ Within that volume:
 
 | Path | Contents |
 | --- | --- |
-| `/data/app.db` | SQLite users, selected video provider, named Modal accounts and encrypted credentials, encrypted Vault code and membership, per-job provider credential snapshots, provider-scoped video models, jobs, normalized events, progress, errors, and cost records |
+| `/data/app.db` | SQLite users, selected video provider, named Modal accounts and encrypted credentials, encrypted Vault code and membership, per-job provider credential snapshots, encrypted callback tokens and hashes, callback dispatch state, provider-scoped video models, jobs, normalized events, progress, errors, and cost records |
 | `/data/secret.key` | Encryption key for stored API credentials |
 | `/data/videos/` | Downloaded completed MP4 files |
 | `/data/projects/` | Per-project scene clips and final 30-second MP4 files |
@@ -74,7 +78,7 @@ Within that volume:
 5. Follow overall progress and each scene independently. A failed scene can be retried without regenerating successful scenes.
 6. When all five scene files are stored, FFmpeg creates the final video automatically.
 
-Projects, scene prompts, provider job IDs, statuses, errors, costs, and file paths are stored in SQLite. The background worker resumes unfinished planning, polling, downloading, and combining work after a restart. Submitted jobs keep an encrypted snapshot of their selected provider credentials, so later account edits or default changes do not alter the account used by an existing job. If the process stops while a paid scene submission is in flight, that scene is marked failed instead of being silently resubmitted; check the selected video provider's activity before using **Retry scene**, because the interrupted request may already have been accepted upstream.
+Projects, scene prompts, provider job IDs, statuses, errors, costs, and file paths are stored in SQLite. The background worker resumes unfinished planning, local downloading, and combining after a restart; it retains provider status polling for OpenRouter and legacy Modal jobs. New callback-based Modal jobs are updated by their authenticated worker callback instead of Go polling the Modal status API. Submitted jobs keep an encrypted snapshot of their selected provider credentials, so later account edits or default changes do not alter the account used by an existing job. If the process stops while a paid scene submission is in flight, that scene is marked failed instead of being silently resubmitted; check the selected video provider's activity before using **Retry scene**, because the interrupted request may already have been accepted upstream.
 
 Each project also keeps a permanent process/audit trace. In **Generation details**, expandable sections retain the exact text-generation system prompt, user prompt, JSON schema, raw tool arguments or assistant response, requested model (`inclusionai/ling-3.0-flash-fin:free`), actual model when returned, normalized story/script/continuity, and each scene's final video prompt. The **Pipeline** timeline records stages, statuses, timestamps, errors, and attempts/retries. This is an operational audit trace, not hidden chain-of-thought or private reasoning. Raw responses are capped at 1 MiB.
 
@@ -112,6 +116,29 @@ video.example.com {
 
 Point DNS at the host and let Caddy obtain the certificate. Configure TLS before using real credentials or API keys. Do not publish the dashboard directly to a public interface.
 
+## Modal callback address
+
+For new Modal single-clip and 30-second submissions, set `VIDEO_CALLBACK_BASE_URL` in the Go server/container environment to the public HTTPS origin of the dashboard, such as `https://video.example.com`. It must be an origin only: no path, query, fragment, or embedded credentials. The Go server trims trailing slashes and appends `/api/video-callbacks/{generationID}`. Docker Compose passes through the host environment value; for example:
+
+```bash
+VIDEO_CALLBACK_BASE_URL=https://video.example.com docker compose up -d --build
+```
+
+Set the same variable in the local Go process when testing Modal through a public HTTPS tunnel or proxy. It is needed only for the Modal callback workflow; leaving it unset does not prevent startup or OpenRouter video generation. A missing or invalid value returns a clear error when a Modal submission is attempted.
+
+In PowerShell, set the host environment value before starting Compose:
+
+```powershell
+$env:VIDEO_CALLBACK_BASE_URL = 'https://video.example.com'
+docker compose up -d --build
+```
+
+The Modal worker receives the generated callback URL and a per-job random 32-byte bearer token. The token is stored encrypted with a hash in SQLite and is never returned to the browser or written to worker job JSON/logs. `POST /api/video-callbacks/{generationID}` uses that token instead of browser-session authentication. A CPU supervisor observes GPU startup/runtime completion and sends a processing update at sequence 1 and a terminal completed/failed result at sequence 2. The callback handler validates the job and update sequence before persisting status, so stale or duplicate updates cannot move a job backward. Transient HTTP delivery uses four short attempts (5-second request timeout; redirects are not followed), then Modal retries the CPU supervisor up to 240 times with exponential delay from 1 to 60 seconds. The terminal result is persisted before delivery; retries re-send that result without running GPU generation again. Modal uses a named atomic Dict claim plus a call-ID-only jobs-volume sidecar to prevent duplicate same-ID GPU dispatch and recover the child call. Ambiguous Modal dispatch acknowledgments remain pending rather than being reported as terminal failures or dispatched again under the same ID. If no callback arrives within eight hours, Go records a visible timeout failure.
+
+Roll out the callback-capable Modal worker before upgrading Go to submit callback fields. Both `modal/video.py` and `workers/modal/skyreels.py` support this protocol; older worker deployments may not accept the new fields. Go keeps retrying ambiguous submissions with the same immutable generation ID, and callback jobs do not fall back to remote status polling.
+
+After a successful callback, Go downloads the MP4 to its local data volume. A single-clip or project-scene download gets at most five attempts; an exhausted download is persisted as a failed job/scene with an actionable message. A failed project scene can be retried from the project view without regenerating successful scenes. The project is combined locally only after all five scene files have downloaded.
+
 ## OpenRouter key bootstrap (optional)
 
 The normal path is adding the key in the authenticated Settings page. For unattended initial deployment only, the Compose file accepts an optional `OPENROUTER_API_KEY` environment value. On first start it is encrypted and persisted in the Docker volume:
@@ -128,7 +155,7 @@ Choose **Modal** or **OpenRouter** in **Settings > Video generation**. The provi
 
 OpenRouter's API key is shared between story/script generation and OpenRouter video generation. It remains configured when Modal is selected, because story/script generation continues to use OpenRouter.
 
-For Modal video, deploy the supplied `video.py` service in the Modal account that will run generation. Run these commands from the directory containing `video.py`. Create the Modal secret named `video-api-secret` with its required `MODAL_VIDEO_API_KEY`, then deploy the service:
+For Wan 2.2 Modal video, deploy [`modal/video.py`](modal/video.py) in the Modal account that will run generation. Run these commands from the `modal/` directory. Create the Modal secret named `video-api-secret` with its required `MODAL_VIDEO_API_KEY`, then deploy the service:
 
 ```bash
 modal secret create video-api-secret MODAL_VIDEO_API_KEY="your-secret-value"
@@ -143,13 +170,13 @@ https://<your-modal-endpoint>/api/v1
 
 Each Modal deployment has its own endpoint and key. The key is encrypted at rest and is never returned to the browser. Add, edit, or delete named accounts in Settings, and mark one account as the default; the Generate screen lets you choose the account separately for each 30-second project or single clip. Existing jobs retain the encrypted credential snapshot captured at submission. The supplied Modal service currently exposes one static model, `modal/wan2.2-lightning-a14b`, with durations from 1 to 15 seconds, 480p/720p, 9:16/16:9, and no generated audio. Its API does not report a video usage charge; Modal infrastructure usage is billed separately by Modal.
 
-For SkyReels V2 deployment steps and model limits, see the [worker README](workers/modal/README.md).
+The separate SkyReels V2 worker is [`workers/modal/skyreels.py`](workers/modal/skyreels.py); its deployment steps and model limits are in the [worker README](workers/modal/README.md). Both Modal workers report new jobs through the Go callback address above.
 
 ## Dashboard behavior
 
-For OpenRouter, the model list includes provider-supplied per-second pricing where available, such as `$0.50/sec`; otherwise it shows `From …/sec` or `Price unavailable`. The dashboard shows estimates only when the active provider supplies pricing. Modal's API returns no per-video price, so its compute cost is billed separately by Modal. History stores the cost value reported by the selected provider; confirm the provider's billing dashboard for actual charges.
+For OpenRouter, the model list includes provider-supplied per-second pricing where available, such as `$0.50/sec`; otherwise it shows a price range or `Price unavailable`. The dashboard shows estimates only when the active provider supplies pricing. Modal's API returns no per-video price, so its compute cost is billed separately by Modal. History stores the cost value reported by the selected provider; confirm the provider's billing dashboard for actual charges.
 
-Jobs are stored before provider polling begins. The background worker keeps polling and downloads completed video into `/data/videos`, so closing the dashboard does not cancel a job. Live job views and History show persisted, application-normalized event messages and progress for project and single-clip jobs. Failure errors are stored with the job and remain visible on its History card. History also includes the prompt, model, date, duration, status, cost, local playback/download, and manual deletion. Deletion removes the corresponding database record and local video file. Files are retained indefinitely until deleted in History.
+Jobs are stored before dispatch. For new Modal submissions, the worker acknowledges promptly, then sends authenticated, sequenced processing and terminal updates to the Go server. Completed clips are downloaded locally; project jobs are combined after all five scene files arrive. OpenRouter and legacy jobs retain backend status polling. The dashboard refreshes from persisted application status, so closing the browser does not cancel a job. Failure errors remain visible on the History card. History also includes the prompt, model, date, duration, status, cost, local playback/download, and manual deletion. Deletion removes the corresponding database record and local video file. Files are retained indefinitely until deleted in History.
 
 Completed videos can be moved from History into the separate Vault tab; this hides them from regular History without moving or copying their files. Set the four-digit Vault code in Settings first. Enter the code to list, play, or download Vault videos. The Vault locks when you refresh the page or choose **Lock Vault**. Change the code in Settings with the current code; keep it safe, because a forgotten code cannot be recovered in this version. Returning a Vault video restores it to History.
 
@@ -166,3 +193,21 @@ docker compose exec video-automation wget -q -O - http://127.0.0.1:8080/health
 `docker compose ps` should show the service as healthy. Open the dashboard in a browser, sign in, change the initial password, save and test the OpenRouter key, choose a video provider, and test its connection. Add a Modal account before selecting one for a submission. OpenRouter video calls may be paid; Modal infrastructure usage is billed separately, and model availability/pricing can change.
 
 For non-Docker development, set `DATA_DIR` to a writable directory and run `go run .`; the server listens on `0.0.0.0:8080`. The Go server has no port override.
+
+## Local development checks
+
+From the repository root, run the Go tests, check the browser JavaScript syntax, run the dependency-free dashboard tests, and review whitespace changes:
+
+```bash
+go test ./...
+go vet ./...
+go build ./...
+node --check static/app.js
+node --test tests/dashboard-ui.test.cjs
+python -m py_compile modal/video.py modal/test_video_callbacks.py workers/modal/skyreels.py workers/modal/test_skyreels.py
+python modal/test_video_callbacks.py
+python workers/modal/test_skyreels.py
+git diff --check
+```
+
+Text-generation tests use mocked HTTP responses. Do not call live text or video providers as part of the routine test suite.
