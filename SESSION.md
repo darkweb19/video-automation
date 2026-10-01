@@ -1,26 +1,30 @@
-# Session handoff — 2026-09-30
+# Session handoff ? 2026-10-01
 
 ## What was done
-- Ported random-prompt generation to five shuffled OpenRouter `:free` models, with 12-second per-model attempts and a 70-second total budget.
-- Added prompt-generation tests for model fallback, retry classes, deadlines, free-only routing, and output validation.
-- Ported durable Modal callback jobs into the current `internal/app` layout: state is saved before submission, callback tokens are encrypted, and single clips and five-scene projects receive ordered authenticated completion or error events without normal provider polling.
-- Updated both Modal workers, `README.md`, `AGENTS.md`, and worker operations guidance for the new callback protocol and staged worker-first rollout.
-- Local verification passed: Go tests, vet, build, dashboard UI tests, Wan callback delivery checks, SkyReels offline tests, JavaScript syntax, and `git diff --check`.
+- Committed OpenRouter prompt/story reliability fixes as `ccb8f0f` on `feat/video-callbacks-and-random-prompts`.
+- Random prompts retain five shuffled free models, with adaptive attempts capped at 35 seconds inside a 110-second request deadline. Unusable and incomplete responses move to another model.
+- Added shared credential-scoped cooldowns, OpenRouter/provider limit classification, retry/reset parsing, HTTP-200 error handling, and safe public errors with retry guidance.
+- Project planning stays on ScriptModel: two three-minute attempts within six minutes and five seconds; invalid output or unsupported tool routing retries with plain JSON. Five-scene validation remains required.
+- Preserved bounded invalid story output for diagnosis with credential redaction; attempt counts persist through an additive SQLite migration and detail/live APIs.
+- Committed Modal supervisor cap/test alignment as `14a30d0`; both workers now use the supported maximum of 10 retries.
+- Go tests, vet, build, dashboard UI tests, JavaScript syntax, Wan callback checks, SkyReels offline tests, and diff checks passed. Final agent review found no material issues.
 
 ## Decisions locked
-- Random prompts never fall back to a paid model; auth and invalid-request failures stop immediately.
-- New Modal callback setup uses `VIDEO_CALLBACK_BASE_URL`; `PUBLIC_BASE_URL` remains a compatibility fallback.
-- Deploy callback-capable Modal workers with legacy support before the Go callback receiver; submit new Modal jobs after both sides are updated.
+- User chose OpenRouter only: no local/template generator and no paid fallback.
+- There is no application usage quota. OpenRouter's shared quota cannot be removed by model/key rotation; known reset times are respected. Missing reset hints receive a 30-second internal suppression without inventing a public reset time.
+- Random-prompt deadline changes from 70/12 seconds to 110/adaptive seconds are intentional and documented in AGENTS.md and README.md.
+- Deploy callback-capable Modal workers before the Go callback receiver; keep authenticated callbacks and legacy compatibility.
 
 ## Open questions
-1. Live rollout validation remains pending; it needs a publicly reachable HTTPS dashboard and explicit authorization for a deployment or provider generation.
+1. Live rollout verification remains pending; no deployment or live provider generation was run.
 
 ## Next steps
-1. Push the reviewed feature branch and open the pull request.
-2. Deploy callback-capable workers, configure `VIDEO_CALLBACK_BASE_URL`, then deploy the matching Go receiver before submitting new Modal jobs.
-3. Verify live generation only after the user explicitly authorizes a deployment and paid provider call.
+1. Deploy the reviewed feature branch when authorized, following the worker-first callback rollout in README.md.
+2. Verify random prompts and project story planning against live OpenRouter after deployment; inspect saved trace attempts and invalid output if a provider still fails.
 
 ## Gotchas
-- Two Modal apps are supplied: Wan 2.2 in `workers/modal/video.py` and SkyReels V2 in `workers/modal/skyreels.py`; each endpoint must be configured separately.
-- Legacy callback jobs use the old route during migration; new jobs use stable IDs at `/api/video-callbacks/{job_id}` with bearer authentication.
-- No live Modal job, paid provider generation, or deployment was run.
+- OpenRouter free-tier account limits still apply across models/API keys; long resets return actionable errors rather than waiting indefinitely.
+- Cooldowns are shared by the HTTP dashboard and processor through Store and reset on app restart.
+- Local Go checks used the writable TEMP build cache. Race-detector checks were not run (no C toolchain); no live API calls were used in tests.
+- Pre-existing untracked `workers/modal/__pycache__/` was left untouched and excluded from commits.
+- Keep `/data/secret.key` with backups and preserve callback worker-first deployment ordering.
