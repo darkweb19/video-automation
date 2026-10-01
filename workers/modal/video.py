@@ -1704,7 +1704,7 @@ class VideoGenerator:
     secrets=[api_secret],
     timeout=7200,
     retries=modal.Retries(
-        max_retries=240,
+        max_retries=10,
         backoff_coefficient=2.0,
         initial_delay=1.0,
         max_delay=60.0,
