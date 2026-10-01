@@ -349,7 +349,7 @@ class SkyReelsCallbackDeliveryTests(unittest.TestCase):
             and node.func.attr == "Retries"
         )
         retry_options = {keyword.arg: ast.literal_eval(keyword.value) for keyword in retry_call.keywords}
-        self.assertEqual(retry_options["max_retries"], 240)
+        self.assertEqual(retry_options["max_retries"], 10)
         self.assertLessEqual(retry_options["max_delay"], 60)
         self.assertTrue(
             any(

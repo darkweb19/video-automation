@@ -162,7 +162,7 @@ def test_supervisor_uses_bounded_modal_retries_and_propagates_cancellation():
         and node.func.attr == "Retries"
     )
     retry_options = {keyword.arg: ast.literal_eval(keyword.value) for keyword in retry_call.keywords}
-    assert retry_options["max_retries"] == 240
+    assert retry_options["max_retries"] == 10
     assert retry_options["max_delay"] <= 60
     assert any(
         isinstance(handler.type, ast.Attribute) and handler.type.attr == "CancelledError"

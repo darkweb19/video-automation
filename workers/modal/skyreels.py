@@ -1206,7 +1206,7 @@ async def run_callback_supervisor(job_id: str, callback_url: str, callback_token
     image=api_image,
     volumes={JOBS_DIR: jobs_volume},
     retries=modal.Retries(
-        max_retries=240,
+        max_retries=10,
         backoff_coefficient=2.0,
         initial_delay=1.0,
         max_delay=60.0,
