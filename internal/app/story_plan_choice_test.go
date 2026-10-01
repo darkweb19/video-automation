@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,8 @@ func TestParseStoryPlanChoice(t *testing.T) {
 		{"tool arguments string", map[string]any{"content": nil, "tool_calls": []any{map[string]any{"function": map[string]any{"name": storyPlanToolName, "arguments": string(planJSON)}}}}},
 		{"tool arguments object", map[string]any{"content": nil, "tool_calls": []any{map[string]any{"function": map[string]any{"name": storyPlanToolName, "arguments": json.RawMessage(planJSON)}}}}},
 		{"invalid tool arguments with valid text fallback", map[string]any{"content": string(planJSON), "tool_calls": []any{map[string]any{"function": map[string]any{"name": storyPlanToolName, "arguments": "not a plan"}}}}},
+		{"later matching tool call", map[string]any{"content": nil, "tool_calls": []any{map[string]any{"function": map[string]any{"name": storyPlanToolName, "arguments": "not a plan"}}, map[string]any{"function": map[string]any{"name": storyPlanToolName, "arguments": string(planJSON)}}}}},
+		{"text blocks", map[string]any{"content": []any{map[string]string{"type": "image", "image_url": "ignored"}, map[string]string{"type": "text", "text": string(planJSON[:len(planJSON)/2])}, map[string]string{"type": "text", "text": string(planJSON[len(planJSON)/2:])}}}},
 		{"text fallback", map[string]any{"content": "Here is the plan:\n```json\n" + string(planJSON) + "\n```"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,6 +44,21 @@ func TestParseStoryPlanChoice(t *testing.T) {
 				t.Fatalf("unexpected plan: scenes=%d raw=%q", len(got.Scenes), raw)
 			}
 		})
+	}
+}
+
+func TestParseStoryPlanChoiceRejectsRefusalWithValidContent(t *testing.T) {
+	planJSON, _ := json.Marshal(validChoicePlan())
+	for _, message := range []map[string]any{
+		{"content": string(planJSON), "refusal": "Declined"},
+		{"content": []any{map[string]string{"type": "text", "text": string(planJSON)}, map[string]string{"type": "refusal", "refusal": "Declined"}}},
+	} {
+		encoded, _ := json.Marshal(message)
+		_, raw, err := parseStoryPlanChoice(encoded)
+		var upstream *upstreamError
+		if !errors.As(err, &upstream) || upstream.StatusCode != 403 || upstream.ErrorType != "refusal" || raw != "" {
+			t.Fatalf("refusal accepted as a valid story: raw=%q err=%v", raw, err)
+		}
 	}
 }
 

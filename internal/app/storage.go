@@ -18,11 +18,12 @@ import (
 )
 
 type Store struct {
-	db         *sql.DB
-	dataDir    string
-	videoDir   string
-	projectDir string
-	events     *eventHub
+	db          *sql.DB
+	dataDir     string
+	videoDir    string
+	projectDir  string
+	events      *eventHub
+	promptState randomPromptState
 }
 
 type GenerationRecord struct {
@@ -414,6 +415,7 @@ func (s *Store) migrate() error {
 			user_prompt TEXT NOT NULL DEFAULT '',
 			response_schema TEXT NOT NULL DEFAULT '',
 			raw_response TEXT NOT NULL DEFAULT '',
+			attempts INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT '',
 			error TEXT NOT NULL DEFAULT '',
 			started_at INTEGER NOT NULL DEFAULT 0,
@@ -450,6 +452,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfMissing("project_scenes", "progress", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("project_text_generation", "attempts", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := s.addColumnIfMissing("generations", "video_provider", "TEXT NOT NULL DEFAULT 'openrouter'"); err != nil {

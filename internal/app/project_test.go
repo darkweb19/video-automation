@@ -503,7 +503,7 @@ func TestGenerateStoryPlanPreservesDeadlineForSafeFailureMessage(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("GenerateStoryPlan error = %v, want wrapped deadline", err)
 	}
-	if trace.Status != "failed" || !strings.Contains(trace.Error, context.DeadlineExceeded.Error()) {
+	if trace.Status != "failed" || !strings.Contains(trace.Error, "timed out") {
 		t.Fatalf("deadline trace = %#v", trace)
 	}
 	if message := safeTextGenerationFailure(err); !strings.Contains(message, "timed out") {

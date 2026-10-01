@@ -4,7 +4,11 @@ A self-hosted dashboard for generating video with a selectable Modal or OpenRout
 
 The dashboard supports a single video and a 30-second project. For a project, OpenRouter's `inclusionai/ling-3.0-flash-fin:free` model creates a structured plan with a plain-text parsing fallback. The app validates the story, script, continuity bible, and five scene prompts. The selected video provider generates five independent six-second 480p clips in 9:16, and FFmpeg joins them into a silent 1080×1920 MP4. The same providers support single-clip generation.
 
-The random-prompt helper uses five explicitly free OpenRouter text models in shuffled order. Each model gets up to 12 seconds within a 70-second request budget. It retries transient model or provider failures, stops immediately for authentication and invalid-request errors, and never falls back to a paid model.
+The random-prompt helper uses five explicitly free OpenRouter text models in shuffled order, with no application usage quota. Requests have a 110-second safety deadline; each model gets an adaptive share of the remaining time, up to 35 seconds, so slow models leave time for the others. Empty, refused, malformed, or truncated responses move to the next model. Authentication and invalid-request errors stop immediately, and retries never use a paid model.
+
+Model rate limits trigger a temporary cooldown while other free models are tried. OpenRouter-wide limits respect `Retry-After` and reset times instead of sending the same blocked request to every model. Short resets are retried automatically; longer resets return the time to retry. The dashboard and project processor share these cooldowns in memory until the app restarts. OpenRouter's shared free-tier quota still applies across models and API keys; see its [limit documentation](https://openrouter.ai/docs/api_reference/limits). This app uses OpenRouter only, so it cannot generate while that shared quota is exhausted.
+
+Project story planning stays on `ScriptModel`. It allows up to two three-minute attempts within a six-minute, five-second total deadline. A recoverable failure is retried; an empty or invalid five-scene response retries with a plain JSON request instead of requiring a function call. The plan must still pass validation before scene generation starts. Text traces record the attempt count, final response, and safe error messages.
 
 ## Docker quick start
 

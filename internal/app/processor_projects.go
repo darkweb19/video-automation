@@ -340,6 +340,9 @@ func safeTextGenerationFailure(err error) string {
 	if strings.Contains(err.Error(), "valid JSON story plan") {
 		return "OpenRouter returned an invalid five-scene story plan. Retry the project."
 	}
+	if strings.HasPrefix(err.Error(), "OpenRouter script response exceeds ") {
+		return "OpenRouter script response exceeds the allowed size. Retry with a shorter project topic."
+	}
 	if strings.HasPrefix(err.Error(), "OpenRouter script request failed with HTTP ") {
 		var status int
 		if _, scanErr := fmt.Sscanf(err.Error(), "OpenRouter script request failed with HTTP %d", &status); scanErr == nil && status >= 400 && status <= 599 {
@@ -348,10 +351,21 @@ func safeTextGenerationFailure(err error) string {
 	}
 	var upstream *upstreamError
 	if errors.As(err, &upstream) {
+		if strings.EqualFold(upstream.ErrorType, "content_policy_violation") || strings.EqualFold(upstream.ErrorType, "refusal") {
+			return "The story model declined this request. Try a different project topic."
+		}
 		switch upstream.StatusCode {
 		case 401, 403:
 			return "OpenRouter rejected the saved API key. Update it in Settings, then retry the project."
+		case 402:
+			return "OpenRouter rejected the story request because of an account credit or key limit. Review your OpenRouter account limits, then retry the project."
 		case 429:
+			if upstream.RateLimitScope == "platform" {
+				if !upstream.RetryAt.IsZero() {
+					return "OpenRouter's shared free-model limit is reached. Retry the project after " + upstream.RetryAt.UTC().Format("2006-01-02 15:04:05 UTC") + ". Switching models does not reset this limit."
+				}
+				return "OpenRouter's shared free-model limit is reached. Wait for the quota to reset, then retry the project."
+			}
 			return "OpenRouter's free models are rate-limited right now. Retry the project shortly."
 		default:
 			return fmt.Sprintf("OpenRouter story request failed with HTTP %d. Retry the project.", upstream.StatusCode)
