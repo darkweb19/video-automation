@@ -14,6 +14,7 @@ type dashboardApp struct {
 	vault                     *vaultRuntime
 	baseURL                   string
 	callbackBaseURL           string
+	videoCallbackBaseURL      string
 	limiter                   *loginThrottle
 	recoveryLimiter           *loginThrottle
 	legacySnapshotBackfillErr error
@@ -23,7 +24,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger, vault: newVaultRuntime(), callbackBaseURL: configuredCallbackBaseURL(), limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
+	app := &dashboardApp{store: store, security: security, logger: logger, vault: newVaultRuntime(), callbackBaseURL: configuredCallbackBaseURL(), videoCallbackBaseURL: configuredVideoCallbackBaseURL(), limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
 	if err := store.RecoverInterruptedProjectDeletes(); err != nil {
 		logger.Error("recover interrupted project deletions failed")
 	}
@@ -38,6 +39,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	// Modal is an external worker and does not have a browser session. Its
 	// callback is authenticated by a per-job capability token instead.
 	mux.HandleFunc("POST /api/provider-callbacks/modal", app.modalCompletionCallback)
+	mux.HandleFunc("POST /api/video-callbacks/{id}", app.videoCallback)
 	mux.HandleFunc("POST /api/login", app.login)
 	mux.HandleFunc("POST /api/password/recover", app.recoverPassword)
 	mux.HandleFunc("GET /api/session", app.session)

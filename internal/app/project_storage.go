@@ -144,13 +144,13 @@ func (s *Store) SaveTextGenerationTrace(projectID string, trace TextGenerationTr
 	if trace.UpdatedAt == 0 {
 		trace.UpdatedAt = now
 	}
-	_, err := s.db.Exec(`INSERT INTO project_text_generation(project_id,router_model,actual_model,system_prompt,user_prompt,response_schema,raw_response,status,error,started_at,completed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET router_model=excluded.router_model,actual_model=excluded.actual_model,system_prompt=excluded.system_prompt,user_prompt=excluded.user_prompt,response_schema=excluded.response_schema,raw_response=excluded.raw_response,status=excluded.status,error=excluded.error,started_at=excluded.started_at,completed_at=excluded.completed_at,updated_at=excluded.updated_at`, projectID, trace.RouterModel, trace.ActualModel, trace.SystemPrompt, trace.UserPrompt, trace.ResponseSchema, trace.RawResponse, trace.Status, trace.Error, trace.StartedAt, trace.CompletedAt, trace.UpdatedAt)
+	_, err := s.db.Exec(`INSERT INTO project_text_generation(project_id,router_model,actual_model,system_prompt,user_prompt,response_schema,raw_response,status,error,started_at,completed_at,updated_at,attempts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET router_model=excluded.router_model,actual_model=excluded.actual_model,system_prompt=excluded.system_prompt,user_prompt=excluded.user_prompt,response_schema=excluded.response_schema,raw_response=excluded.raw_response,status=excluded.status,error=excluded.error,started_at=excluded.started_at,completed_at=excluded.completed_at,updated_at=excluded.updated_at,attempts=excluded.attempts`, projectID, trace.RouterModel, trace.ActualModel, trace.SystemPrompt, trace.UserPrompt, trace.ResponseSchema, trace.RawResponse, trace.Status, trace.Error, trace.StartedAt, trace.CompletedAt, trace.UpdatedAt, trace.Attempts)
 	return err
 }
 
 func scanTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextGenerationTrace, error) {
 	var trace TextGenerationTrace
-	err := scanner.Scan(&trace.RouterModel, &trace.ActualModel, &trace.SystemPrompt, &trace.UserPrompt, &trace.ResponseSchema, &trace.RawResponse, &trace.Status, &trace.Error, &trace.StartedAt, &trace.CompletedAt, &trace.UpdatedAt)
+	err := scanner.Scan(&trace.RouterModel, &trace.ActualModel, &trace.SystemPrompt, &trace.UserPrompt, &trace.ResponseSchema, &trace.RawResponse, &trace.Status, &trace.Error, &trace.StartedAt, &trace.CompletedAt, &trace.UpdatedAt, &trace.Attempts)
 	return trace, err
 }
 
@@ -159,7 +159,7 @@ func scanTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextGener
 // user opens its audit disclosure, not for every live project state change.
 func scanLiveTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextGenerationTrace, error) {
 	var trace TextGenerationTrace
-	err := scanner.Scan(&trace.RouterModel, &trace.ActualModel, &trace.SystemPrompt, &trace.UserPrompt, &trace.ResponseSchema, &trace.Status, &trace.Error, &trace.StartedAt, &trace.CompletedAt, &trace.UpdatedAt)
+	err := scanner.Scan(&trace.RouterModel, &trace.ActualModel, &trace.SystemPrompt, &trace.UserPrompt, &trace.ResponseSchema, &trace.Status, &trace.Error, &trace.StartedAt, &trace.CompletedAt, &trace.UpdatedAt, &trace.Attempts)
 	if err == nil {
 		trace.RawResponseOmitted = true
 	}
@@ -210,7 +210,7 @@ func (s *Store) loadProjectCoreAndScenes(ctx context.Context, id string) (VideoP
 // loadProjectDetails loads data retained for the API's full project view.
 // Callers that only advance work should use loadProjectCoreAndScenes instead.
 func (s *Store) loadProjectDetails(ctx context.Context, project *VideoProject) error {
-	trace, err := scanTextGenerationTrace(s.db.QueryRowContext(ctx, `SELECT router_model,actual_model,system_prompt,user_prompt,response_schema,raw_response,status,error,started_at,completed_at,updated_at FROM project_text_generation WHERE project_id=?`, project.ID))
+	trace, err := scanTextGenerationTrace(s.db.QueryRowContext(ctx, `SELECT router_model,actual_model,system_prompt,user_prompt,response_schema,raw_response,status,error,started_at,completed_at,updated_at,attempts FROM project_text_generation WHERE project_id=?`, project.ID))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -223,7 +223,7 @@ func (s *Store) loadProjectDetails(ctx context.Context, project *VideoProject) e
 // loadProjectLiveDetails preserves the trace metadata and pipeline diagnostics
 // used by the live dashboard while avoiding a raw script response allocation.
 func (s *Store) loadProjectLiveDetails(ctx context.Context, project *VideoProject) error {
-	trace, err := scanLiveTextGenerationTrace(s.db.QueryRowContext(ctx, `SELECT router_model,actual_model,system_prompt,user_prompt,response_schema,status,error,started_at,completed_at,updated_at FROM project_text_generation WHERE project_id=?`, project.ID))
+	trace, err := scanLiveTextGenerationTrace(s.db.QueryRowContext(ctx, `SELECT router_model,actual_model,system_prompt,user_prompt,response_schema,status,error,started_at,completed_at,updated_at,attempts FROM project_text_generation WHERE project_id=?`, project.ID))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -636,20 +636,46 @@ func sceneProgressMilestone(progress int) int {
 }
 
 func (s *Store) ScheduleSceneDownloadRetry(projectID string, number int) error {
-	var attempts int
-	if err := s.db.QueryRow(`SELECT download_attempts FROM project_scenes WHERE project_id=? AND scene_number=?`, projectID, number).Scan(&attempts); err != nil {
-		return err
-	}
-	attempts++
-	backoff := time.Second * time.Duration(1<<min(attempts-1, 8))
-	if backoff > 5*time.Minute {
-		backoff = 5 * time.Minute
-	}
-	_, err := s.db.Exec(`UPDATE project_scenes SET status='download_failed',download_attempts=?,next_attempt_at=?,error='Scene download will retry automatically',updated_at=? WHERE project_id=? AND scene_number=?`, attempts, time.Now().Add(backoff).Unix(), time.Now().Unix(), projectID, number)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	return s.AppendPipelineEvent(projectID, "scene_download", "retry", "Scene download failed; retry scheduled.", number, attempts)
+	defer tx.Rollback()
+	var attempts int
+	if err := tx.QueryRow(`SELECT download_attempts FROM project_scenes WHERE project_id=? AND scene_number=? AND status IN ('downloading','download_failed')`, projectID, number).Scan(&attempts); err != nil {
+		return err
+	}
+	attempts++
+	status := "download_failed"
+	message := fmt.Sprintf("Scene video download failed (attempt %d of %d); another automatic attempt is scheduled.", attempts, maxVideoDownloadAttempts)
+	var nextAttemptAt int64
+	if attempts >= maxVideoDownloadAttempts {
+		status = "failed"
+		message = "The scene video could not be downloaded after 5 attempts. Check the provider, then retry this scene."
+	} else {
+		backoff := time.Second * time.Duration(1<<min(attempts-1, 8))
+		if backoff > 5*time.Minute {
+			backoff = 5 * time.Minute
+		}
+		nextAttemptAt = time.Now().Add(backoff).Unix()
+	}
+	result, err := tx.Exec(`UPDATE project_scenes SET status=?,download_attempts=?,next_attempt_at=?,error=?,updated_at=? WHERE project_id=? AND scene_number=? AND status IN ('downloading','download_failed')`, status, attempts, nextAttemptAt, message, time.Now().Unix(), projectID, number)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count != 1 {
+		return sql.ErrNoRows
+	}
+	eventStatus := "retry"
+	if status == "failed" {
+		eventStatus = "failed"
+	}
+	if err := appendPipelineEvent(tx, projectID, "scene_download", eventStatus, message, number, attempts, time.Now().Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ScheduleModalSceneRecovery(projectID string, number int) error {

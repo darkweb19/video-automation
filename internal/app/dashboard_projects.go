@@ -49,12 +49,6 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if providerID == VideoProviderModal {
-		if _, err := a.modalCallbackURL(); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
-	}
 	provider, providerID, providerConfigID, err := a.videoProviderSnapshotForAccount(providerID, input.ModalAccountID)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
@@ -66,6 +60,18 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 			_ = a.store.DeleteProviderConfigIfUnused(providerConfigID)
 		}
 	}()
+	if providerID == VideoProviderModal {
+		var callbackErr error
+		if _, ok := provider.(CallbackVideoProvider); ok {
+			_, callbackErr = validateVideoCallbackBaseURL(a.videoCallbackBaseURL)
+		} else {
+			_, callbackErr = a.modalCallbackURL()
+		}
+		if callbackErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, callbackErr.Error())
+			return
+		}
+	}
 	models, err := provider.ListVideoModels(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "unable to validate video models")

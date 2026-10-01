@@ -18,11 +18,12 @@ import (
 )
 
 type Store struct {
-	db         *sql.DB
-	dataDir    string
-	videoDir   string
-	projectDir string
-	events     *eventHub
+	db          *sql.DB
+	dataDir     string
+	videoDir    string
+	projectDir  string
+	events      *eventHub
+	promptState randomPromptState
 }
 
 type GenerationRecord struct {
@@ -50,6 +51,10 @@ type GenerationRecord struct {
 	UpdatedAt                     int64             `json:"updated_at"`
 	Events                        []GenerationEvent `json:"events"`
 }
+
+const maxVideoDownloadAttempts = 5
+
+const videoDownloadFinalFailure = "The video was generated, but its file could not be downloaded after 5 attempts. Check the provider connection before you submit the clip again."
 
 // GenerationEvent is a backend-owned lifecycle entry. It intentionally never
 // contains provider headers, credentials, or raw upstream responses.
@@ -410,6 +415,7 @@ func (s *Store) migrate() error {
 			user_prompt TEXT NOT NULL DEFAULT '',
 			response_schema TEXT NOT NULL DEFAULT '',
 			raw_response TEXT NOT NULL DEFAULT '',
+			attempts INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT '',
 			error TEXT NOT NULL DEFAULT '',
 			started_at INTEGER NOT NULL DEFAULT 0,
@@ -446,6 +452,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.addColumnIfMissing("project_scenes", "progress", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing("project_text_generation", "attempts", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := s.addColumnIfMissing("generations", "video_provider", "TEXT NOT NULL DEFAULT 'openrouter'"); err != nil {
@@ -485,7 +494,7 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return fmt.Errorf("initialize video provider setting: %w", err)
 	}
-	return nil
+	return s.migrateCallbackJobs()
 }
 
 func (s *Store) addColumnIfMissing(table, column, definition string) error {
@@ -1228,24 +1237,43 @@ func (s *Store) VideoPath(id string) string {
 }
 
 func (s *Store) ScheduleDownloadRetry(id string) error {
-	var attempts int
-	if err := s.db.QueryRow(`SELECT download_attempts FROM generations WHERE id=? AND status!='deleting'`, id).Scan(&attempts); err != nil {
-		return err
-	}
-	attempts++
-	backoff := time.Second * time.Duration(1<<min(attempts-1, 8))
-	if backoff > 5*time.Minute {
-		backoff = 5 * time.Minute
-	}
-	result, err := s.db.Exec(`UPDATE generations SET status='download_failed',download_attempts=?,next_download_at=?,error='Video download will retry automatically',updated_at=? WHERE id=? AND status!='deleting'`, attempts, time.Now().Add(backoff).Unix(), time.Now().Unix(), id)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	count, _ := result.RowsAffected()
+	defer tx.Rollback()
+	var attempts, progress int
+	if err := tx.QueryRow(`SELECT download_attempts,progress FROM generations WHERE id=? AND status IN ('downloading','download_failed')`, id).Scan(&attempts, &progress); err != nil {
+		return err
+	}
+	attempts++
+	status, message := "download_failed", "Video download failed; another automatic attempt is scheduled."
+	var nextDownloadAt int64
+	if attempts >= maxVideoDownloadAttempts {
+		status = "failed"
+		message = videoDownloadFinalFailure
+	} else {
+		backoff := time.Second * time.Duration(1<<min(attempts-1, 8))
+		if backoff > 5*time.Minute {
+			backoff = 5 * time.Minute
+		}
+		nextDownloadAt = time.Now().Add(backoff).Unix()
+	}
+	result, err := tx.Exec(`UPDATE generations SET status=?,download_attempts=?,next_download_at=?,error=?,updated_at=? WHERE id=? AND status IN ('downloading','download_failed')`, status, attempts, nextDownloadAt, message, time.Now().Unix(), id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if count != 1 {
 		return sql.ErrNoRows
 	}
-	return s.AppendGenerationEvent(id, "download", "download_failed", "Video download will retry automatically", 0)
+	if err := appendGenerationEvent(tx, id, "download", status, message, progress); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func min(a, b int) int {

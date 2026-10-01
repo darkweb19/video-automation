@@ -52,11 +52,17 @@ type OpenRouterClient struct {
 	StoryHTTPClient   *http.Client
 	ContentHTTPClient *http.Client
 	BaseURL           string
+	promptState       *randomPromptState
 }
 
 type upstreamError struct {
-	StatusCode int
-	Message    string
+	StatusCode     int
+	Message        string
+	RetryAt        time.Time
+	RateLimitScope string
+	LimitSource    string
+	ProviderName   string
+	ErrorType      string
 }
 
 func (e *upstreamError) Error() string {
@@ -74,6 +80,7 @@ func NewOpenRouterClient(apiKey string) *OpenRouterClient {
 		HTTPClient:        defaultOpenRouterHTTPClient,
 		ContentHTTPClient: defaultOpenRouterContentClient,
 		BaseURL:           openRouterBaseURL,
+		promptState:       &randomPromptState{},
 	}
 }
 
@@ -271,27 +278,209 @@ func (c *OpenRouterClient) doJSON(ctx context.Context, method, path string, inpu
 
 func readUpstreamError(response *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	return parseOpenRouterError(data, response.StatusCode, response.Header)
+}
+
+// Only selected error fields are retained. Provider metadata.raw and arbitrary
+// response bodies may contain sensitive request details and must not become an
+// error message. Successful responses can carry errors after HTTP 200 headers.
+func parseOpenRouterError(data []byte, status int, headers http.Header) error {
 	var envelope struct {
 		Error   json.RawMessage `json:"error"`
-		Message string          `json:"message"`
+		Message json.RawMessage `json:"message"`
 	}
 	_ = json.Unmarshal(data, &envelope)
-	message := envelope.Message
-	if len(envelope.Error) > 0 {
-		var detail struct {
-			Message string `json:"message"`
-		}
-		if json.Unmarshal(envelope.Error, &detail) == nil && detail.Message != "" {
-			message = detail.Message
+	message := openRouterErrorString(envelope.Message)
+	errorBody := bytes.TrimSpace(envelope.Error)
+	hasError := len(errorBody) > 0 && !bytes.Equal(errorBody, []byte("null")) && !bytes.Equal(errorBody, []byte(`""`))
+	if status >= 200 && status < 300 && !hasError {
+		return nil
+	}
+	var detail map[string]json.RawMessage
+	if hasError {
+		_ = json.Unmarshal(errorBody, &detail)
+		if detailMessage := openRouterErrorString(detail["message"]); detailMessage != "" {
+			message = detailMessage
 		}
 		if message == "" {
-			_ = json.Unmarshal(envelope.Error, &message)
+			message = openRouterErrorString(errorBody)
+		}
+	}
+	if status >= 200 && status < 300 {
+		status = openRouterErrorStatus(detail["code"])
+		if status == 0 {
+			status = openRouterErrorStatus(detail["status"])
+		}
+		if status == 0 {
+			status = http.StatusBadGateway
 		}
 	}
 	if message == "" {
-		message = http.StatusText(response.StatusCode)
+		message = http.StatusText(status)
 	}
-	return &upstreamError{StatusCode: response.StatusCode, Message: message}
+	var metadata map[string]json.RawMessage
+	_ = json.Unmarshal(detail["metadata"], &metadata)
+	metadataHeaders := openRouterErrorHeaders(metadata["headers"])
+	upstream := &upstreamError{
+		StatusCode:   status,
+		Message:      message,
+		LimitSource:  openRouterErrorString(metadata["limit_source"]),
+		ProviderName: openRouterErrorString(metadata["provider_name"]),
+		ErrorType:    openRouterErrorString(metadata["error_type"]),
+		RetryAt:      openRouterErrorRetryAt(headers, metadataHeaders, time.Now()),
+	}
+	if status == http.StatusTooManyRequests {
+		hasProviderCode := openRouterErrorString(metadata["provider_code"]) != "" || openRouterErrorStatus(metadata["provider_code"]) != 0
+		upstream.RateLimitScope = openRouterErrorLimitScope(upstream, headers, metadataHeaders, hasProviderCode)
+	}
+	return upstream
+}
+
+func openRouterErrorString(raw json.RawMessage) string {
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func openRouterErrorStatus(raw json.RawMessage) int {
+	value := openRouterErrorString(raw)
+	if value == "" {
+		value = string(raw)
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil || !(number >= 400 && number <= 599) || number != float64(int(number)) {
+		return 0
+	}
+	return int(number)
+}
+
+func openRouterErrorHeaders(raw json.RawMessage) http.Header {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &fields)
+	headers := make(http.Header)
+	for name, rawValue := range fields {
+		switch strings.ToLower(name) {
+		case "retry-after", "x-ratelimit-reset", "x-ratelimit-limit", "x-ratelimit-remaining":
+			value := openRouterErrorString(rawValue)
+			if value == "" {
+				// Providers sometimes encode epoch timestamps as JSON numbers.
+				var number json.Number
+				if json.Unmarshal(rawValue, &number) == nil {
+					value = number.String()
+				}
+			}
+			if value != "" {
+				headers.Add(name, value)
+			}
+		}
+	}
+	return headers
+}
+
+func openRouterHeaderValues(headers http.Header, name string) []string {
+	var values []string
+	for key, headerValues := range headers {
+		if strings.EqualFold(key, name) {
+			values = append(values, headerValues...)
+		}
+	}
+	return values
+}
+
+func openRouterErrorRetryAt(headers, metadataHeaders http.Header, now time.Time) time.Time {
+	var retryAt time.Time
+	keepLater := func(candidate time.Time) {
+		if candidate.After(retryAt) {
+			retryAt = candidate
+		}
+	}
+	for _, source := range []http.Header{headers, metadataHeaders} {
+		for _, value := range openRouterHeaderValues(source, "Retry-After") {
+			value = strings.TrimSpace(value)
+			if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 && seconds <= int64((1<<63-1)/time.Second) {
+				keepLater(now.Add(time.Duration(seconds) * time.Second))
+			} else if date, err := http.ParseTime(value); err == nil {
+				keepLater(date)
+			}
+		}
+		for _, value := range openRouterHeaderValues(source, "X-RateLimit-Reset") {
+			keepLater(openRouterRateLimitReset(value))
+		}
+	}
+	return retryAt
+}
+
+func openRouterRateLimitReset(value string) time.Time {
+	value = strings.TrimSpace(value)
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	// OpenRouter uses Unix milliseconds. Accept plausible Unix seconds too,
+	// without treating small delay values or overflowing numbers as epochs.
+	if seconds >= 1e12 {
+		seconds /= 1000
+	}
+	if !(seconds >= 946684800 && seconds <= 4102444800) { // 2000 through 2100
+		return time.Time{}
+	}
+	if epoch, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if epoch >= 1e12 {
+			return time.UnixMilli(epoch)
+		}
+		return time.Unix(epoch, 0)
+	}
+	wholeSeconds := int64(seconds)
+	return time.Unix(wholeSeconds, int64((seconds-float64(wholeSeconds))*float64(time.Second)))
+}
+
+func openRouterErrorLimitScope(upstream *upstreamError, headers, metadataHeaders http.Header, hasProviderCode bool) string {
+	limitSource := strings.ToLower(upstream.LimitSource)
+	switch {
+	case limitSource == "openrouter", limitSource == "platform", strings.HasPrefix(limitSource, "openrouter_"):
+		return "platform"
+	case limitSource == "provider", limitSource == "upstream", strings.HasPrefix(limitSource, "upstream_provider"), strings.HasPrefix(limitSource, "provider_"):
+		return "provider"
+	}
+	hasPlatformHeaders := func(source http.Header) bool {
+		for _, name := range []string{"X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"} {
+			for _, value := range openRouterHeaderValues(source, name) {
+				if name == "X-RateLimit-Reset" {
+					if !openRouterRateLimitReset(value).IsZero() {
+						return true
+					}
+				} else if number, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil && number >= 0 && number < 1e12 {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if hasPlatformHeaders(headers) {
+		return "platform"
+	}
+	// Older free-model errors name the shared platform quota only in message.
+	message := strings.TrimSpace(strings.ToLower(upstream.Message))
+	if strings.HasPrefix(message, "rate limit exceeded:") {
+		quota := strings.TrimSpace(strings.TrimPrefix(message, "rate limit exceeded:"))
+		for _, prefix := range []string{"free-models-per-min", "free-models-per-day"} {
+			if strings.HasPrefix(quota, prefix) {
+				suffix := strings.TrimPrefix(quota, prefix)
+				if suffix == "" || strings.ContainsAny(suffix[:1], "-. :\t\r\n") {
+					return "platform"
+				}
+			}
+		}
+	}
+	if upstream.ProviderName != "" || hasProviderCode {
+		return "provider"
+	}
+	if hasPlatformHeaders(metadataHeaders) {
+		return "platform"
+	}
+	return ""
 }
 
 type openRouterGeneration struct {

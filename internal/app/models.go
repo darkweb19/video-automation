@@ -222,6 +222,7 @@ type TextGenerationTrace struct {
 	RawResponseOmitted bool   `json:"raw_response_omitted,omitempty"`
 	Status             string `json:"status"`
 	Error              string `json:"error,omitempty"`
+	Attempts           int    `json:"attempts,omitempty"`
 	StartedAt          int64  `json:"started_at,omitempty"`
 	CompletedAt        int64  `json:"completed_at,omitempty"`
 	UpdatedAt          int64  `json:"updated_at"`

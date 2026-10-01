@@ -149,7 +149,35 @@ def test_success_retry_and_auth_rejection_keep_credentials_out_of_the_payload():
     assert logs == [("WARNING", "callback_rejected", {"job": "job", "status": 401})]
 
 
+def test_supervisor_uses_bounded_modal_retries_and_propagates_cancellation():
+    tree = ast.parse(SOURCE.read_text())
+    supervisor = next(
+        node for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "callback_video_supervisor"
+    )
+    retry_call = next(
+        node for decorator in supervisor.decorator_list for node in ast.walk(decorator)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "Retries"
+    )
+    retry_options = {keyword.arg: ast.literal_eval(keyword.value) for keyword in retry_call.keywords}
+    assert retry_options["max_retries"] == 10
+    assert retry_options["max_delay"] <= 60
+    assert any(
+        isinstance(handler.type, ast.Attribute) and handler.type.attr == "CancelledError"
+        for node in ast.walk(supervisor)
+        if isinstance(node, ast.Try)
+        for handler in node.handlers
+    )
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "cancel"
+        for node in ast.walk(supervisor)
+    )
+
+
 if __name__ == "__main__":
     test_redirects_are_not_followed_and_are_terminal()
     test_success_retry_and_auth_rejection_keep_credentials_out_of_the_payload()
+    test_supervisor_uses_bounded_modal_retries_and_propagates_cancellation()
     print("callback delivery regression checks passed")

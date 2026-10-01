@@ -1,28 +1,30 @@
-﻿# Session handoff - 2026-09-30
+# Session handoff ? 2026-10-01
 
 ## What was done
-- Published the ordered feature merge as `4ae89dcfd6b0441bc283991d4323c56069ebcba6` (parents `af62ad5` and `44e0835`) to `origin/feat/modal-callbacks-live-updates-cost-controls`.
-- Published the main integration as `1e064ac699598ac99057729ceab5bde495529f8f` (parents `a25d621` and `4ae89dc`) to `origin/main`. Parent verified remote ancestry; local `main` matches the published merge.
-- Preserved SkyReels callback compatibility and durability/retry protections. The media-cache fixture uses a representable +1 ms timestamp delta within the same second for Windows.
-- Updated dashboard UI test asset paths and the frontend redesign guide. Restored `docs/SESSION.md` from `origin/main` to retain its historical handoff.
-- All checks passed on the exact published trees: `go test ./...` (11.888s), `go vet ./...`, `go build`, JS syntax, all 11 dashboard UI tests (187 ms), legacy callback plus 15 offline SkyReels tests (2.688s), and `git diff --check`.
-- Isolated HTTP smoke passed for embedded assets, auth/password handling, safe settings, History, SSE, and Vault unlock/lock/logout. Temporary server and data were removed. Commit metadata was corrected for GitHub privacy; tested trees and parent order are unchanged.
+- Committed OpenRouter prompt/story reliability fixes as `ccb8f0f` on `feat/video-callbacks-and-random-prompts`.
+- Random prompts retain five shuffled free models, with adaptive attempts capped at 35 seconds inside a 110-second request deadline. Unusable and incomplete responses move to another model.
+- Added shared credential-scoped cooldowns, OpenRouter/provider limit classification, retry/reset parsing, HTTP-200 error handling, and safe public errors with retry guidance.
+- Project planning stays on ScriptModel: two three-minute attempts within six minutes and five seconds; invalid output or unsupported tool routing retries with plain JSON. Five-scene validation remains required.
+- Preserved bounded invalid story output for diagnosis with credential redaction; attempt counts persist through an additive SQLite migration and detail/live APIs.
+- Committed Modal supervisor cap/test alignment as `14a30d0`; both workers now use the supported maximum of 10 retries.
+- Go tests, vet, build, dashboard UI tests, JavaScript syntax, Wan callback checks, SkyReels offline tests, and diff checks passed. Final agent review found no material issues.
 
 ## Decisions locked
-- Use authenticated same-origin SSE for live dashboard updates and authenticated callbacks with sparse recovery for Modal completions.
-- Keep callback capabilities out of browser responses and logs; the worker retains callback material in its private durable job record for recovery.
-- Keep model capabilities/pricing runtime-driven and preserve the five six-second 480p 9:16 project preset.
-- Retain the monochrome visual system, keyboard navigation, focus indicators, stale-snapshot protection, and light notifications.
+- User chose OpenRouter only: no local/template generator and no paid fallback.
+- There is no application usage quota. OpenRouter's shared quota cannot be removed by model/key rotation; known reset times are respected. Missing reset hints receive a 30-second internal suppression without inventing a public reset time.
+- Random-prompt deadline changes from 70/12 seconds to 110/adaptive seconds are intentional and documented in AGENTS.md and README.md.
+- Deploy callback-capable Modal workers before the Go callback receiver; keep authenticated callbacks and legacy compatibility.
 
 ## Open questions
-1. Fresh desktop/mobile browser visual review remains outstanding. No deployment or paid generation was run.
+1. Live rollout verification remains pending; no deployment or live provider generation was run.
 
 ## Next steps
-1. Do a desktop/mobile browser visual review when browser access is available.
-2. Run preflight before any future deployment or paid generation.
+1. Deploy the reviewed feature branch when authorized, following the worker-first callback rollout in README.md.
+2. Verify random prompts and project story planning against live OpenRouter after deployment; inspect saved trace attempts and invalid output if a provider still fails.
 
 ## Gotchas
-- Dashboard assets and the JS syntax check live under `internal/webui/static/`; UI tests resolve assets from there.
-- Modal callbacks need `PUBLIC_BASE_URL` set to the externally reachable HTTPS dashboard origin. Callback tokens are bearer material stored privately for recovery.
-- Preserve restart-safe SQLite data and `/data/secret.key`; never read or print `.env` contents or credentials.
-- Leave the user's untracked `modal/__pycache__`, the pre-existing conflicted `.worktrees/apple-main-merge`, backup refs, and other worktrees untouched.
+- OpenRouter free-tier account limits still apply across models/API keys; long resets return actionable errors rather than waiting indefinitely.
+- Cooldowns are shared by the HTTP dashboard and processor through Store and reset on app restart.
+- Local Go checks used the writable TEMP build cache. Race-detector checks were not run (no C toolchain); no live API calls were used in tests.
+- Pre-existing untracked `workers/modal/__pycache__/` was left untouched and excluded from commits.
+- Keep `/data/secret.key` with backups and preserve callback worker-first deployment ordering.

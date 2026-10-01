@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLegacyModalAccountMigrationIsRestartSafeAndUsesStableAAD(t *testing.T) {
@@ -180,7 +181,7 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	callbackSeen := false
+	callbackSeen := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer selected-account-key" {
 			t.Fatal("selected account was not used")
@@ -191,14 +192,18 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 		case "/videos":
 			body, _ := io.ReadAll(r.Body)
 			var submitted map[string]any
-			if json.Unmarshal(body, &submitted) != nil || submitted["callback_url"] != "https://dashboard.example/api/provider-callbacks/modal" {
+			if json.Unmarshal(body, &submitted) != nil {
 				t.Fatalf("callback URL missing from Modal request: %s", body)
 			}
-			if token, ok := submitted["callback_token"].(string); !ok || !validModalCallbackToken(token) {
+			jobID, ok := submitted["job_id"].(string)
+			if !ok || !safeID(jobID) || submitted["callback_url"] != "https://dashboard.example/api/video-callbacks/"+jobID {
+				t.Fatalf("callback URL or client job id missing from Modal request: %s", body)
+			}
+			if token, ok := submitted["callback_token"].(string); !ok || !validVideoCallbackToken(token) {
 				t.Fatalf("callback token missing from Modal request: %s", body)
 			}
-			callbackSeen = true
-			_, _ = w.Write([]byte(`{"id":"selected_job","status":"queued","model":"modal/model"}`))
+			callbackSeen <- struct{}{}
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": jobID, "status": "queued", "model": "modal/model"})
 		default:
 			t.Fatalf("unexpected provider path %q", r.URL.Path)
 		}
@@ -215,7 +220,9 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 	if err := store.SetSetting(videoProviderSetting, string(VideoProviderModal)); err != nil {
 		t.Fatal(err)
 	}
-	app := &dashboardApp{store: store, security: security, callbackBaseURL: "https://dashboard.example"}
+	// The new callback endpoint is independently configured; Modal projects
+	// must not still require the legacy PUBLIC_BASE_URL setting.
+	app := &dashboardApp{store: store, security: security, videoCallbackBaseURL: "https://dashboard.example"}
 
 	missing := httptest.NewRecorder()
 	missingRequest := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"a scene","model":"modal/model"}`))
@@ -232,12 +239,44 @@ func TestModalSubmissionsUseSelectedAccountSnapshots(t *testing.T) {
 	if generated.Code != http.StatusAccepted {
 		t.Fatalf("generation status=%d body=%s", generated.Code, generated.Body.String())
 	}
-	if !callbackSeen {
-		t.Fatal("Modal submission did not include callback delivery fields")
+	select {
+	case <-callbackSeen:
+		t.Fatal("generation route dispatched Modal work before callback job persistence")
+	default:
 	}
-	record, err := store.Generation("selected_job")
+	var submittedRecord GenerationRecord
+	if err := json.NewDecoder(generated.Body).Decode(&submittedRecord); err != nil {
+		t.Fatal(err)
+	}
+	if !safeID(submittedRecord.ID) {
+		t.Fatalf("generation id = %q", submittedRecord.ID)
+	}
+	record, err := store.Generation(submittedRecord.ID)
 	if err != nil || record.ProviderConfigID == "" || record.VideoProvider != string(VideoProviderModal) {
 		t.Fatalf("generation record=%#v err=%v", record, err)
+	}
+	callbackJob, err := store.callbackJob(record.ID)
+	if err != nil || callbackJob.ProviderConfigID != record.ProviderConfigID || callbackJob.State != "submitting" {
+		t.Fatalf("callback job=%#v err=%v", callbackJob, err)
+	}
+	plainToken, err := security.DecryptSetting("video_callback."+callbackJob.ID, callbackJob.EncryptedToken)
+	if err != nil || !validVideoCallbackToken(plainToken) || strings.Contains(callbackJob.EncryptedToken, plainToken) {
+		t.Fatalf("callback token was not encrypted: %#v err=%v", callbackJob, err)
+	}
+	serialized, err := json.Marshal(record)
+	if err != nil || strings.Contains(string(serialized), plainToken) || strings.Contains(string(serialized), callbackJob.EncryptedToken) {
+		t.Fatalf("generation response exposed callback capability: %s err=%v", serialized, err)
+	}
+	processor := NewProcessor(store, security, nil)
+	processor.submitCallbackJob(context.Background(), callbackJob)
+	select {
+	case <-callbackSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Modal callback job was not submitted")
+	}
+	callbackJob, err = store.callbackJob(record.ID)
+	if err != nil || callbackJob.State != "accepted" {
+		t.Fatalf("submitted callback job=%#v err=%v", callbackJob, err)
 	}
 
 	projectRecorder := httptest.NewRecorder()
@@ -368,7 +407,7 @@ func TestSwitchingActiveModalAccountAllowsPriorAccountDeletion(t *testing.T) {
 	}
 }
 
-func TestImmediateFailedSubmissionReturnsPersistedSafeEvent(t *testing.T) {
+func TestCallbackSubmissionFailureReturnsPersistedSafeEvent(t *testing.T) {
 	store := newTestStore(t)
 	security, err := NewSecurity(store)
 	if err != nil {
@@ -379,7 +418,8 @@ func TestImmediateFailedSubmissionReturnsPersistedSafeEvent(t *testing.T) {
 		case "/videos/models":
 			_, _ = w.Write([]byte(`{"data":[{"id":"modal/failed","supported_durations":[6]}]}`))
 		case "/videos":
-			_, _ = w.Write([]byte(`{"id":"failed_immediately","status":"failed","progress":42,"error":"Authorization: Bearer exposed-provider-secret"}`))
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"Authorization: Bearer exposed-provider-secret"}`))
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -396,7 +436,7 @@ func TestImmediateFailedSubmissionReturnsPersistedSafeEvent(t *testing.T) {
 	if err := store.SetSetting(videoProviderSetting, string(VideoProviderModal)); err != nil {
 		t.Fatal(err)
 	}
-	app := &dashboardApp{store: store, security: security, callbackBaseURL: "https://dashboard.example"}
+	app := &dashboardApp{store: store, security: security, videoCallbackBaseURL: "https://dashboard.example"}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"fail safely","model":"modal/failed","duration":6,"modal_account_id":"modal_account_failure"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -408,12 +448,17 @@ func TestImmediateFailedSubmissionReturnsPersistedSafeEvent(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Status != "failed" || response.Progress != 42 || len(response.Events) != 1 || strings.Contains(response.Error, "exposed-provider-secret") || !strings.Contains(response.Error, "Video provider") {
-		t.Fatalf("unsafe/incomplete failed response: %#v", response)
+	if response.Status != "queued" || len(response.Events) != 1 {
+		t.Fatalf("generation was not persisted before dispatch: %#v", response)
 	}
+	job, err := store.callbackJob(response.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	NewProcessor(store, security, nil).submitCallbackJob(context.Background(), job)
 	persisted, err := store.Generation(response.ID)
-	if err != nil || persisted.Error != response.Error || len(persisted.Events) != 1 {
-		t.Fatalf("failed submission was not durably persisted: %#v err=%v", persisted, err)
+	if err != nil || persisted.Status != "failed" || !strings.Contains(persisted.Error, "saved API key") || strings.Contains(persisted.Error, "exposed-provider-secret") || len(persisted.Events) != 2 {
+		t.Fatalf("unsafe/incomplete failed response: %#v err=%v", persisted, err)
 	}
 }
 

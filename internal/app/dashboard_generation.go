@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func estimateCost(duration int, price string) string {
@@ -73,14 +74,6 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	callbackURL := ""
-	if providerID == VideoProviderModal {
-		callbackURL, err = a.modalCallbackURL()
-		if err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
-	}
 	provider, providerID, providerConfigID, err := a.videoProviderSnapshotForAccount(providerID, input.ModalAccountID)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
@@ -106,9 +99,35 @@ func (a *dashboardApp) generate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if _, ok := provider.(CallbackVideoProvider); ok {
+		job, prepareErr := a.prepareCallbackJob(request, providerConfigID)
+		if prepareErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, callbackConfigurationError(prepareErr))
+			return
+		}
+		if err := a.store.insertCallbackGeneration(job, estimateCost(request.Duration, model.PricePerSecond)); err != nil {
+			writeError(w, http.StatusInternalServerError, "unable to save callback generation")
+			return
+		}
+		persisted = true
+		record, err := a.store.Generation(job.ID)
+		if err != nil {
+			a.logger.Error("reload saved callback generation failed", "generation_id", job.ID)
+			writeError(w, http.StatusInternalServerError, "unable to load saved generation")
+			return
+		}
+		a.store.PublishGeneration(job.ID)
+		writeJSON(w, http.StatusAccepted, record)
+		return
+	}
 	callbackToken := ""
 	callbackRegistered := false
 	if providerID == VideoProviderModal {
+		callbackURL, callbackErr := a.modalCallbackURL()
+		if callbackErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, callbackErr.Error())
+			return
+		}
 		callbackToken, err = newModalCallbackToken()
 		if err == nil {
 			err = a.store.RegisterModalCallbackToken(callbackToken, "", 0)
@@ -342,7 +361,17 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 	prompt, err := provider.GenerateRandomPrompt(ctx, input)
 	if err != nil {
 		a.logger.Warn("random prompt generation failed")
-		writeError(w, http.StatusBadGateway, safeRandomPromptFailure(err))
+		status := http.StatusBadGateway
+		var upstream *upstreamError
+		if errors.As(err, &upstream) && upstream.StatusCode == http.StatusTooManyRequests {
+			status = http.StatusTooManyRequests
+			if delay := time.Until(upstream.RetryAt); delay > 0 {
+				w.Header().Set("Retry-After", strconv.FormatInt(int64((delay+time.Second-1)/time.Second), 10))
+			}
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		writeError(w, status, safeRandomPromptFailure(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"prompt": prompt})
@@ -350,18 +379,29 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 
 func safeRandomPromptFailure(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return "OpenRouter prompt generation timed out. Try again."
+		return "OpenRouter prompt generation timed out while trying available free models. Try again shortly."
 	}
 	var upstream *upstreamError
 	if errors.As(err, &upstream) {
+		if strings.EqualFold(upstream.ErrorType, "content_policy_violation") || strings.EqualFold(upstream.ErrorType, "refusal") {
+			return "The available free models declined this prompt request. Try another category."
+		}
 		switch upstream.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return "OpenRouter rejected the saved API key. Update it in Settings."
+		case http.StatusPaymentRequired:
+			return "OpenRouter rejected the request because of an account credit or key limit. Review your OpenRouter account limits."
 		case http.StatusTooManyRequests:
+			if upstream.RateLimitScope == "platform" {
+				if !upstream.RetryAt.IsZero() {
+					return "OpenRouter's shared free-model limit is reached. Try again after " + upstream.RetryAt.UTC().Format("2006-01-02 15:04:05 UTC") + ". Switching models does not reset this limit."
+				}
+				return "OpenRouter's shared free-model limit is reached. Wait for the quota to reset, or review your OpenRouter account limits."
+			}
 			return "OpenRouter's free models are rate-limited right now. Try again shortly."
 		default:
 			return fmt.Sprintf("OpenRouter prompt generation failed with HTTP %d. Try again.", upstream.StatusCode)
 		}
 	}
-	return "OpenRouter did not return a usable prompt. Try again."
+	return "The available free models did not return a complete prompt. Try again shortly."
 }

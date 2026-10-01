@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -24,8 +25,24 @@ const (
 	maxGeneratedScenePrompt    = 2200
 	randomProjectTokens        = 1024
 	randomSingleTokens         = 2048
-	randomPromptTimeout        = 105 * time.Second
+	randomPromptTimeout        = 110 * time.Second
+	randomPromptMaxAttemptTime = 35 * time.Second
+	randomPromptMinAttemptTime = 12 * time.Second
+	randomPromptRetryPause     = 100 * time.Millisecond
 )
+
+// Keep the fallback list explicitly free so random prompt generation cannot
+// route to a paid text model. Availability can change; failed variants are
+// skipped within the request budget.
+var randomPromptModels = [...]string{
+	"inclusionai/ling-3.0-flash:free",
+	"nvidia/nemotron-3.5-lightning:free",
+	"qwen/qwen3.8-27b:free",
+	"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+	"liquid/lfm-2.5-2.6b:free",
+}
+
+var errRandomPromptUnusable = errors.New("OpenRouter returned unusable random prompt content")
 
 const scriptSystemPrompt = `You are a short-form visual storyteller and video prompt director. Create a complete silent 30-second vertical video plan from the user's topic. The final video has exactly five sequential scenes, each exactly six seconds. There is no narration, dialogue, subtitles, music, logos, or on-screen text. Tell the story only through visible action.
 
@@ -127,95 +144,6 @@ func newTextGenerationTrace(topic string) (TextGenerationTrace, error) {
 	}, nil
 }
 
-// GenerateStoryPlan returns the normalized plan and auditable provider
-// artifacts. Validation and continuity are separate processor stages.
-func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) (StoryPlan, TextGenerationTrace, error) {
-	trace, err := newTextGenerationTrace(topic)
-	if err != nil {
-		return StoryPlan{}, trace, err
-	}
-	// Free models can spend significant time queued before producing a
-	// complete five-scene plan. Keep the operation bounded, but do not apply the
-	// shorter timeout used by ordinary OpenRouter metadata requests.
-	requestContext, cancel := context.WithTimeout(ctx, storyGenerationTimeout)
-	defer cancel()
-	request := map[string]any{
-		"model":                 ScriptModel,
-		"messages":              []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
-		"temperature":           0.4,
-		"max_completion_tokens": storyPlanCompletionTokens,
-		"tools": []map[string]any{{
-			"type": "function",
-			"function": map[string]any{
-				"name":        storyPlanToolName,
-				"description": "Submit the complete five-scene video plan.",
-				"parameters":  storyPlanSchema(),
-			},
-		}},
-		"tool_choice": map[string]any{"type": "function", "function": map[string]string{"name": storyPlanToolName}},
-	}
-	trace.Status = "started"
-	trace.StartedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
-	fail := func(err error) (StoryPlan, TextGenerationTrace, error) {
-		trace.Status, trace.Error = "failed", err.Error()
-		trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
-		return StoryPlan{}, trace, err
-	}
-	encoded, err := json.Marshal(request)
-	if err != nil {
-		return fail(fmt.Errorf("encode OpenRouter request: %w", err))
-	}
-	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(encoded))
-	if err != nil {
-		return fail(err)
-	}
-	httpRequest.Header.Set("Authorization", "Bearer "+c.APIKey)
-	httpRequest.Header.Set("Accept", "application/json")
-	httpRequest.Header.Set("Content-Type", "application/json")
-	httpResponse, err := c.storyClient().Do(httpRequest)
-	if err != nil {
-		return fail(fmt.Errorf("OpenRouter request: %w", err))
-	}
-	defer httpResponse.Body.Close()
-	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
-		upstreamErr := readUpstreamError(httpResponse)
-		trace.Status, trace.Error = "failed", upstreamErr.Error()
-		trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
-		return StoryPlan{}, trace, upstreamErr
-	}
-	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, MaxScriptRawResponseBytes+1))
-	if err != nil {
-		return fail(fmt.Errorf("read OpenRouter response: %w", err))
-	}
-	if len(body) > MaxScriptRawResponseBytes {
-		return fail(fmt.Errorf("OpenRouter script response exceeds %d bytes", MaxScriptRawResponseBytes))
-	}
-	var response struct {
-		Model   string `json:"model"`
-		Choices []struct {
-			Message json.RawMessage `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &response); err != nil {
-		return fail(fmt.Errorf("decode OpenRouter response: %w", err))
-	}
-	trace.ActualModel = response.Model
-	if len(response.Choices) == 0 {
-		return fail(errors.New("OpenRouter returned an empty script"))
-	}
-	plan, rawResponse, err := parseStoryPlanChoice(response.Choices[0].Message)
-	trace.RawResponse = rawResponse
-	if len(trace.RawResponse) > MaxScriptRawResponseBytes {
-		return fail(fmt.Errorf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes))
-	}
-	if err != nil {
-		return fail(err)
-	}
-	trace.Status = "completed"
-	trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
-	return plan, trace, nil
-}
-
 // Free text models can surround JSON with prose or a Markdown code fence.
 // Decode complete JSON objects and accept only a valid five-scene plan.
 func parseStoryPlanText(content string) (StoryPlan, error) {
@@ -250,11 +178,228 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 	}
 
 	systemPrompt, userPrompt, maxTokens := randomPromptInstructions(input.Mode, input.Category)
+	operationCtx, cancelOperation := context.WithTimeout(ctx, randomPromptTimeout)
+	defer cancelOperation()
+	state := c.promptState
+	if state == nil {
+		// Keep direct/test clients independent without mutating a shared client.
+		state = &randomPromptState{}
+	}
+	stateKey := randomPromptCredentialScope(c.APIKey, c.baseURL())
+	if err := waitForRandomPromptPlatformCooldown(operationCtx, state, stateKey); err != nil {
+		return "", err
+	}
+	cooldowns := state.cooldownSnapshot(stateKey, time.Now())
+
+	models := append([]string(nil), randomPromptModels[:]...)
+	rand.Shuffle(len(models), func(i, j int) {
+		models[i], models[j] = models[j], models[i]
+	})
+
+	var lastErr error
+	var rateLimitedModels int
+	var earliestRateLimit time.Time
+	var remainingModels []string
+	for _, model := range models {
+		if cooldownUntil := randomPromptModelCooldownUntil(cooldowns.models, model); cooldownUntil.After(time.Now()) {
+			rateLimitedModels++
+			if earliestRateLimit.IsZero() || cooldownUntil.Before(earliestRateLimit) {
+				earliestRateLimit = cooldownUntil
+			}
+			continue
+		}
+		remainingModels = append(remainingModels, model)
+	}
+	if len(remainingModels) == 0 {
+		if rateLimitedModels > 0 {
+			return "", allRandomPromptModelsRateLimited(earliestRateLimit)
+		}
+		return "", errors.New("OpenRouter free text models are unavailable")
+	}
+
+	for modelIndex, model := range remainingModels {
+		if err := operationCtx.Err(); err != nil {
+			return "", err
+		}
+		platformRetries := 0
+		for {
+			if err := waitForRandomPromptPlatformCooldown(operationCtx, state, stateKey); err != nil {
+				return "", err
+			}
+			latestCooldowns := state.cooldownSnapshot(stateKey, time.Now())
+			if cooldownUntil := randomPromptModelCooldownUntil(latestCooldowns.models, model); cooldownUntil.After(time.Now()) {
+				rateLimitedModels++
+				if earliestRateLimit.IsZero() || cooldownUntil.Before(earliestRateLimit) {
+					earliestRateLimit = cooldownUntil
+				}
+				break
+			}
+			attemptTimeout := randomPromptAttemptBudget(operationCtx, len(remainingModels)-modelIndex)
+			if attemptTimeout <= 0 {
+				if err := operationCtx.Err(); err != nil {
+					return "", err
+				}
+				return "", context.DeadlineExceeded
+			}
+			attemptCtx, cancelAttempt := context.WithTimeout(operationCtx, attemptTimeout)
+			prompt, err := c.generateRandomPromptAttempt(attemptCtx, input, model, systemPrompt, userPrompt, maxTokens)
+			cancelAttempt()
+			if err == nil {
+				return prompt, nil
+			}
+			if err := operationCtx.Err(); err != nil {
+				return "", err
+			}
+			lastErr = err
+
+			var upstream *upstreamError
+			if errors.As(err, &upstream) && upstream.StatusCode == http.StatusTooManyRequests {
+				if upstream.RateLimitScope == "platform" {
+					state.setPlatformCooldown(stateKey, upstream, time.Now())
+					platformRetries++
+					if platformRetries == 1 && upstream.RetryAt.After(time.Now()) {
+						if waitErr := waitForRandomPromptPlatformCooldown(operationCtx, state, stateKey); waitErr == nil {
+							continue
+						} else {
+							return "", waitErr
+						}
+					}
+					return "", err
+				}
+
+				rateLimitedModels++
+				cooldownKey := randomPromptModelCooldownKey(model, upstream)
+				cooldownUntil := upstream.RetryAt
+				if !cooldownUntil.After(time.Now()) {
+					cooldownUntil = time.Now().Add(defaultModelCooldown)
+				}
+				state.setModelCooldown(stateKey, cooldownKey, cooldownUntil, time.Now())
+				cooldowns.models[cooldownKey] = cooldownUntil
+				if earliestRateLimit.IsZero() || cooldownUntil.Before(earliestRateLimit) {
+					earliestRateLimit = cooldownUntil
+				}
+			}
+			if !randomPromptShouldRetry(err) {
+				return "", err
+			}
+			if randomPromptShouldPauseBeforeRetry(err) {
+				if waitErr := waitRandomPromptRetryPause(operationCtx); waitErr != nil {
+					return "", waitErr
+				}
+			}
+			break
+		}
+	}
+	if rateLimitedModels >= len(models) {
+		return "", allRandomPromptModelsRateLimited(earliestRateLimit)
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", errors.New("OpenRouter free text models are unavailable")
+}
+
+func randomPromptAttemptBudget(ctx context.Context, remainingAttempts int) time.Duration {
+	if remainingAttempts < 1 {
+		return 0
+	}
+	remaining := randomPromptTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining = time.Until(deadline)
+	}
+	if remaining <= 0 {
+		return 0
+	}
+	budget := remaining / time.Duration(remainingAttempts)
+	if budget > randomPromptMaxAttemptTime {
+		budget = randomPromptMaxAttemptTime
+	}
+	if budget < randomPromptMinAttemptTime && remaining > randomPromptMinAttemptTime {
+		// Preserve a useful queue window when the caller supplied a slightly
+		// shorter deadline than the normal 110-second operation budget.
+		budget = randomPromptMinAttemptTime
+	}
+	if budget > remaining {
+		return remaining
+	}
+	return budget
+}
+
+func randomPromptModelCooldownUntil(cooldowns map[string]time.Time, model string) time.Time {
+	var latest time.Time
+	for _, key := range randomPromptModelCooldownKeys(model) {
+		if until := cooldowns[key]; until.After(latest) {
+			latest = until
+		}
+	}
+	return latest
+}
+
+func waitForRandomPromptPlatformLimit(ctx context.Context, retryAt time.Time, minAttempt time.Duration) error {
+	if retryAt.IsZero() || !retryAt.After(time.Now()) {
+		return errors.New("OpenRouter platform rate limit did not include a future reset time")
+	}
+	deadline, ok := ctx.Deadline()
+	if ok && retryAt.Add(minAttempt).After(deadline) {
+		return context.DeadlineExceeded
+	}
+	delay := time.Until(retryAt)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func waitForRandomPromptPlatformCooldown(ctx context.Context, state *randomPromptState, scopeKey string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		snapshot := state.cooldownSnapshot(scopeKey, time.Now())
+		if snapshot.platformUntil.IsZero() {
+			return nil
+		}
+		if snapshot.platformError != nil && snapshot.platformError.RetryAt.IsZero() {
+			return snapshot.platformError
+		}
+		if err := waitForRandomPromptPlatformLimit(ctx, snapshot.platformUntil, randomPromptMinAttemptTime); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if snapshot.platformError != nil {
+				return snapshot.platformError
+			}
+			return err
+		}
+		// Another request may have extended the shared reset while this request
+		// was waiting, so refresh the state before sending any model request.
+	}
+}
+
+func allRandomPromptModelsRateLimited(retryAt time.Time) error {
+	return &upstreamError{
+		StatusCode:     http.StatusTooManyRequests,
+		Message:        "all configured free OpenRouter text models are temporarily rate-limited",
+		RetryAt:        retryAt,
+		RateLimitScope: "provider",
+		LimitSource:    "free model availability",
+	}
+}
+
+func (c *OpenRouterClient) generateRandomPromptAttempt(ctx context.Context, input RandomPromptRequest, model, systemPrompt, userPrompt string, maxTokens int) (string, error) {
 	request := map[string]any{
-		"model":                 ScriptModel,
+		"model":                 model,
 		"messages":              []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
 		"temperature":           1,
 		"max_completion_tokens": maxTokens,
+		"reasoning": map[string]any{
+			"effort":  "minimal",
+			"exclude": true,
+		},
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
@@ -274,12 +419,12 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 		return "", fmt.Errorf("OpenRouter random prompt request: %w", err)
 	}
 	defer httpResponse.Body.Close()
-	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
-		return "", readUpstreamError(httpResponse)
-	}
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxRandomPromptResponse+1))
 	if err != nil {
 		return "", fmt.Errorf("read OpenRouter random prompt response: %w", err)
+	}
+	if upstreamErr := parseOpenRouterError(body, httpResponse.StatusCode, httpResponse.Header); upstreamErr != nil {
+		return "", upstreamErr
 	}
 	if len(body) > maxRandomPromptResponse {
 		return "", errors.New("OpenRouter random prompt response exceeds the allowed size")
@@ -287,8 +432,12 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 	var response struct {
 		Choices []struct {
 			Message struct {
-				Content json.RawMessage `json:"content"`
+				Content   json.RawMessage `json:"content"`
+				Refusal   json.RawMessage `json:"refusal"`
+				Reasoning json.RawMessage `json:"reasoning"`
 			} `json:"message"`
+			FinishReason       string `json:"finish_reason"`
+			NativeFinishReason string `json:"native_finish_reason"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -296,23 +445,163 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 	}
 	var prompt string
 	for _, choice := range response.Choices {
-		prompt = strings.TrimSpace(openRouterMessageText(choice.Message.Content))
-		if prompt != "" {
-			break
+		finishReason := strings.ToLower(strings.TrimSpace(choice.FinishReason))
+		nativeFinishReason := strings.ToLower(strings.TrimSpace(choice.NativeFinishReason))
+		if hasRandomPromptRefusal(choice.Message.Refusal) || randomPromptFinishIsUnusable(finishReason) || randomPromptFinishIsUnusable(nativeFinishReason) {
+			continue
 		}
+		candidate := strings.TrimSpace(openRouterMessageText(choice.Message.Content))
+		var reasoning string
+		_ = json.Unmarshal(choice.Message.Reasoning, &reasoning)
+		if reasoning = strings.TrimSpace(reasoning); reasoning != "" && candidate == reasoning {
+			continue
+		}
+		if len(candidate) >= 2 && candidate[0] == '"' && candidate[len(candidate)-1] == '"' {
+			candidate = strings.TrimSpace(candidate[1 : len(candidate)-1])
+		}
+		candidate = stripRandomPromptReasoning(candidate)
+		if candidate == "" || isRandomPromptRefusal(candidate) || isMalformedRandomPrompt(candidate) {
+			continue
+		}
+		prompt = candidate
+		break
 	}
 	if prompt == "" {
-		return "", errors.New("OpenRouter returned no text in its random prompt choices")
-	}
-	if len(prompt) >= 2 && prompt[0] == '"' && prompt[len(prompt)-1] == '"' {
-		prompt = strings.TrimSpace(prompt[1 : len(prompt)-1])
+		return "", fmt.Errorf("%w: no complete plain prompt in the response choices", errRandomPromptUnusable)
 	}
 	if input.Mode == RandomPromptModeProject {
 		prompt = fitRandomProjectTopic(prompt)
 	} else if utf8.RuneCountInString(prompt) > MaxPromptLength {
-		return "", fmt.Errorf("OpenRouter random prompt exceeds %d characters", MaxPromptLength)
+		return "", fmt.Errorf("%w: prompt exceeds %d characters", errRandomPromptUnusable, MaxPromptLength)
 	}
 	return prompt, nil
+}
+
+func randomPromptFinishIsUnusable(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "token_limit", "content_filter", "error", "failed", "refusal", "content_policy_violation":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasRandomPromptRefusal(refusal json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(refusal))
+	return trimmed != "" && trimmed != "null" && trimmed != `""`
+}
+
+func isMalformedRandomPrompt(prompt string) bool {
+	trimmed := strings.TrimSpace(prompt)
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "```")
+}
+
+func randomPromptShouldRetry(err error) bool {
+	if errors.Is(err, errRandomPromptUnusable) {
+		return true
+	}
+	var upstream *upstreamError
+	if errors.As(err, &upstream) {
+		if upstream.StatusCode == http.StatusTooManyRequests {
+			return upstream.RateLimitScope != "platform"
+		}
+		if upstream.StatusCode == http.StatusForbidden && (strings.EqualFold(strings.TrimSpace(upstream.ErrorType), "content_policy_violation") || strings.EqualFold(strings.TrimSpace(upstream.ErrorType), "refusal")) {
+			return true
+		}
+		switch status := upstream.StatusCode; {
+		case status == http.StatusNotFound:
+			// The model may have been removed since this free variant was listed.
+			return true
+		case status == http.StatusRequestTimeout,
+			status == http.StatusConflict,
+			status == http.StatusTooEarly,
+			status == http.StatusTooManyRequests,
+			status >= http.StatusInternalServerError:
+			return true
+		default:
+			// Authentication and other client errors need a key or request fix.
+			return false
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Transport, body-read, and malformed-response failures may be isolated to
+	// one routed model, so move to the next explicitly free variant.
+	return true
+}
+
+func randomPromptShouldPauseBeforeRetry(err error) bool {
+	if errors.Is(err, errRandomPromptUnusable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var upstream *upstreamError
+	if errors.As(err, &upstream) && upstream.StatusCode == http.StatusTooManyRequests {
+		return false
+	}
+	return true
+}
+
+func waitRandomPromptRetryPause(ctx context.Context) error {
+	timer := time.NewTimer(randomPromptRetryPause)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func stripRandomPromptReasoning(prompt string) string {
+	trimmed := strings.TrimSpace(prompt)
+	for _, tag := range []string{"think", "analysis", "reasoning"} {
+		lower := strings.ToLower(trimmed)
+		openTag, closeTag := "<"+tag+">", "</"+tag+">"
+		if start := strings.Index(lower, openTag); start >= 0 {
+			end := strings.Index(lower[start+len(openTag):], closeTag)
+			if end < 0 {
+				return ""
+			}
+			trimmed = strings.TrimSpace(trimmed[start+len(openTag)+end+len(closeTag):])
+		}
+	}
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"reasoning:", "analysis:", "let me think", "we need to", "the user asks"} {
+		if strings.HasPrefix(lower, prefix) {
+			return ""
+		}
+	}
+	return trimmed
+}
+
+func isRandomPromptRefusal(prompt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(prompt))
+	for _, prefix := range []string{
+		"i cannot help",
+		"i cannot assist",
+		"i cannot provide",
+		"i can't help",
+		"i can't assist",
+		"i can't provide",
+		"i am unable to help",
+		"i'm unable to help",
+		"i am unable to provide",
+		"i'm unable to provide",
+		"i am unable to assist",
+		"i'm unable to assist",
+		"sorry, i cannot",
+		"sorry, i can't",
+		"sorry, i can’t",
+		"sorry, i am unable",
+		"sorry, i'm unable",
+		"sorry, i’m unable",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // OpenRouter normally returns message.content as a string, but compatible

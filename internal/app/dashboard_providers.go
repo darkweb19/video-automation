@@ -26,6 +26,8 @@ func (a *dashboardApp) openRouterTextProvider() (*OpenRouterClient, error) {
 		return nil, err
 	}
 	client := NewOpenRouterClient(key)
+	// The HTTP dashboard and background processor share one store lifecycle.
+	client.promptState = &a.store.promptState
 	if a.baseURL != "" {
 		client.BaseURL = a.baseURL
 	}

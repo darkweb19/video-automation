@@ -14,6 +14,7 @@ const storyPlanToolName = "submit_story_plan"
 func parseStoryPlanChoice(message json.RawMessage) (StoryPlan, string, error) {
 	var choice struct {
 		Content   json.RawMessage `json:"content"`
+		Refusal   json.RawMessage `json:"refusal"`
 		ToolCalls []struct {
 			Function struct {
 				Name      string          `json:"name"`
@@ -24,46 +25,63 @@ func parseStoryPlanChoice(message json.RawMessage) (StoryPlan, string, error) {
 	if err := json.Unmarshal(message, &choice); err != nil {
 		return StoryPlan{}, "", fmt.Errorf("decode OpenRouter script message: %w", err)
 	}
+	if openRouterErrorString(choice.Refusal) != "" {
+		return StoryPlan{}, "", &upstreamError{StatusCode: 403, ErrorType: "refusal"}
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(choice.Content, &blocks) == nil {
+		for _, block := range blocks {
+			if block.Type == "refusal" {
+				return StoryPlan{}, "", &upstreamError{StatusCode: 403, ErrorType: "refusal"}
+			}
+		}
+	}
 	var raw string
+	var lastErr error
 	for _, call := range choice.ToolCalls {
 		if call.Function.Name != storyPlanToolName {
 			continue
 		}
 		arguments := bytes.TrimSpace(call.Function.Arguments)
+		var candidate string
 		if len(arguments) > 0 && arguments[0] == '"' {
-			if err := json.Unmarshal(arguments, &raw); err != nil {
-				raw = string(arguments)
+			if err := json.Unmarshal(arguments, &candidate); err != nil {
+				candidate = string(arguments)
 			}
 		} else {
-			raw = string(arguments)
+			candidate = string(arguments)
 		}
-		break
-	}
-	if len(raw) > MaxScriptRawResponseBytes {
-		return StoryPlan{}, "", fmt.Errorf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes)
-	}
-	if strings.TrimSpace(raw) != "" {
-		if plan, err := parseStoryPlanText(raw); err == nil {
-			return plan, raw, nil
+		if len(candidate) > MaxScriptRawResponseBytes {
+			lastErr = fmt.Errorf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes)
+			continue
+		}
+		if strings.TrimSpace(candidate) != "" {
+			raw = candidate
+			plan, err := parseStoryPlanText(raw)
+			if err == nil {
+				return plan, raw, nil
+			}
+			lastErr = err
 		}
 	}
-	if len(choice.Content) > 0 && string(choice.Content) != "null" {
-		var content string
-		if err := json.Unmarshal(choice.Content, &content); err == nil && strings.TrimSpace(content) != "" {
-			if len(content) > MaxScriptRawResponseBytes {
-				return StoryPlan{}, "", fmt.Errorf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes)
-			}
-			if plan, err := parseStoryPlanText(content); err == nil {
-				return plan, content, nil
-			}
-			if raw == "" {
-				raw = content
-			}
+	if content := openRouterMessageText(choice.Content); strings.TrimSpace(content) != "" {
+		if len(content) > MaxScriptRawResponseBytes {
+			return StoryPlan{}, "", fmt.Errorf("OpenRouter raw script response exceeds %d bytes", MaxScriptRawResponseBytes)
 		}
+		if plan, err := parseStoryPlanText(content); err == nil {
+			return plan, content, nil
+		} else {
+			lastErr = err
+		}
+		raw = content
+	}
+	if lastErr != nil {
+		return StoryPlan{}, raw, lastErr
 	}
 	if strings.TrimSpace(raw) == "" {
 		return StoryPlan{}, "", fmt.Errorf("OpenRouter returned an empty script")
 	}
-	plan, err := parseStoryPlanText(raw)
-	return plan, raw, err
+	return StoryPlan{}, raw, errStoryPlanUnusable
 }
