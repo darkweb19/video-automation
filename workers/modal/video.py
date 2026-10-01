@@ -49,7 +49,7 @@ KEEP_WARM_SECONDS = 120
 
 # Keep model components resident on the A100 between requests.
 # Set this to True only if you run into CUDA OOM errors.
-OFFLOAD_MODEL = False
+OFFLOAD_MODEL = True
 MODEL_DOWNLOAD_SENTINEL = f"{MODEL_CACHE}/.wan22_download_complete"
 
 # Runtime telemetry cadence while a job is active.
