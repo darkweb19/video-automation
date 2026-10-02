@@ -1,30 +1,29 @@
-# Session handoff ? 2026-10-01
+# Session handoff - 2026-10-02
 
 ## What was done
-- Committed OpenRouter prompt/story reliability fixes as `ccb8f0f` on `feat/video-callbacks-and-random-prompts`.
-- Random prompts retain five shuffled free models, with adaptive attempts capped at 35 seconds inside a 110-second request deadline. Unusable and incomplete responses move to another model.
-- Added shared credential-scoped cooldowns, OpenRouter/provider limit classification, retry/reset parsing, HTTP-200 error handling, and safe public errors with retry guidance.
-- Project planning stays on ScriptModel: two three-minute attempts within six minutes and five seconds; invalid output or unsupported tool routing retries with plain JSON. Five-scene validation remains required.
-- Preserved bounded invalid story output for diagnosis with credential redaction; attempt counts persist through an additive SQLite migration and detail/live APIs.
-- Committed Modal supervisor cap/test alignment as `14a30d0`; both workers now use the supported maximum of 10 retries.
-- Go tests, vet, build, dashboard UI tests, JavaScript syntax, Wan callback checks, SkyReels offline tests, and diff checks passed. Final agent review found no material issues.
+- Built the feature on `feat/youtube-upload-and-generation-reliability`, based on fetched `origin/main`.
+- Added encrypted Google OAuth credentials, PKCE, a Lax callback bridge bound to the original Strict session, one-use state, settings-version checks, disconnect invalidation, and safe browser responses.
+- Added durable resumable YouTube uploads, bounded retries/processing checks, cancellation and explicit duplicate-risk recovery, source/Vault deletion guards, and metadata generation.
+- Added dashboard upload flows and user-facing setup guidance; retained authenticated callbacks and worker-first legacy rollout compatibility.
+- Repinned story planning to catalog-verified free `nvidia/nemotron-3.5-lightning:free`; callback rejection now stops costly generation and has bounded safe recovery.
+- Added OAuth and resumable-recovery regressions. Full `go test ./... -count=1` passed after the latest tests.
 
 ## Decisions locked
-- User chose OpenRouter only: no local/template generator and no paid fallback.
-- There is no application usage quota. OpenRouter's shared quota cannot be removed by model/key rotation; known reset times are respected. Missing reset hints receive a 30-second internal suppression without inventing a public reset time.
-- Random-prompt deadline changes from 70/12 seconds to 110/adaptive seconds are intentional and documented in AGENTS.md and README.md.
-- Deploy callback-capable Modal workers before the Go callback receiver; keep authenticated callbacks and legacy compatibility.
+- OpenRouter only for text; free models only, no paid or local fallback.
+- Story planning remains one configured ScriptModel, at most two three-minute attempts within six minutes and five seconds, with five-scene validation.
+- YouTube callback bearer authentication stays enabled. Modal workers with legacy support must deploy before the Go callback receiver.
+- No paid provider generation or deployment was used for verification.
+- User has authorized pushing this feature branch and creating a PR after final checks.
 
 ## Open questions
-1. Live rollout verification remains pending; no deployment or live provider generation was run.
+1. Root: report final build/vet and browser/offline checks, then give the push/PR greenlight.
 
 ## Next steps
-1. Deploy the reviewed feature branch when authorized, following the worker-first callback rollout in README.md.
-2. Verify random prompts and project story planning against live OpenRouter after deployment; inspect saved trace attempts and invalid output if a provider still fails.
+1. Run final `go build ./cmd/video-automation`, `go vet ./...`, JavaScript syntax, Modal offline tests, and `git diff --check`.
+2. After root confirms all checks and commits are ready, push the branch and create the PR with the prepared body file.
+3. Follow up on deployment separately using the worker-first callback order; do not run provider generation during local checks.
 
 ## Gotchas
-- OpenRouter free-tier account limits still apply across models/API keys; long resets return actionable errors rather than waiting indefinitely.
-- Cooldowns are shared by the HTTP dashboard and processor through Store and reset on app restart.
-- Local Go checks used the writable TEMP build cache. Race-detector checks were not run (no C toolchain); no live API calls were used in tests.
-- Pre-existing untracked `workers/modal/__pycache__/` was left untouched and excluded from commits.
-- Keep `/data/secret.key` with backups and preserve callback worker-first deployment ordering.
+- Go race tests cannot run here because CGO is disabled; normal focused and full Go tests passed.
+- Preserve pre-existing untracked `workers/modal/__pycache__/`; never stage the whole worktree.
+- Do not read or print `.env` or credentials. Use a task-specific Go cache under TEMP if needed.
