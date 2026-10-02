@@ -146,6 +146,17 @@ func TestGenerateStoryPlanToolUnsupportedRetriesButFatalErrorsStop(t *testing.T)
 	}
 }
 
+func TestSafeTextGenerationFailureMakesUnavailableFreeModelActionable(t *testing.T) {
+	err := &upstreamError{StatusCode: http.StatusNotFound, Message: "Model not found; API key: story-test-secret"}
+	message := safeTextGenerationFailure(err)
+	if !strings.Contains(message, ScriptModel) || !strings.Contains(message, "HTTP 404") || !strings.Contains(message, "available free model") {
+		t.Fatalf("missing-model failure is not actionable: %q", message)
+	}
+	if strings.Contains(message, "story-test-secret") || strings.Contains(message, "API key") {
+		t.Fatalf("provider detail leaked a credential: %q", message)
+	}
+}
+
 func TestGenerateStoryPlanEmbeddedPlatformLimitPreservesCooldown(t *testing.T) {
 	reset := time.Now().Add(24 * time.Hour).Truncate(time.Millisecond)
 	requests := 0

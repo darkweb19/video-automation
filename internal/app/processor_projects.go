@@ -359,6 +359,12 @@ func safeTextGenerationFailure(err error) string {
 			return "OpenRouter rejected the saved API key. Update it in Settings, then retry the project."
 		case 402:
 			return "OpenRouter rejected the story request because of an account credit or key limit. Review your OpenRouter account limits, then retry the project."
+		case 404:
+			message := strings.ToLower(upstream.Message)
+			if strings.Contains(message, "model") || strings.Contains(message, "endpoint") {
+				return fmt.Sprintf("OpenRouter could not route the configured free story model %s (HTTP 404). Update ScriptModel to an available free model, then retry the project.", ScriptModel)
+			}
+			return "OpenRouter story request returned HTTP 404. Check the configured OpenRouter endpoint, then retry the project."
 		case 429:
 			if upstream.RateLimitScope == "platform" {
 				if !upstream.RetryAt.IsZero() {
