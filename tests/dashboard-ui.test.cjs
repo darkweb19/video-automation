@@ -764,6 +764,41 @@ test('metadata failures preserve edits, and an old dialog cannot reset a new met
   app.closeYouTubeComposer(false);
 });
 
+test('metadata resolving after manual upload cannot change queued details or unlock the composer', async () => {
+  const { app } = connectedYouTubeApp();
+  await openFixtureComposer(app, 'metadata-race-source');
+  const pendingMetadata = deferred();
+  let submittedBody;
+  app.setRequest((path, options = {}) => {
+    if (path === '/api/youtube/metadata') return pendingMetadata.promise;
+    if (path === '/api/youtube/uploads') {
+      submittedBody = JSON.parse(options.body);
+      return Promise.resolve({ upload: { id: 'queued-upload', status: 'queued', ...submittedBody } });
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+
+  const metadataRequest = app.generateYouTubeMetadata();
+  app.elements.youtubeTitle.value = 'Manual title';
+  app.elements.youtubeDescription.value = 'Manual description';
+  app.elements.youtubeMadeForKidsNo.checked = true;
+  await app.submitYouTubeUpload({ preventDefault() {} });
+  assert.equal(submittedBody.title, 'Manual title');
+  assert.equal(submittedBody.description, 'Manual description');
+  assert.equal(app.state.youtubeUpload.status, 'queued');
+  assert.equal(app.elements.youtubeGenerateMetadata.disabled, true);
+
+  pendingMetadata.resolve({ title: 'Late generated title', description: 'Late generated description' });
+  await metadataRequest;
+  assert.equal(app.elements.youtubeTitle.value, 'Manual title');
+  assert.equal(app.elements.youtubeDescription.value, 'Manual description');
+  assert.equal(app.elements.youtubeTitle.disabled, true);
+  assert.equal(app.elements.youtubeDescription.disabled, true);
+  assert.equal(app.elements.youtubeGenerateMetadata.disabled, true);
+  assert.equal(app.elements.youtubeGenerateMetadata.textContent, 'Generate title and description');
+  app.closeYouTubeComposer(false);
+});
+
 test('a successful move to Vault invalidates a matching non-Vault YouTube composer', async () => {
   const { app } = connectedYouTubeApp();
   await openFixtureComposer(app, 'moving-generation');

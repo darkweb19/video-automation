@@ -3395,6 +3395,11 @@
     renderYouTubeComposerConnection();
     if (!upload) {
       elements.youtubeUploadStatus.hidden = true;
+      const lockFields = !state.youtubeDialogReady || state.youtubeSubmitting;
+      [elements.youtubeTitle, elements.youtubeDescription, elements.youtubeVisibility,
+        elements.youtubeMadeForKidsYes, elements.youtubeMadeForKidsNo, elements.youtubeSynthetic,
+        elements.youtubeGenerateMetadata].forEach((field) => { field.disabled = lockFields; });
+      elements.youtubeUploadSubmit.disabled = lockFields;
       return;
     }
     const status = String(upload.status || "").toLowerCase();
@@ -3459,7 +3464,7 @@
       elements.youtubeUploadProgressLabel.textContent = active ? "In progress" : "";
       elements.youtubeUploadProgressBar.removeAttribute("aria-valuenow");
     }
-    const lockFields = !state.youtubeDialogReady || active || ["processing", "completed", "failed", "needs_reconnect", "attention_required"].includes(status);
+    const lockFields = !state.youtubeDialogReady || state.youtubeSubmitting || active || ["processing", "completed", "failed", "needs_reconnect", "attention_required"].includes(status);
     [elements.youtubeTitle, elements.youtubeDescription, elements.youtubeVisibility,
       elements.youtubeMadeForKidsYes, elements.youtubeMadeForKidsNo, elements.youtubeSynthetic,
       elements.youtubeGenerateMetadata].forEach((field) => { field.disabled = lockFields; });
@@ -3493,6 +3498,14 @@
     }
   }
 
+  function canEditYouTubeMetadata(upload) {
+    if (!state.youtubeDialogReady || state.youtubeSubmitting) return false;
+    if (!upload || !upload.id) return true;
+    const status = String(upload.status || "").toLowerCase();
+    return status === "canceled" && !upload.error && upload.outcome_uncertain !== true
+      && !upload.cancel_requested && !upload.youtube_video_id;
+  }
+
   function validateYouTubeUpload() {
     const title = elements.youtubeTitle.value.trim();
     const description = elements.youtubeDescription.value;
@@ -3508,7 +3521,7 @@
   async function generateYouTubeMetadata() {
     const source = state.youtubeSource;
     const epoch = state.youtubeDialogEpoch;
-    if (!source || !isCurrentYouTubeDialog(epoch, source)) return;
+    if (!source || !isCurrentYouTubeDialog(epoch, source) || !canEditYouTubeMetadata(state.youtubeUpload)) return;
     const previousTitle = elements.youtubeTitle.value;
     const previousDescription = elements.youtubeDescription.value;
     elements.youtubeMetadataError.hidden = true;
@@ -3519,7 +3532,7 @@
         signal: state.youtubeDialogController && state.youtubeDialogController.signal,
         body: JSON.stringify({ source_kind: source.kind, source_id: source.id })
       }, source);
-      if (!isCurrentYouTubeDialog(epoch, source)) return;
+      if (!isCurrentYouTubeDialog(epoch, source) || !canEditYouTubeMetadata(state.youtubeUpload)) return;
       if (elements.youtubeTitle.value === previousTitle) elements.youtubeTitle.value = String(result && result.title || "");
       if (elements.youtubeDescription.value === previousDescription) elements.youtubeDescription.value = String(result && result.description || "");
     } catch (error) {
@@ -3528,7 +3541,10 @@
         elements.youtubeMetadataError.hidden = false;
       }
     } finally {
-      if (isCurrentYouTubeDialog(epoch, source)) setButtonBusy(elements.youtubeGenerateMetadata, false);
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        setButtonBusy(elements.youtubeGenerateMetadata, false);
+        renderYouTubeUpload(state.youtubeUpload);
+      }
     }
   }
 
