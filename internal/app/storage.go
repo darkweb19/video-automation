@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -24,6 +25,10 @@ type Store struct {
 	projectDir  string
 	events      *eventHub
 	promptState randomPromptState
+	// youtubeMu is shared by dashboard handlers and the background processor
+	// because both are constructed around this same Store instance. It serializes
+	// OAuth token refreshes with connection changes and source enqueue/deletion.
+	youtubeMu sync.Mutex
 }
 
 type GenerationRecord struct {
@@ -494,7 +499,10 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return fmt.Errorf("initialize video provider setting: %w", err)
 	}
-	return s.migrateCallbackJobs()
+	if err := s.migrateCallbackJobs(); err != nil {
+		return err
+	}
+	return s.migrateYouTube()
 }
 
 func (s *Store) addColumnIfMissing(table, column, definition string) error {
