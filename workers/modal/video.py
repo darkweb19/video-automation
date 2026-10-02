@@ -662,6 +662,7 @@ def classify_worker_failure(error: Exception, job: dict | None = None) -> str:
     allowed = {
         "out_of_memory", "worker_startup_failed", "generation_timeout", "generation_failed",
         "encoding_failed", "storage_failed", "dispatch_failed", "dispatch_interrupted",
+        "callback_delivery_rejected",
     }
     existing = job.get("error_code")
     if existing in allowed:
@@ -858,28 +859,89 @@ def deliver_video_callback(
     payload: dict,
     post_once=None,
     sleep=time.sleep,
-) -> bool:
+    return_result: bool = False,
+) -> bool | dict:
     """Send a per-job bearer callback with redirects disabled and bounded retries."""
     post_once = post_once or post_video_callback_once
-    for delay in CALLBACK_RETRY_DELAYS_SECONDS:
+    last_status = None
+    for attempt, delay in enumerate(CALLBACK_RETRY_DELAYS_SECONDS, start=1):
         if delay:
             sleep(delay)
         try:
             status = post_once(callback_url, callback_token, payload)
         except Exception:
             status = None
+        last_status = status if isinstance(status, int) else None
         if isinstance(status, int) and 200 <= status < 300:
-            return True
+            outcome = {"state": "delivered", "code": "delivered", "status_code": status, "attempts": attempt}
+            return outcome if return_result else True
         if status is not None and status not in {408, 425, 429, 500, 502, 503, 504}:
             log_event("WARNING", "callback_rejected", job=payload.get("id"), status=status)
-            return False
+            outcome = {"state": "rejected", "code": f"http_{status}", "status_code": status, "attempts": attempt}
+            return outcome if return_result else False
     log_event(
         "ERROR",
         "callback_delivery_exhausted",
         job=payload.get("id"),
         attempts=len(CALLBACK_RETRY_DELAYS_SECONDS),
     )
-    return False
+    code = f"http_{last_status}" if last_status is not None else "network_error"
+    outcome = {
+        "state": "retry_exhausted",
+        "code": code,
+        "status_code": last_status,
+        "attempts": len(CALLBACK_RETRY_DELAYS_SECONDS),
+    }
+    return outcome if return_result else False
+
+
+def callback_delivery_summary(job: dict) -> dict | None:
+    delivery = job.get("callback_delivery")
+    if not isinstance(delivery, dict) or delivery.get("state") not in {"rejected", "retry_exhausted"}:
+        return None
+    code = delivery.get("code")
+    if not isinstance(code, str) or not re.fullmatch(r"(?:http_[1-5][0-9]{2}|network_error)", code):
+        code = "unknown_error"
+    status_code = delivery.get("status_code")
+    if type(status_code) is not int or status_code < 100 or status_code > 599:
+        status_code = None
+    attempts = delivery.get("attempts")
+    if type(attempts) is not int or attempts < 1 or attempts > len(CALLBACK_RETRY_DELAYS_SECONDS):
+        attempts = len(CALLBACK_RETRY_DELAYS_SECONDS)
+    return {
+        "state": delivery["state"],
+        "code": code,
+        "status_code": status_code,
+        "attempts": attempts,
+    }
+
+
+async def persist_callback_delivery(job_id: str, job: dict, outcome: dict, write_job_fn) -> None:
+    saved_job = dict(job)
+    if outcome["state"] == "delivered":
+        if "callback_delivery" not in saved_job:
+            return
+        saved_job.pop("callback_delivery", None)
+    else:
+        saved_job["callback_delivery"] = {
+            "state": outcome["state"],
+            "code": outcome["code"],
+            "status_code": outcome["status_code"],
+            "attempts": outcome["attempts"],
+        }
+    try:
+        await write_job_fn(job_id, saved_job)
+    except Exception as error:
+        log_event("ERROR", "callback_delivery_state_persist_failed", job=job_id, code="storage_failed")
+        raise SupervisorStateError("Callback delivery result could not be persisted") from error
+
+
+def callback_delivery_rejection_result(event: dict, outcome: dict) -> dict:
+    result = dict(event)
+    result["delivery_rejected"] = True
+    result["delivery_code"] = outcome["code"]
+    result["delivery_status"] = outcome["status_code"]
+    return result
 
 
 async def run_callback_supervisor(
@@ -902,11 +964,23 @@ async def run_callback_supervisor(
 
     event = terminal_callback_event(job_id, job)
     if event is not None:
-        if not deliver_video_callback(callback_url, callback_token, event, post_once=post_once, sleep=sleep):
-            raise CallbackDeliveryError("Persisted terminal callback delivery failed")
+        outcome = deliver_video_callback(
+            callback_url,
+            callback_token,
+            event,
+            post_once=post_once,
+            sleep=sleep,
+            return_result=True,
+        )
+        await persist_callback_delivery(job_id, job, outcome, write_job_fn)
+        if outcome["state"] == "retry_exhausted":
+            raise CallbackDeliveryError("Transient terminal callback delivery failed after bounded retries")
+        if outcome["state"] == "rejected":
+            log_event("WARNING", "callback_delivery_rejected_terminal", job=job_id, code=outcome["code"], status=outcome["status_code"])
+            return callback_delivery_rejection_result(event, outcome)
         return event
 
-    deliver_video_callback(
+    outcome = deliver_video_callback(
         callback_url,
         callback_token,
         _callback_event(
@@ -918,7 +992,29 @@ async def run_callback_supervisor(
         ),
         post_once=post_once,
         sleep=sleep,
+        return_result=True,
     )
+    if outcome["state"] == "retry_exhausted":
+        await persist_callback_delivery(job_id, job, outcome, write_job_fn)
+        raise CallbackDeliveryError("Transient initial callback delivery failed after bounded retries")
+    if outcome["state"] == "rejected":
+        rejected_job = dict(job)
+        rejected_job.update(
+            {
+                "id": job_id,
+                "status": "failed",
+                "stage": "failed",
+                "failure_stage": "callback",
+                "error_code": "callback_delivery_rejected",
+                "error": "Callback endpoint rejected the worker's initial status update. Check VIDEO_CALLBACK_BASE_URL, the deployed receiver, and edge access rules.",
+                "completed_at": int(time.time()),
+            }
+        )
+        await persist_callback_delivery(job_id, rejected_job, outcome, write_job_fn)
+        event = terminal_callback_event(job_id, rejected_job)
+        log_event("WARNING", "callback_delivery_rejected_before_generation", job=job_id, code=outcome["code"], status=outcome["status_code"])
+        return callback_delivery_rejection_result(event, outcome)
+    await persist_callback_delivery(job_id, job, outcome, write_job_fn)
     caught_error = None
     try:
         await run_generation()
@@ -958,10 +1054,23 @@ async def run_callback_supervisor(
         except Exception as error:
             log_event("ERROR", "callback_job_persist_failed", job=job_id, code="storage_failed")
             raise SupervisorStateError("Terminal video failure could not be persisted") from error
+        job = failed_job
         event = terminal_callback_event(job_id, failed_job)
 
-    if not deliver_video_callback(callback_url, callback_token, event, post_once=post_once, sleep=sleep):
-        raise CallbackDeliveryError("Persisted terminal callback delivery failed")
+    outcome = deliver_video_callback(
+        callback_url,
+        callback_token,
+        event,
+        post_once=post_once,
+        sleep=sleep,
+        return_result=True,
+    )
+    await persist_callback_delivery(job_id, job, outcome, write_job_fn)
+    if outcome["state"] == "retry_exhausted":
+        raise CallbackDeliveryError("Transient terminal callback delivery failed after bounded retries")
+    if outcome["state"] == "rejected":
+        log_event("WARNING", "callback_delivery_rejected_terminal", job=job_id, code=outcome["code"], status=outcome["status_code"])
+        event = callback_delivery_rejection_result(event, outcome)
     if event["status"] == "failed":
         log_event("WARNING", "callback_job_failed", job=job_id, code=event.get("error_code"))
     return event
@@ -2374,12 +2483,14 @@ def api():
                 terminal_event = terminal_callback_event(job_id, existing_job)
                 if terminal_event is not None:
                     try:
-                        await asyncio.to_thread(
+                        outcome = await asyncio.to_thread(
                             deliver_video_callback,
                             callback_url,
                             callback_token,
                             terminal_event,
+                            return_result=True,
                         )
+                        await persist_callback_delivery(job_id, existing_job, outcome, write_job_async)
                     except Exception:
                         pass
                 return acknowledgement(existing_job, include_poll=False)
@@ -2588,6 +2699,10 @@ def api():
                     {},
                 ),
         }
+
+        callback_delivery = callback_delivery_summary(job)
+        if callback_delivery is not None:
+            response["callback_delivery"] = callback_delivery
 
         if job.get("status") not in {"completed", "failed"}:
             response["poll_after_seconds"] = STATUS_POLL_RETRY_SECONDS
