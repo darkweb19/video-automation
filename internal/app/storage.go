@@ -28,7 +28,8 @@ type Store struct {
 	// youtubeMu is shared by dashboard handlers and the background processor
 	// because both are constructed around this same Store instance. It serializes
 	// OAuth token refreshes with connection changes and source enqueue/deletion.
-	youtubeMu sync.Mutex
+	youtubeMu        sync.Mutex
+	youtubeRefreshMu sync.Mutex
 }
 
 type GenerationRecord struct {
@@ -871,6 +872,8 @@ func sanitizeProviderFailure(message string) string {
 	}
 	lower := strings.ToLower(message)
 	switch {
+	case strings.Contains(lower, "callback_delivery_rejected"):
+		return callbackFailure("callback_delivery_rejected")
 	case strings.Contains(lower, "unauthorized"), strings.Contains(lower, "forbidden"), strings.Contains(lower, "401"), strings.Contains(lower, "403"):
 		return "Video provider authentication failed"
 	case strings.Contains(lower, "rate limit"), strings.Contains(lower, "429"):
@@ -1292,6 +1295,8 @@ func min(a, b int) int {
 }
 
 func (s *Store) BeginDelete(id string) (GenerationRecord, error) {
+	s.youtubeMu.Lock()
+	defer s.youtubeMu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return GenerationRecord{}, err
@@ -1300,6 +1305,13 @@ func (s *Store) BeginDelete(id string) (GenerationRecord, error) {
 	record, err := scanGeneration(tx.QueryRow(`SELECT `+generationColumns+` FROM generations WHERE id=? AND status!='deleting' AND in_vault=0`, id))
 	if err != nil {
 		return record, err
+	}
+	var activeYouTube int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM youtube_uploads WHERE source_kind='generation' AND source_id=? AND status IN ('queued','initiating','uploading','needs_reconnect','attention_required') AND (status NOT IN ('needs_reconnect','attention_required') OR youtube_video_id='')`, id).Scan(&activeYouTube); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return record, err
+	}
+	if activeYouTube != 0 {
+		return record, ErrYouTubeUploadInUse
 	}
 	result, err := tx.Exec(`UPDATE generations SET status='deleting',updated_at=? WHERE id=? AND status!='deleting' AND in_vault=0`, time.Now().Unix(), id)
 	if err != nil {

@@ -150,6 +150,9 @@ func (a *dashboardApp) deleteProject(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.DeleteProject(id); errors.Is(err, sql.ErrNoRows) || errors.Is(err, ErrVaultItemInVault) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
+	} else if errors.Is(err, ErrYouTubeUploadInUse) {
+		writeError(w, http.StatusConflict, "Finish or cancel the YouTube upload before deleting this project")
+		return
 	} else if errors.Is(err, ErrProjectNotTerminal) {
 		writeError(w, http.StatusConflict, "active projects cannot be deleted")
 		return

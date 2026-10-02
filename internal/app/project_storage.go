@@ -300,6 +300,8 @@ func (s *Store) DeleteProject(id string) error {
 	if !safeID(id) {
 		return errors.New("invalid project id")
 	}
+	s.youtubeMu.Lock()
+	defer s.youtubeMu.Unlock()
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -314,6 +316,13 @@ func (s *Store) DeleteProject(id string) error {
 	}
 	if inVault {
 		return ErrVaultItemInVault
+	}
+	var activeYouTube int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM youtube_uploads WHERE source_kind='project' AND source_id=? AND status IN ('queued','initiating','uploading','needs_reconnect','attention_required') AND (status NOT IN ('needs_reconnect','attention_required') OR youtube_video_id='')`, id).Scan(&activeYouTube); err != nil {
+		return err
+	}
+	if activeYouTube != 0 {
+		return ErrYouTubeUploadInUse
 	}
 	if status != "completed" && status != "failed" {
 		return ErrProjectNotTerminal

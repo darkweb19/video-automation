@@ -343,6 +343,31 @@ func (a *dashboardApp) requireVaultUnlock(next http.Handler) http.Handler {
 	})
 }
 
+func (a *dashboardApp) vaultGrantValid(r *http.Request) bool {
+	if a.vault == nil || a.security == nil {
+		return false
+	}
+	identity, ok := a.security.Session(r)
+	if !ok {
+		return false
+	}
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return false
+	}
+	token := vaultTokenFromRequest(r)
+	if token == "" {
+		return false
+	}
+	key := tokenHash(token)
+	now := time.Now()
+	a.vault.mu.Lock()
+	defer a.vault.mu.Unlock()
+	a.pruneVaultGrantsLocked(now)
+	grant, found := a.vault.grants[key]
+	return found && grant.expiresAt.After(now) && grant.username == identity.Username && grant.authSession == tokenHash(cookie.Value)
+}
+
 func (a *dashboardApp) lockVault(w http.ResponseWriter, r *http.Request) {
 	if !mutationAllowed(w, r) {
 		return
@@ -437,6 +462,9 @@ func (a *dashboardApp) updateVaultMembership(w http.ResponseWriter, r *http.Requ
 	case errors.Is(err, ErrVaultItemInVault), errors.Is(err, ErrVaultItemNotInVault):
 		writeError(w, http.StatusConflict, "Vault item has already changed")
 		return
+	case errors.Is(err, ErrYouTubeUploadInUse):
+		writeError(w, http.StatusConflict, "Finish or cancel the YouTube upload before moving this video into the Vault")
+		return
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, "unable to update Vault")
 		return
@@ -499,6 +527,17 @@ func (a *dashboardApp) vaultVideo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Store) SetGenerationVaulted(id string, inVault bool) error {
+	s.youtubeMu.Lock()
+	defer s.youtubeMu.Unlock()
+	if inVault {
+		var active int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM youtube_uploads WHERE source_kind='generation' AND source_id=? AND status IN ('queued','initiating','uploading','needs_reconnect','attention_required') AND (status NOT IN ('needs_reconnect','attention_required') OR youtube_video_id='')`, id).Scan(&active); err != nil {
+			return err
+		}
+		if active != 0 {
+			return ErrYouTubeUploadInUse
+		}
+	}
 	value := 0
 	if inVault {
 		value = 1
@@ -526,6 +565,17 @@ func (s *Store) SetGenerationVaulted(id string, inVault bool) error {
 }
 
 func (s *Store) SetProjectVaulted(id string, inVault bool) error {
+	s.youtubeMu.Lock()
+	defer s.youtubeMu.Unlock()
+	if inVault {
+		var active int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM youtube_uploads WHERE source_kind='project' AND source_id=? AND status IN ('queued','initiating','uploading','needs_reconnect','attention_required') AND (status NOT IN ('needs_reconnect','attention_required') OR youtube_video_id='')`, id).Scan(&active); err != nil {
+			return err
+		}
+		if active != 0 {
+			return ErrYouTubeUploadInUse
+		}
+	}
 	value := 0
 	if inVault {
 		value = 1
