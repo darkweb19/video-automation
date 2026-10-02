@@ -87,7 +87,7 @@ const (
 	ProjectSceneCount   = 5
 	ProjectSceneSeconds = 6
 	ProjectAspectRatio  = "9:16"
-	ScriptModel         = "inclusionai/ling-3.0-flash-fin:free"
+	ScriptModel         = "nvidia/nemotron-3.5-lightning:free"
 	ProjectResolution   = "480p"
 )
 

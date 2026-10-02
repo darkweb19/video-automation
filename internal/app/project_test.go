@@ -25,7 +25,7 @@ func validStoryPlan() StoryPlan {
 	return plan
 }
 
-func TestGenerateStoryPlanUsesLingModel(t *testing.T) {
+func TestGenerateStoryPlanUsesConfiguredScriptModel(t *testing.T) {
 	plan := validStoryPlan()
 	content, _ := json.Marshal(plan)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +36,7 @@ func TestGenerateStoryPlanUsesLingModel(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != "inclusionai/ling-3.0-flash-fin:free" {
+		if body["model"] != ScriptModel {
 			t.Fatalf("model = %v", body["model"])
 		}
 		if body["max_completion_tokens"] != float64(storyPlanCompletionTokens) {
@@ -81,7 +81,7 @@ func TestGenerateStoryPlanUsesLingModel(t *testing.T) {
 	if len(generated.Scenes) != ProjectSceneCount || generated.Title != plan.Title {
 		t.Fatalf("unexpected plan: %+v", generated)
 	}
-	if trace.RouterModel != "inclusionai/ling-3.0-flash-fin:free" || trace.ActualModel != "acme/free-actual" || !strings.Contains(trace.RawResponse, "```json") || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
+	if trace.RouterModel != ScriptModel || trace.ActualModel != "acme/free-actual" || !strings.Contains(trace.RawResponse, "```json") || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
 		t.Fatalf("unexpected trace: %+v", trace)
 	}
 }

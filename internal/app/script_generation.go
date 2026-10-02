@@ -35,7 +35,6 @@ const (
 // route to a paid text model. Availability can change; failed variants are
 // skipped within the request budget.
 var randomPromptModels = [...]string{
-	"inclusionai/ling-3.0-flash:free",
 	"nvidia/nemotron-3.5-lightning:free",
 	"qwen/qwen3.8-27b:free",
 	"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",

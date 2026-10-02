@@ -40,8 +40,8 @@ func TestGenerateRandomPromptUsesQueuedTextClientOnFirstRequest(t *testing.T) {
 	if initialAttemptBudget <= 12*time.Second || initialAttemptBudget > randomPromptMaxAttemptTime {
 		t.Fatalf("initial adaptive model window = %s, want more than 12 seconds and at most %s", initialAttemptBudget, randomPromptMaxAttemptTime)
 	}
-	if len(randomPromptModels) != 5 {
-		t.Fatalf("random prompt model count = %d, want five", len(randomPromptModels))
+	if len(randomPromptModels) != 4 {
+		t.Fatalf("random prompt model count = %d, want four currently verified free variants", len(randomPromptModels))
 	}
 	seenModels := make(map[string]bool, len(randomPromptModels))
 	for _, model := range randomPromptModels {
