@@ -16,7 +16,7 @@ Connection state and the channel name are loaded from `/api/youtube/status`. The
 
 ## Composer and validation
 
-The composer shows the selected video, channel, editable title and description, an optional Generate title and description action, visibility, made-for-kids selection, and the synthetic-content disclosure. Private is selected by default. The user must explicitly choose whether a video is made for kids. The AI/synthetic disclosure starts checked and remains editable.
+The composer shows the selected video, channel, editable title and description, an optional Generate title and description action, visibility, made-for-kids selection, and the synthetic-content disclosure. Metadata generation uses the configured OpenRouter key and existing explicit free-model list only; it has no paid or local fallback. It updates a field only if that field is unchanged while the request runs, so manual edits are preserved. A failed suggestion leaves manual entry usable. Private is selected by default. The user must explicitly choose whether a video is made for kids. The AI/synthetic disclosure starts checked and remains editable.
 
 Before sending a create request, the browser checks that the trimmed title is nonempty and no more than 100 Unicode code points, the description is no more than 5,000 UTF-8 bytes, neither field contains `<` or `>`, visibility is one of `private`, `unlisted`, or `public`, and made-for-kids is explicitly selected. The service validates the same contract. A failed metadata suggestion leaves the user’s edited values intact.
 
