@@ -55,13 +55,13 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 		case "planning":
 			p.startProjectTask(ctx, project.ID+":script", func(taskCtx context.Context) {
 				defer p.app.store.PublishProject(project.ID)
-				trace, traceErr := newTextGenerationTrace(project.Topic)
+				trace, traceErr := newTextGenerationTraceForCategory(project.Topic, project.Category)
 				if traceErr != nil || p.app.store.SaveTextGenerationTrace(project.ID, trace) != nil {
 					_ = p.app.store.AppendPipelineEvent(project.ID, "text_request", "failed", "Unable to prepare script-generation request metadata.", 0, 0)
 					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", "Unable to prepare the story and script request. Retry the project.")
 					return
 				}
-				_ = p.app.store.AppendPipelineEvent(project.ID, "text_request", "started", "Free-text story request prepared for OpenRouter.", 0, 0)
+				_ = p.app.store.AppendPipelineEvent(project.ID, "text_request", "started", "Claude Haiku story request prepared for OpenRouter.", 0, 0)
 				_ = p.app.store.AppendPipelineEvent(project.ID, "text_generation", "started", "OpenRouter text generation started.", 0, 0)
 				textProvider, providerErr := p.app.openRouterTextProvider()
 				if providerErr != nil {
@@ -70,7 +70,7 @@ func (p *Processor) processProjects(ctx context.Context, projects []VideoProject
 					_ = p.app.store.UpdateProjectStatus(project.ID, "failed", message)
 					return
 				}
-				plan, trace, err := textProvider.GenerateStoryPlan(taskCtx, project.Topic)
+				plan, trace, err := textProvider.GenerateStoryPlanForCategory(taskCtx, project.Topic, project.Category)
 				if persistErr := p.app.store.SaveTextGenerationTrace(project.ID, trace); persistErr != nil {
 					p.logger.Error("save project text trace failed", "project_id", project.ID)
 				}
@@ -362,17 +362,17 @@ func safeTextGenerationFailure(err error) string {
 		case 404:
 			message := strings.ToLower(upstream.Message)
 			if strings.Contains(message, "model") || strings.Contains(message, "endpoint") {
-				return fmt.Sprintf("OpenRouter could not route the configured free story model %s (HTTP 404). Update ScriptModel to an available free model, then retry the project.", ScriptModel)
+				return fmt.Sprintf("OpenRouter could not route the configured story model %s (HTTP 404). Check model availability, then retry the project.", ScriptModel)
 			}
 			return "OpenRouter story request returned HTTP 404. Check the configured OpenRouter endpoint, then retry the project."
 		case 429:
 			if upstream.RateLimitScope == "platform" {
 				if !upstream.RetryAt.IsZero() {
-					return "OpenRouter's shared free-model limit is reached. Retry the project after " + upstream.RetryAt.UTC().Format("2006-01-02 15:04:05 UTC") + ". Switching models does not reset this limit."
+					return "OpenRouter's account limit is reached. Retry the project after " + upstream.RetryAt.UTC().Format("2006-01-02 15:04:05 UTC") + "."
 				}
-				return "OpenRouter's shared free-model limit is reached. Wait for the quota to reset, then retry the project."
+				return "OpenRouter's account limit is reached. Wait for the quota to reset, then retry the project."
 			}
-			return "OpenRouter's free models are rate-limited right now. Retry the project shortly."
+			return "OpenRouter's story model is rate-limited right now. Retry the project shortly."
 		default:
 			return fmt.Sprintf("OpenRouter story request failed with HTTP %d. Retry the project.", upstream.StatusCode)
 		}

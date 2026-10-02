@@ -2746,7 +2746,7 @@
     elements.projectError.hidden = true;
     elements.projectScenes.replaceChildren();
     try {
-      const requestBody = { topic, model: elements.model.value };
+      const requestBody = { topic, category: selectedPromptCategory(), model: elements.model.value };
       if (state.videoProvider === "modal") {
         const accountID = selectedModalAccountID();
         if (!accountID) throw new APIError("Choose a Modal account for this submission.", 400);

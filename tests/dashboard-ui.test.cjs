@@ -172,6 +172,22 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+test('project submission carries the selected category into story planning', async () => {
+  const app = configuredApp('project');
+  app.elements.promptCategory.value = '2';
+  let submitted;
+  app.setRequest((requestPath, options = {}) => {
+    if (requestPath === '/api/projects' && options.method === 'POST') {
+      submitted = JSON.parse(options.body);
+      return Promise.reject(new Error('Fixture stops before generation'));
+    }
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  await app.submitProject();
+  assert.equal(submitted.topic, 'Test project topic');
+  assert.equal(submitted.category, 'Nature');
+});
+
 function collectText(node) {
   return [node.textContent, ...(node.children || []).map(collectText)].filter(Boolean).join(' ');
 }

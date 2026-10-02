@@ -97,7 +97,7 @@ const (
 	ProjectSceneCount   = 5
 	ProjectSceneSeconds = 6
 	ProjectAspectRatio  = "9:16"
-	ScriptModel         = "nvidia/nemotron-3.5-lightning:free"
+	ScriptModel         = "anthropic/claude-haiku-4.5"
 	ProjectResolution   = "480p"
 )
 
@@ -146,8 +146,9 @@ type RandomPromptRequest struct {
 }
 
 type ProjectRequest struct {
-	Topic string `json:"topic"`
-	Model string `json:"model"`
+	Topic    string `json:"topic"`
+	Model    string `json:"model"`
+	Category string `json:"category,omitempty"`
 }
 
 type StoryPlan struct {
@@ -191,6 +192,7 @@ type ProjectScene struct {
 type VideoProject struct {
 	ID               string         `json:"id"`
 	Topic            string         `json:"topic"`
+	Category         string         `json:"category,omitempty"`
 	Title            string         `json:"title,omitempty"`
 	Story            string         `json:"story,omitempty"`
 	Script           string         `json:"script,omitempty"`
@@ -217,7 +219,7 @@ type VideoProject struct {
 	UpdatedAt      int64           `json:"updated_at"`
 }
 
-// TextGenerationTrace is the durable record of a free-text script-generation
+// TextGenerationTrace is the durable record of a text script-generation
 // request. RawResponse is the assistant content exactly as received, subject
 // to MaxScriptRawResponseBytes.
 type TextGenerationTrace struct {

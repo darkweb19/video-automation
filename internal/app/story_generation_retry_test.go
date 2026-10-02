@@ -49,17 +49,9 @@ func TestGenerateStoryPlanRetriesInvalidOutputWithPlainJSON(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != ScriptModel || body["max_completion_tokens"] != float64(storyPlanCompletionTokens) {
-			t.Fatalf("request changed configured story model or token budget: %v", body)
-		}
-		reasoning := body["reasoning"].(map[string]any)
-		if reasoning["effort"] != "minimal" || reasoning["exclude"] != true {
-			t.Fatalf("reasoning = %v", reasoning)
-		}
-		_, hasTools := body["tools"]
-		_, hasChoice := body["tool_choice"]
-		if hasTools != (requests == 1) || hasChoice != (requests == 1) {
-			t.Fatalf("attempt %d tools=%v choice=%v", requests, hasTools, hasChoice)
+		assertHaikuPromptSchema(t, body, storyPlanCompletionTokens)
+		if body["tools"] != nil || body["tool_choice"] != nil {
+			t.Fatal("story request should use strict JSON output")
 		}
 		deadline, ok := request.Context().Deadline()
 		if !ok || time.Until(deadline) > storyGenerationTimeout {
@@ -106,15 +98,15 @@ func TestGenerateStoryPlanRejectsIncompleteFinishReasons(t *testing.T) {
 	}
 }
 
-func TestGenerateStoryPlanToolUnsupportedRetriesButFatalErrorsStop(t *testing.T) {
+func TestGenerateStoryPlanConfigurationAndFatalErrorsDoNotWeakenSchema(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		status  int
 		message string
 		want    int
 	}{
-		{"unsupported tools", http.StatusBadRequest, "This model does not support tool_choice", 2},
-		{"no tool-capable endpoint", http.StatusNotFound, "No endpoints found that support tool use.", 2},
+		{"unsupported schema", http.StatusBadRequest, "This endpoint does not support response_format", 1},
+		{"no structured endpoint", http.StatusNotFound, "No endpoints found that support structured outputs.", 1},
 		{"missing model", http.StatusNotFound, "Model not found", 1},
 		{"invalid request", http.StatusBadRequest, "Invalid request story-test-secret", 1},
 		{"auth", http.StatusUnauthorized, "Invalid key story-test-secret", 1},
@@ -146,10 +138,10 @@ func TestGenerateStoryPlanToolUnsupportedRetriesButFatalErrorsStop(t *testing.T)
 	}
 }
 
-func TestSafeTextGenerationFailureMakesUnavailableFreeModelActionable(t *testing.T) {
+func TestSafeTextGenerationFailureMakesUnavailableModelActionable(t *testing.T) {
 	err := &upstreamError{StatusCode: http.StatusNotFound, Message: "Model not found; API key: story-test-secret"}
 	message := safeTextGenerationFailure(err)
-	if !strings.Contains(message, ScriptModel) || !strings.Contains(message, "HTTP 404") || !strings.Contains(message, "available free model") {
+	if !strings.Contains(message, ScriptModel) || !strings.Contains(message, "HTTP 404") || !strings.Contains(message, "model availability") {
 		t.Fatalf("missing-model failure is not actionable: %q", message)
 	}
 	if strings.Contains(message, "story-test-secret") || strings.Contains(message, "API key") {
@@ -163,7 +155,7 @@ func TestGenerateStoryPlanEmbeddedPlatformLimitPreservesCooldown(t *testing.T) {
 	client := storyRetryClient(func(*http.Request) (*http.Response, error) {
 		requests++
 		return storyRetryResponse(t, http.StatusOK, map[string]any{"error": map[string]any{
-			"code": "429", "message": "Rate limit exceeded: free-models-per-day.",
+			"code": "429", "message": "Rate limit exceeded: account-per-day.",
 			"metadata": map[string]any{"headers": map[string]string{"X-RateLimit-Reset": strconv.FormatInt(reset.UnixMilli(), 10)}, "raw": "story-test-secret"},
 		}}), nil
 	})
@@ -217,7 +209,7 @@ func TestGenerateStoryPlanPlatformLimitWithoutResetSuppressesRepeatedCalls(t *te
 	requests := 0
 	client := storyRetryClient(func(*http.Request) (*http.Response, error) {
 		requests++
-		return storyRetryResponse(t, http.StatusTooManyRequests, map[string]any{"error": map[string]string{"message": "Rate limit exceeded: free-models-per-min."}}), nil
+		return storyRetryResponse(t, http.StatusTooManyRequests, map[string]any{"error": map[string]any{"message": "Account rate limit exceeded", "metadata": map[string]string{"limit_source": "openrouter"}}}), nil
 	})
 	for call := 0; call < 2; call++ {
 		_, trace, err := client.GenerateStoryPlan(context.Background(), "five scenes")
@@ -282,6 +274,110 @@ func TestGenerateStoryPlanRetryHonorsResetAndCancellation(t *testing.T) {
 		var upstream *upstreamError
 		if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusTooManyRequests || requests != 1 || trace.Attempts != 1 {
 			t.Fatalf("requests=%d trace=%+v err=%v", requests, trace, err)
+		}
+	})
+}
+
+func TestStoryResponseStrictlyRejectsAmbiguousOrInvalidJSON(t *testing.T) {
+	plan := validStoryPlan()
+	encoded, _ := json.Marshal(plan)
+	valid := string(encoded)
+	for _, test := range []struct{ name, raw string }{
+		{"unknown root field", strings.Replace(valid, `{"title":`, `{"extra":true,"title":`, 1)},
+		{"missing root field", strings.Replace(valid, `"title":"A small rescue",`, "", 1)},
+		{"null title", strings.Replace(valid, `"title":"A small rescue"`, `"title":null`, 1)},
+		{"uppercase title", strings.Replace(valid, `"title":`, `"TITLE":`, 1)},
+		{"case variant duplicate", strings.Replace(valid, `{"title":`, `{"TITLE":"other","title":`, 1)},
+		{"duplicate title", strings.Replace(valid, `{"title":`, `{"title":"other","title":`, 1)},
+		{"unknown scene field", strings.Replace(valid, `{"number":1,`, `{"number":1,"extra":true,`, 1)},
+		{"uppercase scene field", strings.Replace(valid, `"number":1`, `"NUMBER":1`, 1)},
+		{"null scene field", strings.Replace(valid, `"number":1`, `"number":null`, 1)},
+		{"duplicate scene field", strings.Replace(valid, `"number":1`, `"number":1,"number":2`, 1)},
+		{"trailing JSON", valid + `{}`},
+		{"trailing prose", valid + " this is your story"},
+		{"prose wrapper", "Here is your story: " + valid},
+		{"fenced wrapper", "```json\n" + valid + "\n```"},
+		{"out of sequence", strings.Replace(strings.Replace(valid, `"number":1`, `"number":9`, 1), `"number":9`, `"number":2`, 1)},
+		{"oversized continuity", strings.Replace(valid, plan.Continuity, strings.Repeat("x", maxGeneratedContinuity+1), 1)},
+		{"oversized scene prompt", strings.Replace(valid, plan.Scenes[0].VideoPrompt, strings.Repeat("x", maxGeneratedScenePrompt+1), 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{"model": ScriptModel, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": test.raw}}}})
+			_, model, raw, err := parseStoryPlanResponse(body, nil)
+			if !errors.Is(err, errStoryPlanUnusable) || model != ScriptModel || raw != test.raw {
+				t.Fatalf("model=%q raw=%q err=%v", model, raw, err)
+			}
+		})
+	}
+}
+
+func TestGenerateStoryPlanIgnoresFreeQuotaButHonorsPaidProviderCooldown(t *testing.T) {
+	calls := 0
+	client := storyRetryClient(func(*http.Request) (*http.Response, error) {
+		calls++
+		return storyRetryPlanResponse(t, validStoryPlan(), nil), nil
+	})
+	key := randomPromptCredentialScope(client.APIKey, client.baseURL())
+	reset := time.Now().Add(2 * time.Hour)
+	client.promptState.setPlatformCooldown(key, &upstreamError{StatusCode: 429, RateLimitScope: "platform", LimitSource: "openrouter_free_models", RetryAt: reset}, time.Now())
+	if _, _, err := client.GenerateStoryPlan(context.Background(), "story"); err != nil {
+		t.Fatalf("free quota blocked Haiku story: %v", err)
+	}
+	client.promptState.setModelCooldown(key, "provider:anthropic", reset, time.Now())
+	_, trace, err := client.GenerateStoryPlan(context.Background(), "story")
+	var upstream *upstreamError
+	if !errors.As(err, &upstream) || upstream.StatusCode != 429 || trace.Attempts != 0 || calls != 1 {
+		t.Fatalf("calls=%d trace=%+v err=%v", calls, trace, err)
+	}
+}
+
+func TestRandomPromptFreeQuotaClassificationIsExplicit(t *testing.T) {
+	for _, test := range []struct {
+		message, source string
+		want            bool
+	}{
+		{"quota reached", "openrouter_free_models", true},
+		{"Rate limit exceeded: free-models-per-day-high-balance.", "", true},
+		{"Rate limit exceeded: free-models-per-min.", "", true},
+		{"Rate limit exceeded: free-models-per-minor.", "", false},
+		{"Provider mentions free-models-per-min", "", false},
+		{"quota reached", "openrouter", false},
+		{"quota reached", "openrouter_account", false},
+	} {
+		upstream := &upstreamError{StatusCode: 429, RateLimitScope: "platform", Message: test.message, LimitSource: test.source}
+		if got := randomPromptIsFreeQuota(upstream); got != test.want {
+			t.Fatalf("message=%q source=%q got=%v", test.message, test.source, got)
+		}
+	}
+}
+
+func TestCanceledTextGenerationDoesNotAcceptLateValidResponse(t *testing.T) {
+	t.Run("story", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		calls := 0
+		client := storyRetryClient(func(*http.Request) (*http.Response, error) {
+			calls++
+			cancel()
+			return storyRetryPlanResponse(t, validStoryPlan(), nil), nil
+		})
+		_, trace, err := client.GenerateStoryPlan(ctx, "story")
+		if !errors.Is(err, context.Canceled) || trace.Status != "failed" || calls != 1 {
+			t.Fatalf("calls=%d trace=%+v err=%v", calls, trace, err)
+		}
+	})
+	t.Run("single prompt", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		calls := 0
+		client := randomPromptTestClient(func(*http.Request) (*http.Response, error) {
+			calls++
+			cancel()
+			return randomPromptTestResponse(t, "A fox follows a trail of fireflies."), nil
+		})
+		prompt, err := client.GenerateRandomPrompt(ctx, RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeSingle})
+		if !errors.Is(err, context.Canceled) || prompt != "" || calls != 1 {
+			t.Fatalf("calls=%d prompt=%q err=%v", calls, prompt, err)
 		}
 	})
 }

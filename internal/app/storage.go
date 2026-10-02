@@ -469,6 +469,9 @@ func (s *Store) migrate() error {
 	if err := s.addColumnIfMissing("video_projects", "video_provider", "TEXT NOT NULL DEFAULT 'openrouter'"); err != nil {
 		return err
 	}
+	if err := s.addColumnIfMissing("video_projects", "category", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.addColumnIfMissing("generations", "provider_config_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
