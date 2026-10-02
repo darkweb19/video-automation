@@ -1,30 +1,31 @@
 # Session handoff - 2026-10-02
 
 ## What was done
-- Completed `feat/youtube-upload-and-generation-reliability` from fetched `origin/main`; branch is pushed and ready PR #6 targets `main`: https://github.com/darkweb19/video-automation/pull/6.
-- Added encrypted Google OAuth credentials, PKCE, one-use state, a Lax callback bridge bound to the original Strict session, settings-version checks, disconnect invalidation, and safe browser responses.
-- Added durable resumable YouTube uploads, bounded retries/processing checks, cancellation and explicit recovery, source/Vault deletion guards, and dashboard support.
-- Repinned story planning to catalog-verified free `nvidia/nemotron-3.5-lightning:free`; Modal callback rejection stops costly generation and sparse recovery preserves terminal media without rerunning inference.
-- Updated setup and rollout documentation; kept legacy callback support and worker-first deployment order.
+- Implemented Haiku text generation on local `feat/haiku-text-generation`, based on the existing YouTube feature branch/PR #6. This branch has not been pushed or deployed.
+- Project story plans and random project ideas use `anthropic/claude-haiku-4.5` through the existing OpenRouter client and encrypted Settings key.
+- Single random prompts try one available shuffled free model, then Haiku on failure, reserving at least 60 seconds of the 110-second operation budget for fallback.
+- Added strict JSON schema requests, local validation, clear terminal errors, and separate free/account/paid-model cooldown handling. YouTube metadata stays free-only.
+- Persisted optional project category with an additive migration; browser submission, worker loading, restart, and planning preserve category guidance.
+- Added category-aware video prompt contracts, immutable v1/v2 records under `docs/prompts/`, routing ADR-002, updated README/AGENTS, and mocked regression tests. Terra and Luna worked at MAX; independent review findings were resolved.
 
 ## Decisions locked
-- OpenRouter only for text; free models only, no paid or local fallback.
-- Story planning uses one configured ScriptModel, at most two three-minute attempts within six minutes and five seconds, and five-scene validation.
-- Modal per-job callbacks retain bearer authentication. Google OAuth callbacks use one-use state, PKCE, and the original session-bound Lax flow.
-- Deploy Modal workers with legacy and new callback support before the Go callback receiver.
-- No paid generation, live YouTube upload, or deployment was used for verification.
+- User explicitly superseded the former free-only story/random policy with Haiku for project text and single-prompt fallback.
+- OpenRouter remains the only text integration; no additional Anthropic key or provider is required. General account limits are respected; free-tier limits do not block Haiku.
+- Story planning retains two three-minute attempts within six minutes and five seconds. Invalid output never starts video work; five ordered six-second silent 480p scenes and final 1080x1920 assembly remain required.
+- Categories guide family animation, suspense, plausible nature, and non-explicit adult visuals. Legacy projects without a category use general guidance.
+- No paid provider calls, deployment, live upload, or push was performed. Text charges are separate from dashboard video cost totals.
 
 ## Open questions
-- None for the local implementation. Production configuration and deployment verification remain operator follow-up.
+- None for local implementation. Live Haiku output quality and production account credits remain unverified.
 
 ## Next steps
-1. Review and merge PR #6 when accepted.
-2. For rollout, configure Google OAuth and the public HTTPS callback origin, deploy both workers first, then deploy the Go callback receiver.
-3. Verify the deployed callback path and any external 403 gateway behavior, then perform manual browser and YouTube integration checks.
+1. Review the local Haiku feature branch; it currently includes the underlying YouTube PR #6 changes, so account for that dependency before opening/merging a separate PR.
+2. Ensure the saved OpenRouter key has credits, deploy the Go service, and run a budgeted live smoke test for project text and single-prompt fallback when authorized.
+3. For the underlying YouTube/Modal rollout, deploy callback-compatible workers before the Go callback receiver and verify the public callback origin.
 
 ## Gotchas
-- Final checks passed: `go test ./... -count=1`, `go build ./...`, `go vet ./...`, `node --check internal/webui/static/app.js`, 27 dashboard tests, Wan callback delivery tests, 24 SkyReels offline tests, and `git diff --check`.
-- Manual browser checks were unavailable. The external 403 gateway/reverse-proxy behavior remains unverified; Modal callbacks remain authenticated.
-- Go race tests could not run because CGO is disabled.
-- Preserve pre-existing untracked `workers/modal/__pycache__/`; never stage the whole worktree.
-- Do not read or print `.env` or credentials.
+- Verification passed: `go test ./... -count=1`, `go build ./...`, `go vet ./...`, `node --check internal/webui/static/app.js`, 28 dashboard tests, callback delivery checks, and `git diff --check`.
+- Go's default AppData build cache is inaccessible in the sandbox. Set `GOCACHE` to this repo's ignored `.gocache` and `GOMODCACHE` to `.gomodcache` for local checks.
+- Tests use synthetic fixtures and mock HTTP providers; contract regressions do not establish semantic story quality. No live A/B evaluation was performed.
+- Existing untracked `workers/modal/__pycache__/` was left untouched and must not be staged.
+- Never read or print `.env` or credentials; keep `/data/secret.key` with production backups. Manual browser integration and external gateway behavior remain unverified.
