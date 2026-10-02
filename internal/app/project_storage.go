@@ -32,6 +32,15 @@ func (s *Store) InsertProjectForProvider(topic, provider, model string) (VideoPr
 }
 
 func (s *Store) InsertProjectWithProviderConfig(topic, provider, providerConfigID, model string) (VideoProject, error) {
+	return s.InsertProjectWithCategory(topic, "", provider, providerConfigID, model)
+}
+
+// Category is optional for older clients and preserved for queued planning and retries.
+func (s *Store) InsertProjectWithCategory(topic, category, provider, providerConfigID, model string) (VideoProject, error) {
+	category = strings.TrimSpace(category)
+	if category != "" && !validRandomPromptCategory(category) {
+		return VideoProject{}, errors.New("unsupported project category")
+	}
 	id, err := newProjectID()
 	if err != nil {
 		return VideoProject{}, err
@@ -42,7 +51,7 @@ func (s *Store) InsertProjectWithProviderConfig(topic, provider, providerConfigI
 		return VideoProject{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO video_projects(id,topic,model,video_provider,provider_config_id,status,created_at,updated_at) VALUES(?,?,?,?,?,'planning',?,?)`, id, topic, model, provider, providerConfigID, now, now)
+	_, err = tx.Exec(`INSERT INTO video_projects(id,topic,category,model,video_provider,provider_config_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'planning',?,?)`, id, topic, category, model, provider, providerConfigID, now, now)
 	if err != nil {
 		return VideoProject{}, err
 	}
@@ -105,7 +114,7 @@ func (s *Store) SaveStoryPlan(projectID string, plan StoryPlan) error {
 	return tx.Commit()
 }
 
-const projectColumns = `id,topic,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at,in_vault`
+const projectColumns = `id,topic,category,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at,in_vault`
 const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,progress,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,modal_callback_recovery_at,modal_callback_recovery_attempts,created_at,updated_at`
 
 func appendPipelineEvent(execer interface {
@@ -168,7 +177,7 @@ func scanLiveTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextG
 
 func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) {
 	var project VideoProject
-	err := scanner.Scan(&project.ID, &project.Topic, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt, &project.InVault)
+	err := scanner.Scan(&project.ID, &project.Topic, &project.Category, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt, &project.InVault)
 	project.FinalVideoReady = project.FinalVideoPath != ""
 	return project, err
 }
@@ -300,6 +309,8 @@ func (s *Store) DeleteProject(id string) error {
 	if !safeID(id) {
 		return errors.New("invalid project id")
 	}
+	s.youtubeMu.Lock()
+	defer s.youtubeMu.Unlock()
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -314,6 +325,13 @@ func (s *Store) DeleteProject(id string) error {
 	}
 	if inVault {
 		return ErrVaultItemInVault
+	}
+	var activeYouTube int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM youtube_uploads WHERE source_kind='project' AND source_id=? AND status IN ('queued','initiating','uploading','needs_reconnect','attention_required') AND (status NOT IN ('needs_reconnect','attention_required') OR youtube_video_id='')`, id).Scan(&activeYouTube); err != nil {
+		return err
+	}
+	if activeYouTube != 0 {
+		return ErrYouTubeUploadInUse
 	}
 	if status != "completed" && status != "failed" {
 		return ErrProjectNotTerminal

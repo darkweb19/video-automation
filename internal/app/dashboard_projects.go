@@ -10,6 +10,7 @@ import (
 
 type projectSubmission struct {
 	Topic          string `json:"topic"`
+	Category       string `json:"category,omitempty"`
 	Model          string `json:"model"`
 	ModalAccountID string `json:"modal_account_id,omitempty"`
 }
@@ -39,6 +40,11 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Topic, input.Model = strings.TrimSpace(input.Topic), strings.TrimSpace(input.Model)
+	input.Category = strings.TrimSpace(input.Category)
+	if input.Category != "" && !validRandomPromptCategory(input.Category) {
+		writeError(w, http.StatusBadRequest, "a supported project category is required")
+		return
+	}
 	if input.Topic == "" || len([]rune(input.Topic)) > MaxPromptLength {
 		writeError(w, http.StatusBadRequest, "a topic or story idea of at most 4,000 characters is required")
 		return
@@ -94,7 +100,7 @@ func (a *dashboardApp) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "select a video model that supports 6-second clips at 480p in 9:16")
 		return
 	}
-	project, err := a.store.InsertProjectWithProviderConfig(input.Topic, string(providerID), providerConfigID, model.ID)
+	project, err := a.store.InsertProjectWithCategory(input.Topic, input.Category, string(providerID), providerConfigID, model.ID)
 	if err != nil {
 		a.logger.Error("create project failed")
 		writeError(w, http.StatusInternalServerError, "unable to create project")
@@ -149,6 +155,9 @@ func (a *dashboardApp) deleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.store.DeleteProject(id); errors.Is(err, sql.ErrNoRows) || errors.Is(err, ErrVaultItemInVault) {
 		writeError(w, http.StatusNotFound, "project not found")
+		return
+	} else if errors.Is(err, ErrYouTubeUploadInUse) {
+		writeError(w, http.StatusConflict, "Finish or cancel the YouTube upload before deleting this project")
 		return
 	} else if errors.Is(err, ErrProjectNotTerminal) {
 		writeError(w, http.StatusConflict, "active projects cannot be deleted")

@@ -35,13 +35,13 @@ func TestRandomPromptAPIPlatformLimitSharesCooldownAndKeepsErrorsSafe(t *testing
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		if r.Header.Get("Authorization") == "Bearer replacement-test-key" {
-			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"A firefly crosses a moonlit forest."}}]}`)
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{\"prompt\":\"A firefly crosses a moonlit forest.\"}"}}]}`)
 			return
 		}
 		w.Header().Set("X-RateLimit-Remaining", "0")
 		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.UnixMilli(), 10))
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = fmt.Fprint(w, `{"error":{"code":429,"message":"private upstream error first-test-key","metadata":{"limit_source":"openrouter_free_models"}}}`)
+		_, _ = fmt.Fprint(w, `{"error":{"code":429,"message":"private upstream error first-test-key","metadata":{"limit_source":"openrouter"}}}`)
 	}))
 	defer upstream.Close()
 	app := &dashboardApp{store: store, security: security, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), baseURL: upstream.URL}
@@ -54,7 +54,7 @@ func TestRandomPromptAPIPlatformLimitSharesCooldownAndKeepsErrorsSafe(t *testing
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		response := generate()
-		if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), "shared free-model limit") {
+		if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), "account limit") {
 			t.Fatalf("limit response = %d: %s", response.Code, response.Body.String())
 		}
 		seconds, err := strconv.Atoi(response.Header().Get("Retry-After"))
@@ -83,7 +83,7 @@ func TestSafeRandomPromptFailureDistinguishesPlatformLimitsAndCreditErrors(t *te
 		want string
 	}{
 		{&upstreamError{StatusCode: 429, RateLimitScope: "platform", RetryAt: reset}, "2026-10-02 00:00:00 UTC"},
-		{&upstreamError{StatusCode: 429, RateLimitScope: "platform"}, "quota to reset"},
+		{&upstreamError{StatusCode: 429, RateLimitScope: "platform"}, "account limits"},
 		{&upstreamError{StatusCode: 402}, "account credit or key limit"},
 	} {
 		if message := safeRandomPromptFailure(test.err); !strings.Contains(message, test.want) {

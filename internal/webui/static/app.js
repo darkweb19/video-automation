@@ -70,6 +70,7 @@
     retryStatus: $("#retry-status"),
     generatedVideo: $("#generated-video"),
     openVideo: $("#open-video"),
+    singleYouTubeUpload: $("#single-youtube-upload"),
     projectStatus: $("#project-status"),
     projectProgressWrap: $("#project-progress-wrap"),
     projectProgressBar: $("#project-progress-bar"),
@@ -86,6 +87,7 @@
     projectFinal: $("#project-final"),
     projectVideo: $("#project-video"),
     projectDownload: $("#project-download"),
+    projectYouTubeUpload: $("#project-youtube-upload"),
     projectHistory: $("#project-history"),
     historyGrid: $("#history-grid"),
     vaultLock: $("#vault-lock"),
@@ -106,6 +108,7 @@
     vaultPlayer: $("#vault-player"),
     vaultPlayerDownload: $("#vault-player-download"),
     vaultPlayerClose: $("#vault-player-close"),
+    vaultPlayerYouTubeUpload: $("#vault-player-youtube-upload"),
     recentList: $("#recent-list"),
     refreshHistory: $("#refresh-history"),
     statTotal: $("#stat-total"),
@@ -141,6 +144,53 @@
     vaultConfirmCode: $("#vault-confirm-code"),
     vaultCodeSave: $("#vault-code-save"),
     vaultCodeHelp: $("#vault-code-help"),
+    youtubeChannelState: $("#youtube-channel-state"),
+    youtubeChannelSummary: $("#youtube-channel-summary"),
+    youtubeChannelName: $("#youtube-channel-name"),
+    youtubeConfigForm: $("#youtube-config-form"),
+    youtubeClientID: $("#youtube-client-id"),
+    youtubeClientSecret: $("#youtube-client-secret"),
+    youtubeBaseURL: $("#youtube-base-url"),
+    youtubeRedirectURI: $("#youtube-redirect-uri"),
+    youtubeSecretHelp: $("#youtube-secret-help"),
+    youtubeConfigError: $("#youtube-config-error"),
+    youtubeSaveConfig: $("#youtube-save-config"),
+    youtubeConnect: $("#youtube-connect"),
+    youtubeDisconnect: $("#youtube-disconnect"),
+    youtubeDialog: $("#youtube-upload-dialog"),
+    youtubeDialogClose: $("#youtube-dialog-close"),
+    youtubePreview: $("#youtube-preview"),
+    youtubeSourceLabel: $("#youtube-source-label"),
+    youtubeConnectRequired: $("#youtube-connect-required"),
+    youtubeGoSettings: $("#youtube-go-settings"),
+    youtubeUploadForm: $("#youtube-upload-form"),
+    youtubeUploadChannel: $("#youtube-upload-channel"),
+    youtubeTitle: $("#youtube-title"),
+    youtubeDescription: $("#youtube-description"),
+    youtubeGenerateMetadata: $("#youtube-generate-metadata"),
+    youtubeMetadataError: $("#youtube-metadata-error"),
+    youtubeVisibility: $("#youtube-visibility"),
+    youtubeVisibilityHelp: $("#youtube-visibility-help"),
+    youtubeMadeForKidsYes: $("#youtube-made-for-kids-yes"),
+    youtubeMadeForKidsNo: $("#youtube-made-for-kids-no"),
+    youtubeSynthetic: $("#youtube-synthetic"),
+    youtubeUploadStatus: $("#youtube-upload-status"),
+    youtubeUploadStatusLabel: $("#youtube-upload-status-label"),
+    youtubeUploadProgressLabel: $("#youtube-upload-progress-label"),
+    youtubeUploadProgressWrap: $("#youtube-upload-progress-wrap"),
+    youtubeUploadProgressBar: $("#youtube-upload-progress-bar"),
+    youtubeUploadError: $("#youtube-upload-error"),
+    youtubeUploadNote: $("#youtube-upload-note"),
+    youtubeUploadSubmit: $("#youtube-upload-submit"),
+    youtubeUploadCancel: $("#youtube-upload-cancel"),
+    youtubeUploadAbandon: $("#youtube-upload-abandon"),
+    youtubeUploadRetry: $("#youtube-upload-retry"),
+    youtubeDuplicateRecovery: $("#youtube-duplicate-recovery"),
+    youtubeRecoveryConfirmControls: $("#youtube-recovery-confirm-controls"),
+    youtubeDuplicateConfirm: $("#youtube-duplicate-confirm"),
+    youtubeUploadRestart: $("#youtube-upload-restart"),
+    youtubeOpenVideo: $("#youtube-open-video"),
+    youtubeOpenStudio: $("#youtube-open-studio"),
     toast: $("#toast")
   };
 
@@ -214,7 +264,22 @@
     vaultMediaControllers: new Set(),
     vaultItems: [],
     vaultObjectURL: "",
-    vaultPlayerItemKey: ""
+    vaultPlayerItemKey: "",
+    youtubeStatus: null,
+    youtubeStatusRequestID: 0,
+    youtubeConfigDirty: false,
+    youtubeSource: null,
+    youtubeUpload: null,
+    youtubeReviewedChannelID: "",
+    youtubeSubmitting: false,
+    youtubeAbandoning: false,
+    youtubeRestarting: false,
+    youtubeDialogReady: false,
+    youtubeDialogEpoch: 0,
+    youtubeDialogController: null,
+    youtubePollTimer: 0,
+    youtubeSourcePreviewURL: "",
+    youtubeRestoreFocus: null
   };
 
   const VIDEO_PROVIDER_NAMES = Object.freeze({ modal: "Modal", openrouter: "OpenRouter" });
@@ -1055,6 +1120,11 @@
   function showLoggedOut() {
     stopJobEventStream(true);
     invalidateProjectRawTraceRequests();
+    closeYouTubeComposer(false);
+    state.youtubeStatus = null;
+    state.youtubeStatusRequestID += 1;
+    state.youtubeConfigDirty = false;
+    elements.youtubeClientSecret.value = "";
     resetVaultRestoreState();
     clearVaultClientState();
     clearGenerationDisplay();
@@ -1123,6 +1193,7 @@
       toast("Change your password before using the dashboard.", true);
     }
     if (state.currentView === "generate" && view !== "generate") invalidateProjectRawTraceRequests();
+    if (state.currentView === "settings" && view !== "settings") elements.youtubeClientSecret.value = "";
     state.currentView = view;
     const previousView = $(".view.active")?.dataset.page || "";
     const navigationWasOpen = isCompactNavigation() && elements.sidebar.classList.contains("open");
@@ -1686,6 +1757,11 @@
         make("strong", { text: record.prompt || "Untitled generation" }),
         make("span", { text: friendlyModel(record.model) })
       );
+      if (String(record.status || "").toLowerCase() === "completed" && record.video_ready) {
+        const upload = make("button", { className: "button text-button recent-upload", type: "button", text: "Upload to YouTube" });
+        upload.addEventListener("click", () => openYouTubeUpload(generationYouTubeSource(record)));
+        main.append(upload);
+      }
       const date = make("span", { className: "meta", text: formatDate(record.created_at) });
       const badge = statusBadge(record.status);
       const cost = make("strong", { text: recordCost(record).value });
@@ -1813,6 +1889,11 @@
         download.href = videoURL;
         download.download = `generation-${record.id}.mp4`;
         actions.append(download);
+      }
+      if (videoReady) {
+        const upload = make("button", { className: "button secondary", text: "Upload to YouTube", type: "button" });
+        upload.addEventListener("click", () => openYouTubeUpload(generationYouTubeSource(record)));
+        actions.append(upload);
       }
       if (videoReady) {
         const move = make("button", { className: "button secondary vault-move-button", text: "Move to Vault", type: "button" });
@@ -1951,6 +2032,7 @@
     elements.openVideo.removeAttribute("href");
     elements.openVideo.removeAttribute("download");
     elements.openVideo.hidden = true;
+    elements.singleYouTubeUpload.hidden = true;
     elements.singleTerminal.replaceChildren();
     elements.singleTerminalSection.hidden = true;
     elements.statusActive.hidden = true;
@@ -1985,6 +2067,7 @@
     elements.projectFinal.hidden = true;
     elements.projectDownload.removeAttribute("href");
     elements.projectDownload.removeAttribute("download");
+    elements.projectYouTubeUpload.hidden = true;
     elements.projectStory.replaceChildren();
     elements.projectStory.hidden = true;
     elements.projectScenes.replaceChildren();
@@ -2007,6 +2090,7 @@
     setButtonBusy(button, true, "Moving…");
     try {
       await request(`/api/vault/items/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/move`, { method: "POST" });
+      invalidateYouTubeSource(kind, id);
       if (kind === "generation") {
         state.generations = state.generations.filter((item) => item.id !== id);
         clearGenerationDisplay(id);
@@ -2065,6 +2149,7 @@
     elements.retryStatus.hidden = true;
     elements.generatedVideo.hidden = true;
     elements.openVideo.hidden = true;
+    elements.singleYouTubeUpload.hidden = true;
 
     const pending = ["queued", "processing", "downloading", "download_failed"].includes(status);
     elements.progressWrap.hidden = !pending;
@@ -2101,6 +2186,7 @@
       if (elements.openVideo.getAttribute("href") !== videoURL) elements.openVideo.href = videoURL;
       elements.openVideo.download = `generation-${record.id}.mp4`;
       elements.openVideo.hidden = false;
+      elements.singleYouTubeUpload.hidden = false;
     }
     syncGenerationModeDisplay();
   }
@@ -2485,6 +2571,7 @@
       if (elements.projectVideo.getAttribute("src") !== videoURL) elements.projectVideo.src = videoURL;
       if (elements.projectDownload.getAttribute("href") !== videoURL) elements.projectDownload.href = videoURL;
       elements.projectDownload.download = `project-${id}.mp4`;
+      elements.projectYouTubeUpload.hidden = false;
     } else {
       if (elements.projectVideo.getAttribute("src")) {
         elements.projectVideo.pause();
@@ -2493,6 +2580,7 @@
       }
       elements.projectDownload.removeAttribute("href");
       elements.projectDownload.removeAttribute("download");
+      elements.projectYouTubeUpload.hidden = true;
     }
     syncGenerationModeDisplay();
   }
@@ -2588,6 +2676,11 @@
             download.download = `project-${id}.mp4`;
             actions.append(download);
           }
+          if (videoReady && videoURL) {
+            const upload = make("button", { className: "button secondary", type: "button", text: "Upload to YouTube" });
+            upload.addEventListener("click", () => openYouTubeUpload(projectYouTubeSource(project)));
+            actions.append(upload);
+          }
           if (status === "completed" && videoReady) {
             const move = make("button", { className: "button secondary vault-move-button", type: "button", text: "Move to Vault" });
             move.addEventListener("click", () => moveHistoryItem("project", id, move));
@@ -2653,7 +2746,7 @@
     elements.projectError.hidden = true;
     elements.projectScenes.replaceChildren();
     try {
-      const requestBody = { topic, model: elements.model.value };
+      const requestBody = { topic, category: selectedPromptCategory(), model: elements.model.value };
       if (state.videoProvider === "modal") {
         const accountID = selectedModalAccountID();
         if (!accountID) throw new APIError("Choose a Modal account for this submission.", 400);
@@ -2811,12 +2904,863 @@
     try {
       const settings = await request("/api/settings");
       renderProviderSettings(settings || {});
-      await loadModalAccounts(notify);
+      await Promise.all([loadModalAccounts(notify), loadYouTubeStatus(notify)]);
     } catch (error) {
       elements.keyState.className = "badge failed";
       elements.keyState.textContent = "Unavailable";
       if (notify && error.status !== 401) toast(error.message, true);
     }
+  }
+
+  function generationYouTubeSource(record) {
+    const id = String(record && record.id || "");
+    const prompt = String(record && record.prompt || "");
+    return {
+      kind: "generation",
+      id,
+      label: prompt || "Generated video",
+      titleSuggestion: prompt,
+      descriptionSuggestion: prompt,
+      videoURL: `/video?id=${encodeURIComponent(id)}`
+    };
+  }
+
+  function projectYouTubeSource(project) {
+    const id = projectID(project);
+    const topic = String(projectValue(project, "topic") || "");
+    const story = projectValue(project, "story", "description", "script", "narrative");
+    return {
+      kind: "project",
+      id,
+      label: topic || "30-second project",
+      titleSuggestion: topic,
+      descriptionSuggestion: typeof story === "string" ? story : "",
+      videoURL: `/api/projects/${encodeURIComponent(id)}/video`
+    };
+  }
+
+  function vaultYouTubeSource(item) {
+    return {
+      kind: String(item && item.kind || ""),
+      id: String(item && item.id || ""),
+      label: String(item && item.title || "Vault video"),
+      titleSuggestion: String(item && item.title || ""),
+      descriptionSuggestion: "",
+      isVault: true,
+      vaultItem: item
+    };
+  }
+
+  function youtubeAbortError() {
+    const error = new Error("Upload dialog is no longer active");
+    error.name = "AbortError";
+    return error;
+  }
+
+  function isCurrentYouTubeDialog(epoch, source = state.youtubeSource) {
+    if (epoch !== state.youtubeDialogEpoch || !source || source !== state.youtubeSource
+      || !elements.youtubeDialog.open || !state.authenticated) return false;
+    if (source.isVault && (state.vaultLocking || !state.vaultToken
+      || source.vaultToken !== state.vaultToken || source.vaultGeneration !== state.vaultGeneration)) return false;
+    return true;
+  }
+
+  function clearYouTubePreview() {
+    elements.youtubePreview.pause();
+    elements.youtubePreview.removeAttribute("src");
+    elements.youtubePreview.load();
+    if (state.youtubeSourcePreviewURL) URL.revokeObjectURL(state.youtubeSourcePreviewURL);
+    state.youtubeSourcePreviewURL = "";
+  }
+
+  function resetYouTubeComposerFields() {
+    [elements.youtubeGenerateMetadata, elements.youtubeUploadSubmit, elements.youtubeUploadCancel,
+      elements.youtubeUploadAbandon, elements.youtubeUploadRetry, elements.youtubeUploadRestart]
+      .forEach((button) => setButtonBusy(button, false));
+    elements.youtubeTitle.value = "";
+    elements.youtubeDescription.value = "";
+    elements.youtubeVisibility.value = "private";
+    elements.youtubeVisibility.disabled = false;
+    elements.youtubeVisibilityHelp.textContent = "Private is selected by default. Some Google API projects can upload only privately until audited.";
+    elements.youtubeMadeForKidsYes.checked = false;
+    elements.youtubeMadeForKidsNo.checked = false;
+    elements.youtubeSynthetic.checked = true;
+    elements.youtubeUploadStatus.hidden = true;
+    elements.youtubeUploadError.hidden = true;
+    elements.youtubeUploadNote.hidden = true;
+    elements.youtubeMetadataError.hidden = true;
+    elements.youtubeUploadSubmit.hidden = false;
+    elements.youtubeUploadSubmit.disabled = false;
+    elements.youtubeUploadSubmit.textContent = "Upload video";
+    elements.youtubeGenerateMetadata.textContent = "Generate title and description";
+    elements.youtubeUploadCancel.hidden = true;
+    elements.youtubeUploadCancel.disabled = false;
+    elements.youtubeUploadCancel.textContent = "Cancel upload";
+    elements.youtubeUploadAbandon.hidden = true;
+    elements.youtubeUploadAbandon.disabled = false;
+    elements.youtubeUploadAbandon.textContent = "Abandon upload";
+    elements.youtubeUploadRetry.hidden = true;
+    elements.youtubeDuplicateRecovery.hidden = true;
+    elements.youtubeRecoveryConfirmControls.hidden = false;
+    elements.youtubeDuplicateConfirm.checked = false;
+    elements.youtubeDuplicateConfirm.disabled = false;
+    elements.youtubeUploadRestart.disabled = true;
+    elements.youtubeUploadRestart.textContent = "Start upload again";
+    elements.youtubeOpenVideo.hidden = true;
+    elements.youtubeOpenVideo.removeAttribute("href");
+    elements.youtubeOpenStudio.hidden = true;
+    elements.youtubeUploadProgressWrap.hidden = true;
+    elements.youtubeUploadProgressBar.style.width = "0%";
+    elements.youtubeUploadProgressBar.classList.remove("indeterminate");
+    elements.youtubeUploadProgressLabel.textContent = "";
+    elements.youtubeUploadForm.querySelectorAll?.("input, textarea, select, button").forEach((control) => {
+      control.disabled = false;
+    });
+  }
+
+  function setYouTubeDialogReady(ready) {
+    state.youtubeDialogReady = Boolean(ready);
+    const disabled = !state.youtubeDialogReady;
+    [elements.youtubeTitle, elements.youtubeDescription, elements.youtubeVisibility,
+      elements.youtubeMadeForKidsYes, elements.youtubeMadeForKidsNo, elements.youtubeSynthetic,
+      elements.youtubeGenerateMetadata].forEach((field) => { field.disabled = disabled; });
+    elements.youtubeUploadSubmit.disabled = disabled;
+    elements.youtubeUploadRetry.disabled = disabled;
+    elements.youtubeUploadAbandon.disabled = disabled;
+    elements.youtubeDuplicateConfirm.disabled = disabled;
+    elements.youtubeUploadRestart.disabled = disabled || !elements.youtubeDuplicateConfirm.checked;
+  }
+
+  function renderYouTubeSettings(status) {
+    const configured = Boolean(status && status.configured);
+    const connected = Boolean(status && status.connected);
+    const channel = status && status.channel && typeof status.channel === "object" ? status.channel : null;
+    const channelName = String(channel && (channel.title || channel.name || channel.id) || "");
+    elements.youtubeChannelState.className = `badge ${connected ? "completed" : configured ? "neutral" : "neutral"}`;
+    elements.youtubeChannelState.textContent = connected ? "Connected" : configured ? "Ready to connect" : "Not configured";
+    elements.youtubeChannelSummary.hidden = !connected;
+    elements.youtubeChannelName.textContent = channelName;
+    elements.youtubeConnect.hidden = !configured || connected;
+    elements.youtubeRedirectURI.value = String(status && status.redirect_uri || "");
+    elements.youtubeSecretHelp.textContent = status && status.has_client_secret
+      ? "A client secret is saved and never sent back to the browser. Leave this blank to keep it."
+      : "The secret is write-only and will never be shown again after saving.";
+    if (!state.youtubeConfigDirty) {
+      elements.youtubeClientID.value = String(status && status.client_id || "");
+      elements.youtubeBaseURL.value = String(status && status.base_url || "");
+      elements.youtubeClientSecret.value = "";
+    }
+    if (state.youtubeSource && elements.youtubeDialog.open) {
+      const reviewedChannelID = state.youtubeReviewedChannelID;
+      const currentChannelID = String(channel && channel.id || "");
+      if (reviewedChannelID && currentChannelID !== reviewedChannelID) {
+        closeYouTubeComposer(false);
+        toast("The connected YouTube channel changed. Reopen the upload to review it again.", true);
+        return;
+      }
+      renderYouTubeComposerConnection();
+    }
+  }
+
+  async function loadYouTubeStatus(notify = false, controller = null, dialogEpoch = 0) {
+    const requestID = ++state.youtubeStatusRequestID;
+    try {
+      const options = controller ? { signal: controller.signal } : {};
+      const status = await request("/api/youtube/status", options);
+      if (requestID !== state.youtubeStatusRequestID) return null;
+      if (dialogEpoch && !isCurrentYouTubeDialog(dialogEpoch)) return null;
+      state.youtubeStatus = status || { configured: false, connected: false };
+      renderYouTubeSettings(state.youtubeStatus);
+      return state.youtubeStatus;
+    } catch (error) {
+      if (error.name === "AbortError" || error.status === 401) return null;
+      if (notify) toast(error.message, true);
+      if (!dialogEpoch) {
+        elements.youtubeChannelState.className = "badge failed";
+        elements.youtubeChannelState.textContent = "Unavailable";
+      } else if (isCurrentYouTubeDialog(dialogEpoch)) {
+        showYouTubeUploadFeedback("YouTube connection status could not be loaded.", error.message);
+      }
+      return null;
+    }
+  }
+
+  async function saveYouTubeConfig(event) {
+    event.preventDefault();
+    if (state.mustChangePassword) return;
+    const clientID = elements.youtubeClientID.value.trim();
+    const clientSecret = elements.youtubeClientSecret.value;
+    const baseURLValue = elements.youtubeBaseURL.value.trim();
+    let baseURL;
+    try {
+      baseURL = new URL(baseURLValue);
+    } catch {
+      baseURL = null;
+    }
+    const normalizedInput = baseURLValue.replace(/\/+$/, "");
+    const localHost = baseURL && ["localhost", "127.0.0.1", "[::1]", "::1"].includes(baseURL.hostname.toLowerCase());
+    const allowedProtocol = baseURL && (baseURL.protocol === "https:" || (baseURL.protocol === "http:" && localHost));
+    const normalizedBaseURL = baseURL && baseURL.origin === normalizedInput && allowedProtocol ? baseURL.origin : "";
+    if (!clientID) {
+      elements.youtubeConfigError.textContent = "Enter a Google OAuth client ID.";
+      elements.youtubeConfigError.hidden = false;
+      elements.youtubeClientID.focus();
+      return;
+    }
+    if (!normalizedBaseURL) {
+      elements.youtubeConfigError.textContent = "Enter the public HTTPS origin. HTTP is allowed for localhost.";
+      elements.youtubeConfigError.hidden = false;
+      elements.youtubeBaseURL.focus();
+      return;
+    }
+    if (!clientSecret.trim() && !(state.youtubeStatus && state.youtubeStatus.has_client_secret)) {
+      elements.youtubeConfigError.textContent = "Enter the Google OAuth client secret.";
+      elements.youtubeConfigError.hidden = false;
+      elements.youtubeClientSecret.focus();
+      return;
+    }
+    elements.youtubeConfigError.hidden = true;
+    setButtonBusy(elements.youtubeSaveConfig, true, "Saving…");
+    try {
+      await request("/api/youtube/config", {
+        method: "PUT",
+        body: JSON.stringify({ client_id: clientID, client_secret: clientSecret, base_url: normalizedBaseURL })
+      });
+      elements.youtubeClientSecret.value = "";
+      state.youtubeConfigDirty = false;
+      await loadYouTubeStatus(false);
+      toast("YouTube settings saved.");
+    } catch (error) {
+      if (error.status !== 401) {
+        elements.youtubeConfigError.textContent = error.message;
+        elements.youtubeConfigError.hidden = false;
+      }
+    } finally {
+      setButtonBusy(elements.youtubeSaveConfig, false);
+    }
+  }
+
+  async function connectYouTube() {
+    setButtonBusy(elements.youtubeConnect, true, "Connecting…");
+    try {
+      const result = await request("/api/youtube/connect", { method: "POST", body: JSON.stringify({}) });
+      const authorizationURL = new URL(String(result && result.authorization_url || ""));
+      if (authorizationURL.protocol !== "https:" || authorizationURL.hostname !== "accounts.google.com") {
+        throw new APIError("Google returned an invalid authorization link.", 502);
+      }
+      window.location.assign(authorizationURL.toString());
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(elements.youtubeConnect, false);
+    }
+  }
+
+  async function disconnectYouTube() {
+    setButtonBusy(elements.youtubeDisconnect, true, "Disconnecting…");
+    try {
+      await request("/api/youtube/connection", { method: "DELETE" });
+      await loadYouTubeStatus(false);
+      toast("YouTube channel disconnected.");
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, true);
+    } finally {
+      setButtonBusy(elements.youtubeDisconnect, false);
+    }
+  }
+
+  function consumeYouTubeReturn() {
+    const url = new URL(window.location.href);
+    const result = url.searchParams.get("youtube");
+    if (!result) return;
+    const reason = url.searchParams.get("youtube_reason") || "";
+    url.searchParams.delete("youtube");
+    url.searchParams.delete("youtube_reason");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    navigate("settings");
+    if (result === "connected") toast("YouTube channel connected.");
+    else {
+      const messages = {
+        state_invalid: "YouTube connection could not be verified. Try connecting again.",
+        consent_denied: "YouTube access was not granted.",
+        missing_scopes: "Grant YouTube upload access when reconnecting.",
+        offline_access_missing: "Google did not grant offline access. Connect again and approve account access.",
+        channel_unavailable: "Google could not confirm a YouTube channel for this account.",
+        channel_busy: "This source has an active upload on a different YouTube channel. Wait for it to finish or reconnect that channel in Settings.",
+        settings_changed: "YouTube settings changed during authorization. Start the connection again.",
+        session_expired: "Your FrameVault session expired. Sign in and connect YouTube again.",
+        provider_error: "Google could not complete the connection. Try again."
+      };
+      toast(messages[reason] || "YouTube could not connect. Review the settings and try again.", true);
+    }
+  }
+
+  function youtubeRequest(path, options = {}, source = state.youtubeSource) {
+    if (source && source.isVault) {
+      if (!source.vaultToken || source.vaultToken !== state.vaultToken || source.vaultGeneration !== state.vaultGeneration
+        || state.vaultLocking) return Promise.reject(new APIError("Vault is locked", 423));
+      return vaultRequest(path, options).catch((error) => {
+        if (error.status === 423 && state.vaultToken) {
+          renderVaultLocked("Your Vault session ended. Enter your code to unlock it again.");
+        }
+        throw error;
+      });
+    }
+    return request(path, options);
+  }
+
+  function renderYouTubeComposerConnection() {
+    const connected = Boolean(state.youtubeStatus && state.youtubeStatus.connected && state.youtubeStatus.channel);
+    const needsReconnect = Boolean(state.youtubeUpload && state.youtubeUpload.status === "needs_reconnect");
+    const needsSettings = !connected || needsReconnect;
+    elements.youtubeConnectRequired.hidden = !needsSettings;
+    elements.youtubeUploadForm.hidden = !connected;
+    elements.youtubeGoSettings.textContent = needsReconnect ? "Reconnect in Settings" : "Open Settings";
+    const channel = state.youtubeStatus && state.youtubeStatus.channel;
+    elements.youtubeUploadChannel.textContent = String(channel && (channel.title || channel.name || channel.id) || "");
+  }
+
+  function showYouTubeUploadFeedback(label, message) {
+    elements.youtubeUploadStatus.hidden = false;
+    elements.youtubeUploadStatusLabel.textContent = label;
+    elements.youtubeUploadError.textContent = message;
+    elements.youtubeUploadError.hidden = !message;
+    elements.youtubeUploadNote.hidden = true;
+    elements.youtubeUploadProgressWrap.hidden = true;
+  }
+
+  function clearYouTubeComposer() {
+    window.clearTimeout(state.youtubePollTimer);
+    state.youtubePollTimer = 0;
+    if (state.youtubeDialogController) {
+      state.youtubeDialogController.abort();
+      state.vaultMediaControllers.delete(state.youtubeDialogController);
+    }
+    state.youtubeDialogController = null;
+    state.youtubeSource = null;
+    state.youtubeUpload = null;
+    state.youtubeReviewedChannelID = "";
+    state.youtubeSubmitting = false;
+    state.youtubeAbandoning = false;
+    state.youtubeRestarting = false;
+    state.youtubeDialogReady = false;
+    state.youtubeDialogEpoch += 1;
+    clearYouTubePreview();
+    resetYouTubeComposerFields();
+    elements.youtubeSourceLabel.textContent = "";
+    elements.youtubeUploadChannel.textContent = "";
+    elements.youtubeConnectRequired.hidden = true;
+    elements.youtubeUploadForm.hidden = false;
+  }
+
+  function closeYouTubeComposer(restoreFocus = true) {
+    const wasOpen = elements.youtubeDialog.open;
+    if (!wasOpen && !state.youtubeSource && !state.youtubeDialogController) return;
+    const focusTarget = state.youtubeRestoreFocus;
+    state.youtubeRestoreFocus = null;
+    clearYouTubeComposer();
+    if (wasOpen) elements.youtubeDialog.close();
+    if (restoreFocus && focusTarget && focusTarget.isConnected !== false && typeof focusTarget.focus === "function") {
+      focusTarget.focus({ preventScroll: true });
+    }
+  }
+
+  function setYouTubeVisibilityRules(source) {
+    elements.youtubeVisibility.value = "private";
+    elements.youtubeVisibility.disabled = false;
+    elements.youtubeVisibilityHelp.textContent = "Private is selected by default. Some Google API projects can upload only privately until audited.";
+  }
+
+  function youtubeTitleSuggestion(value) {
+    const title = String(value || "").trim();
+    if (!title || /[<>]/.test(title)) return "";
+    return [...title].slice(0, 100).join("");
+  }
+
+  function youtubeDescriptionSuggestion(value) {
+    const description = String(value || "");
+    if (/[<>]/.test(description)) return "";
+    const encoder = new TextEncoder();
+    let bytes = 0;
+    let result = "";
+    for (const character of description) {
+      const size = encoder.encode(character).length;
+      if (bytes + size > 5000) break;
+      result += character;
+      bytes += size;
+    }
+    return result;
+  }
+
+  async function openYouTubeUpload(source) {
+    if (!source || !["generation", "project"].includes(source.kind) || !source.id) return;
+    if (source.isVault && (!state.vaultToken || state.vaultLocking)) {
+      toast("Unlock the Vault before preparing this upload.", true);
+      return;
+    }
+    if (elements.youtubeDialog.open || state.youtubeSource) closeYouTubeComposer(false);
+    const controller = new AbortController();
+    const normalized = {
+      ...source,
+      id: String(source.id),
+      vaultToken: source.isVault ? state.vaultToken : "",
+      vaultGeneration: source.isVault ? state.vaultGeneration : 0
+    };
+    state.youtubeSource = normalized;
+    state.youtubeDialogController = controller;
+    if (normalized.isVault) state.vaultMediaControllers.add(controller);
+    state.youtubeUpload = null;
+    state.youtubeReviewedChannelID = "";
+    state.youtubeSubmitting = false;
+    state.youtubeDialogReady = false;
+    state.youtubeRestoreFocus = document.activeElement;
+    const epoch = ++state.youtubeDialogEpoch;
+    resetYouTubeComposerFields();
+    setYouTubeVisibilityRules(normalized);
+    elements.youtubeTitle.value = youtubeTitleSuggestion(normalized.titleSuggestion);
+    elements.youtubeDescription.value = youtubeDescriptionSuggestion(normalized.descriptionSuggestion);
+    elements.youtubeSourceLabel.textContent = String(normalized.label || "").slice(0, 240);
+    elements.youtubeMetadataError.hidden = true;
+    elements.youtubeDialog.showModal();
+    setYouTubeDialogReady(false);
+    if (!normalized.isVault) elements.youtubePreview.src = normalized.videoURL;
+    renderYouTubeComposerConnection();
+
+    const statusTask = loadYouTubeStatus(false, controller, epoch);
+    const tasks = [statusTask];
+    if (normalized.isVault) {
+      tasks.push((async () => {
+        const blob = await fetchVaultVideo(normalized.vaultItem, false, controller);
+        if (!isCurrentYouTubeDialog(epoch, normalized)) return;
+        state.youtubeSourcePreviewURL = URL.createObjectURL(blob);
+        elements.youtubePreview.src = state.youtubeSourcePreviewURL;
+      })());
+    }
+    const [freshStatus] = await Promise.allSettled(tasks);
+    if (isCurrentYouTubeDialog(epoch, normalized) && freshStatus.status === "fulfilled"
+      && freshStatus.value && freshStatus.value.connected) {
+      await loadYouTubeUploads(normalized, epoch, freshStatus.value);
+    }
+  }
+
+  async function loadYouTubeUploads(source, epoch, reviewedStatus) {
+    const channelID = String(reviewedStatus && reviewedStatus.channel && reviewedStatus.channel.id || "");
+    if (!channelID) {
+      showYouTubeUploadFeedback("YouTube channel could not be confirmed.", "Return to Settings and connect a channel again.");
+      return;
+    }
+    const query = new URLSearchParams({ source_kind: source.kind, source_id: source.id });
+    try {
+      const result = await youtubeRequest(`/api/youtube/uploads?${query.toString()}`, {
+        signal: state.youtubeDialogController && state.youtubeDialogController.signal
+      }, source);
+      if (!isCurrentYouTubeDialog(epoch, source)) return;
+      if (String(state.youtubeStatus && state.youtubeStatus.channel && state.youtubeStatus.channel.id || "") !== channelID) {
+        closeYouTubeComposer(false);
+        return;
+      }
+      state.youtubeReviewedChannelID = channelID;
+      const uploads = (Array.isArray(result && result.uploads) ? result.uploads : [])
+        .filter((upload) => channelID && String(upload && upload.channel_id || "") === channelID);
+      const latest = uploads[0];
+      setYouTubeDialogReady(true);
+      if (!latest) return;
+      state.youtubeUpload = latest;
+      elements.youtubeTitle.value = String(latest.title || "");
+      elements.youtubeDescription.value = String(latest.description || "");
+      elements.youtubeVisibility.value = String(latest.privacy_status || "private");
+      elements.youtubeMadeForKidsYes.checked = latest.made_for_kids === true;
+      elements.youtubeMadeForKidsNo.checked = latest.made_for_kids === false;
+      elements.youtubeSynthetic.checked = latest.contains_synthetic_media !== false;
+      renderYouTubeUpload(latest);
+    } catch (error) {
+      if (error.name === "AbortError" || error.status === 401 || error.status === 423 || !isCurrentYouTubeDialog(epoch, source)) return;
+      showYouTubeUploadFeedback("Upload status could not be loaded.", error.message);
+    }
+  }
+
+  function youTubeWatchURL(upload) {
+    const value = String(upload && upload.youtube_url || "");
+    const videoID = String(upload && upload.youtube_video_id || "");
+    const candidate = value || (videoID ? `https://www.youtube.com/watch?v=${encodeURIComponent(videoID)}` : "");
+    try {
+      const url = new URL(candidate);
+      if (url.protocol === "https:" && ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"].includes(url.hostname)) return url.toString();
+    } catch {}
+    return "";
+  }
+
+  function renderYouTubeUpload(upload) {
+    state.youtubeUpload = upload || null;
+    renderYouTubeComposerConnection();
+    if (!upload) {
+      elements.youtubeUploadStatus.hidden = true;
+      const lockFields = !state.youtubeDialogReady || state.youtubeSubmitting;
+      [elements.youtubeTitle, elements.youtubeDescription, elements.youtubeVisibility,
+        elements.youtubeMadeForKidsYes, elements.youtubeMadeForKidsNo, elements.youtubeSynthetic,
+        elements.youtubeGenerateMetadata].forEach((field) => { field.disabled = lockFields; });
+      elements.youtubeUploadSubmit.disabled = lockFields;
+      return;
+    }
+    const status = String(upload.status || "").toLowerCase();
+    const labels = {
+      queued: "Upload queued",
+      initiating: "Starting upload",
+      uploading: "Uploading to YouTube",
+      processing: "YouTube is processing the video",
+      completed: "Ready on YouTube",
+      failed: "Upload failed",
+      canceled: "Upload canceled",
+      needs_reconnect: "Reconnect your YouTube channel",
+      attention_required: "YouTube needs attention"
+    };
+    const active = ["queued", "initiating", "uploading"].includes(status);
+    const cancelRequested = Boolean(upload.cancel_requested);
+    const hasYouTubeID = Boolean(upload.youtube_video_id);
+    const progressValue = Number(upload.progress);
+    const hasProgress = upload.progress !== null && upload.progress !== undefined && upload.progress !== "" && Number.isFinite(progressValue);
+    const watchURL = youTubeWatchURL(upload);
+    elements.youtubeUploadStatus.hidden = false;
+    elements.youtubeUploadStatusLabel.textContent = labels[status] || (status ? status.replaceAll("_", " ") : "Upload status");
+    elements.youtubeUploadError.textContent = String(upload.error || "");
+    elements.youtubeUploadError.hidden = !upload.error;
+    let note = "";
+    if (status === "processing") {
+      note = upload.processing_status
+        ? `YouTube processing status: ${String(upload.processing_status).replaceAll("_", " ")}. Playback may not be ready yet.`
+        : "Playback may not be ready until YouTube finishes processing the video.";
+    } else if (status === "completed") {
+      note = "YouTube finished processing this video.";
+    } else if (cancelRequested) {
+      note = "Cancel requested. Waiting for the upload stream to stop.";
+    } else if (status === "needs_reconnect") {
+      note = "Reconnect the channel in Settings, then return here to retry.";
+    } else if (status === "attention_required") {
+      note = "Review the video in YouTube Studio before taking another upload action.";
+    } else if (status === "canceled" && (upload.outcome_uncertain || upload.error)) {
+      note = "The upload outcome is unresolved. Check YouTube before starting another upload.";
+    }
+    if (upload.manual_restart_note) {
+      note = `${note ? `${note} ` : ""}${String(upload.manual_restart_note)}`;
+    }
+    if (upload.requested_privacy_status && upload.privacy_status
+      && upload.requested_privacy_status !== upload.privacy_status) {
+      note = `${note ? `${note} ` : ""}YouTube applied ${upload.privacy_status} visibility.`;
+    }
+    elements.youtubeUploadNote.textContent = note;
+    elements.youtubeUploadNote.hidden = !note;
+    elements.youtubeUploadProgressWrap.hidden = !active;
+    elements.youtubeUploadProgressBar.classList.toggle("indeterminate", active && !hasProgress);
+    if (hasProgress) {
+      const progress = Math.max(0, Math.min(100, progressValue));
+      elements.youtubeUploadProgressBar.style.width = `${progress}%`;
+      elements.youtubeUploadProgressLabel.textContent = `${Math.round(progress)}%`;
+      elements.youtubeUploadProgressBar.setAttribute("role", "progressbar");
+      elements.youtubeUploadProgressBar.setAttribute("aria-valuemin", "0");
+      elements.youtubeUploadProgressBar.setAttribute("aria-valuemax", "100");
+      elements.youtubeUploadProgressBar.setAttribute("aria-valuenow", String(progress));
+    } else {
+      elements.youtubeUploadProgressBar.style.width = active ? "38%" : "0%";
+      elements.youtubeUploadProgressLabel.textContent = active ? "In progress" : "";
+      elements.youtubeUploadProgressBar.removeAttribute("aria-valuenow");
+    }
+    const lockFields = !state.youtubeDialogReady || state.youtubeSubmitting || active || ["processing", "completed", "failed", "needs_reconnect", "attention_required"].includes(status);
+    [elements.youtubeTitle, elements.youtubeDescription, elements.youtubeVisibility,
+      elements.youtubeMadeForKidsYes, elements.youtubeMadeForKidsNo, elements.youtubeSynthetic,
+      elements.youtubeGenerateMetadata].forEach((field) => { field.disabled = lockFields; });
+    const canSubmit = !upload.id || (status === "canceled" && !upload.error && !upload.outcome_uncertain && !cancelRequested && !hasYouTubeID);
+    elements.youtubeUploadSubmit.hidden = !canSubmit;
+    elements.youtubeUploadSubmit.disabled = !state.youtubeDialogReady || state.youtubeSubmitting;
+    elements.youtubeUploadSubmit.textContent = status === "canceled" ? "Upload again" : "Upload video";
+    elements.youtubeUploadCancel.hidden = !active;
+    elements.youtubeUploadCancel.disabled = !state.youtubeDialogReady || cancelRequested;
+    elements.youtubeUploadCancel.textContent = cancelRequested ? "Canceling…" : "Cancel upload";
+    const abandonAllowed = !hasYouTubeID && ["needs_reconnect", "attention_required"].includes(status);
+    elements.youtubeUploadAbandon.hidden = !abandonAllowed;
+    elements.youtubeUploadAbandon.disabled = !state.youtubeDialogReady || state.youtubeAbandoning;
+    elements.youtubeUploadAbandon.textContent = state.youtubeAbandoning ? "Abandoning…" : "Abandon upload";
+    elements.youtubeUploadRetry.hidden = status !== "failed" || hasYouTubeID;
+    elements.youtubeUploadRetry.disabled = !state.youtubeDialogReady;
+    elements.youtubeOpenVideo.hidden = !watchURL;
+    if (watchURL) elements.youtubeOpenVideo.href = watchURL;
+    const canCheckYouTube = status === "attention_required" || (status === "canceled" && upload.outcome_uncertain === true);
+    if (hasYouTubeID) elements.youtubeDuplicateConfirm.checked = false;
+    elements.youtubeOpenStudio.hidden = !canCheckYouTube;
+    elements.youtubeDuplicateRecovery.hidden = !canCheckYouTube;
+    elements.youtubeRecoveryConfirmControls.hidden = hasYouTubeID;
+    elements.youtubeDuplicateConfirm.disabled = !state.youtubeDialogReady || state.youtubeRestarting;
+    elements.youtubeUploadRestart.disabled = !state.youtubeDialogReady || state.youtubeRestarting || !elements.youtubeDuplicateConfirm.checked;
+    elements.youtubeUploadRestart.textContent = state.youtubeRestarting ? "Starting…" : "Start upload again";
+    if (status === "processing" || active) scheduleYouTubePoll(state.youtubeDialogEpoch, String(upload.id || ""));
+    else {
+      window.clearTimeout(state.youtubePollTimer);
+      state.youtubePollTimer = 0;
+    }
+  }
+
+  function canEditYouTubeMetadata(upload) {
+    if (!state.youtubeDialogReady || state.youtubeSubmitting) return false;
+    if (!upload || !upload.id) return true;
+    const status = String(upload.status || "").toLowerCase();
+    return status === "canceled" && !upload.error && upload.outcome_uncertain !== true
+      && !upload.cancel_requested && !upload.youtube_video_id;
+  }
+
+  function validateYouTubeUpload() {
+    const title = elements.youtubeTitle.value.trim();
+    const description = elements.youtubeDescription.value;
+    if (!title) return "Enter a video title.";
+    if ([...title].length > 100) return "Video titles can contain up to 100 characters.";
+    if (/[<>]/.test(title) || /[<>]/.test(description)) return "Remove angle brackets from the title and description.";
+    if (new TextEncoder().encode(description).length > 5000) return "Descriptions can contain up to 5,000 UTF-8 bytes.";
+    if (!elements.youtubeMadeForKidsYes.checked && !elements.youtubeMadeForKidsNo.checked) return "Choose whether this video is made for kids.";
+    if (!["private", "unlisted", "public"].includes(elements.youtubeVisibility.value)) return "Choose a visibility setting.";
+    return "";
+  }
+
+  async function generateYouTubeMetadata() {
+    const source = state.youtubeSource;
+    const epoch = state.youtubeDialogEpoch;
+    if (!source || !isCurrentYouTubeDialog(epoch, source) || !canEditYouTubeMetadata(state.youtubeUpload)) return;
+    const previousTitle = elements.youtubeTitle.value;
+    const previousDescription = elements.youtubeDescription.value;
+    elements.youtubeMetadataError.hidden = true;
+    setButtonBusy(elements.youtubeGenerateMetadata, true, "Generating…");
+    try {
+      const result = await youtubeRequest("/api/youtube/metadata", {
+        method: "POST",
+        signal: state.youtubeDialogController && state.youtubeDialogController.signal,
+        body: JSON.stringify({ source_kind: source.kind, source_id: source.id })
+      }, source);
+      if (!isCurrentYouTubeDialog(epoch, source) || !canEditYouTubeMetadata(state.youtubeUpload)) return;
+      if (elements.youtubeTitle.value === previousTitle) elements.youtubeTitle.value = String(result && result.title || "");
+      if (elements.youtubeDescription.value === previousDescription) elements.youtubeDescription.value = String(result && result.description || "");
+    } catch (error) {
+      if (error.name !== "AbortError" && error.status !== 401 && error.status !== 423 && isCurrentYouTubeDialog(epoch, source)) {
+        elements.youtubeMetadataError.textContent = error.message;
+        elements.youtubeMetadataError.hidden = false;
+      }
+    } finally {
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        setButtonBusy(elements.youtubeGenerateMetadata, false);
+        renderYouTubeUpload(state.youtubeUpload);
+      }
+    }
+  }
+
+  async function submitYouTubeUpload(event) {
+    event.preventDefault();
+    const source = state.youtubeSource;
+    const epoch = state.youtubeDialogEpoch;
+    if (!source || !isCurrentYouTubeDialog(epoch, source) || state.youtubeSubmitting) return;
+    if (!state.youtubeDialogReady) return;
+    if (!state.youtubeStatus || !state.youtubeStatus.connected) {
+      renderYouTubeComposerConnection();
+      return;
+    }
+    const existingStatus = String(state.youtubeUpload && state.youtubeUpload.status || "").toLowerCase();
+    const safelyCanceled = existingStatus === "canceled" && state.youtubeUpload
+      && !state.youtubeUpload.error && state.youtubeUpload.outcome_uncertain !== true
+      && !state.youtubeUpload.cancel_requested && !state.youtubeUpload.youtube_video_id;
+    if (state.youtubeUpload && state.youtubeUpload.id && !safelyCanceled) return;
+    const reviewedChannelID = String(state.youtubeReviewedChannelID || "");
+    const currentChannelID = String(state.youtubeStatus.channel && state.youtubeStatus.channel.id || "");
+    if (!reviewedChannelID || reviewedChannelID !== currentChannelID) {
+      closeYouTubeComposer(false);
+      toast("The connected YouTube channel changed. Reopen the upload to review it again.", true);
+      return;
+    }
+    const validationError = validateYouTubeUpload();
+    if (validationError) {
+      showYouTubeUploadFeedback("Check upload details", validationError);
+      return;
+    }
+    const madeForKids = elements.youtubeMadeForKidsYes.checked;
+    const privacyStatus = elements.youtubeVisibility.value;
+    const body = {
+      source_kind: source.kind,
+      source_id: source.id,
+      channel_id: reviewedChannelID,
+      title: elements.youtubeTitle.value.trim(),
+      description: elements.youtubeDescription.value,
+      privacy_status: privacyStatus,
+      made_for_kids: madeForKids,
+      contains_synthetic_media: Boolean(elements.youtubeSynthetic.checked)
+    };
+    elements.youtubeUploadError.hidden = true;
+    elements.youtubeUploadNote.hidden = true;
+    state.youtubeSubmitting = true;
+    setButtonBusy(elements.youtubeUploadSubmit, true, "Starting upload…");
+    try {
+      const result = await youtubeRequest("/api/youtube/uploads", {
+        method: "POST",
+        signal: state.youtubeDialogController && state.youtubeDialogController.signal,
+        body: JSON.stringify(body)
+      }, source);
+      if (!isCurrentYouTubeDialog(epoch, source)) return;
+      const upload = result && result.upload || result;
+      renderYouTubeUpload(upload || {});
+      scheduleYouTubePoll(epoch, String(upload && upload.id || ""));
+    } catch (error) {
+      if (error.name !== "AbortError" && error.status !== 401 && error.status !== 423 && isCurrentYouTubeDialog(epoch, source)) {
+        showYouTubeUploadFeedback("Upload could not be started.", error.message);
+      }
+    } finally {
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        state.youtubeSubmitting = false;
+        setButtonBusy(elements.youtubeUploadSubmit, false);
+        renderYouTubeUpload(state.youtubeUpload);
+      }
+    }
+  }
+
+  function scheduleYouTubePoll(epoch, uploadID, delay = 3000) {
+    window.clearTimeout(state.youtubePollTimer);
+    state.youtubePollTimer = 0;
+    if (!uploadID || !state.youtubeSource || !isCurrentYouTubeDialog(epoch)) return;
+    const status = String(state.youtubeUpload && state.youtubeUpload.status || "").toLowerCase();
+    if (!["queued", "initiating", "uploading", "processing"].includes(status)) return;
+    state.youtubePollTimer = window.setTimeout(async () => {
+      if (!isCurrentYouTubeDialog(epoch)) return;
+      try {
+        const result = await youtubeRequest(`/api/youtube/uploads/${encodeURIComponent(uploadID)}`, {
+          signal: state.youtubeDialogController && state.youtubeDialogController.signal
+        });
+        if (!isCurrentYouTubeDialog(epoch)) return;
+        renderYouTubeUpload(result && result.upload || result);
+      } catch (error) {
+        if (error.name === "AbortError" || error.status === 401 || error.status === 423 || !isCurrentYouTubeDialog(epoch)) return;
+        elements.youtubeUploadError.textContent = `Upload status could not be refreshed. ${error.message}`;
+        elements.youtubeUploadError.hidden = false;
+      }
+      if (isCurrentYouTubeDialog(epoch)) scheduleYouTubePoll(epoch, uploadID, 5000);
+    }, delay);
+  }
+
+  async function cancelYouTubeUpload() {
+    const upload = state.youtubeUpload;
+    const source = state.youtubeSource;
+    const epoch = state.youtubeDialogEpoch;
+    if (!upload || !upload.id || !source || !isCurrentYouTubeDialog(epoch, source)) return;
+    setButtonBusy(elements.youtubeUploadCancel, true, "Canceling…");
+    try {
+      const result = await youtubeRequest(`/api/youtube/uploads/${encodeURIComponent(upload.id)}/cancel`, {
+        method: "POST",
+        signal: state.youtubeDialogController && state.youtubeDialogController.signal
+      }, source);
+      if (isCurrentYouTubeDialog(epoch, source)) renderYouTubeUpload(result && result.upload || result);
+    } catch (error) {
+      if (error.name !== "AbortError" && error.status !== 401 && error.status !== 423 && isCurrentYouTubeDialog(epoch, source)) {
+        elements.youtubeUploadError.textContent = error.message;
+        elements.youtubeUploadError.hidden = false;
+      }
+    } finally {
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        setButtonBusy(elements.youtubeUploadCancel, false);
+        renderYouTubeUpload(state.youtubeUpload);
+      }
+    }
+  }
+
+  async function abandonYouTubeUpload() {
+    const upload = state.youtubeUpload;
+    const source = state.youtubeSource;
+    const epoch = state.youtubeDialogEpoch;
+    const status = String(upload && upload.status || "").toLowerCase();
+    if (!upload || !upload.id || upload.youtube_video_id || !source
+      || !["needs_reconnect", "attention_required"].includes(status)
+      || state.youtubeAbandoning || !isCurrentYouTubeDialog(epoch, source)) return;
+    state.youtubeAbandoning = true;
+    setButtonBusy(elements.youtubeUploadAbandon, true, "Abandoning…");
+    try {
+      const result = await youtubeRequest(`/api/youtube/uploads/${encodeURIComponent(upload.id)}/cancel`, {
+        method: "POST",
+        signal: state.youtubeDialogController && state.youtubeDialogController.signal
+      }, source);
+      if (isCurrentYouTubeDialog(epoch, source)) renderYouTubeUpload(result && result.upload || result);
+    } catch (error) {
+      if (error.name !== "AbortError" && error.status !== 401 && error.status !== 423 && isCurrentYouTubeDialog(epoch, source)) {
+        elements.youtubeUploadError.textContent = error.message;
+        elements.youtubeUploadError.hidden = false;
+      }
+    } finally {
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        state.youtubeAbandoning = false;
+        setButtonBusy(elements.youtubeUploadAbandon, false);
+        renderYouTubeUpload(state.youtubeUpload);
+      }
+    }
+  }
+
+  async function retryYouTubeUpload() {
+    const upload = state.youtubeUpload;
+    const source = state.youtubeSource;
+    const epoch = state.youtubeDialogEpoch;
+    if (!upload || !upload.id || upload.youtube_video_id || !source || String(upload.status).toLowerCase() !== "failed"
+      || !isCurrentYouTubeDialog(epoch, source)) return;
+    setButtonBusy(elements.youtubeUploadRetry, true, "Retrying…");
+    try {
+      const result = await youtubeRequest(`/api/youtube/uploads/${encodeURIComponent(upload.id)}/retry`, {
+        method: "POST",
+        signal: state.youtubeDialogController && state.youtubeDialogController.signal
+      }, source);
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        renderYouTubeUpload(result && result.upload || result);
+        scheduleYouTubePoll(epoch, String(upload.id));
+      }
+    } catch (error) {
+      if (error.name !== "AbortError" && error.status !== 401 && error.status !== 423 && isCurrentYouTubeDialog(epoch, source)) {
+        elements.youtubeUploadError.textContent = error.message;
+        elements.youtubeUploadError.hidden = false;
+      }
+    } finally {
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        setButtonBusy(elements.youtubeUploadRetry, false);
+        renderYouTubeUpload(state.youtubeUpload);
+      }
+    }
+  }
+
+  async function restartYouTubeUpload() {
+    const upload = state.youtubeUpload;
+    const source = state.youtubeSource;
+    const epoch = state.youtubeDialogEpoch;
+    const status = String(upload && upload.status || "").toLowerCase();
+    const recoverable = status === "attention_required" || (status === "canceled" && upload && upload.outcome_uncertain === true);
+    if (!upload || !upload.id || upload.youtube_video_id || !source || !recoverable
+      || !elements.youtubeDuplicateConfirm.checked || state.youtubeRestarting || !isCurrentYouTubeDialog(epoch, source)) return;
+    state.youtubeRestarting = true;
+    elements.youtubeDuplicateConfirm.checked = false;
+    setButtonBusy(elements.youtubeUploadRestart, true, "Starting…");
+    try {
+      const result = await youtubeRequest(`/api/youtube/uploads/${encodeURIComponent(upload.id)}/restart`, {
+        method: "POST",
+        signal: state.youtubeDialogController && state.youtubeDialogController.signal,
+        body: JSON.stringify({ confirm_not_uploaded: true })
+      }, source);
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        const restarted = result && result.upload || result;
+        renderYouTubeUpload(restarted);
+        scheduleYouTubePoll(epoch, String(restarted && restarted.id || upload.id));
+      }
+    } catch (error) {
+      if (error.name !== "AbortError" && error.status !== 401 && error.status !== 423 && isCurrentYouTubeDialog(epoch, source)) {
+        elements.youtubeUploadError.textContent = error.message;
+        elements.youtubeUploadError.hidden = false;
+      }
+    } finally {
+      if (isCurrentYouTubeDialog(epoch, source)) {
+        state.youtubeRestarting = false;
+        setButtonBusy(elements.youtubeUploadRestart, false);
+        renderYouTubeUpload(state.youtubeUpload);
+      }
+    }
+  }
+
+  function invalidateYouTubeSource(kind, id) {
+    const source = state.youtubeSource;
+    if (!source || source.kind !== kind || String(source.id) !== String(id)) return;
+    closeYouTubeComposer(false);
   }
 
   function clearVaultClientState() {
@@ -2833,6 +3777,7 @@
   }
 
   function invalidateVaultOperations() {
+    if (state.youtubeSource && state.youtubeSource.isVault) closeYouTubeComposer(false);
     state.vaultGeneration += 1;
     state.vaultMediaControllers.forEach((controller) => controller.abort());
     state.vaultMediaControllers.clear();
@@ -2968,19 +3913,21 @@
       download.addEventListener("click", () => downloadVaultVideo(item, download));
       const restore = make("button", { className: "button secondary", text: "Return to History", type: "button" });
       restore.addEventListener("click", () => restoreVaultItem(item, restore));
-      actions.append(view, download, restore);
+      const upload = make("button", { className: "button secondary", text: "Upload to YouTube", type: "button" });
+      upload.addEventListener("click", () => openYouTubeUpload(vaultYouTubeSource(item)));
+      actions.append(view, download, restore, upload);
       body.append(actions);
       card.append(preview, body);
       elements.vaultGrid.append(card);
     });
   }
 
-  async function fetchVaultVideo(item, download = false) {
+  async function fetchVaultVideo(item, download = false, suppliedController = null) {
     if (state.vaultLocking || !state.vaultToken) throw new APIError("Vault is locked", 423);
     const path = `/api/vault/items/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}/video${download ? "?download=1" : ""}`;
     const generation = state.vaultGeneration;
     const token = state.vaultToken;
-    const controller = new AbortController();
+    const controller = suppliedController || new AbortController();
     state.vaultMediaControllers.add(controller);
     try {
       const response = await fetch(path, {
@@ -3030,6 +3977,7 @@
       elements.vaultPlayerDialog.showModal();
       state.vaultPlayerItemKey = vaultItemKey(item);
       elements.vaultPlayerDownload.disabled = false;
+      elements.vaultPlayerYouTubeUpload.hidden = false;
     } catch (error) {
       if (error.status !== 401 && error.status !== 423) toast(error.message, true);
     } finally {
@@ -3078,6 +4026,7 @@
     try {
       await vaultRequest(`/api/vault/items/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}/restore`, { method: "POST" });
       if (generation !== state.vaultGeneration || token !== state.vaultToken || !token) return;
+      invalidateYouTubeSource(item.kind, item.id);
       state.vaultItems = state.vaultItems.filter((entry) => entry.id !== item.id || entry.kind !== item.kind);
       renderVaultItems();
       await Promise.allSettled([loadHistory(false), loadProjects(false)]);
@@ -3210,6 +4159,7 @@
     state.vaultObjectURL = "";
     state.vaultPlayerItemKey = "";
     if (elements.vaultPlayerDownload) elements.vaultPlayerDownload.disabled = true;
+    if (elements.vaultPlayerYouTubeUpload) elements.vaultPlayerYouTubeUpload.hidden = true;
     if (elements.vaultPlayerDialog && elements.vaultPlayerDialog.open) elements.vaultPlayerDialog.close();
   }
 
@@ -3417,6 +4367,7 @@
         await loadSettings(false);
         await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false)]);
         startJobEventStream();
+        consumeYouTubeReturn();
       }
     } catch (error) {
       elements.loginError.textContent = error.message;
@@ -3509,7 +4460,37 @@
       const item = state.vaultItems.find((entry) => vaultItemKey(entry) === state.vaultPlayerItemKey);
       if (item) void downloadVaultVideo(item, elements.vaultPlayerDownload);
     });
+    elements.vaultPlayerYouTubeUpload.addEventListener("click", () => {
+      const item = state.vaultItems.find((entry) => vaultItemKey(entry) === state.vaultPlayerItemKey);
+      if (item) void openYouTubeUpload(vaultYouTubeSource(item));
+    });
     elements.vaultPlayerDialog.addEventListener("close", closeVaultPlayer);
+    elements.youtubeConfigForm.addEventListener("submit", saveYouTubeConfig);
+    elements.youtubeConfigForm.addEventListener("input", () => { state.youtubeConfigDirty = true; });
+    elements.youtubeConnect.addEventListener("click", connectYouTube);
+    elements.youtubeDisconnect.addEventListener("click", disconnectYouTube);
+    elements.singleYouTubeUpload.addEventListener("click", () => {
+      if (state.currentGenerationRecord) void openYouTubeUpload(generationYouTubeSource(state.currentGenerationRecord));
+    });
+    elements.projectYouTubeUpload.addEventListener("click", () => {
+      if (state.currentProjectRecord) void openYouTubeUpload(projectYouTubeSource(state.currentProjectRecord));
+    });
+    elements.youtubeUploadForm.addEventListener("submit", submitYouTubeUpload);
+    elements.youtubeGenerateMetadata.addEventListener("click", generateYouTubeMetadata);
+    elements.youtubeUploadCancel.addEventListener("click", cancelYouTubeUpload);
+    elements.youtubeUploadAbandon.addEventListener("click", abandonYouTubeUpload);
+    elements.youtubeUploadRetry.addEventListener("click", retryYouTubeUpload);
+    elements.youtubeDuplicateConfirm.addEventListener("change", () => {
+      elements.youtubeUploadRestart.disabled = !state.youtubeDialogReady || state.youtubeRestarting || !elements.youtubeDuplicateConfirm.checked;
+    });
+    elements.youtubeUploadRestart.addEventListener("click", restartYouTubeUpload);
+    elements.youtubeDialogClose.addEventListener("click", () => closeYouTubeComposer());
+    elements.youtubeDialog.addEventListener("close", () => closeYouTubeComposer());
+    elements.youtubeDialog.addEventListener("cancel", () => closeYouTubeComposer(false));
+    elements.youtubeGoSettings.addEventListener("click", () => {
+      closeYouTubeComposer(false);
+      navigate("settings");
+    });
     elements.modalConfigForm.addEventListener("submit", saveModalConfig);
     elements.modalAccountCancel.addEventListener("click", resetModalAccountForm);
     elements.modalAccountProject.addEventListener("change", () => {
