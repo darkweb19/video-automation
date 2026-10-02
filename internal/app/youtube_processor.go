@@ -472,6 +472,14 @@ func scheduleYouTubeRetryDelay(attempt int) time.Duration {
 	return delay
 }
 
+func youtubeRetryAfterDelay(headers http.Header, now time.Time) time.Duration {
+	retryAt := openRouterErrorRetryAt(headers, nil, now)
+	if !retryAt.After(now) {
+		return 0
+	}
+	return retryAt.Sub(now)
+}
+
 func youtubeProcessingDelay(checks int) time.Duration {
 	delay := 10 * time.Second
 	for i := 0; i < checks/2 && delay < youtubeProcessingMaxDelay; i++ {
@@ -592,6 +600,17 @@ func (p *Processor) initiateYouTubeUpload(ctx context.Context, upload YouTubeUpl
 		}
 		return
 	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		retryAfter := youtubeRetryAfterDelay(response.Header, time.Now())
+		response.Body.Close()
+		requeued, requeueErr := p.app.store.requeueYouTubeInitiation(upload.ID, 0, time.Now().Unix())
+		if requeueErr == nil && requeued {
+			delay := max(scheduleYouTubeRetryDelay(upload.AttemptCount), retryAfter)
+			now := time.Now()
+			_ = p.app.store.scheduleYouTubeUploadRetry(upload.ID, upload.ChannelID, upload.ConnectionVersion, now.Add(delay).Unix(), now.Unix())
+		}
+		return
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if response.StatusCode >= 500 || response.StatusCode >= 300 && response.StatusCode < 400 {
 			response.Body.Close()
@@ -657,6 +676,7 @@ func (p *Processor) resumeYouTubeUpload(ctx context.Context, upload YouTubeUploa
 	}
 	if response.StatusCode == http.StatusPermanentRedirect {
 		offset, valid := parseYouTubeResumeOffset(response.Header.Get("Range"), upload.SourceSize)
+		retryAfter := youtubeRetryAfterDelay(response.Header, time.Now())
 		response.Body.Close()
 		if !valid {
 			_ = p.app.store.unknownYouTubeUploadOutcome(upload.ID, "YouTube returned an invalid resume offset. Check YouTube Studio before restarting.", time.Now().Unix())
@@ -664,15 +684,20 @@ func (p *Processor) resumeYouTubeUpload(ctx context.Context, upload YouTubeUploa
 		}
 		_ = p.app.store.consumeYouTubeRestartApproval(upload.ID, time.Now().Unix())
 		if offset >= upload.SourceSize {
-			p.retryYouTubeLater(upload, 10*time.Second)
+			p.persistYouTubeProgressAndRetry(upload, offset, max(10*time.Second, retryAfter))
+			return
+		}
+		if retryAfter > 0 {
+			p.persistYouTubeProgressAndRetry(upload, offset, retryAfter)
 			return
 		}
 		p.sendYouTubeChunks(ctx, upload, file, accessToken, sessionURL, offset)
 		return
 	}
 	if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
+		retryAfter := youtubeRetryAfterDelay(response.Header, time.Now())
 		response.Body.Close()
-		p.retryYouTubeLater(upload, 0)
+		p.retryYouTubeLater(upload, retryAfter)
 		return
 	}
 	message := p.app.safeYouTubeAPIError(response)
@@ -724,6 +749,7 @@ func (p *Processor) sendYouTubeChunks(ctx context.Context, upload YouTubeUpload,
 		}
 		if response.StatusCode == http.StatusPermanentRedirect {
 			newOffset, valid := parseYouTubeResumeOffset(response.Header.Get("Range"), upload.SourceSize)
+			retryAfter := youtubeRetryAfterDelay(response.Header, time.Now())
 			response.Body.Close()
 			if !valid || newOffset < offset || newOffset > endExclusive {
 				_ = p.app.store.unknownYouTubeUploadOutcome(upload.ID, "YouTube returned an invalid resume offset. Check YouTube Studio before restarting.", time.Now().Unix())
@@ -731,7 +757,7 @@ func (p *Processor) sendYouTubeChunks(ctx context.Context, upload YouTubeUpload,
 			}
 			_ = p.app.store.consumeYouTubeRestartApproval(upload.ID, time.Now().Unix())
 			if newOffset == offset {
-				p.retryYouTubeLater(upload, 5*time.Second)
+				p.retryYouTubeLater(upload, max(5*time.Second, retryAfter))
 				return
 			}
 			offset = newOffset
@@ -740,6 +766,13 @@ func (p *Processor) sendYouTubeChunks(ctx context.Context, upload YouTubeUpload,
 				progress = int(float64(offset) / float64(upload.SourceSize) * 100)
 			}
 			_ = p.app.store.setYouTubeUploadProgress(upload.ID, progress, 0, false, time.Now().Unix())
+			if retryAfter > 0 {
+				latest, loadErr := p.app.store.YouTubeUpload(upload.ID)
+				if loadErr == nil {
+					p.retryYouTubeLater(latest, retryAfter)
+				}
+				return
+			}
 			continue
 		}
 		if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
@@ -748,13 +781,28 @@ func (p *Processor) sendYouTubeChunks(ctx context.Context, upload YouTubeUpload,
 			return
 		}
 		if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
+			retryAfter := youtubeRetryAfterDelay(response.Header, time.Now())
 			response.Body.Close()
-			p.retryYouTubeLater(upload, 0)
+			p.retryYouTubeLater(upload, retryAfter)
 			return
 		}
 		message := p.app.safeYouTubeAPIError(response)
 		_ = p.app.store.unknownYouTubeUploadOutcome(upload.ID, message+" Check YouTube Studio before restarting this upload.", time.Now().Unix())
 		return
+	}
+}
+
+func (p *Processor) persistYouTubeProgressAndRetry(upload YouTubeUpload, offset int64, minimum time.Duration) {
+	progress := 0
+	if upload.SourceSize > 0 {
+		progress = int(float64(offset) / float64(upload.SourceSize) * 100)
+	}
+	if err := p.app.store.setYouTubeUploadProgress(upload.ID, progress, 0, false, time.Now().Unix()); err != nil {
+		return
+	}
+	latest, err := p.app.store.YouTubeUpload(upload.ID)
+	if err == nil {
+		p.retryYouTubeLater(latest, minimum)
 	}
 }
 
@@ -812,13 +860,18 @@ func (p *Processor) retryYouTubeLater(upload YouTubeUpload, minimum time.Duratio
 }
 
 func (p *Processor) retryYouTubeProcessingCheck(upload YouTubeUpload, status string) {
+	p.retryYouTubeProcessingCheckAfter(upload, status, 0)
+}
+
+func (p *Processor) retryYouTubeProcessingCheckAfter(upload YouTubeUpload, status string, minimum time.Duration) {
 	checks := upload.ProcessingCheckCount + 1
 	now := time.Now()
 	if checks >= youtubeProcessingCheckLimit || upload.AttemptCount >= youtubeTransientAttemptLimit-1 {
 		_ = p.app.store.updateYouTubeProcessing(upload.ID, youtubeUploadAttentionRequired, "status_check_unavailable", "YouTube has not confirmed this video's processing status. Check YouTube Studio before abandoning the upload.", checks, 0, now.Unix())
 		return
 	}
-	_ = p.app.store.retryYouTubeProcessingCheck(upload.ID, status, checks, now.Add(scheduleYouTubeRetryDelay(upload.AttemptCount)).Unix(), now.Unix())
+	delay := max(scheduleYouTubeRetryDelay(upload.AttemptCount), minimum)
+	_ = p.app.store.retryYouTubeProcessingCheck(upload.ID, status, checks, now.Add(delay).Unix(), now.Unix())
 }
 
 func (p *Processor) pollYouTubeProcessing(ctx context.Context, upload YouTubeUpload, refreshed bool) {
@@ -852,8 +905,9 @@ func (p *Processor) pollYouTubeProcessing(ctx context.Context, upload YouTubeUpl
 		return
 	}
 	if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
+		retryAfter := youtubeRetryAfterDelay(response.Header, time.Now())
 		response.Body.Close()
-		p.retryYouTubeProcessingCheck(upload, "checking")
+		p.retryYouTubeProcessingCheckAfter(upload, "checking", retryAfter)
 		return
 	}
 	body, readErr := readYouTubeResponse(response)
@@ -862,7 +916,7 @@ func (p *Processor) pollYouTubeProcessing(ctx context.Context, upload YouTubeUpl
 			p.markYouTubeReconnectForUpload(upload, "Reconnect the YouTube channel to check processing status.")
 			return
 		}
-		p.retryYouTubeProcessingCheck(upload, "checking")
+		p.retryYouTubeProcessingCheckAfter(upload, "checking", youtubeRetryAfterDelay(response.Header, time.Now()))
 		return
 	}
 	if readErr != nil {

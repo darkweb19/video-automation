@@ -201,6 +201,65 @@ func TestYouTubeUploadResumesStoredGoogleSessionAndStreamsRemainingBytes(t *test
 	}
 }
 
+func TestYouTubeResumeHonorsRetryAfterWithoutSendingNextChunk(t *testing.T) {
+	for _, status := range []int{http.StatusPermanentRedirect, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var calls int
+			serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodPut || !strings.HasPrefix(r.Header.Get("Content-Range"), "bytes */") {
+					t.Errorf("request = %s %s, Content-Range=%q", r.Method, r.URL.Path, r.Header.Get("Content-Range"))
+				}
+				w.Header().Set("Retry-After", "60")
+				if status == http.StatusPermanentRedirect {
+					w.Header().Set("Range", "bytes=0-0")
+				}
+				w.WriteHeader(status)
+			})
+			fixture, server := newYouTubeBackendFixture(t, serverHandler)
+			sessionURL := server.URL + "/upload/youtube/v3/videos?uploadType=resumable&upload_id=retry-after-session"
+			ciphertext, err := fixture.security.EncryptSetting("youtube_upload_session_"+fixture.upload.ID, sessionURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimed, err := fixture.store.claimYouTubeUploadInitiation(fixture.upload.ID, time.Now().Unix())
+			if err != nil || !claimed {
+				t.Fatalf("claim initial session: %v (claimed=%v)", err, claimed)
+			}
+			if err := fixture.store.setYouTubeUploadSession(fixture.upload.ID, ciphertext, time.Now().Unix()); err != nil {
+				t.Fatal(err)
+			}
+			upload, err := fixture.store.YouTubeUpload(fixture.upload.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := time.Now()
+			fixture.processor().processYouTubeUpload(context.Background(), upload)
+			retried, err := fixture.store.YouTubeUpload(fixture.upload.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatalf("sent %d requests before Retry-After elapsed, want only probe/error request", calls)
+			}
+			if retried.NextAttemptAt < before.Add(59*time.Second).Unix() {
+				t.Fatalf("next attempt %d does not honor Retry-After 60 seconds", retried.NextAttemptAt)
+			}
+			if status == http.StatusPermanentRedirect && retried.Progress == 0 {
+				t.Fatalf("confirmed resume offset was not persisted before yielding: %#v", retried)
+			}
+		})
+	}
+}
+
+func TestYouTubeRetryAfterAcceptsHTTPDate(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	when := now.Add(90 * time.Second)
+	if got := youtubeRetryAfterDelay(http.Header{"Retry-After": {when.Format(http.TimeFormat)}}, now); got != 90*time.Second {
+		t.Fatalf("HTTP-date retry delay = %s, want %s", got, 90*time.Second)
+	}
+}
+
 func serverLocation(request *http.Request, query string) string {
 	return "http://" + request.Host + "/upload/youtube/v3/videos?" + query
 }
