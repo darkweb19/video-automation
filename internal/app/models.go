@@ -27,13 +27,23 @@ type GenerateRequest struct {
 
 // Generation is the normalized state returned to the browser.
 type Generation struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Model     string `json:"model,omitempty"`
-	Progress  *int   `json:"progress,omitempty"`
-	OutputURL string `json:"output_url,omitempty"`
-	Error     string `json:"error,omitempty"`
-	CostUSD   string `json:"cost_usd,omitempty"`
+	ID               string                      `json:"id"`
+	Status           string                      `json:"status"`
+	Model            string                      `json:"model,omitempty"`
+	Progress         *int                        `json:"progress,omitempty"`
+	OutputURL        string                      `json:"output_url,omitempty"`
+	Error            string                      `json:"error,omitempty"`
+	CostUSD          string                      `json:"cost_usd,omitempty"`
+	CallbackDelivery *CallbackDeliveryDiagnostic `json:"-"`
+}
+
+// CallbackDeliveryDiagnostic is returned only by the authenticated Modal API
+// for the sparse watchdog. It is never sent to browser clients.
+type CallbackDeliveryDiagnostic struct {
+	State      string `json:"state"`
+	Code       string `json:"code"`
+	StatusCode int    `json:"status_code"`
+	Attempts   int    `json:"attempts"`
 }
 
 // VideoModel describes the capabilities OpenRouter exposes for a video model.

@@ -484,14 +484,15 @@ func openRouterErrorLimitScope(upstream *upstreamError, headers, metadataHeaders
 }
 
 type openRouterGeneration struct {
-	ID           string   `json:"id"`
-	GenerationID string   `json:"generation_id"`
-	Status       string   `json:"status"`
-	Model        string   `json:"model"`
-	Error        string   `json:"error"`
-	Progress     *int     `json:"progress"`
-	UnsignedURLs []string `json:"unsigned_urls"`
-	Usage        struct {
+	ID               string                      `json:"id"`
+	GenerationID     string                      `json:"generation_id"`
+	Status           string                      `json:"status"`
+	Model            string                      `json:"model"`
+	Error            string                      `json:"error"`
+	Progress         *int                        `json:"progress"`
+	UnsignedURLs     []string                    `json:"unsigned_urls"`
+	CallbackDelivery *CallbackDeliveryDiagnostic `json:"callback_delivery"`
+	Usage            struct {
 		Cost json.Number `json:"cost"`
 	} `json:"usage"`
 }
@@ -526,7 +527,7 @@ func normalizeVideoGeneration(source openRouterGeneration, provider string) (*Ge
 	default:
 		return nil, fmt.Errorf("%s returned an unsupported video status %q", provider, source.Status)
 	}
-	generation := &Generation{ID: source.ID, Status: status, Model: source.Model, Progress: source.Progress, Error: source.Error, CostUSD: string(source.Usage.Cost)}
+	generation := &Generation{ID: source.ID, Status: status, Model: source.Model, Progress: source.Progress, Error: source.Error, CostUSD: string(source.Usage.Cost), CallbackDelivery: normalizeCallbackDeliveryDiagnostic(source.CallbackDelivery)}
 	if generation.Status == "completed" && generation.ID != "" {
 		generation.OutputURL = "/video?id=" + url.QueryEscape(generation.ID)
 	}
