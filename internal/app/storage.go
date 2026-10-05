@@ -412,6 +412,11 @@ func (s *Store) migrate() error {
 			PRIMARY KEY(project_id, scene_number)
 		);
 		CREATE INDEX IF NOT EXISTS video_projects_status ON video_projects(status);
+		CREATE TABLE IF NOT EXISTS project_submissions (
+			request_id TEXT PRIMARY KEY,
+			request_hash TEXT NOT NULL,
+			project_id TEXT NOT NULL UNIQUE
+		);
 		CREATE INDEX IF NOT EXISTS project_scenes_status ON project_scenes(status,next_attempt_at);
 		CREATE TABLE IF NOT EXISTS project_text_generation (
 			project_id TEXT PRIMARY KEY REFERENCES video_projects(id) ON DELETE CASCADE,

@@ -191,6 +191,7 @@ type ProjectScene struct {
 
 type VideoProject struct {
 	ID               string         `json:"id"`
+	RequestID        string         `json:"request_id,omitempty"`
 	Topic            string         `json:"topic"`
 	Category         string         `json:"category,omitempty"`
 	Title            string         `json:"title,omitempty"`

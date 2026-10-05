@@ -37,6 +37,10 @@ func (s *Store) InsertProjectWithProviderConfig(topic, provider, providerConfigI
 
 // Category is optional for older clients and preserved for queued planning and retries.
 func (s *Store) InsertProjectWithCategory(topic, category, provider, providerConfigID, model string) (VideoProject, error) {
+	return s.insertProjectSubmission(topic, category, provider, providerConfigID, model, "", "")
+}
+
+func (s *Store) insertProjectSubmission(topic, category, provider, providerConfigID, model, requestID, requestHash string) (VideoProject, error) {
 	category = strings.TrimSpace(category)
 	if category != "" && !validRandomPromptCategory(category) {
 		return VideoProject{}, errors.New("unsupported project category")
@@ -51,6 +55,25 @@ func (s *Store) InsertProjectWithCategory(topic, category, provider, providerCon
 		return VideoProject{}, err
 	}
 	defer tx.Rollback()
+	if requestID != "" {
+		// This ledger intentionally has no cascading project foreign key. Its
+		// small tombstone prevents a delayed POST from recreating a deleted job.
+		result, claimErr := tx.Exec(`INSERT INTO project_submissions(request_id,request_hash,project_id) VALUES(?,?,?) ON CONFLICT(request_id) DO NOTHING`, requestID, requestHash, id)
+		if claimErr != nil {
+			return VideoProject{}, claimErr
+		}
+		count, claimErr := result.RowsAffected()
+		if claimErr != nil {
+			return VideoProject{}, claimErr
+		}
+		if count == 0 {
+			// Release the single database connection before loading the winner.
+			if err := tx.Rollback(); err != nil {
+				return VideoProject{}, err
+			}
+			return s.projectForSubmission(requestID, requestHash)
+		}
+	}
 	_, err = tx.Exec(`INSERT INTO video_projects(id,topic,category,model,video_provider,provider_config_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'planning',?,?)`, id, topic, category, model, provider, providerConfigID, now, now)
 	if err != nil {
 		return VideoProject{}, err
@@ -114,7 +137,7 @@ func (s *Store) SaveStoryPlan(projectID string, plan StoryPlan) error {
 	return tx.Commit()
 }
 
-const projectColumns = `id,topic,category,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at,in_vault`
+const projectColumns = `id,topic,category,title,story,script,continuity,model,video_provider,provider_config_id,status,error,final_video_path,final_size_bytes,created_at,updated_at,in_vault,COALESCE((SELECT request_id FROM project_submissions WHERE project_id=video_projects.id),'')`
 const sceneColumns = `project_id,scene_number,title,scene_script,prompt,status,progress,attempts,provider_generation_id,cost_usd,video_path,size_bytes,error,download_attempts,next_attempt_at,modal_callback_recovery_at,modal_callback_recovery_attempts,created_at,updated_at`
 
 func appendPipelineEvent(execer interface {
@@ -177,7 +200,7 @@ func scanLiveTextGenerationTrace(scanner interface{ Scan(...any) error }) (TextG
 
 func scanProject(scanner interface{ Scan(...any) error }) (VideoProject, error) {
 	var project VideoProject
-	err := scanner.Scan(&project.ID, &project.Topic, &project.Category, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt, &project.InVault)
+	err := scanner.Scan(&project.ID, &project.Topic, &project.Category, &project.Title, &project.Story, &project.Script, &project.Continuity, &project.Model, &project.VideoProvider, &project.ProviderConfigID, &project.Status, &project.Error, &project.FinalVideoPath, &project.FinalSizeBytes, &project.CreatedAt, &project.UpdatedAt, &project.InVault, &project.RequestID)
 	project.FinalVideoReady = project.FinalVideoPath != ""
 	return project, err
 }
