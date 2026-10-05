@@ -493,6 +493,78 @@ test('a list refresh during submission does not replace the local submitting car
   assert.equal(app.state.currentProjectID, 'accepted-project');
 });
 
+test('project refresh verifies omitted selections and clears items deleted or moved to Vault', async () => {
+  const app = configuredApp('project');
+  const oldProject = { id: 'older-project', status: 'completed', topic: 'Older', scenes: [] };
+  app.state.authenticated = true;
+  app.renderProject(oldProject, true);
+  let detailExists = true;
+  app.setRequest((requestPath) => {
+    if (requestPath === '/api/projects') return Promise.resolve({ projects: [] });
+    if (requestPath === `/api/projects/${oldProject.id}`) {
+      return detailExists
+        ? Promise.resolve(oldProject)
+        : Promise.reject(Object.assign(new Error('Project not found'), { status: 404 }));
+    }
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  await app.loadProjects(false);
+  assert.equal(app.state.currentProjectID, oldProject.id, 'projects beyond the 24-row list remain open after detail verification');
+  assert.equal(app.state.projects[0].id, oldProject.id);
+
+  detailExists = false;
+  await app.loadProjects(false);
+  assert.equal(app.state.currentProjectID, '');
+  assert.equal(app.state.displayedProjectID, '');
+  assert.equal(app.state.projects.length, 0);
+  assert.equal(app.elements.projectStatus.hidden, true);
+});
+
+test('an older list response cannot reinsert a project deleted by the newest response', async () => {
+  const app = configuredApp('project');
+  const oldProject = { id: 'deleted-after-list-start', status: 'completed', scenes: [] };
+  app.state.authenticated = true;
+  app.renderProject(oldProject, true);
+  const oldList = deferred();
+  let listCount = 0;
+  app.setRequest((requestPath) => {
+    if (requestPath === '/api/projects') {
+      listCount++;
+      return listCount === 1 ? oldList.promise : Promise.resolve({ projects: [] });
+    }
+    if (requestPath === `/api/projects/${oldProject.id}`) {
+      return Promise.reject(Object.assign(new Error('Project not found'), { status: 404 }));
+    }
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+
+  const older = app.loadProjects(false);
+  const newer = app.loadProjects(false);
+  await newer;
+  oldList.resolve({ projects: [oldProject] });
+  await older;
+  assert.equal(app.state.projects.length, 0);
+  assert.equal(app.state.currentProjectID, '');
+  assert.equal(app.elements.projectStatus.hidden, true);
+});
+
+test('late project-list responses cannot restore state after the auth epoch changes', async () => {
+  const app = configuredApp('project');
+  app.state.authenticated = true;
+  const list = deferred();
+  app.setRequest(() => list.promise);
+  const loading = app.loadProjects(false);
+  app.state.authenticated = false;
+  app.state.authGeneration++;
+  app.state.projects = [];
+  app.state.currentProjectID = '';
+  app.state.currentProjectRecord = null;
+  list.resolve({ projects: [{ id: 'late-project', status: 'failed', scenes: [] }] });
+  await loading;
+  assert.equal(app.state.projects.length, 0);
+  assert.equal(app.state.currentProjectID, '');
+});
+
 function collectText(node) {
   return [node.textContent, ...(node.children || []).map(collectText)].filter(Boolean).join(' ');
 }
