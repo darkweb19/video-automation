@@ -230,6 +230,13 @@
     submissionPending: false,
     projectSubmissionPending: false,
     projectSubmissionFailed: false,
+    projectRecoveryAttemptedID: "",
+    projectRecoveryPromise: null,
+    projectListRequestID: 0,
+    pendingProjectSubmission: null,
+    pendingProjectFormEdited: false,
+    authGeneration: 0,
+    randomPromptPending: false,
     singleSubmissionPending: false,
     singleSubmissionFailed: false,
     projects: [],
@@ -283,6 +290,83 @@
   };
 
   const VIDEO_PROVIDER_NAMES = Object.freeze({ modal: "Modal", openrouter: "OpenRouter" });
+  const PENDING_PROJECT_SUBMISSION_KEY = "framevault.pendingProjectSubmission";
+  state.pendingProjectSubmission = readPendingProjectSubmission();
+  restorePendingProjectForm();
+
+  function readPendingProjectSubmission() {
+    try {
+      const raw = window.sessionStorage?.getItem(PENDING_PROJECT_SUBMISSION_KEY);
+      if (!raw) return null;
+      const pending = JSON.parse(raw);
+      if (!pending || typeof pending.request_id !== "string" || !pending.body
+        || typeof pending.body.topic !== "string") return null;
+      return pending;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function writePendingProjectSubmission(pending) {
+    state.pendingProjectSubmission = pending;
+    state.projectRecoveryAttemptedID = "";
+    state.pendingProjectFormEdited = false;
+    try {
+      window.sessionStorage?.setItem(PENDING_PROJECT_SUBMISSION_KEY, JSON.stringify(pending));
+    } catch (_error) {
+      // The request still carries its idempotency key when session storage is unavailable.
+    }
+  }
+
+  function clearPendingProjectSubmission(requestID) {
+    if (state.pendingProjectSubmission?.request_id !== requestID) return;
+    state.pendingProjectSubmission = null;
+    state.projectRecoveryAttemptedID = "";
+    state.pendingProjectFormEdited = false;
+    try {
+      window.sessionStorage?.removeItem(PENDING_PROJECT_SUBMISSION_KEY);
+    } catch (_error) {
+      // Ignore unavailable session storage; the in-memory request is already settled.
+    }
+  }
+
+  function newProjectRequestID() {
+    try {
+      if (typeof window.crypto?.randomUUID === "function") return window.crypto.randomUUID();
+    } catch (_error) {
+      // Use the local fallback if browser crypto is unavailable.
+    }
+    return `project-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  function sameProjectRequestBody(left, right) {
+    return Boolean(left && right)
+      && String(left.topic || "") === String(right.topic || "")
+      && String(left.category || "") === String(right.category || "")
+      && String(left.model || "") === String(right.model || "")
+      && String(left.modal_account_id || "") === String(right.modal_account_id || "");
+  }
+
+  function restorePendingProjectForm() {
+    const pending = state.pendingProjectSubmission;
+    if (!pending || state.pendingProjectFormEdited) return;
+    const body = pending.body || {};
+    if (!elements.projectTopic.value.trim()) elements.projectTopic.value = String(body.topic || "");
+    const categoryIndex = promptCategories.indexOf(String(body.category || ""));
+    if (categoryIndex >= 0) {
+      elements.promptCategory.value = String(categoryIndex);
+      updatePromptCategory();
+    }
+    if (body.model && state.models.some((model) => model.id === body.model)) {
+      elements.model.value = body.model;
+      renderModelPicker();
+      updateModelOptions();
+    }
+  }
+
+  function markPendingProjectFormEdited() {
+    if (state.pendingProjectSubmission) state.pendingProjectFormEdited = true;
+  }
 
   function videoProviderName(provider = state.videoProvider) {
     return VIDEO_PROVIDER_NAMES[provider] || provider;
@@ -841,6 +925,11 @@
         state.currentProjectRecord = snapshot;
         if (state.mode === "project") renderProject(snapshot);
       }
+      if (state.pendingProjectSubmission
+        && String(projectValue(snapshot, "request_id", "requestID") || "") === state.pendingProjectSubmission.request_id) {
+        if (!state.projects.some((item) => projectID(item) === id)) state.projects.unshift(snapshot);
+        void recoverPendingProjectSubmission();
+      }
     }
 
     if (becameTerminal) {
@@ -1012,14 +1101,18 @@
   }
 
   async function generateRandomPrompt() {
+    if (state.randomPromptPending) return;
     const mode = state.mode;
     const category = selectedPromptCategory();
+    const authGeneration = state.authGeneration;
+    state.randomPromptPending = true;
     setButtonBusy(elements.randomPrompt, true, "Generating…");
     try {
       const payload = await request("/api/prompts/random", {
         method: "POST",
         body: JSON.stringify({ category, mode })
       });
+      if (state.authGeneration !== authGeneration || !state.authenticated) return;
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
       if (!prompt) throw new APIError("No prompt was returned. Try again.", 502);
       const field = mode === "project" ? elements.projectTopic : elements.prompt;
@@ -1027,10 +1120,14 @@
       field.dispatchEvent(new Event("input", { bubbles: true }));
       field.focus();
       if (mode === "project") elements.projectTopicError.textContent = "";
+      toast("Random prompt ready.");
     } catch (error) {
-      if (error.status !== 401) toast(error.message, true);
+      if (state.authGeneration === authGeneration && state.authenticated && error.status !== 401) toast(error.message, true);
     } finally {
-      setButtonBusy(elements.randomPrompt, false);
+      if (state.authGeneration === authGeneration) {
+        state.randomPromptPending = false;
+        setButtonBusy(elements.randomPrompt, false);
+      }
     }
   }
 
@@ -1118,6 +1215,17 @@
   }
 
   function showLoggedOut() {
+    state.authGeneration += 1;
+    state.submissionPending = false;
+    state.projectSubmissionPending = false;
+    state.projectSubmissionFailed = false;
+    state.singleSubmissionPending = false;
+    state.singleSubmissionFailed = false;
+    state.randomPromptPending = false;
+    state.projectRecoveryAttemptedID = "";
+    state.projectRecoveryPromise = null;
+    setButtonBusy(elements.generate, false);
+    setButtonBusy(elements.randomPrompt, false);
     stopJobEventStream(true);
     invalidateProjectRawTraceRequests();
     closeYouTubeComposer(false);
@@ -1170,6 +1278,9 @@
   }
 
   function showAuthenticated(username, mustChangePassword) {
+    state.authGeneration += 1;
+    state.randomPromptPending = false;
+    setButtonBusy(elements.randomPrompt, false);
     resetVaultRestoreState();
     stopJobEventStream(true);
     invalidateProjectRawTraceRequests();
@@ -1560,6 +1671,7 @@
         || savedModel
         || state.models[0];
       if (selected) elements.model.value = selected.id;
+      restorePendingProjectForm();
       elements.activeVideoProvider.textContent = `Video provider: ${videoProviderName(payload && payload.provider || requestedProvider)}`;
       elements.model.disabled = false;
       elements.modelTrigger.disabled = false;
@@ -2612,11 +2724,100 @@
     }
   }
 
-  async function loadProjects(notify = true) {
-    if (!state.authenticated || state.mustChangePassword) return;
+  function projectListFromPayload(payload) {
+    return Array.isArray(payload) ? payload : (Array.isArray(payload && payload.projects) ? payload.projects : []);
+  }
+
+  function applyRecoveredProjectSubmission(id, pending, project, authGeneration) {
+    if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration
+      || state.pendingProjectSubmission !== pending) return { status: "stale" };
+    const projectIDValue = projectID(project);
+    if (!projectIDValue) return { status: "missing" };
+    const existing = state.projects.find((item) => projectID(item) === projectIDValue);
+    project = mergeProjectRawTrace(existing, project);
+    if (!existing) state.projects.unshift(project);
+    else state.projects = state.projects.map((item) => projectID(item) === projectIDValue ? project : item);
+    clearPendingProjectSubmission(id);
+    state.projectSubmissionPending = false;
+    state.projectSubmissionFailed = false;
+    if (elements.projectTopic.value.trim() === String(pending.body.topic || "").trim()) {
+      elements.projectTopic.value = "";
+    }
+    elements.projectTopicError.textContent = "";
+    renderProject(project, true);
+    toast("Project submission restored after a connection interruption.");
+    return { status: "recovered", project };
+  }
+
+  async function recoverPendingProjectSubmission({ requestID = "", force = false, notifyUncertain = false } = {}) {
+    const pending = state.pendingProjectSubmission;
+    const id = requestID || (pending && pending.request_id) || "";
+    if (!pending || !id || pending.request_id !== id) return { status: "none" };
+    if (!state.authenticated || state.mustChangePassword) return { status: "stale" };
+    const listedProject = state.projects.find((item) => String(projectValue(item, "request_id", "requestID") || "") === id);
+    const authGeneration = state.authGeneration;
+    if (listedProject) return applyRecoveredProjectSubmission(id, pending, listedProject, authGeneration);
+    if (!force && state.projectRecoveryAttemptedID === id) return { status: "checked" };
+    if (state.projectRecoveryPromise && state.projectRecoveryPromise.requestID === id) {
+      return state.projectRecoveryPromise.promise;
+    }
+
+    const promise = (async () => {
+      try {
+        const payload = await request(`/api/projects?request_id=${encodeURIComponent(id)}`);
+        if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration
+          || state.pendingProjectSubmission !== pending) return { status: "stale" };
+        let project = projectListFromPayload(payload).find((item) => String(projectValue(item, "request_id", "requestID") || "") === id)
+          || state.projects.find((item) => String(projectValue(item, "request_id", "requestID") || "") === id);
+        if (project) {
+          return applyRecoveredProjectSubmission(id, pending, project, authGeneration);
+        }
+
+        state.projectRecoveryAttemptedID = id;
+        if (!elements.projectTopic.value.trim()) elements.projectTopic.value = String(pending.body.topic || "");
+        restorePendingProjectForm();
+        if (notifyUncertain) {
+          toast("The project is not confirmed yet. Your topic is saved; retrying the same request is safe.", true);
+        }
+        return { status: "missing" };
+      } catch (error) {
+        if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration
+          || state.pendingProjectSubmission !== pending) return { status: "stale" };
+        const listed = state.projects.find((item) => String(projectValue(item, "request_id", "requestID") || "") === id);
+        if (listed) return applyRecoveredProjectSubmission(id, pending, listed, authGeneration);
+        if (!elements.projectTopic.value.trim()) elements.projectTopic.value = String(pending.body.topic || "");
+        restorePendingProjectForm();
+        if (notifyUncertain && error.status !== 401) {
+          toast("Could not check whether the project was saved. Your topic is saved; retrying the same request is safe.", true);
+        }
+        return { status: "unavailable", error };
+      }
+    })();
+    const recovery = { requestID: id, promise };
+    state.projectRecoveryPromise = recovery;
     try {
+      return await promise;
+    } finally {
+      if (state.projectRecoveryPromise === recovery) state.projectRecoveryPromise = null;
+    }
+  }
+
+  async function loadProjects(notify = true, restoreSelection = true) {
+    if (!state.authenticated || state.mustChangePassword) return;
+    const authGeneration = state.authGeneration;
+    const listRequestID = ++state.projectListRequestID;
+    const isCurrentListRequest = () => state.projectListRequestID === listRequestID;
+    try {
+      const selectedIDAtRequestStart = state.currentProjectID || state.displayedProjectID;
+      const selectedAtRequestStart = state.currentProjectRecord
+        || state.projects.find((project) => projectID(project) === selectedIDAtRequestStart);
       const payload = await request("/api/projects");
-      const projects = Array.isArray(payload) ? payload : (Array.isArray(payload && payload.projects) ? payload.projects : []);
+      if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration || !isCurrentListRequest()) return;
+      const projects = projectListFromPayload(payload);
+      const selectedIDBeforeRefresh = state.currentProjectID || state.displayedProjectID;
+      const selectedBeforeRefresh = state.currentProjectRecord
+        || state.projects.find((project) => projectID(project) === selectedIDBeforeRefresh)
+        || (selectedIDBeforeRefresh === selectedIDAtRequestStart ? selectedAtRequestStart : null);
       state.projects = preserveNewerSnapshots(
         projects,
         state.projects,
@@ -2624,11 +2825,46 @@
         "project",
         projectID
       );
+
+      if (selectedIDBeforeRefresh && selectedBeforeRefresh
+        && !state.projects.some((project) => projectID(project) === selectedIDBeforeRefresh)) {
+        try {
+          const detailPayload = await request(`/api/projects/${encodeURIComponent(selectedIDBeforeRefresh)}`);
+          if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration || !isCurrentListRequest()) return;
+          const detail = detailPayload && detailPayload.project ? detailPayload.project : detailPayload;
+          if (projectID(detail) === selectedIDBeforeRefresh
+            && (state.currentProjectID === selectedIDBeforeRefresh || state.displayedProjectID === selectedIDBeforeRefresh)
+            && !state.projects.some((project) => projectID(project) === selectedIDBeforeRefresh)) {
+            state.projects.unshift(mergeProjectRawTrace(selectedBeforeRefresh, detail));
+          }
+        } catch (error) {
+          if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration || !isCurrentListRequest()) return;
+          if (error.status === 404) {
+            state.projects = state.projects.filter((project) => projectID(project) !== selectedIDBeforeRefresh);
+            if (state.currentProjectID === selectedIDBeforeRefresh || state.displayedProjectID === selectedIDBeforeRefresh) {
+              clearProjectDisplay(selectedIDBeforeRefresh);
+            }
+          } else if ((state.currentProjectID === selectedIDBeforeRefresh || state.displayedProjectID === selectedIDBeforeRefresh)
+            && !state.projects.some((project) => projectID(project) === selectedIDBeforeRefresh)) {
+            state.projects.unshift(selectedBeforeRefresh);
+          }
+        }
+      }
+
+      const hadSelection = Boolean(state.currentProjectID || state.displayedProjectID);
+      if (!state.currentProjectID && state.displayedProjectID
+        && state.projects.some((project) => projectID(project) === state.displayedProjectID)) {
+        state.currentProjectID = state.displayedProjectID;
+      }
       const current = state.projects.find((project) => projectID(project) === state.currentProjectID);
       if (!current && state.currentProjectID) clearProjectDisplay(state.currentProjectID);
-      if (!state.currentProjectID) {
+      if (!state.currentProjectID && restoreSelection && !hadSelection && !state.submissionPending) {
         const active = state.projects.find((project) => !isTerminalJobStatus(projectValue(project, "status")));
-        state.currentProjectID = active ? projectID(active) : "";
+        // On a fresh page load, restore an in-flight job first. If all jobs are
+        // terminal, show the newest saved result so failures and errors remain
+        // visible after refresh without changing an existing selection.
+        const selected = active || state.projects[0];
+        state.currentProjectID = selected ? projectID(selected) : "";
       }
       const selectedProject = state.projects.find((project) => projectID(project) === state.currentProjectID);
       if (selectedProject) state.currentProjectRecord = selectedProject;
@@ -2708,8 +2944,14 @@
         }
       }
       renderHistory();
+      if (restoreSelection && !state.submissionPending && state.pendingProjectSubmission) {
+        await recoverPendingProjectSubmission({ notifyUncertain: true });
+      }
     } catch (error) {
-      if (notify && error.status !== 401 && error.status !== 404) toast(error.message, true);
+      if (notify && state.authenticated && state.authGeneration === authGeneration && isCurrentListRequest()
+        && error.status !== 401 && error.status !== 404) {
+        toast(error.message, true);
+      }
     }
   }
 
@@ -2733,7 +2975,25 @@
       toast("Choose a model that supports 6-second clips at 480p in 9:16.", true);
       return;
     }
+    const currentRequestBody = { topic, category: selectedPromptCategory(), model: elements.model.value };
+    if (state.videoProvider === "modal") {
+      const accountID = selectedModalAccountID();
+      if (!accountID) {
+        toast("Choose a Modal account for this submission.", true);
+        return;
+      }
+      currentRequestBody.modal_account_id = accountID;
+    }
+    const previousPending = state.pendingProjectSubmission;
+    const samePendingBody = previousPending && sameProjectRequestBody(previousPending.body, currentRequestBody);
+    const restorePendingBody = previousPending && !state.pendingProjectFormEdited
+      && String(previousPending.body.topic || "").trim() === topic;
+    const reusePending = Boolean(samePendingBody || restorePendingBody);
+    const requestBody = restorePendingBody && !samePendingBody
+      ? { ...previousPending.body }
+      : currentRequestBody;
     clearProjectDisplay();
+    const authGeneration = state.authGeneration;
     state.submissionPending = true;
     state.projectSubmissionPending = true;
     state.projectSubmissionFailed = false;
@@ -2745,38 +3005,58 @@
     elements.projectStatusDetail.textContent = "Generating story and five-scene script...";
     elements.projectError.hidden = true;
     elements.projectScenes.replaceChildren();
+    const requestID = reusePending && sameProjectRequestBody(previousPending.body, requestBody)
+      ? previousPending.request_id
+      : newProjectRequestID();
+    writePendingProjectSubmission({ request_id: requestID, body: { ...requestBody } });
+    requestBody.request_id = requestID;
     try {
-      const requestBody = { topic, category: selectedPromptCategory(), model: elements.model.value };
-      if (state.videoProvider === "modal") {
-        const accountID = selectedModalAccountID();
-        if (!accountID) throw new APIError("Choose a Modal account for this submission.", 400);
-        requestBody.modal_account_id = accountID;
-      }
       const payload = await request("/api/projects", { method: "POST", body: JSON.stringify(requestBody) });
+      if (!state.authenticated || state.authGeneration !== authGeneration
+        || state.pendingProjectSubmission?.request_id !== requestID) return;
       const project = payload && payload.project ? payload.project : payload;
       const id = projectID(project);
+      if (!id) throw new APIError("Project was created without an id.", 500);
+      clearPendingProjectSubmission(requestID);
       state.projectSubmissionPending = false;
       state.projectSubmissionFailed = false;
-      renderProject(project);
-      if (!id) throw new APIError("Project was created without an id.", 500);
+      renderProject(project, true);
       elements.projectTopic.value = "";
       elements.projectTopicError.textContent = "";
       toast("Project submitted. Script generation has started.");
       loadProjects(false);
     } catch (error) {
+      if (!state.authenticated || state.authGeneration !== authGeneration
+        || state.pendingProjectSubmission?.request_id !== requestID) return;
+      const status = Number(error && error.status);
+      const outcomeMayBeUnknown = error.status !== 401
+        && (!Number.isFinite(status) || status === 408 || status >= 500);
+      if (outcomeMayBeUnknown) {
+        const recovered = await recoverPendingProjectSubmission({ requestID, force: true });
+        if (recovered.status === "recovered") return;
+        if (!state.authenticated || state.authGeneration !== authGeneration
+          || state.pendingProjectSubmission?.request_id !== requestID) return;
+      } else {
+        clearPendingProjectSubmission(requestID);
+      }
+
       state.projectSubmissionPending = false;
       state.projectSubmissionFailed = true;
       elements.projectError.hidden = false;
-      elements.projectError.textContent = error.message;
+      elements.projectError.textContent = outcomeMayBeUnknown
+        ? `${error.message} The project may still be running. Retrying this same request is safe.`
+        : error.message;
       elements.statusBadge.className = "badge failed";
       elements.statusBadge.textContent = "Failed";
       syncGenerationModeDisplay();
-      if (error.status !== 401) toast(error.message, true);
+      if (error.status !== 401) toast(elements.projectError.textContent, true);
     } finally {
-      state.submissionPending = false;
-      setButtonBusy(elements.generate, false);
-      updateGenerateAvailability();
-      syncGenerationModeDisplay();
+      if (state.authGeneration === authGeneration) {
+        state.submissionPending = false;
+        setButtonBusy(elements.generate, false);
+        updateGenerateAvailability();
+        syncGenerationModeDisplay();
+      }
     }
   }
 
@@ -4421,6 +4701,8 @@
       if (error.status !== 401) toast(error.message, true);
     } finally {
       elements.logout.disabled = false;
+      if (state.pendingProjectSubmission) clearPendingProjectSubmission(state.pendingProjectSubmission.request_id);
+      elements.projectTopic.value = "";
       showLoggedOut();
     }
   }
@@ -4437,7 +4719,11 @@
     });
     elements.logout.addEventListener("click", logout);
     elements.generatorForm.addEventListener("submit", submitGeneration);
-    elements.promptCategory.addEventListener("input", updatePromptCategory);
+    elements.promptCategory.addEventListener("input", () => {
+      markPendingProjectFormEdited();
+      updatePromptCategory();
+    });
+    elements.projectTopic.addEventListener("input", markPendingProjectFormEdited);
     elements.randomPrompt.addEventListener("click", generateRandomPrompt);
     elements.retryProject.addEventListener("click", retryCurrentProject);
     elements.modeOptions.forEach((button) => {
@@ -4494,6 +4780,7 @@
     elements.modalConfigForm.addEventListener("submit", saveModalConfig);
     elements.modalAccountCancel.addEventListener("click", resetModalAccountForm);
     elements.modalAccountProject.addEventListener("change", () => {
+      markPendingProjectFormEdited();
       if (state.videoProvider === "modal" && state.mode === "project") void loadModels(false);
     });
     elements.modalAccountSingle.addEventListener("change", () => {
@@ -4504,6 +4791,7 @@
     elements.passwordForm.addEventListener("submit", updatePassword);
     elements.refreshHistory.addEventListener("click", () => { loadHistory(true); loadProjects(true); });
     elements.model.addEventListener("change", () => {
+      markPendingProjectFormEdited();
       updateModelOptions();
       void persistVideoModel(elements.model.value, true);
     });
