@@ -8,7 +8,7 @@ import (
 )
 
 func TestVideoPromptContractMetadataHasVersionedAssets(t *testing.T) {
-	if storyPromptContractID != "framevault.story.v2" || randomPromptContractID != "framevault.random.v2" {
+	if storyPromptContractID != "framevault.story.v2" || randomPromptContractID != "framevault.random.v3" {
 		t.Fatalf("prompt contract identifiers are not versioned: story=%q random=%q", storyPromptContractID, randomPromptContractID)
 	}
 	if videoPromptContractVersion == "" || videoPromptContractAuthor == "" || videoPromptContractChange == "" {

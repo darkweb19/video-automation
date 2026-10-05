@@ -42,6 +42,7 @@ var randomPromptModels = [...]string{
 }
 
 var errRandomPromptUnusable = errors.New("OpenRouter returned unusable random prompt content")
+var errRandomPromptTooLong = errors.New("OpenRouter returned an over-limit random prompt")
 
 const continuityPromptSuffix = "\n\nContinuity bible - apply exactly in this scene:\n"
 const shotContractSuffix = "\n\nShot requirements: exactly six seconds; vertical 9:16 framing. Motion: show visible action progressing from the described start state to the end state. Camera movement: make a slow forward push toward the action throughout the shot."
@@ -161,7 +162,10 @@ func (c *OpenRouterClient) GenerateRandomPrompt(ctx context.Context, input Rando
 	}
 	stateKey := randomPromptCredentialScope(c.APIKey, c.baseURL())
 
-	if err := waitForRandomPromptAccountCooldown(operationCtx, state, stateKey, false); err != nil {
+	if input.Mode == RandomPromptModeProject {
+		return c.generateRandomProjectPrompt(operationCtx, input, systemPrompt, userPrompt, maxTokens, state, stateKey)
+	}
+	if err := waitForRandomPromptAccountCooldown(operationCtx, state, stateKey, false, randomPromptHaikuReserve); err != nil {
 		return "", err
 	}
 	if input.Mode == RandomPromptModeSingle {
@@ -244,10 +248,10 @@ func recordRandomPromptCooldown(state *randomPromptState, scopeKey, model string
 // Explicit free-model quotas suppress only free attempts. Generic platform
 // and account limits remain shared, including the Haiku route.
 func waitForPaidPromptPlatformCooldown(ctx context.Context, state *randomPromptState, scopeKey string) error {
-	return waitForRandomPromptAccountCooldown(ctx, state, scopeKey, true)
+	return waitForRandomPromptAccountCooldown(ctx, state, scopeKey, true, randomPromptHaikuReserve)
 }
 
-func waitForRandomPromptAccountCooldown(ctx context.Context, state *randomPromptState, scopeKey string, includePaidModel bool) error {
+func waitForRandomPromptAccountCooldown(ctx context.Context, state *randomPromptState, scopeKey string, includePaidModel bool, minimumAttempt time.Duration) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -263,7 +267,7 @@ func waitForRandomPromptAccountCooldown(ctx context.Context, state *randomPrompt
 		if snapshot.platformError != nil && snapshot.platformError.RetryAt.IsZero() {
 			return snapshot.platformError
 		}
-		if err := waitForRandomPromptPlatformLimit(ctx, snapshot.platformUntil, randomPromptHaikuReserve); err != nil {
+		if err := waitForRandomPromptPlatformLimit(ctx, snapshot.platformUntil, minimumAttempt); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -415,7 +419,7 @@ func (c *OpenRouterClient) generateRandomPromptAttempt(ctx context.Context, inpu
 		return "", upstreamErr
 	}
 	if len(body) > maxRandomPromptResponse {
-		return "", errors.New("OpenRouter random prompt response exceeds the allowed size")
+		return "", fmt.Errorf("%w: response exceeds the allowed size", errRandomPromptUnusable)
 	}
 	var response struct {
 		Choices []struct {
@@ -430,7 +434,7 @@ func (c *OpenRouterClient) generateRandomPromptAttempt(ctx context.Context, inpu
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
-		return "", fmt.Errorf("decode OpenRouter random prompt response: %w", err)
+		return "", fmt.Errorf("%w: malformed response envelope", errRandomPromptUnusable)
 	}
 	var lastErr error
 	for _, choice := range response.Choices {
@@ -441,7 +445,13 @@ func (c *OpenRouterClient) generateRandomPromptAttempt(ctx context.Context, inpu
 				continue
 			}
 		}
-		if hasRandomPromptRefusal(choice.Message.Refusal) || !randomPromptFinishIsComplete(choice.FinishReason, choice.NativeFinishReason) || openRouterContentHasRefusal(choice.Message.Content) {
+		finishReason := storyChoiceFinishReason(choice.FinishReason, choice.NativeFinishReason)
+		if hasRandomPromptRefusal(choice.Message.Refusal) || openRouterContentHasRefusal(choice.Message.Content) || finishReason == "content_filter" || finishReason == "refusal" {
+			lastErr = &upstreamError{StatusCode: http.StatusForbidden, ErrorType: "refusal"}
+			continue
+		}
+		if !randomPromptFinishIsComplete(choice.FinishReason, choice.NativeFinishReason) {
+			lastErr = fmt.Errorf("%w: response did not complete", errRandomPromptUnusable)
 			continue
 		}
 		candidate := strings.TrimSpace(openRouterMessageText(choice.Message.Content))

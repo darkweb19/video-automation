@@ -390,7 +390,7 @@ func TestGenerateRandomPromptRejectsInvalidInputAndOversizedProjectIdea(t *testi
 		return randomPromptTestResponse(t, strings.Repeat("x", maxRandomProjectTopicRunes+1)), nil
 	})
 	prompt, err := client.GenerateRandomPrompt(context.Background(), RandomPromptRequest{Category: RandomPromptCategoryNature, Mode: RandomPromptModeProject})
-	if err == nil || prompt != "" || calls != 1 {
+	if err == nil || prompt != "" || calls != randomProjectPromptAttempts {
 		t.Fatalf("oversized idea was silently truncated: prompt=%q err=%v calls=%d", prompt, err, calls)
 	}
 }

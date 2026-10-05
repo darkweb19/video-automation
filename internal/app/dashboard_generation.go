@@ -360,7 +360,7 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	prompt, err := provider.GenerateRandomPrompt(ctx, input)
 	if err != nil {
-		a.logger.Warn("random prompt generation failed")
+		a.logger.Warn("random prompt generation failed", "mode", input.Mode, "category", input.Category, "reason", safeRandomPromptFailure(err))
 		status := http.StatusBadGateway
 		var upstream *upstreamError
 		if errors.As(err, &upstream) && upstream.StatusCode == http.StatusTooManyRequests {
@@ -380,6 +380,9 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 func safeRandomPromptFailure(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "OpenRouter prompt generation timed out. Try again shortly."
+	}
+	if errors.Is(err, errRandomPromptTooLong) {
+		return "The prompt model returned text that is too long. Try again or enter your own prompt."
 	}
 	var upstream *upstreamError
 	if errors.As(err, &upstream) {
@@ -403,5 +406,8 @@ func safeRandomPromptFailure(err error) string {
 			return fmt.Sprintf("OpenRouter prompt generation failed with HTTP %d. Try again.", upstream.StatusCode)
 		}
 	}
-	return "The prompt model did not return a complete, valid prompt. Try again shortly."
+	if errors.Is(err, errRandomPromptUnusable) {
+		return "The prompt model did not return a complete, valid prompt. Try again or enter your own prompt."
+	}
+	return "Unable to reach the prompt model. Try again shortly."
 }
