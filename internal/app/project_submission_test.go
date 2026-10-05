@@ -283,3 +283,61 @@ func TestProjectSubmissionLookupBeyondHistoryAndVaultAndDeletedReplay(t *testing
 		})
 	}
 }
+
+func TestProjectSubmissionMigrationAndInvalidRequestIDs(t *testing.T) {
+	directory := t.TempDir()
+	store, err := OpenStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := store.InsertProject("Existing project", "fixture/video")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE project_submissions`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	loaded, err := store.Project(legacy.ID)
+	if err != nil || loaded.RequestID != "" || loaded.Topic != legacy.Topic {
+		t.Fatalf("legacy migration failed: project=%+v err=%v", loaded, err)
+	}
+	app := &dashboardApp{}
+	for _, requestID := range []string{"tiny", "../../path-traversal", strings.Repeat("x", 129), "fixture request 01", "fixture-request-💡"} {
+		input := projectSubmissionFixture()
+		input.RequestID = requestID
+		if response := submitProjectFixture(t, app, input); response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid request ID accepted: %q status=%d", requestID, response.Code)
+		}
+	}
+}
+
+func TestProjectSubmissionLookupAndReplayRequireAuthentication(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := projectSubmissionFixture()
+	if _, err := store.insertProjectSubmission(input.Topic, input.Category, "openrouter", "", input.Model, input.RequestID, input.requestHash()); err != nil {
+		t.Fatal(err)
+	}
+	app := NewDashboardHandler(store, security, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body, _ := json.Marshal(input)
+	for _, request := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/projects?request_id=" + input.RequestID, ""},
+		{http.MethodPost, "/api/projects", string(body)},
+	} {
+		response := vaultTestRequest(app, request.method, request.path, request.body, nil, "")
+		if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), input.Topic) {
+			t.Fatalf("unauthenticated request revealed a project: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+}
