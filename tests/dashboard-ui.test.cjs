@@ -9,10 +9,35 @@ const markup = fs.readFileSync(path.join(staticDir, 'index.html'), 'utf8');
 const source = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 
 // This DOM stub tests application state and events, not browser layout.
-function createApp() {
+let requestIDSeed = 0;
+function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
   let document;
   let compact = false;
   const timers = [];
+  const eventSources = [];
+  class EventSourceStub {
+    constructor(url, options) {
+      this.url = url;
+      this.options = options;
+      this.listeners = new Map();
+      this.closed = false;
+      eventSources.push(this);
+    }
+    addEventListener(name, callback) {
+      const callbacks = this.listeners.get(name) ?? [];
+      callbacks.push(callback);
+      this.listeners.set(name, callbacks);
+    }
+    emit(name, event = {}) {
+      for (const callback of this.listeners.get(name) ?? []) callback(event);
+    }
+    close() { this.closed = true; }
+  }
+  const sessionStorage = {
+    getItem: (key) => { if (storageThrows) throw new Error('Storage unavailable'); return sessionData.get(key) ?? null; },
+    setItem: (key, value) => { if (storageThrows) throw new Error('Storage unavailable'); sessionData.set(key, String(value)); },
+    removeItem: (key) => { if (storageThrows) throw new Error('Storage unavailable'); sessionData.delete(key); },
+  };
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag;
@@ -56,6 +81,11 @@ function createApp() {
       if (this.tagName === 'select' && !this.value && nodes[0]) this.value = nodes[0].value;
     }
     replaceChildren(...nodes) { this.children.forEach((child) => { child.parent = null; }); this.children = []; this.append(...nodes); }
+    insertBefore(node, reference) {
+      const index = this.children.indexOf(reference);
+      node.parent = this;
+      this.children.splice(index < 0 ? this.children.length : index, 0, node);
+    }
     querySelector() { return null; }
     querySelectorAll() { return []; }
     contains(node) { return node === this || this.children.some((child) => child.contains(node)); }
@@ -84,6 +114,7 @@ function createApp() {
   }
   const nodes = new Map([...markup.matchAll(/<([a-z][a-z0-9-]*)\b[^>]*\bid="([^"]+)"[^>]*>/g)]
     .map((match) => [match[2], new Element(match[1])]));
+  nodes.get('password-form').parentElement = new Element('div');
   const sidebar = new Element('aside');
   const tabs = ['project', 'single'].map((mode) => {
     const tab = new Element('button');
@@ -105,6 +136,9 @@ function createApp() {
     window: {
       location: { href: 'http://localhost/' },
       history: { replaceState() {} },
+      sessionStorage,
+      crypto: { randomUUID: () => `fixture-project-request-${++requestIDSeed}` },
+      EventSource: EventSourceStub,
       matchMedia: () => ({ matches: compact }),
       setTimeout: (callback) => { timers.push(callback); return timers.length; },
       clearTimeout() {},
@@ -124,9 +158,10 @@ function createApp() {
     loadHistory = async () => {};
     globalThis.ui = {
       state, elements, setGenerationMode, syncGenerationModeDisplay,
-      submitGeneration, submitProject, updateModelOptions,
+      submitGeneration, submitProject, generateRandomPrompt, updateModelOptions,
       syncNavigationAccessibility, setNavigationOpen,
       handleJobSnapshot, bindEvents, renderRecent, renderHistory, renderProject,
+      startJobEventStream, stopJobEventStream,
       setStatusRecord, renderVaultItems, openYouTubeUpload, closeYouTubeComposer, renderYouTubeUpload,
       renderYouTubeSettings, loadYouTubeStatus, renderVaultLocked, showLoggedOut, generateYouTubeMetadata, submitYouTubeUpload, retryYouTubeUpload,
       abandonYouTubeUpload, restartYouTubeUpload, moveHistoryItem, openVaultVideo, loadProjects
@@ -143,14 +178,15 @@ function createApp() {
     ...context.ui,
     document,
     takeTimer: () => timers.shift(),
+    eventSources,
     setCompact: (value) => { compact = value; },
     setRequest: (request) => { context.uiTestRequest = request; },
     setFetch: (fetcher) => { context.fetch = fetcher; },
   };
 }
 
-function configuredApp(mode, compatible = true) {
-  const app = createApp();
+function configuredApp(mode, compatible = true, options = {}) {
+  const app = createApp(options);
   app.state.authenticated = true;
   // Synthetic model capabilities are fixtures only; no provider is contacted.
   app.state.models = [{
@@ -186,6 +222,90 @@ test('project submission carries the selected category into story planning', asy
   await app.submitProject();
   assert.equal(submitted.topic, 'Test project topic');
   assert.equal(submitted.category, 'Nature');
+});
+
+test('an invalid random project idea response preserves the topic and allows a safe retry', async () => {
+  const app = configuredApp('project');
+  app.elements.projectTopic.value = 'Keep this idea while retrying';
+  let attempts = 0;
+  app.setRequest((requestPath, options = {}) => {
+    assert.equal(requestPath, '/api/prompts/random');
+    assert.equal(JSON.parse(options.body).mode, 'project');
+    attempts++;
+    if (attempts === 1) return Promise.resolve({ prompt: '  ' });
+    if (attempts === 2) return Promise.reject(new Error('The prompt model did not return a complete, valid prompt. Try again shortly.'));
+    return Promise.resolve({ prompt: 'A new project idea' });
+  });
+
+  await app.generateRandomPrompt();
+  assert.equal(app.elements.projectTopic.value, 'Keep this idea while retrying');
+  assert.match(app.elements.toast.textContent, /No prompt was returned/);
+  assert.equal(app.elements.randomPrompt.disabled, false);
+
+  await app.generateRandomPrompt();
+  assert.equal(app.elements.projectTopic.value, 'Keep this idea while retrying');
+  assert.equal(app.elements.toast.textContent, 'The prompt model did not return a complete, valid prompt. Try again shortly.');
+  assert.equal(app.elements.randomPrompt.disabled, false);
+
+  await app.generateRandomPrompt();
+  assert.equal(app.elements.projectTopic.value, 'A new project idea');
+  assert.equal(app.elements.toast.classList.contains('error'), false);
+  assert.equal(attempts, 3);
+});
+
+test('duplicate random idea requests are ignored while the first request is pending', async () => {
+  const app = configuredApp('project');
+  const pending = deferred();
+  let attempts = 0;
+  app.setRequest(() => { attempts++; return pending.promise; });
+  const first = app.generateRandomPrompt();
+  const second = app.generateRandomPrompt();
+  assert.equal(attempts, 1);
+  assert.equal(app.elements.randomPrompt.disabled, true);
+  pending.resolve({ prompt: 'One generated idea' });
+  await Promise.all([first, second]);
+  assert.equal(app.elements.projectTopic.value, 'One generated idea');
+  assert.equal(attempts, 1);
+  assert.equal(app.elements.randomPrompt.disabled, false);
+});
+
+test('a refreshed dashboard restores a project using its exact persisted request id', async () => {
+  const sessionData = new Map();
+  const firstApp = configuredApp('project', true, { sessionData });
+  const response = deferred();
+  let submittedBody;
+  firstApp.setRequest((requestPath, options = {}) => {
+    assert.equal(requestPath, '/api/projects');
+    submittedBody = JSON.parse(options.body);
+    return response.promise;
+  });
+  const submission = firstApp.submitProject();
+  await Promise.resolve();
+  assert.equal(sessionData.has('framevault.pendingProjectSubmission'), true);
+  assert.equal(submittedBody.request_id, firstApp.state.pendingProjectSubmission.request_id);
+
+  const project = {
+    id: 'fixture-restored-project', request_id: submittedBody.request_id,
+    topic: submittedBody.topic, status: 'planning', scenes: [], updated_at: 20,
+  };
+  const refreshed = configuredApp('project', true, { sessionData });
+  refreshed.state.authenticated = true;
+  refreshed.setRequest((requestPath) => {
+    if (requestPath === '/api/projects') return Promise.resolve({ projects: [] });
+    if (requestPath === `/api/projects?request_id=${encodeURIComponent(submittedBody.request_id)}`) {
+      return Promise.resolve({ projects: [project] });
+    }
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  await refreshed.loadProjects(false);
+  assert.equal(refreshed.state.currentProjectID, project.id);
+  assert.equal(refreshed.state.displayedProjectID, project.id);
+  assert.equal(refreshed.elements.statusBadge.textContent, 'planning');
+  assert.equal(refreshed.state.pendingProjectSubmission, null);
+  assert.equal(sessionData.has('framevault.pendingProjectSubmission'), false);
+
+  response.resolve(project);
+  await submission;
 });
 
 function collectText(node) {
@@ -269,7 +389,9 @@ for (const mode of ['project', 'single']) {
     const error = mode === 'project' ? app.elements.projectError : app.elements.statusError;
     assert.equal(panel.hidden, false);
     assert.equal(error.hidden, false);
-    assert.equal(error.textContent, 'Fixture submission failed');
+    assert.equal(error.textContent, mode === 'project'
+      ? 'Fixture submission failed The project may still be running. Retrying this same request is safe.'
+      : 'Fixture submission failed');
     assert.equal(app.elements.statusBadge.textContent.toLowerCase(), 'failed');
     assert.equal(app.elements.generate.disabled, false);
     assert.equal(app.elements.generate.getAttribute('aria-busy'), null);
