@@ -565,6 +565,95 @@ test('late project-list responses cannot restore state after the auth epoch chan
   assert.equal(app.state.currentProjectID, '');
 });
 
+test('late random idea responses cannot replace a prompt after logout and a new session', async () => {
+  const app = configuredApp('project');
+  app.state.authenticated = true;
+  app.state.authGeneration = 4;
+  const oldResponse = deferred();
+  const newResponse = deferred();
+  let calls = 0;
+  app.setRequest(() => {
+    calls++;
+    return calls === 1 ? oldResponse.promise : newResponse.promise;
+  });
+
+  const oldRequest = app.generateRandomPrompt();
+  assert.equal(app.elements.randomPrompt.disabled, true);
+  app.showLoggedOut();
+  assert.equal(app.elements.randomPrompt.disabled, false);
+  app.state.authenticated = true;
+  app.state.authGeneration++;
+  const newRequest = app.generateRandomPrompt();
+  assert.equal(app.elements.randomPrompt.disabled, true);
+  oldResponse.resolve({ prompt: 'Old session idea' });
+  await oldRequest;
+  assert.equal(app.elements.randomPrompt.disabled, true, 'the old request cannot clear the new request busy state');
+  newResponse.resolve({ prompt: 'New session idea' });
+  await newRequest;
+  assert.equal(app.elements.projectTopic.value, 'New session idea');
+  assert.equal(app.elements.randomPrompt.disabled, false);
+});
+
+test('late project POST responses cannot overwrite a pending request after logout and login', async () => {
+  const app = configuredApp('project');
+  app.state.authenticated = true;
+  app.state.authGeneration = 10;
+  const response = deferred();
+  app.setRequest(() => response.promise);
+  const submission = app.submitProject();
+  const oldRequestID = app.state.pendingProjectSubmission.request_id;
+
+  app.state.authenticated = false;
+  app.state.authGeneration++;
+  app.state.submissionPending = false;
+  app.state.projectSubmissionPending = false;
+  app.state.pendingProjectSubmission = {
+    request_id: 'new-session-project-request-0001',
+    body: { topic: 'A different session idea', category: 'Nature', model: 'fixture/video' },
+  };
+  app.state.authenticated = true;
+  app.state.authGeneration++;
+  app.state.submissionPending = true;
+  app.state.projectSubmissionPending = true;
+  app.state.currentProjectID = 'new-session-project';
+  app.state.displayedProjectID = 'new-session-project';
+  app.state.currentProjectRecord = { id: 'new-session-project', status: 'planning', scenes: [] };
+
+  response.resolve({ id: 'old-session-project', request_id: oldRequestID, status: 'planning', scenes: [] });
+  await submission;
+  assert.equal(app.state.currentProjectID, 'new-session-project');
+  assert.equal(app.state.pendingProjectSubmission.request_id, 'new-session-project-request-0001');
+  assert.equal(app.state.submissionPending, true);
+});
+
+test('logout during an uncertain-submission lookup cannot show a stale project failure', async () => {
+  const app = configuredApp('project');
+  app.state.authenticated = true;
+  const lookup = deferred();
+  let lookupStarted = false;
+  app.setRequest((requestPath, options = {}) => {
+    if (requestPath === '/api/projects' && options.method === 'POST') {
+      return Promise.reject(new TypeError('Connection interrupted'));
+    }
+    if (requestPath.startsWith('/api/projects?request_id=')) {
+      lookupStarted = true;
+      return lookup.promise;
+    }
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+
+  const submission = app.submitProject();
+  await flushUI();
+  assert.equal(lookupStarted, true);
+  app.showLoggedOut();
+  lookup.resolve({ projects: [] });
+  await submission;
+  assert.equal(app.state.authenticated, false);
+  assert.equal(app.state.projectSubmissionFailed, false);
+  assert.equal(app.state.currentProjectID, '');
+  assert.equal(app.elements.projectStatus.hidden, true);
+});
+
 function collectText(node) {
   return [node.textContent, ...(node.children || []).map(collectText)].filter(Boolean).join(' ');
 }
