@@ -226,3 +226,60 @@ func TestProjectSubmissionConcurrentChangedInputConflictsAndNewKeyIsIndependent(
 		t.Fatalf("independent requests were deduplicated: count=%d err=%v", count, err)
 	}
 }
+
+func TestProjectSubmissionLookupBeyondHistoryAndVaultAndDeletedReplay(t *testing.T) {
+	for _, unavailable := range []string{"vault", "deleted"} {
+		t.Run(unavailable, func(t *testing.T) {
+			store := newTestStore(t)
+			input := projectSubmissionFixture()
+			project, err := store.insertProjectSubmission(input.Topic, input.Category, "openrouter", "", input.Model, input.RequestID, input.requestHash())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`UPDATE video_projects SET created_at=1 WHERE id=?`, project.ID); err != nil {
+				t.Fatal(err)
+			}
+			for i := range 25 {
+				if _, err := store.InsertProject(fmt.Sprintf("Later project %d", i), input.Model); err != nil {
+					t.Fatal(err)
+				}
+			}
+			app := &dashboardApp{store: store}
+			lookup := func() []VideoProject {
+				request := httptest.NewRequest(http.MethodGet, "/api/projects?request_id="+input.RequestID, nil)
+				response := httptest.NewRecorder()
+				app.projects(response, request)
+				var result struct {
+					Projects []VideoProject `json:"projects"`
+				}
+				if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil {
+					t.Fatalf("lookup status=%d body=%s", response.Code, response.Body.String())
+				}
+				return result.Projects
+			}
+			if projects := lookup(); len(projects) != 1 || projects[0].ID != project.ID {
+				t.Fatalf("exact lookup lost older project: %+v", projects)
+			}
+			if err := store.UpdateProjectStatus(project.ID, "failed", "Synthetic terminal fixture"); err != nil {
+				t.Fatal(err)
+			}
+			if unavailable == "vault" {
+				_, err = store.db.Exec(`UPDATE video_projects SET in_vault=1 WHERE id=?`, project.ID)
+			} else {
+				err = store.DeleteProject(project.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if projects := lookup(); len(projects) != 0 {
+				t.Fatalf("unavailable project leaked: %+v", projects)
+			}
+			if response := submitProjectFixture(t, app, input); response.Code != http.StatusConflict || strings.Contains(response.Body.String(), input.Topic) {
+				t.Fatalf("unavailable request replay: status=%d body=%s", response.Code, response.Body.String())
+			}
+			if _, err := store.insertProjectSubmission(input.Topic, input.Category, "openrouter", "", input.Model, input.RequestID, input.requestHash()); !errors.Is(err, errProjectSubmissionUnavailable) {
+				t.Fatalf("tombstone did not prevent recreation: %v", err)
+			}
+		})
+	}
+}
