@@ -405,6 +405,94 @@ test('project submission still works if sessionStorage is unavailable and refres
   assert.equal(app.state.displayedProjectID, project.id);
 });
 
+test('uncertain project submission retries with the same request id and does not attach a same-topic project', async () => {
+  const app = configuredApp('project');
+  app.elements.promptCategory.value = '0';
+  app.bindEvents();
+  const requestIDs = [];
+  let attempt = 0;
+  const intendedProject = {
+    id: 'fixture-intended-project', request_id: '', topic: 'Test project topic', status: 'planning', scenes: [],
+  };
+  const otherProject = {
+    id: 'fixture-other-project', request_id: 'another-request-id-0001', topic: 'Test project topic', status: 'queued', scenes: [],
+  };
+  app.setRequest((requestPath, options = {}) => {
+    if (requestPath === '/api/projects' && options.method === 'POST') {
+      const body = JSON.parse(options.body);
+      requestIDs.push(body.request_id);
+      if (attempt++ === 0) return Promise.reject(new TypeError('Connection interrupted'));
+      return Promise.resolve({ ...intendedProject, request_id: body.request_id });
+    }
+    if (requestPath.startsWith('/api/projects?request_id=')) {
+      if (attempt === 1) return Promise.resolve({ projects: [otherProject] });
+      throw new Error('Unexpected recovery lookup after the accepted response');
+    }
+    if (requestPath === '/api/projects') return Promise.resolve({ projects: [] });
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+
+  await app.submitProject();
+  assert.equal(app.state.currentProjectID, '');
+  assert.equal(app.state.pendingProjectSubmission.request_id, requestIDs[0]);
+  assert.notEqual(app.state.currentProjectID, otherProject.id);
+  assert.equal(app.elements.projectTopic.value, 'Test project topic');
+
+  app.elements.promptCategory.value = '2';
+  app.elements.promptCategory.emit('input');
+  app.elements.promptCategory.value = '0';
+  app.elements.promptCategory.emit('input');
+  assert.equal(app.state.pendingProjectFormEdited, true);
+  app.elements.projectTopic.value = 'Test project topic';
+  await app.submitProject();
+  assert.equal(requestIDs[1], requestIDs[0]);
+  assert.equal(app.state.currentProjectID, intendedProject.id);
+});
+
+test('refresh selects an accepted active project ahead of older terminal projects', async () => {
+  const app = configuredApp('project');
+  app.state.authenticated = true;
+  app.setRequest((requestPath) => {
+    if (requestPath === '/api/projects') {
+      return Promise.resolve({ projects: [
+        { id: 'fixture-new-failed', status: 'failed', error: 'Fixture failure', scenes: [], updated_at: 30 },
+        { id: 'fixture-active', status: 'planning', scenes: [], updated_at: 20 },
+        { id: 'fixture-completed', status: 'completed', scenes: [], updated_at: 10 },
+      ] });
+    }
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  await app.loadProjects(false);
+  assert.equal(app.state.currentProjectID, 'fixture-active');
+  assert.equal(app.state.displayedProjectID, 'fixture-active');
+  assert.equal(app.elements.projectStatus.hidden, false);
+  assert.match(app.elements.projectStatusDetail.textContent, /in progress/i);
+});
+
+test('a list refresh during submission does not replace the local submitting card', async () => {
+  const app = configuredApp('project');
+  app.state.authenticated = true;
+  const post = deferred();
+  app.setRequest((requestPath, options = {}) => {
+    if (requestPath === '/api/projects' && options.method === 'POST') return post.promise;
+    if (requestPath === '/api/projects') {
+      return Promise.resolve({ projects: [{ id: 'older-active-project', status: 'planning', scenes: [] }] });
+    }
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  const submission = app.submitProject();
+  const requestID = app.state.pendingProjectSubmission.request_id;
+  await app.loadProjects(false);
+  assert.equal(app.state.currentProjectID, '');
+  assert.equal(app.state.displayedProjectID, '');
+  assert.equal(app.elements.statusBadge.textContent, 'Submitting');
+  assert.equal(app.elements.projectStatusDetail.textContent, 'Generating story and five-scene script...');
+
+  post.resolve({ id: 'accepted-project', request_id: requestID, status: 'planning', scenes: [] });
+  await submission;
+  assert.equal(app.state.currentProjectID, 'accepted-project');
+});
+
 function collectText(node) {
   return [node.textContent, ...(node.children || []).map(collectText)].filter(Boolean).join(' ');
 }
