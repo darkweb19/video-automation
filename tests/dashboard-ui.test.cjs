@@ -308,6 +308,103 @@ test('a refreshed dashboard restores a project using its exact persisted request
   await submission;
 });
 
+test('a safe post-refresh retry reuses the stored request body and id even when loaded defaults differ', async () => {
+  const sessionData = new Map([['framevault.pendingProjectSubmission', JSON.stringify({
+    request_id: 'stored-project-request-0001',
+    body: {
+      topic: 'Stored project idea', category: 'Nature', model: 'previous/video-model',
+      modal_account_id: 'previous-account',
+    },
+  })]]);
+  const app = configuredApp('project', true, { sessionData });
+  app.elements.projectTopic.value = '';
+  app.state.authenticated = true;
+  let submitted;
+  app.setRequest((requestPath, options = {}) => {
+    if (requestPath === '/api/projects' && options.method === 'POST') {
+      submitted = JSON.parse(options.body);
+      return Promise.resolve({
+        id: 'fixture-safe-retry', request_id: submitted.request_id,
+        topic: submitted.topic, status: 'planning', scenes: [],
+      });
+    }
+    if (requestPath === '/api/projects') return Promise.resolve({ projects: [] });
+    if (requestPath === '/api/projects?request_id=stored-project-request-0001') {
+      return Promise.resolve({ projects: [] });
+    }
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+
+  await app.loadProjects(false);
+  assert.equal(app.elements.projectTopic.value, 'Stored project idea');
+  app.elements.model.value = 'fixture/video';
+  await app.submitProject();
+  assert.equal(submitted.request_id, 'stored-project-request-0001');
+  assert.equal(submitted.topic, 'Stored project idea');
+  assert.equal(submitted.category, 'Nature');
+  assert.equal(submitted.model, 'previous/video-model');
+  assert.equal(submitted.modal_account_id, 'previous-account');
+});
+
+test('a project that appears after an empty refresh lookup is recovered from its live snapshot', async () => {
+  const requestID = 'late-project-request-0001';
+  const sessionData = new Map([['framevault.pendingProjectSubmission', JSON.stringify({
+    request_id: requestID,
+    body: { topic: 'Late accepted idea', category: 'Nature', model: 'fixture/video' },
+  })]]);
+  const app = configuredApp('project', true, { sessionData });
+  app.state.authenticated = true;
+  app.setRequest((requestPath) => {
+    if (requestPath === '/api/projects') return Promise.resolve({ projects: [] });
+    if (requestPath === `/api/projects?request_id=${requestID}`) return Promise.resolve({ projects: [] });
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  await app.loadProjects(false);
+  assert.equal(app.state.pendingProjectSubmission.request_id, requestID);
+  assert.equal(app.state.projectRecoveryAttemptedID, requestID);
+
+  const project = {
+    id: 'late-accepted-project', request_id: requestID,
+    topic: 'Late accepted idea', status: 'planning', scenes: [], updated_at: 50,
+  };
+  app.handleJobSnapshot('project', {
+    data: JSON.stringify({ id: project.id, project }),
+  });
+  await flushUI();
+  assert.equal(app.state.currentProjectID, project.id);
+  assert.equal(app.state.pendingProjectSubmission, null);
+  assert.equal(sessionData.has('framevault.pendingProjectSubmission'), false);
+});
+
+test('project submission still works if sessionStorage is unavailable and refresh restores from history', async () => {
+  const app = configuredApp('project', true, { storageThrows: true });
+  app.state.authenticated = true;
+  const project = {
+    id: 'fixture-no-storage-project', topic: 'Test project topic', status: 'planning', scenes: [],
+  };
+  let submitted;
+  app.setRequest((requestPath, options = {}) => {
+    if (requestPath === '/api/projects' && options.method === 'POST') {
+      submitted = JSON.parse(options.body);
+      return Promise.resolve({ ...project, request_id: submitted.request_id });
+    }
+    if (requestPath === '/api/projects') return Promise.resolve({ projects: [project] });
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  await app.submitProject();
+  assert.equal(typeof submitted.request_id, 'string');
+  assert.ok(submitted.request_id.length >= 16);
+  assert.equal(app.state.pendingProjectSubmission, null);
+
+  app.state.projects = [];
+  app.state.currentProjectID = '';
+  app.state.displayedProjectID = '';
+  app.state.currentProjectRecord = null;
+  await app.loadProjects(false);
+  assert.equal(app.state.currentProjectID, project.id);
+  assert.equal(app.state.displayedProjectID, project.id);
+});
+
 function collectText(node) {
   return [node.textContent, ...(node.children || []).map(collectText)].filter(Boolean).join(' ');
 }
