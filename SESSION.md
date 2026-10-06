@@ -1,30 +1,27 @@
-# Session handoff — 2026-10-05
+# Session handoff — 2026-10-06
 
 ## What was done
-- Fixed 30-second idea failures by retrying incomplete, invalid, and transient Haiku responses once within the existing request deadline; strict JSON and character validation remain enforced.
-- Added durable, idempotent project submissions keyed by optional `request_id`, including exact lookup, replay conflict handling, and deletion tombstones.
-- The dashboard saves the exact project request in the current tab and restores accepted work by ID after refresh; uncertain retries reuse the same request.
-- Documented refresh, tab-close, History, random-idea, and `/data` restart behavior in README; added the versioned random-project prompt v3 asset.
-- Created 15 focused conventional commits and pushed them to `feat/youtube-upload-and-generation-reliability`.
+- Implemented Railway runtime volume/path validation before storage initialization, including read-only `storage-path` for the root container entrypoint.
+- Added a root entrypoint that validates first, initializes only known `/data` paths, sets restrictive ownership/modes without recursive media traversal, then drops to `app` with `su-exec`.
+- Updated Dockerfile, LF `.gitattributes`, Railway README setup/recovery guidance, and [Railway persistence decision](docs/architecture/003-railway-persistence.md).
+- Implemented on `feat/youtube-upload-and-generation-reliability`; user authorized push and will attach the Development volume.
 
 ## Decisions locked
-- Project ideas use catalog-verified Haiku through OpenRouter; invalid or temporary output gets one correction attempt, while fatal account errors and refusals stop.
-- An optional request ID replays the same project for the same options; changed options conflict. Exact lookup remains authenticated and respects Vault visibility.
-- Same-tab refresh recovery uses session storage. App restart recovery requires the persistent `/data` volume.
-- Projects remain five ordered six-second silent 480p scenes assembled to silent 1080×1920 video.
-- No live paid generation or deployment was performed.
+- Keep Go + SQLite and all state/media under one service-scoped `/data` volume; no external database/object storage or Railway config-as-code.
+- Development gets its own new volume; do not share Production's existing volume. User confirms no Development state needs preserving.
+- Startup fails closed without valid Railway volume metadata. Set `DATA_DIR=/data`; leave `RAILWAY_RUN_UID` unset so root initialization can run before the app drops privileges.
+- A newly attached empty Development volume needs first-run password and provider setup. Same-volume redeploys retain password, Settings, history, and media.
+- Preserve existing generation and idempotent project behavior. No paid generations; Railway deployment was not inspected.
 
 ## Open questions
-1. Live Haiku output quality and production account credits remain unverified; run a budgeted smoke test only when authorized.
+1. Sujan: choose backup frequency, retention, and disaster recovery objectives.
 
 ## Next steps
-1. Review the updated branch in PR #6.
-2. After merge and authorization, deploy and run a budgeted live smoke test for project ideas and refresh recovery.
-3. For Modal callback rollout, deploy callback-compatible workers before the Go callback receiver and verify the public callback origin.
+1. Attach a new persistent volume to Railway Development at `/data` and set `DATA_DIR=/data`; keep Production separate.
+2. Deploy and verify login, Settings, history, media, `/health`, and persistence across a later redeploy.
 
 ## Gotchas
-- Verification passed: Go tests, build, vet, callback delivery, JavaScript syntax, 43/43 dashboard UI tests, and `git diff --check`; independent review reported no blocking findings.
-- Go's default AppData build cache is inaccessible in the sandbox; use repository-local `.gocache` and `.gomodcache` for local checks.
-- Tests use synthetic prompt fixtures and mocked providers; they do not establish live Haiku quality or external gateway behavior.
-- `workers/modal/__pycache__/` is untracked and was left untouched; do not stage it.
-- Never read or print `.env` or credentials. Keep `/data/secret.key` with production backups.
+- Verification passed: `go test ./...`, 43/43 dashboard UI tests, JavaScript syntax, Python callback delivery, Git Bash `-n`, Linux CGO-disabled deployment build, and `git diff --check`; independent review found no blockers.
+- Windows skipped two symlink tests due to platform privileges. Docker build/runtime and live Railway checks remain unavailable; complete those after deployment.
+- Railway volume handling is documented in [the architecture decision](docs/architecture/003-railway-persistence.md). Back up SQLite and `secret.key` together; include WAL sidecars and media in a stopped-app copy.
+- `workers/modal/__pycache__/` is pre-existing untracked data; leave it untouched. Never read `.env` or expose credentials.
