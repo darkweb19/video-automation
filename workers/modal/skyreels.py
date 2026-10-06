@@ -714,6 +714,7 @@ def deliver_terminal_callback(
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json",
+                    "User-Agent": "FrameVault-Modal-Callback/1.0",
                     "X-Modal-Callback-Token": callback_token,
                 },
             )
@@ -1090,6 +1091,7 @@ def post_video_callback_once(callback_url: str, callback_token: str, payload: di
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": "FrameVault-Modal-Callback/1.0",
             "Authorization": f"Bearer {callback_token}",
         },
     )
