@@ -53,7 +53,7 @@ docker compose down
 If you forget the password, generate a one-time recovery code from the same data directory as the running app. For Docker:
 
 ```bash
-docker compose exec video-automation /app/video-automation recovery-code
+docker compose exec --user app video-automation /app/video-automation recovery-code
 ```
 
 For a local development server:
@@ -170,7 +170,24 @@ video.example.com {
 
 Point DNS at the host and let Caddy obtain the certificate. Configure TLS before using real credentials or API keys. Do not publish the dashboard directly to a public interface.
 
-For Railway, build from the repository root Dockerfile, attach a persistent volume at `/data`, and expose container port `8080`. The health check is `GET /health`. Keep one service replica per local data volume; SQLite state and generated media are not shared across independent volumes.
+### Railway persistence
+
+In Railway, open the existing **video-automation Development** service and:
+
+1. Create a persistent volume in the Development environment.
+2. Attach/select that volume for the existing service and set its mount path to `/data`.
+3. Set `DATA_DIR=/data` in the service variables. Railway supplies the actual volume mount metadata automatically; do not set a made-up mount-path variable.
+4. Keep the root `Dockerfile` build, expose container port `8080`, and use `GET /health` as the health check.
+
+Leave Railway's `RAILWAY_RUN_UID` unset so the entrypoint can initialize volume ownership as root and then start the service as `app`. If Railway forces a non-root run UID, the initializer is bypassed and a root-owned volume may prevent startup; remove that override.
+
+The app validates the runtime mount before initializing storage. If the Development volume is missing or incorrectly mounted, startup fails instead of treating the container filesystem as persistent storage. The Settings page already stores provider credentials and other configuration in SQLite; after the volume is attached, they persist with the account and job history across pushes/redeploys, so they do not need to be entered again.
+
+An empty volume starts with the documented first-run account and no existing settings, history, or media. To retain existing state, first make a consistent full backup and restore it to the volume before starting the app. Preserve `/data/app.db`, `/data/secret.key`, `/data/videos/`, and `/data/projects/` together. Stop the app before copying SQLite files so any WAL state is included consistently; do not copy only `app.db` from a live service. Losing or mismatching `secret.key` makes encrypted settings and credentials unreadable.
+
+Keep Development and Production on separate service volumes. Do not attach the Production volume to Development or use one volume for both. Run one app replica per volume because SQLite state and generated media are local to that volume and are not shared across replicas. A redeploy using the same intact volume should retain the password, settings, history, and media; a new or empty volume is a new application state.
+
+Railway service and volume configuration is managed in the Railway dashboard. This repository does not add deprecated `railway.toml` or `railway.json` configuration files.
 
 For new Modal jobs, set `VIDEO_CALLBACK_BASE_URL` to the externally reachable HTTPS origin of the dashboard, for example `https://video.example.com`. Set only the origin, without a path, query, fragment, or user information; local, loopback, link-local, and private hosts are rejected. The Go service builds callback URLs from this setting and never trusts an inbound `Host` or forwarding header. `PUBLIC_BASE_URL` is accepted only as a backward-compatible fallback when `VIDEO_CALLBACK_BASE_URL` is unset.
 
