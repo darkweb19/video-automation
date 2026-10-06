@@ -21,11 +21,15 @@ const (
 
 var errStoryPlanUnusable = errors.New("OpenRouter did not return a valid JSON story plan with exactly 5 scenes")
 
-// GenerateStoryPlan keeps the configured free story model and retries an
-// incomplete plan once without tool requirements. Each provider request has
+// GenerateStoryPlan uses Claude Haiku 4.5 and retries an incomplete plan once.
+// Every attempt requires the same strict schema. Each provider request has
 // its own deadline, inside a bounded operation and any earlier caller deadline.
 func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) (StoryPlan, TextGenerationTrace, error) {
-	trace, err := newTextGenerationTrace(topic)
+	return c.GenerateStoryPlanForCategory(ctx, topic, "")
+}
+
+func (c *OpenRouterClient) GenerateStoryPlanForCategory(ctx context.Context, topic, category string) (StoryPlan, TextGenerationTrace, error) {
+	trace, err := newTextGenerationTraceForCategory(topic, category)
 	if err != nil {
 		return StoryPlan{}, trace, err
 	}
@@ -55,22 +59,21 @@ func (c *OpenRouterClient) GenerateStoryPlan(ctx context.Context, topic string) 
 		}
 		trace.Attempts++
 		attemptCtx, cancelAttempt := context.WithTimeout(operationCtx, storyGenerationTimeout)
-		plan, actualModel, rawResponse, attemptErr := c.generateStoryPlanAttempt(attemptCtx, trace, plainJSON)
+		plan, actualModel, rawResponse, attemptErr := c.generateStoryPlanAttempt(attemptCtx, trace)
 		cancelAttempt()
 		trace.ActualModel = actualModel
 		trace.RawResponse = c.safeStoryRawResponse(rawResponse)
+		if err := operationCtx.Err(); err != nil {
+			return fail(err)
+		}
 		if attemptErr == nil {
 			trace.Status, trace.Error = "completed", ""
 			trace.CompletedAt, trace.UpdatedAt = time.Now().Unix(), time.Now().Unix()
 			return plan, trace, nil
 		}
-		if err := operationCtx.Err(); err != nil {
-			return fail(err)
-		}
 		var upstream *upstreamError
-		if errors.As(attemptErr, &upstream) && upstream.StatusCode == http.StatusTooManyRequests && upstream.RateLimitScope == "platform" {
-			state.setPlatformCooldown(stateKey, upstream, time.Now())
-		}
+		_ = errors.As(attemptErr, &upstream)
+		recordRandomPromptCooldown(state, stateKey, ScriptModel, attemptErr)
 		retry, usePlainJSON := storyPlanRetryPolicy(attemptErr)
 		if !retry || attempt == storyGenerationAttempts-1 {
 			return fail(attemptErr)
@@ -111,24 +114,17 @@ func (c *OpenRouterClient) safeStoryRawResponse(raw string) string {
 	return raw
 }
 
-func (c *OpenRouterClient) generateStoryPlanAttempt(ctx context.Context, trace TextGenerationTrace, plainJSON bool) (StoryPlan, string, string, error) {
+func (c *OpenRouterClient) generateStoryPlanAttempt(ctx context.Context, trace TextGenerationTrace) (StoryPlan, string, string, error) {
 	request := map[string]any{
-		"model":                 ScriptModel,
-		"messages":              []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
-		"temperature":           0.4,
-		"max_completion_tokens": storyPlanCompletionTokens,
-		"reasoning":             map[string]any{"effort": "minimal", "exclude": true},
-	}
-	if !plainJSON {
-		request["tools"] = []map[string]any{{
-			"type": "function",
-			"function": map[string]any{
-				"name":        storyPlanToolName,
-				"description": "Submit the complete five-scene video plan.",
-				"parameters":  storyPlanSchema(),
-			},
-		}}
-		request["tool_choice"] = map[string]any{"type": "function", "function": map[string]string{"name": storyPlanToolName}}
+		"model":       ScriptModel,
+		"messages":    []map[string]string{{"role": "system", "content": trace.SystemPrompt}, {"role": "user", "content": trace.UserPrompt}},
+		"temperature": 0.4,
+		"max_tokens":  storyPlanCompletionTokens,
+		"provider":    map[string]any{"require_parameters": true},
+		"response_format": map[string]any{
+			"type":        "json_schema",
+			"json_schema": map[string]any{"name": "video_story_plan", "strict": true, "schema": storyPlanSchema()},
+		},
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
@@ -206,6 +202,11 @@ func parseStoryPlanResponse(body []byte, headers http.Header) (StoryPlan, string
 		}
 		plan, raw, err := parseStoryPlanChoice(choice.Message)
 		if err == nil {
+			// Compatibility response envelopes and tool arguments remain
+			// readable, but generated content must be one exact JSON object.
+			plan, err = parseGeneratedStoryJSON(raw)
+		}
+		if err == nil {
 			return plan, response.Model, raw, nil
 		}
 		var upstream *upstreamError
@@ -220,14 +221,15 @@ func parseStoryPlanResponse(body []byte, headers http.Header) (StoryPlan, string
 }
 
 func storyChoiceFinishReason(normalized, native string) string {
-	switch strings.ToLower(native) {
-	case "length", "max_tokens", "max_output_tokens":
+	normalized = strings.ToLower(strings.TrimSpace(normalized))
+	switch strings.ToLower(strings.TrimSpace(native)) {
+	case "length", "max_tokens", "max_output_tokens", "token_limit":
 		return "length"
 	case "content_filter", "safety":
 		return "content_filter"
-	case "refusal", "refused":
+	case "refusal", "refused", "content_policy_violation":
 		return "refusal"
-	case "error":
+	case "error", "failed":
 		return "error"
 	default:
 		return normalized
@@ -242,10 +244,9 @@ func storyPlanRetryPolicy(err error) (retry, plainJSON bool) {
 	if errors.As(err, &upstream) {
 		switch {
 		case upstream.StatusCode == http.StatusBadRequest, upstream.StatusCode == http.StatusNotFound:
-			message := strings.ToLower(upstream.Message)
-			mentionsTools := strings.Contains(message, "tool_choice") || strings.Contains(message, "tools") || strings.Contains(message, "tool use") || strings.Contains(message, "tool calling") || strings.Contains(message, "function calling")
-			unsupported := strings.Contains(message, "unsupported") || strings.Contains(message, "not supported") || strings.Contains(message, "does not support") || (strings.Contains(message, "no endpoints") && strings.Contains(message, "support"))
-			return mentionsTools && unsupported, mentionsTools && unsupported
+			// The pinned model supports structured outputs. Do not weaken the
+			// schema or require_parameters after a request/configuration error.
+			return false, false
 		case upstream.StatusCode == http.StatusForbidden:
 			refused := upstream.ErrorType == "content_policy_violation" || upstream.ErrorType == "refusal"
 			return refused, refused
@@ -283,6 +284,10 @@ func waitForStoryPlatformCooldown(ctx context.Context, state *randomPromptState,
 			return err
 		}
 		snapshot := state.cooldownSnapshot(scopeKey, time.Now())
+		if modelUntil := randomPromptModelCooldownUntil(snapshot.models, ScriptModel); modelUntil.After(snapshot.platformUntil) {
+			snapshot.platformUntil = modelUntil
+			snapshot.platformError = paidTextModelCooldownError(modelUntil)
+		}
 		if snapshot.platformUntil.IsZero() {
 			return nil
 		}

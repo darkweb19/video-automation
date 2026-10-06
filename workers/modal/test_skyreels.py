@@ -369,6 +369,127 @@ class SkyReelsCallbackDeliveryTests(unittest.TestCase):
 
 
 class SkyReelsSupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_permanent_initial_callback_rejection_stops_before_generation(self) -> None:
+        job_id = "client-job-initial-callback-rejected"
+        stored = {"id": job_id, "status": "pending", "progress": 0}
+        generation_calls = 0
+
+        async def read_job(_job_id: str):
+            return dict(stored)
+
+        async def write_job(_job_id: str, value: dict[str, Any]):
+            stored.clear()
+            stored.update(value)
+
+        async def run_generation():
+            nonlocal generation_calls
+            generation_calls += 1
+
+        result = await WORKER.run_callback_supervisor(
+            job_id,
+            f"https://dashboard.example/api/video-callbacks/{job_id}",
+            CALLBACK_TOKEN,
+            run_generation,
+            read_job,
+            write_job,
+            post_once=lambda *_args: 403,
+            sleep=lambda _seconds: None,
+        )
+
+        self.assertEqual(generation_calls, 0)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "callback_delivery_rejected")
+        self.assertTrue(result["delivery_rejected"])
+        self.assertEqual(stored["status"], "failed")
+        self.assertEqual(stored["callback_delivery"]["status_code"], 403)
+        self.assertNotIn(CALLBACK_TOKEN, repr(stored))
+
+    async def test_transient_initial_callback_exhaustion_stays_retryable_before_generation(self) -> None:
+        job_id = "client-job-initial-callback-transient"
+        stored = {"id": job_id, "status": "pending", "progress": 0}
+        generation_calls = 0
+
+        async def read_job(_job_id: str):
+            return dict(stored)
+
+        async def write_job(_job_id: str, value: dict[str, Any]):
+            stored.clear()
+            stored.update(value)
+
+        async def run_generation():
+            nonlocal generation_calls
+            generation_calls += 1
+
+        with self.assertRaises(WORKER.CallbackDeliveryError):
+            await WORKER.run_callback_supervisor(
+                job_id,
+                f"https://dashboard.example/api/video-callbacks/{job_id}",
+                CALLBACK_TOKEN,
+                run_generation,
+                read_job,
+                write_job,
+                post_once=lambda *_args: 503,
+                sleep=lambda _seconds: None,
+            )
+
+        self.assertEqual(generation_calls, 0)
+        self.assertEqual(stored["status"], "in_progress")
+        self.assertEqual(stored["callback_delivery"]["state"], "retry_exhausted")
+        self.assertEqual(stored["callback_delivery"]["status_code"], 503)
+
+    async def test_permanent_callback_rejection_is_durable_and_replay_skips_generation(self) -> None:
+        job_id = "client-job-callback-rejected"
+        stored = {
+            "id": job_id,
+            "status": "completed",
+            "stage": "completed",
+            "progress": 100,
+            "model": WORKER.MODEL_ID,
+        }
+        writes: list[dict[str, Any]] = []
+        callbacks: list[dict[str, Any]] = []
+        generation_calls = 0
+
+        async def read_job(_job_id: str):
+            return dict(stored)
+
+        async def write_job(_job_id: str, value: dict[str, Any]):
+            nonlocal stored
+            stored = dict(value)
+            writes.append(dict(value))
+
+        async def run_generation():
+            nonlocal generation_calls
+            generation_calls += 1
+
+        def reject_callback(_url, _token, payload):
+            callbacks.append(dict(payload))
+            return 403
+
+        for _ in range(2):
+            result = await WORKER.run_callback_supervisor(
+                job_id,
+                f"https://dashboard.example/api/video-callbacks/{job_id}",
+                CALLBACK_TOKEN,
+                run_generation,
+                read_job,
+                write_job,
+                post_once=reject_callback,
+                sleep=lambda _seconds: None,
+            )
+            self.assertTrue(result["delivery_rejected"])
+            self.assertEqual(result["delivery_status"], 403)
+
+        self.assertEqual(generation_calls, 0)
+        self.assertEqual(len(callbacks), 2)
+        self.assertEqual(stored["status"], "completed")
+        self.assertEqual(
+            stored["callback_delivery"],
+            {"state": "rejected", "code": "http_403", "status_code": 403, "attempts": 1},
+        )
+        self.assertNotIn(CALLBACK_TOKEN, repr(stored))
+        self.assertEqual(WORKER.callback_delivery_summary(stored), stored["callback_delivery"])
+
     async def test_startup_error_is_persisted_then_sent_as_terminal_callback(self) -> None:
         job_id = "client-job-startup"
         stored = {
@@ -745,6 +866,12 @@ class SkyReelsAPITests(unittest.IsolatedAsyncioTestCase):
             "progress": 100,
             "gpu_seconds": 72.5,
             "gpu_name": "L40S",
+            "callback_delivery": {
+                "state": "rejected",
+                "code": "http_403",
+                "status_code": 403,
+                "attempts": 1,
+            },
         }
         await WORKER.write_job_async(job_id, completed_job)
         video = b"0123456789-video-content"
@@ -755,6 +882,8 @@ class SkyReelsAPITests(unittest.IsolatedAsyncioTestCase):
         payload = completed.json()
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["progress"], 100)
+        self.assertEqual(payload["callback_delivery"], completed_job["callback_delivery"])
+        self.assertNotIn(CALLBACK_TOKEN, json.dumps(payload))
         self.assertEqual(payload["unsigned_urls"], [
             f"http://worker.test{BASE_PATH}/{job_id}/content?index=0"
         ])

@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/model-picker.css?v=20260929-1">
   <link rel="stylesheet" href="/static/project.css?v=20260929-1">
   <link rel="stylesheet" href="/static/history-settings.css?v=20260929-1">
+  <link rel="stylesheet" href="/static/youtube.css?v=20261002-1">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -152,6 +153,7 @@
                 <button id="retry-status" class="button secondary" type="button" hidden>Retry status</button>
                 <video id="generated-video" aria-label="Generated video preview" controls playsinline preload="metadata" hidden></video>
                 <a id="open-video" class="button secondary full" hidden>Download video</a>
+                <button id="single-youtube-upload" class="button secondary full youtube-entry" type="button" hidden>Upload to YouTube</button>
               </div>
               <div id="project-status" hidden>
                 <div id="project-progress-wrap" class="progress-wrap"><div id="project-progress-bar" class="progress-bar"></div></div>
@@ -172,7 +174,7 @@
                   <div class="trace-heading"><div><h3 id="project-trace-title">Generation details</h3><p>Recorded inputs, outputs, and retry history.</p></div></div>
                   <div id="project-trace-sections" class="trace-sections"></div>
                 </section>
-                <div id="project-final" class="project-final" hidden><video id="project-video" aria-label="30-second project preview" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a></div>
+                <div id="project-final" class="project-final" hidden><video id="project-video" aria-label="30-second project preview" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a><button id="project-youtube-upload" class="button secondary full youtube-entry" type="button">Upload to YouTube</button></div>
               </div>
             </aside>
           </div>
@@ -227,6 +229,7 @@
               <h2 id="vault-player-title">Vault video</h2>
               <div class="vault-player-actions">
                 <button id="vault-player-download" class="button secondary" type="button" disabled>Download</button>
+                <button id="vault-player-youtube-upload" class="button secondary" type="button" hidden>Upload to YouTube</button>
                 <button id="vault-player-close" class="button secondary" type="button">Close</button>
               </div>
             </div>
@@ -243,6 +246,24 @@
                 <div class="field"><label for="video-provider">Video provider</label><select id="video-provider"><option value="modal">Modal</option><option value="openrouter">OpenRouter</option></select><small id="provider-help">Model options and capabilities follow the selected provider.</small></div>
                 <div class="provider-actions"><span id="video-provider-state" class="badge neutral">Checking</span><button id="test-video-provider" class="button secondary" type="button">Test video provider</button></div>
               </div>
+            </section>
+            <section id="youtube-settings" class="panel youtube-settings-panel">
+              <div class="panel-head"><div><h2>YouTube</h2><p>Connect one channel for manual video uploads.</p></div><span id="youtube-channel-state" class="badge neutral">Checking</span></div>
+              <div id="youtube-channel-summary" class="youtube-channel-summary" hidden>
+                <div><span>Connected channel</span><strong id="youtube-channel-name"></strong></div>
+                <button id="youtube-disconnect" class="button secondary" type="button">Disconnect channel</button>
+              </div>
+              <form id="youtube-config-form" class="stack youtube-config-form">
+                <div class="field"><label for="youtube-client-id">Google OAuth client ID</label><input id="youtube-client-id" name="client_id" autocomplete="off" required><small>Use a web application OAuth client with YouTube upload access.</small></div>
+                <div class="field"><label for="youtube-client-secret">Google OAuth client secret</label><input id="youtube-client-secret" name="client_secret" type="password" autocomplete="new-password"><small id="youtube-secret-help">The secret is write-only. Leave it blank to keep a saved secret.</small></div>
+                <div class="field"><label for="youtube-base-url">Public app origin</label><input id="youtube-base-url" name="base_url" type="url" inputmode="url" autocomplete="url" required><small>Enter the public HTTPS origin that serves FrameVault.</small></div>
+                <div class="field"><label for="youtube-redirect-uri">OAuth redirect URI</label><input id="youtube-redirect-uri" type="text" readonly aria-describedby="youtube-redirect-help"><small id="youtube-redirect-help">Add this exact URI to the OAuth client’s authorized redirect URIs.</small></div>
+                <p id="youtube-config-error" class="alert error" role="alert" hidden></p>
+                <div class="youtube-config-actions">
+                  <button id="youtube-save-config" class="button primary" type="submit">Save YouTube settings</button>
+                  <button id="youtube-connect" class="button secondary" type="button" hidden>Connect YouTube channel</button>
+                </div>
+              </form>
             </section>
             <section id="openrouter-settings" class="panel settings-key-panel">
               <div class="panel-head"><div><h2>OpenRouter API key</h2><p>Used for story generation and OpenRouter video. Encrypted at rest.</p></div><span id="key-state" class="badge neutral">Checking</span></div>
@@ -287,7 +308,59 @@
       </div>
     </main>
   </div>
+  <dialog id="youtube-upload-dialog" class="youtube-dialog" aria-labelledby="youtube-upload-heading" aria-describedby="youtube-upload-intro">
+    <div class="youtube-dialog-shell">
+      <header class="youtube-dialog-header">
+        <div><h2 id="youtube-upload-heading">Upload to YouTube</h2><p id="youtube-upload-intro">Review the video and upload details before sending it to your channel.</p></div>
+        <button id="youtube-dialog-close" class="button secondary" type="button" autofocus>Close</button>
+      </header>
+      <div class="youtube-dialog-body">
+        <div class="youtube-preview-column">
+          <div class="youtube-preview-frame"><video id="youtube-preview" aria-label="Video being prepared for upload" controls playsinline preload="metadata"></video></div>
+          <p id="youtube-source-label" class="youtube-source-label"></p>
+        </div>
+        <div class="youtube-composer-column">
+          <div id="youtube-connect-required" class="youtube-connect-required" hidden>
+            <p>Connect a YouTube channel in Settings before uploading.</p>
+            <button id="youtube-go-settings" class="button secondary" type="button">Open Settings</button>
+          </div>
+          <form id="youtube-upload-form" class="stack youtube-upload-form">
+            <div class="youtube-channel-ready"><span>Channel</span><strong id="youtube-upload-channel"></strong></div>
+            <div class="field"><label for="youtube-title">Video title</label><input id="youtube-title" name="title" autocomplete="off" required></div>
+            <div class="field"><label for="youtube-description">Description</label><textarea id="youtube-description" name="description" rows="5"></textarea></div>
+            <button id="youtube-generate-metadata" class="button secondary youtube-metadata-button" type="button">Generate title and description</button>
+            <p id="youtube-metadata-error" class="alert error" role="alert" hidden></p>
+            <div class="field"><label for="youtube-visibility">Visibility</label><select id="youtube-visibility" name="privacy_status"><option value="private" selected>Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select><small id="youtube-visibility-help">Private is selected by default. Some Google API projects can upload only privately until audited.</small></div>
+            <fieldset class="youtube-audience-fieldset"><legend>Is this video made for kids?</legend><label class="youtube-choice"><input id="youtube-made-for-kids-yes" type="radio" name="made_for_kids" value="true" required><span>Yes, it is made for kids</span></label><label class="youtube-choice"><input id="youtube-made-for-kids-no" type="radio" name="made_for_kids" value="false" required><span>No, it is not made for kids</span></label></fieldset>
+            <label class="youtube-choice youtube-disclosure"><input id="youtube-synthetic" name="contains_synthetic_media" type="checkbox" checked><span>This video contains AI-generated or synthetic content</span></label>
+            <div id="youtube-upload-status" class="youtube-upload-status" role="status" aria-live="polite" hidden>
+              <div class="youtube-upload-status-head"><strong id="youtube-upload-status-label"></strong><span id="youtube-upload-progress-label"></span></div>
+              <div id="youtube-upload-progress-wrap" class="youtube-upload-progress-wrap" hidden><div id="youtube-upload-progress-bar" class="youtube-upload-progress-bar"></div></div>
+              <p id="youtube-upload-error" class="youtube-upload-error" hidden></p>
+              <p id="youtube-upload-note" class="youtube-upload-note" hidden></p>
+            </div>
+            <section id="youtube-duplicate-recovery" class="youtube-duplicate-recovery" aria-labelledby="youtube-duplicate-heading" hidden>
+              <strong id="youtube-duplicate-heading">Check YouTube before restarting</strong>
+              <p>This upload may have reached YouTube. Restart only after you confirm it is not in YouTube Studio.</p>
+              <a id="youtube-open-studio" class="button secondary" href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer">Open YouTube Studio</a>
+              <div id="youtube-recovery-confirm-controls">
+                <label class="youtube-choice"><input id="youtube-duplicate-confirm" type="checkbox"><span>I checked YouTube Studio. This video was not uploaded.</span></label>
+                <button id="youtube-upload-restart" class="button secondary" type="button" disabled>Start upload again</button>
+              </div>
+            </section>
+            <div class="youtube-upload-actions">
+              <button id="youtube-upload-submit" class="button primary" type="submit">Upload video</button>
+              <button id="youtube-upload-cancel" class="button secondary" type="button" hidden>Cancel upload</button>
+              <button id="youtube-upload-abandon" class="button secondary" type="button" hidden>Abandon upload</button>
+              <button id="youtube-upload-retry" class="button secondary" type="button" hidden>Retry upload</button>
+              <a id="youtube-open-video" class="button secondary" target="_blank" rel="noopener noreferrer" hidden>Open on YouTube</a>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20260929-1" defer></script>
+  <script src="/static/app.js?v=20261002-1" defer></script>
 </body>
 </html>

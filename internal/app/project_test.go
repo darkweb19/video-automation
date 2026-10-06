@@ -25,7 +25,7 @@ func validStoryPlan() StoryPlan {
 	return plan
 }
 
-func TestGenerateStoryPlanUsesLingModel(t *testing.T) {
+func TestGenerateStoryPlanUsesConfiguredScriptModel(t *testing.T) {
 	plan := validStoryPlan()
 	content, _ := json.Marshal(plan)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,40 +36,24 @@ func TestGenerateStoryPlanUsesLingModel(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != "inclusionai/ling-3.0-flash-fin:free" {
+		if body["model"] != ScriptModel {
 			t.Fatalf("model = %v", body["model"])
 		}
-		if body["max_completion_tokens"] != float64(storyPlanCompletionTokens) {
-			t.Fatalf("max completion tokens = %v", body["max_completion_tokens"])
-		}
-		tools, ok := body["tools"].([]any)
-		if !ok || len(tools) != 1 {
-			t.Fatalf("tools = %v", body["tools"])
-		}
-		function := tools[0].(map[string]any)["function"].(map[string]any)
-		choice := body["tool_choice"].(map[string]any)["function"].(map[string]any)
-		if function["name"] != "submit_story_plan" || function["parameters"] == nil || choice["name"] != "submit_story_plan" {
-			t.Fatalf("tool configuration = %v, choice = %v", function, choice)
-		}
-		properties := function["parameters"].(map[string]any)["properties"].(map[string]any)
+		assertHaikuPromptSchema(t, body, storyPlanCompletionTokens)
+		schema := body["response_format"].(map[string]any)["json_schema"].(map[string]any)["schema"].(map[string]any)
+		properties := schema["properties"].(map[string]any)
 		continuity := properties["continuity"].(map[string]any)
 		scenes := properties["scenes"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)
 		videoPrompt := scenes["video_prompt"].(map[string]any)
-		if continuity["maxLength"] != float64(maxGeneratedContinuity) || videoPrompt["maxLength"] != float64(maxGeneratedScenePrompt) {
-			t.Fatalf("scene and continuity length guidance missing: %v, %v", videoPrompt, continuity)
+		if !strings.Contains(continuity["description"].(string), "900") || !strings.Contains(videoPrompt["description"].(string), "2200") {
+			t.Fatal("scene and continuity length guidance missing")
 		}
 		messages := body["messages"].([]any)
 		userMessage := messages[1].(map[string]any)["content"].(string)
 		if !strings.Contains(userMessage, `"video_prompt"`) || !strings.Contains(userMessage, "a fox rescue") {
 			t.Fatalf("user prompt is missing topic or schema: %q", userMessage)
 		}
-		if _, ok := body["response_format"]; ok {
-			t.Fatal("free-text route must not require structured output")
-		}
-		if _, ok := body["provider"]; ok {
-			t.Fatal("free-text route must not require provider parameters")
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"model": "acme/free-actual", "choices": []any{map[string]any{"message": map[string]any{"content": "Here is the plan:\n```json\n" + string(content) + "\n```"}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": ScriptModel, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": string(content)}}}})
 	}))
 	defer server.Close()
 	client := NewOpenRouterClient("test-key")
@@ -81,7 +65,7 @@ func TestGenerateStoryPlanUsesLingModel(t *testing.T) {
 	if len(generated.Scenes) != ProjectSceneCount || generated.Title != plan.Title {
 		t.Fatalf("unexpected plan: %+v", generated)
 	}
-	if trace.RouterModel != "inclusionai/ling-3.0-flash-fin:free" || trace.ActualModel != "acme/free-actual" || !strings.Contains(trace.RawResponse, "```json") || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
+	if trace.RouterModel != ScriptModel || trace.ActualModel != ScriptModel || trace.RawResponse != string(content) || trace.SystemPrompt != scriptSystemPrompt || !strings.Contains(trace.ResponseSchema, `"video_prompt"`) {
 		t.Fatalf("unexpected trace: %+v", trace)
 	}
 }

@@ -26,6 +26,9 @@ type randomPromptCooldownScope struct {
 	platformUntil time.Time
 	platformError upstreamError
 	hasPlatform   bool
+	freeUntil     time.Time
+	freeError     upstreamError
+	hasFree       bool
 	models        map[string]time.Time
 	lastUsed      time.Time
 }
@@ -33,6 +36,8 @@ type randomPromptCooldownScope struct {
 type randomPromptCooldownSnapshot struct {
 	platformUntil time.Time
 	platformError *upstreamError
+	freeUntil     time.Time
+	freeError     *upstreamError
 	models        map[string]time.Time
 }
 
@@ -62,6 +67,16 @@ func (s *randomPromptState) cooldownSnapshot(scopeKey string, now time.Time) ran
 		snapshot.platformUntil = scope.platformUntil
 		platformError := scope.platformError
 		snapshot.platformError = &platformError
+	}
+	if !scope.freeUntil.IsZero() && !scope.freeUntil.After(now) {
+		scope.freeUntil = time.Time{}
+		scope.freeError = upstreamError{}
+		scope.hasFree = false
+	}
+	if scope.hasFree {
+		snapshot.freeUntil = scope.freeUntil
+		freeError := scope.freeError
+		snapshot.freeError = &freeError
 	}
 	for model, until := range scope.models {
 		if !until.After(now) {
@@ -107,12 +122,46 @@ func (s *randomPromptState) setPlatformCooldown(scopeKey string, upstream *upstr
 	defer s.mu.Unlock()
 	scope := s.getOrCreateScopeLocked(scopeKey, now)
 	touchRandomPromptScope(scope, now)
+	if randomPromptIsFreeQuota(upstream) {
+		if scope.freeUntil.After(until) {
+			return
+		}
+		scope.freeUntil, scope.freeError, scope.hasFree = until, *upstream, true
+		return
+	}
 	if scope.platformUntil.After(until) {
 		return
 	}
 	scope.platformUntil = until
 	scope.platformError = *upstream
 	scope.hasPlatform = true
+}
+
+// Only explicit free-quota metadata or an anchored legacy quota message can
+// exempt Haiku from a shared platform cooldown. Generic account limits and
+// provider messages that merely mention a free quota retain their scope.
+func randomPromptIsFreeQuota(upstream *upstreamError) bool {
+	if upstream == nil || upstream.StatusCode != 429 || upstream.RateLimitScope != "platform" {
+		return false
+	}
+	source := strings.ToLower(strings.TrimSpace(upstream.LimitSource))
+	if source == "openrouter_free_models" || source == "openrouter_free_model" || source == "openrouter_free_models_per_min" || source == "openrouter_free_models_per_day" {
+		return true
+	}
+	message := strings.TrimSpace(strings.ToLower(upstream.Message))
+	if !strings.HasPrefix(message, "rate limit exceeded:") {
+		return false
+	}
+	quota := strings.TrimSpace(strings.TrimPrefix(message, "rate limit exceeded:"))
+	for _, prefix := range []string{"free-models-per-min", "free-models-per-day"} {
+		if strings.HasPrefix(quota, prefix) {
+			suffix := strings.TrimPrefix(quota, prefix)
+			if suffix == "" || strings.ContainsAny(suffix[:1], "-. :\t\r\n") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func touchRandomPromptScope(scope *randomPromptCooldownScope, now time.Time) {

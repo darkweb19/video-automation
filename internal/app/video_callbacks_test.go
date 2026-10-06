@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +176,18 @@ func TestVideoCallbackFailureUsesSafeReadableError(t *testing.T) {
 	}
 	if len(record.Events) < 2 || record.Events[len(record.Events)-1].Message != record.Error {
 		t.Fatalf("callback failure event missing: %#v", record.Events)
+	}
+}
+
+func TestRejectedInitialCallbackFailureIsActionableAndSafe(t *testing.T) {
+	message := callbackFailure("callback_delivery_rejected")
+	for _, want := range []string{"VIDEO_CALLBACK_BASE_URL", "deployed callback receiver", "edge access rules"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("callback rejection guidance %q does not contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "Bearer ") || strings.Contains(message, "token") {
+		t.Fatalf("callback rejection guidance exposed a capability: %q", message)
 	}
 }
 
@@ -356,6 +369,169 @@ func TestProcessorSkipsPollingCallbackJobsAndKeepsLegacyPolling(t *testing.T) {
 	processor.process(context.Background())
 	if requests != 1 {
 		t.Fatalf("legacy generation made %d provider requests; expected normal polling", requests)
+	}
+}
+
+func TestCallbackRecoveryScheduleIsSparseAndBounded(t *testing.T) {
+	now := time.Date(2026, time.October, 2, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(8 * time.Hour).Unix()
+	want := []time.Duration{15 * time.Minute, time.Hour, 3 * time.Hour, 6 * time.Hour}
+	base := now
+	for attempts, delay := range want {
+		got := callbackRecoveryAt(base, attempts, deadline)
+		if got != now.Add(delay).Unix() {
+			t.Errorf("attempt %d recovery at %s, want %s", attempts, time.Unix(got, 0), now.Add(delay))
+		}
+		base = time.Unix(got, 0)
+	}
+	if got := callbackRecoveryAt(now, callbackRecoveryMaxAttempts, deadline); got != deadline {
+		t.Fatalf("recovery after maximum attempts=%s, want deadline %s", time.Unix(got, 0), time.Unix(deadline, 0))
+	}
+}
+
+func TestCallbackRecoveryClosesCrashGapAndKeepsCompletedMedia(t *testing.T) {
+	store, security, app := newVideoCallbackTestApp(t)
+	var job callbackJob
+	job, _ = newPersistedCallbackGeneration(t, app, "provider_config_recovery")
+	modalKey := "immutable-modal-key"
+	ciphertext, err := security.EncryptSetting("video_provider_config.provider_config_recovery", modalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content = []byte("recovered-terminal-video")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+modalKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/videos/"+job.ID:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"` + job.ID + `","status":"completed","model":"modal/wan","progress":100,"callback_delivery":{"state":"rejected","status_code":403,"attempts":1}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/videos/"+job.ID+"/content":
+			_, _ = w.Write(content)
+		default:
+			t.Errorf("unexpected Modal recovery request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	if _, err := store.InsertProviderConfig(ProviderConfig{ID: "provider_config_recovery", Provider: string(VideoProviderModal), BaseURL: server.URL, EncryptedAPIKey: ciphertext}); err != nil {
+		t.Fatal(err)
+	}
+	// This is the durable state after ApplyModalGenerationRecovery committed,
+	// but before the separate callback-job terminal update could be written.
+	if _, err := store.db.Exec(`UPDATE generations SET status='downloading',progress=100 WHERE id=?`, job.GenerationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE video_callback_jobs SET state='accepted',deadline=?,recovery_at=?,recovery_attempts=0 WHERE id=?`, time.Now().Add(time.Hour).Unix(), time.Now().Add(-time.Second).Unix(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.callbackJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := NewProcessor(store, security, app.logger)
+	processor.app.videoCallbackBaseURL = "https://video.example.com"
+	processor.recoverCallbackJob(context.Background(), job)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var record GenerationRecord
+	for time.Now().Before(deadline) {
+		record, err = store.Generation(job.GenerationID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.Status == "completed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if record.Status != "completed" || !record.VideoReady {
+		t.Fatalf("recovered video record=%#v", record)
+	}
+	video, err := os.ReadFile(record.VideoPath)
+	if err != nil || string(video) != string(content) {
+		t.Fatalf("recovered media=%q err=%v", video, err)
+	}
+	callback, err := store.callbackJob(job.ID)
+	if err != nil || callback.State != "completed" || callback.RecoveryAttempts != 1 {
+		t.Fatalf("callback recovery state=%#v err=%v", callback, err)
+	}
+	if callback.DeliveryState != "rejected" || callback.DeliveryCode != "http_403" || callback.DeliveryStatus != http.StatusForbidden {
+		t.Fatalf("callback rejection diagnostic=%#v", callback)
+	}
+	foundDiagnostic := false
+	for _, event := range record.Events {
+		if event.Stage == "callback_delivery" && strings.Contains(event.Message, "HTTP 403") {
+			foundDiagnostic = true
+		}
+	}
+	if !foundDiagnostic {
+		t.Fatalf("safe callback rejection event missing: %#v", record.Events)
+	}
+}
+
+func TestCallbackRecoveryCannotFinishReplacedSceneAttempt(t *testing.T) {
+	store, security, app := newVideoCallbackTestApp(t)
+	const configID = "provider_config_stale_scene_recovery"
+	const modalKey = "immutable-scene-modal-key"
+	project, err := store.InsertProjectWithProviderConfig("stale callback recovery", string(VideoProviderModal), configID, "modal/wan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStoryPlan(project.ID, validStoryPlan()); err != nil {
+		t.Fatal(err)
+	}
+	job, err := app.prepareCallbackJob(GenerateRequest{Prompt: "scene one", Model: "modal/wan", Duration: 6, Resolution: "480p", AspectRatio: "9:16"}, configID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.ProjectID, job.SceneNumber = project.ID, 1
+	if err := store.insertCallbackScene(job); err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := security.EncryptSetting("video_provider_config."+configID, modalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+modalKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/videos/"+job.ID {
+			t.Errorf("unexpected Modal recovery request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"` + job.ID + `","status":"completed","model":"modal/wan","progress":100}`))
+	}))
+	defer server.Close()
+	if _, err := store.InsertProviderConfig(ProviderConfig{ID: configID, Provider: string(VideoProviderModal), BaseURL: server.URL, EncryptedAPIKey: ciphertext}); err != nil {
+		t.Fatal(err)
+	}
+	const replacementID = "gen_replacement_scene_attempt"
+	if _, err := store.db.Exec(`UPDATE project_scenes SET provider_generation_id=?,status='queued' WHERE project_id=? AND scene_number=1`, replacementID, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE video_callback_jobs SET state='accepted',deadline=?,recovery_at=? WHERE id=?`, time.Now().Add(time.Hour).Unix(), time.Now().Add(-time.Second).Unix(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.callbackJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := NewProcessor(store, security, app.logger)
+	processor.recoverCallbackJob(context.Background(), job)
+
+	loaded, err := store.projectForWorker(context.Background(), project.ID)
+	if err != nil || loaded.Scenes[0].ProviderGenerationID != replacementID || loaded.Scenes[0].Status != "queued" {
+		t.Fatalf("replacement scene was changed by stale recovery: scene=%#v err=%v", loaded.Scenes[0], err)
+	}
+	oldCallback, err := store.callbackJob(job.ID)
+	if err != nil || oldCallback.State != "accepted" || oldCallback.RecoveryAttempts != 1 {
+		t.Fatalf("stale callback attempt was marked terminal: job=%#v err=%v", oldCallback, err)
 	}
 }
 

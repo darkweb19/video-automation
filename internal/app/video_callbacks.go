@@ -8,19 +8,29 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	videoCallbackBaseURLEnv = "VIDEO_CALLBACK_BASE_URL"
-	videoCallbackPath       = "/api/video-callbacks/"
-	callbackJobLifetime     = 8 * time.Hour
+	videoCallbackBaseURLEnv     = "VIDEO_CALLBACK_BASE_URL"
+	videoCallbackPath           = "/api/video-callbacks/"
+	callbackJobLifetime         = 8 * time.Hour
+	callbackRecoveryMaxAttempts = 4
 )
+
+var callbackRecoveryDelays = [...]time.Duration{
+	15 * time.Minute,
+	45 * time.Minute,
+	2 * time.Hour,
+	3 * time.Hour,
+}
 
 var (
 	errCallbackWorkerUnsupported  = errors.New("Modal worker does not support idempotent callback jobs; deploy the updated Modal worker")
@@ -52,13 +62,42 @@ type videoCallback struct {
 }
 
 type callbackJob struct {
-	ID, GenerationID, ProjectID, ProviderConfigID string
-	SceneNumber                                   int
-	Request                                       GenerateRequest
-	CallbackURL, EncryptedToken, TokenHash        string
-	State                                         string
-	Sequence, Attempts                            int
-	NextAttemptAt, Deadline                       int64
+	ID, GenerationID, ProjectID, ProviderConfigID                          string
+	SceneNumber                                                            int
+	Request                                                                GenerateRequest
+	CallbackURL, EncryptedToken, TokenHash                                 string
+	State, DeliveryState, DeliveryCode                                     string
+	Sequence, Attempts, DeliveryStatus, DeliveryAttempts, RecoveryAttempts int
+	NextAttemptAt, Deadline, RecoveryAt                                    int64
+}
+
+func callbackRecoveryAt(now time.Time, attempts int, deadline int64) int64 {
+	if attempts < 0 {
+		attempts = 0
+	}
+	if attempts >= callbackRecoveryMaxAttempts || attempts >= len(callbackRecoveryDelays) {
+		return deadline
+	}
+	recoveryAt := now.Add(callbackRecoveryDelays[attempts]).Unix()
+	if deadline > 0 && recoveryAt > deadline {
+		return deadline
+	}
+	return recoveryAt
+}
+
+func normalizeCallbackDeliveryDiagnostic(source *CallbackDeliveryDiagnostic) *CallbackDeliveryDiagnostic {
+	if source == nil || (source.State != "rejected" && source.State != "retry_exhausted") {
+		return nil
+	}
+	statusCode := source.StatusCode
+	code := "network_error"
+	if statusCode >= 100 && statusCode <= 599 {
+		code = "http_" + strconv.Itoa(statusCode)
+	} else {
+		statusCode = 0
+	}
+	attempts := min(max(source.Attempts, 1), 5)
+	return &CallbackDeliveryDiagnostic{State: source.State, Code: code, StatusCode: statusCode, Attempts: attempts}
 }
 
 func configuredVideoCallbackBaseURL() string {
@@ -147,13 +186,36 @@ func (s *Store) migrateCallbackJobs() error {
 		sequence INTEGER NOT NULL DEFAULT 0,
 		attempts INTEGER NOT NULL DEFAULT 0,
 		next_attempt_at INTEGER NOT NULL DEFAULT 0,
+		delivery_state TEXT NOT NULL DEFAULT '',
+		delivery_code TEXT NOT NULL DEFAULT '',
+		delivery_status INTEGER NOT NULL DEFAULT 0,
+		delivery_attempts INTEGER NOT NULL DEFAULT 0,
+		recovery_attempts INTEGER NOT NULL DEFAULT 0,
+		recovery_at INTEGER NOT NULL DEFAULT 0,
 		deadline INTEGER NOT NULL,
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		CHECK ((generation_id IS NOT NULL AND project_id IS NULL AND scene_number=0) OR
 		       (generation_id IS NULL AND project_id IS NOT NULL AND scene_number BETWEEN 1 AND 5))
 	);
-	CREATE INDEX IF NOT EXISTS video_callback_jobs_pending ON video_callback_jobs(state,next_attempt_at);`)
+CREATE INDEX IF NOT EXISTS video_callback_jobs_pending ON video_callback_jobs(state,next_attempt_at);`)
+	if err != nil {
+		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"delivery_state", "TEXT NOT NULL DEFAULT ''"},
+		{"delivery_code", "TEXT NOT NULL DEFAULT ''"},
+		{"delivery_status", "INTEGER NOT NULL DEFAULT 0"},
+		{"delivery_attempts", "INTEGER NOT NULL DEFAULT 0"},
+		{"recovery_attempts", "INTEGER NOT NULL DEFAULT 0"},
+		{"recovery_at", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.addColumnIfMissing("video_callback_jobs", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`UPDATE video_callback_jobs SET recovery_at=unixepoch()+900 WHERE state IN ('accepted','processing') AND recovery_at=0;
+CREATE INDEX IF NOT EXISTS video_callback_jobs_recovery ON video_callback_jobs(state,recovery_at);`)
 	return err
 }
 
@@ -168,8 +230,9 @@ func insertCallbackJob(tx *sql.Tx, job callbackJob) error {
 	} else {
 		projectID = job.ProjectID
 	}
-	_, err = tx.Exec(`INSERT INTO video_callback_jobs(id,generation_id,project_id,scene_number,provider_config_id,request_json,callback_url,encrypted_token,token_hash,state,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,unixepoch(),unixepoch())`,
-		job.ID, generationID, projectID, job.SceneNumber, job.ProviderConfigID, string(request), job.CallbackURL, job.EncryptedToken, job.TokenHash, job.State, job.Deadline)
+	job.RecoveryAt = callbackRecoveryAt(time.Now(), 0, job.Deadline)
+	_, err = tx.Exec(`INSERT INTO video_callback_jobs(id,generation_id,project_id,scene_number,provider_config_id,request_json,callback_url,encrypted_token,token_hash,state,deadline,recovery_attempts,recovery_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,unixepoch(),unixepoch())`,
+		job.ID, generationID, projectID, job.SceneNumber, job.ProviderConfigID, string(request), job.CallbackURL, job.EncryptedToken, job.TokenHash, job.State, job.Deadline, job.RecoveryAttempts, job.RecoveryAt)
 	return err
 }
 
@@ -232,12 +295,12 @@ func validVideoCallbackTokenHash(value string) bool {
 	return len(value) == 43
 }
 
-const callbackColumns = `id,COALESCE(generation_id,''),COALESCE(project_id,''),scene_number,provider_config_id,request_json,callback_url,encrypted_token,token_hash,state,sequence,attempts,next_attempt_at,deadline`
+const callbackColumns = `id,COALESCE(generation_id,''),COALESCE(project_id,''),scene_number,provider_config_id,request_json,callback_url,encrypted_token,token_hash,state,sequence,attempts,next_attempt_at,deadline,delivery_state,delivery_code,delivery_status,delivery_attempts,recovery_attempts,recovery_at`
 
 func scanCallbackJob(row interface{ Scan(...any) error }) (callbackJob, error) {
 	var job callbackJob
 	var request string
-	err := row.Scan(&job.ID, &job.GenerationID, &job.ProjectID, &job.SceneNumber, &job.ProviderConfigID, &request, &job.CallbackURL, &job.EncryptedToken, &job.TokenHash, &job.State, &job.Sequence, &job.Attempts, &job.NextAttemptAt, &job.Deadline)
+	err := row.Scan(&job.ID, &job.GenerationID, &job.ProjectID, &job.SceneNumber, &job.ProviderConfigID, &request, &job.CallbackURL, &job.EncryptedToken, &job.TokenHash, &job.State, &job.Sequence, &job.Attempts, &job.NextAttemptAt, &job.Deadline, &job.DeliveryState, &job.DeliveryCode, &job.DeliveryStatus, &job.DeliveryAttempts, &job.RecoveryAttempts, &job.RecoveryAt)
 	if err == nil {
 		err = json.Unmarshal([]byte(request), &job.Request)
 	}
@@ -252,6 +315,62 @@ func (s *Store) hasCallbackJob(id string) (bool, error) {
 	var found bool
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM video_callback_jobs WHERE id=?)`, id).Scan(&found)
 	return found, err
+}
+
+func callbackDeliveryMessage(diagnostic *CallbackDeliveryDiagnostic) string {
+	if diagnostic == nil {
+		return "Modal callback delivery failed; terminal media recovery is underway."
+	}
+	if diagnostic.StatusCode == 401 {
+		return "Modal callback delivery was rejected with HTTP 401. Check the public callback origin and deployed receiver; terminal media recovery is underway."
+	}
+	if diagnostic.StatusCode == 403 {
+		return "Modal callback delivery was rejected with HTTP 403. Check the public callback origin and edge access rules; terminal media recovery is underway."
+	}
+	if diagnostic.StatusCode == 404 {
+		return "Modal callback delivery was rejected with HTTP 404. Check VIDEO_CALLBACK_BASE_URL and the deployed callback route; terminal media recovery is underway."
+	}
+	if diagnostic.StatusCode != 0 {
+		return fmt.Sprintf("Modal callback delivery %s with HTTP %d. Check callback reachability; terminal media recovery is underway.", diagnostic.State, diagnostic.StatusCode)
+	}
+	return "Modal callback delivery exhausted bounded retries after a network error. Check callback reachability; terminal media recovery is underway."
+}
+
+func (s *Store) recordCallbackDeliveryDiagnostic(id string, diagnostic *CallbackDeliveryDiagnostic) error {
+	diagnostic = normalizeCallbackDeliveryDiagnostic(diagnostic)
+	if diagnostic == nil {
+		return nil
+	}
+	job, err := s.callbackJob(id)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE video_callback_jobs SET delivery_state=?,delivery_code=?,delivery_status=?,delivery_attempts=?,updated_at=unixepoch() WHERE id=? AND state IN ('accepted','processing')`, diagnostic.State, diagnostic.Code, diagnostic.StatusCode, diagnostic.Attempts, id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count != 1 {
+		return err
+	}
+	message := callbackDeliveryMessage(diagnostic)
+	status := diagnostic.State
+	if job.GenerationID != "" {
+		if err := appendGenerationEvent(tx, job.GenerationID, "callback_delivery", status, message, 0); err != nil {
+			return err
+		}
+	}
+	if job.ProjectID != "" {
+		if err := appendPipelineEvent(tx, job.ProjectID, "callback_delivery", status, message, job.SceneNumber, 0, time.Now().Unix()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ApplyVideoCallback(callback videoCallback, token string) error {
@@ -365,6 +484,8 @@ func callbackFailure(code string) string {
 		return "Modal submission was interrupted before its worker reference was saved. Check Modal jobs before retrying."
 	case "callback_timeout":
 		return "No completion callback arrived from Modal before the job deadline. Check VIDEO_CALLBACK_BASE_URL, dashboard reachability, and Modal logs before retrying."
+	case "callback_delivery_rejected":
+		return "The worker stopped before generation because the initial callback was rejected. Check VIDEO_CALLBACK_BASE_URL, the deployed callback receiver, and edge access rules before retrying."
 	case "submission_auth_failed":
 		return "Modal rejected the saved API key. Update the account in Settings, then retry."
 	case "submission_conflict":
@@ -470,7 +591,7 @@ func (a *dashboardApp) videoCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Processor) processCallbackJobs(ctx context.Context) {
-	rows, err := p.app.store.db.QueryContext(ctx, `SELECT `+callbackColumns+` FROM video_callback_jobs WHERE state NOT IN ('completed','failed') AND (deadline<=unixepoch() OR (state='submitting' AND next_attempt_at<=unixepoch())) ORDER BY created_at`)
+	rows, err := p.app.store.db.QueryContext(ctx, `SELECT `+callbackColumns+` FROM video_callback_jobs WHERE state NOT IN ('completed','failed') AND (deadline<=unixepoch() OR (state='submitting' AND next_attempt_at<=unixepoch()) OR (state IN ('accepted','processing') AND recovery_at<=unixepoch())) ORDER BY created_at`)
 	if err != nil {
 		p.logger.Error("load callback jobs failed")
 		return
@@ -495,9 +616,185 @@ func (p *Processor) processCallbackJobs(ctx context.Context) {
 			continue
 		}
 		jobCopy := job
-		p.startProjectTask(ctx, "callback-submit:"+job.ID, func(taskCtx context.Context) {
-			p.submitCallbackJob(taskCtx, jobCopy)
-		})
+		switch job.State {
+		case "submitting":
+			p.startProjectTask(ctx, "callback-submit:"+job.ID, func(taskCtx context.Context) {
+				p.submitCallbackJob(taskCtx, jobCopy)
+			})
+		case "accepted", "processing":
+			p.startProjectTask(ctx, "callback-recovery:"+job.ID, func(taskCtx context.Context) {
+				p.recoverCallbackJob(taskCtx, jobCopy)
+			})
+		}
+	}
+}
+
+func (s *Store) claimCallbackJobRecovery(job callbackJob) (bool, error) {
+	attempts := job.RecoveryAttempts + 1
+	recoveryAt := callbackRecoveryAt(time.Now(), attempts, job.Deadline)
+	result, err := s.db.Exec(`UPDATE video_callback_jobs SET recovery_attempts=?,recovery_at=?,updated_at=unixepoch() WHERE id=? AND state IN ('accepted','processing') AND recovery_attempts=? AND recovery_at<=unixepoch()`, attempts, recoveryAt, job.ID, job.RecoveryAttempts)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+func (s *Store) finishCallbackJobRecovery(id, state string) error {
+	if state != "completed" && state != "failed" {
+		return errors.New("invalid callback recovery terminal state")
+	}
+	_, err := s.db.Exec(`UPDATE video_callback_jobs SET state=?,recovery_at=0,updated_at=unixepoch() WHERE id=? AND state IN ('accepted','processing')`, state, id)
+	return err
+}
+
+func recoveryTerminalMatches(remoteStatus, localStatus string) bool {
+	switch remoteStatus {
+	case "completed":
+		return localStatus == "downloading" || localStatus == "completed"
+	case "failed":
+		return localStatus == "failed"
+	default:
+		return false
+	}
+}
+
+// callbackRecoveryTargetStatus verifies whether a prior recovery transaction
+// already advanced the same provider job. The check closes the crash window
+// between applying terminal media state and marking the callback row terminal.
+func (p *Processor) callbackRecoveryTargetStatus(ctx context.Context, job callbackJob) (string, bool, error) {
+	if job.GenerationID != "" {
+		var provider, status string
+		err := p.app.store.db.QueryRowContext(ctx, `SELECT video_provider,status FROM generations WHERE id=?`, job.GenerationID).Scan(&provider, &status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+		if provider != string(VideoProviderModal) {
+			return "", false, nil
+		}
+		return status, true, nil
+	}
+	project, err := p.app.store.projectForWorker(ctx, job.ProjectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if project.VideoProvider != string(VideoProviderModal) {
+		return "", false, nil
+	}
+	for _, scene := range project.Scenes {
+		if scene.Number == job.SceneNumber && scene.ProviderGenerationID == job.ID {
+			return scene.Status, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (p *Processor) recoverCallbackJob(ctx context.Context, job callbackJob) {
+	claimed, err := p.app.store.claimCallbackJobRecovery(job)
+	if err != nil || !claimed {
+		if err != nil {
+			p.logger.Warn("claim Modal callback recovery failed", "generation_id", job.ID)
+		}
+		return
+	}
+	config, err := p.app.store.ProviderConfig(job.ProviderConfigID)
+	if err != nil {
+		p.logger.Warn("Modal callback recovery waiting for immutable provider configuration", "generation_id", job.ID)
+		return
+	}
+	if config.Provider != string(VideoProviderModal) {
+		p.logger.Warn("Modal callback recovery provider snapshot has an unexpected provider", "generation_id", job.ID)
+		return
+	}
+	provider, err := p.app.videoProviderFromConfig(config)
+	if err != nil {
+		p.logger.Warn("Modal callback recovery could not load immutable provider credentials", "generation_id", job.ID)
+		return
+	}
+	requestContext, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	generation, err := provider.GetGeneration(requestContext, job.ID)
+	if err != nil || generation == nil {
+		p.logger.Warn("Modal callback recovery status request failed", "generation_id", job.ID)
+		return
+	}
+	if generation.ID != job.ID {
+		p.logger.Warn("Modal callback recovery returned a different job id", "generation_id", job.ID)
+		return
+	}
+	if generation.CallbackDelivery != nil {
+		if err := p.app.store.recordCallbackDeliveryDiagnostic(job.ID, generation.CallbackDelivery); err != nil {
+			p.logger.Warn("persist Modal callback delivery diagnostic failed", "generation_id", job.ID)
+		}
+	}
+	if generation.Status != "completed" && generation.Status != "failed" {
+		return
+	}
+	if job.GenerationID != "" {
+		updated, err := p.app.store.ApplyModalGenerationRecovery(job.GenerationID, *generation)
+		if err != nil {
+			p.logger.Warn("apply Modal callback generation recovery failed", "generation_id", job.ID)
+			return
+		}
+		if !updated {
+			localStatus, found, checkErr := p.callbackRecoveryTargetStatus(ctx, job)
+			if checkErr != nil {
+				p.logger.Warn("check Modal callback generation recovery state failed", "generation_id", job.ID)
+				return
+			}
+			if !found || !recoveryTerminalMatches(generation.Status, localStatus) {
+				return
+			}
+		}
+		if err := p.app.store.finishCallbackJobRecovery(job.ID, generation.Status); err != nil {
+			p.logger.Warn("finish Modal callback generation recovery failed", "generation_id", job.ID)
+			return
+		}
+		p.app.store.PublishGeneration(job.GenerationID)
+		if generation.Status == "completed" {
+			record, loadErr := p.app.store.Generation(job.GenerationID)
+			if loadErr == nil && record.Status == "downloading" {
+				p.startDownload(ctx, provider, record)
+			}
+		}
+		return
+	}
+	updated, err := p.app.store.ApplyModalSceneRecovery(job.ProjectID, job.SceneNumber, *generation)
+	if err != nil {
+		p.logger.Warn("apply Modal callback scene recovery failed", "project_id", job.ProjectID, "scene", job.SceneNumber)
+		return
+	}
+	if !updated {
+		localStatus, found, checkErr := p.callbackRecoveryTargetStatus(ctx, job)
+		if checkErr != nil {
+			p.logger.Warn("check Modal callback scene recovery state failed", "project_id", job.ProjectID, "scene", job.SceneNumber)
+			return
+		}
+		if !found || !recoveryTerminalMatches(generation.Status, localStatus) {
+			return
+		}
+	}
+	if err := p.app.store.finishCallbackJobRecovery(job.ID, generation.Status); err != nil {
+		p.logger.Warn("finish Modal callback scene recovery failed", "project_id", job.ProjectID, "scene", job.SceneNumber)
+		return
+	}
+	p.app.store.PublishProject(job.ProjectID)
+	if generation.Status == "completed" {
+		project, loadErr := p.app.store.projectForWorker(ctx, job.ProjectID)
+		if loadErr == nil {
+			for _, scene := range project.Scenes {
+				if scene.Number == job.SceneNumber && scene.Status == "downloading" {
+					p.startSceneDownload(ctx, provider, scene)
+					return
+				}
+			}
+		}
 	}
 }
 
@@ -547,7 +844,7 @@ func (p *Processor) submitCallbackJob(ctx context.Context, job callbackJob) {
 		_, _ = p.app.store.db.Exec(`UPDATE video_callback_jobs SET attempts=attempts+1,next_attempt_at=?,updated_at=unixepoch() WHERE id=? AND state='submitting'`, time.Now().Add(delay).Unix(), job.ID)
 		return
 	}
-	_, _ = p.app.store.db.Exec(`UPDATE video_callback_jobs SET state='accepted',attempts=attempts+1,updated_at=unixepoch() WHERE id=? AND state='submitting'`, job.ID)
+	_, _ = p.app.store.db.Exec(`UPDATE video_callback_jobs SET state='accepted',attempts=attempts+1,recovery_attempts=0,recovery_at=unixepoch()+900,updated_at=unixepoch() WHERE id=? AND state='submitting'`, job.ID)
 }
 
 func (p *Processor) failCallbackJob(job callbackJob, code string) {

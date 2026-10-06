@@ -360,7 +360,7 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	prompt, err := provider.GenerateRandomPrompt(ctx, input)
 	if err != nil {
-		a.logger.Warn("random prompt generation failed")
+		a.logger.Warn("random prompt generation failed", "mode", input.Mode, "category", input.Category, "reason", safeRandomPromptFailure(err))
 		status := http.StatusBadGateway
 		var upstream *upstreamError
 		if errors.As(err, &upstream) && upstream.StatusCode == http.StatusTooManyRequests {
@@ -379,12 +379,15 @@ func (a *dashboardApp) randomPrompt(w http.ResponseWriter, r *http.Request) {
 
 func safeRandomPromptFailure(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return "OpenRouter prompt generation timed out while trying available free models. Try again shortly."
+		return "OpenRouter prompt generation timed out. Try again shortly."
+	}
+	if errors.Is(err, errRandomPromptTooLong) {
+		return "The prompt model returned text that is too long. Try again or enter your own prompt."
 	}
 	var upstream *upstreamError
 	if errors.As(err, &upstream) {
 		if strings.EqualFold(upstream.ErrorType, "content_policy_violation") || strings.EqualFold(upstream.ErrorType, "refusal") {
-			return "The available free models declined this prompt request. Try another category."
+			return "The prompt model declined this request. Try another category."
 		}
 		switch upstream.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
@@ -394,14 +397,17 @@ func safeRandomPromptFailure(err error) string {
 		case http.StatusTooManyRequests:
 			if upstream.RateLimitScope == "platform" {
 				if !upstream.RetryAt.IsZero() {
-					return "OpenRouter's shared free-model limit is reached. Try again after " + upstream.RetryAt.UTC().Format("2006-01-02 15:04:05 UTC") + ". Switching models does not reset this limit."
+					return "OpenRouter's account limit is reached. Try again after " + upstream.RetryAt.UTC().Format("2006-01-02 15:04:05 UTC") + "."
 				}
-				return "OpenRouter's shared free-model limit is reached. Wait for the quota to reset, or review your OpenRouter account limits."
+				return "OpenRouter's account limit is reached. Wait for the quota to reset, or review your OpenRouter account limits."
 			}
-			return "OpenRouter's free models are rate-limited right now. Try again shortly."
+			return "OpenRouter's prompt model is rate-limited right now. Try again shortly."
 		default:
 			return fmt.Sprintf("OpenRouter prompt generation failed with HTTP %d. Try again.", upstream.StatusCode)
 		}
 	}
-	return "The available free models did not return a complete prompt. Try again shortly."
+	if errors.Is(err, errRandomPromptUnusable) {
+		return "The prompt model did not return a complete, valid prompt. Try again or enter your own prompt."
+	}
+	return "Unable to reach the prompt model. Try again shortly."
 }

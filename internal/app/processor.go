@@ -13,6 +13,7 @@ type Processor struct {
 	logger          *slog.Logger
 	downloadTimeout time.Duration
 	downloadSem     chan struct{}
+	youtubeSem      chan struct{}
 	projectSem      chan struct{}
 	combineSem      chan struct{}
 	combineRunner   commandRunner
@@ -34,7 +35,7 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 			logger.Error("legacy provider snapshot backfill failed; legacy work will be skipped", "error", err)
 		}
 	}
-	return &Processor{app: app, interval: 5 * time.Second, logger: logger, downloadTimeout: 5 * time.Minute, downloadSem: make(chan struct{}, 2), projectSem: make(chan struct{}, 3), combineSem: make(chan struct{}, 1), combineRunner: runCommand, inFlight: make(map[string]struct{})}
+	return &Processor{app: app, interval: 5 * time.Second, logger: logger, downloadTimeout: 5 * time.Minute, downloadSem: make(chan struct{}, 2), youtubeSem: make(chan struct{}, 1), projectSem: make(chan struct{}, 3), combineSem: make(chan struct{}, 1), combineRunner: runCommand, inFlight: make(map[string]struct{})}
 }
 
 func (p *Processor) Run(ctx context.Context) {
@@ -53,6 +54,7 @@ func (p *Processor) Run(ctx context.Context) {
 
 func (p *Processor) process(ctx context.Context) {
 	p.processCallbackJobs(ctx)
+	p.processYouTubeUploads(ctx)
 	records, err := p.app.store.PendingGenerations(ctx)
 	if err != nil {
 		p.logger.Error("load pending generations failed")

@@ -1,30 +1,27 @@
-# Session handoff ? 2026-10-01
+# Session handoff — 2026-10-06
 
 ## What was done
-- Committed OpenRouter prompt/story reliability fixes as `ccb8f0f` on `feat/video-callbacks-and-random-prompts`.
-- Random prompts retain five shuffled free models, with adaptive attempts capped at 35 seconds inside a 110-second request deadline. Unusable and incomplete responses move to another model.
-- Added shared credential-scoped cooldowns, OpenRouter/provider limit classification, retry/reset parsing, HTTP-200 error handling, and safe public errors with retry guidance.
-- Project planning stays on ScriptModel: two three-minute attempts within six minutes and five seconds; invalid output or unsupported tool routing retries with plain JSON. Five-scene validation remains required.
-- Preserved bounded invalid story output for diagnosis with credential redaction; attempt counts persist through an additive SQLite migration and detail/live APIs.
-- Committed Modal supervisor cap/test alignment as `14a30d0`; both workers now use the supported maximum of 10 retries.
-- Go tests, vet, build, dashboard UI tests, JavaScript syntax, Wan callback checks, SkyReels offline tests, and diff checks passed. Final agent review found no material issues.
+- Implemented Railway runtime volume/path validation before storage initialization, including read-only `storage-path` for the root container entrypoint.
+- Added a root entrypoint that validates first, initializes only known `/data` paths, sets restrictive ownership/modes without recursive media traversal, then drops to `app` with `su-exec`.
+- Updated Dockerfile, LF `.gitattributes`, Railway README setup/recovery guidance, and [Railway persistence decision](docs/architecture/003-railway-persistence.md).
+- Implemented on `feat/youtube-upload-and-generation-reliability`; user authorized push and will attach the Development volume.
 
 ## Decisions locked
-- User chose OpenRouter only: no local/template generator and no paid fallback.
-- There is no application usage quota. OpenRouter's shared quota cannot be removed by model/key rotation; known reset times are respected. Missing reset hints receive a 30-second internal suppression without inventing a public reset time.
-- Random-prompt deadline changes from 70/12 seconds to 110/adaptive seconds are intentional and documented in AGENTS.md and README.md.
-- Deploy callback-capable Modal workers before the Go callback receiver; keep authenticated callbacks and legacy compatibility.
+- Keep Go + SQLite and all state/media under one service-scoped `/data` volume; no external database/object storage or Railway config-as-code.
+- Development gets its own new volume; do not share Production's existing volume. User confirms no Development state needs preserving.
+- Startup fails closed without valid Railway volume metadata. Set `DATA_DIR=/data`; leave `RAILWAY_RUN_UID` unset so root initialization can run before the app drops privileges.
+- A newly attached empty Development volume needs first-run password and provider setup. Same-volume redeploys retain password, Settings, history, and media.
+- Preserve existing generation and idempotent project behavior. No paid generations; Railway deployment was not inspected.
 
 ## Open questions
-1. Live rollout verification remains pending; no deployment or live provider generation was run.
+1. Sujan: choose backup frequency, retention, and disaster recovery objectives.
 
 ## Next steps
-1. Deploy the reviewed feature branch when authorized, following the worker-first callback rollout in README.md.
-2. Verify random prompts and project story planning against live OpenRouter after deployment; inspect saved trace attempts and invalid output if a provider still fails.
+1. Attach a new persistent volume to Railway Development at `/data` and set `DATA_DIR=/data`; keep Production separate.
+2. Deploy and verify login, Settings, history, media, `/health`, and persistence across a later redeploy.
 
 ## Gotchas
-- OpenRouter free-tier account limits still apply across models/API keys; long resets return actionable errors rather than waiting indefinitely.
-- Cooldowns are shared by the HTTP dashboard and processor through Store and reset on app restart.
-- Local Go checks used the writable TEMP build cache. Race-detector checks were not run (no C toolchain); no live API calls were used in tests.
-- Pre-existing untracked `workers/modal/__pycache__/` was left untouched and excluded from commits.
-- Keep `/data/secret.key` with backups and preserve callback worker-first deployment ordering.
+- Verification passed: `go test ./...`, 43/43 dashboard UI tests, JavaScript syntax, Python callback delivery, Git Bash `-n`, Linux CGO-disabled deployment build, and `git diff --check`; independent review found no blockers.
+- Windows skipped two symlink tests due to platform privileges. Docker build/runtime and live Railway checks remain unavailable; complete those after deployment.
+- Railway volume handling is documented in [the architecture decision](docs/architecture/003-railway-persistence.md). Back up SQLite and `secret.key` together; include WAL sidecars and media in a stopped-app copy.
+- `workers/modal/__pycache__/` is pre-existing untracked data; leave it untouched. Never read `.env` or expose credentials.

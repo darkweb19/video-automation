@@ -56,6 +56,10 @@ func (a *dashboardApp) deleteGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	record, err := a.store.BeginDelete(id)
+	if errors.Is(err, ErrYouTubeUploadInUse) {
+		writeError(w, http.StatusConflict, "Finish or cancel the YouTube upload before deleting this video")
+		return
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "generation not found")
 		return

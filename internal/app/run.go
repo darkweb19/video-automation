@@ -17,10 +17,33 @@ import (
 // Run starts the video automation service and handles its command-line modes.
 func Run() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	dataDir := strings.TrimSpace(os.Getenv("DATA_DIR"))
-	if dataDir == "" {
-		dataDir = "data"
+	mode := ""
+	if len(os.Args) > 1 {
+		if len(os.Args) != 2 || (os.Args[1] != "recovery-code" && os.Args[1] != "storage-path") {
+			fmt.Fprintln(os.Stderr, "usage: video-automation [recovery-code|storage-path]")
+			os.Exit(2)
+		}
+		mode = os.Args[1]
 	}
+	storage, err := resolveRuntimeStorage(os.Getenv, os.ReadFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "storage initialization refused:", err)
+		os.Exit(1)
+	}
+	dataDir := storage.dataDir
+	if mode == "storage-path" {
+		absolute, err := filepath.Abs(dataDir)
+		if err == nil {
+			absolute, err = resolveExistingAncestor(absolute)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "unable to resolve storage path: check DATA_DIR directory access")
+			os.Exit(1)
+		}
+		fmt.Println(absolute)
+		return
+	}
+	logger.Info("storage directory validated", "data_directory", dataDir, "railway_persistent_volume_checked", storage.railway)
 	store, err := OpenStore(dataDir)
 	if err != nil {
 		logger.Error("database initialization failed")
@@ -33,11 +56,7 @@ func Run() {
 		logger.Error("initial user setup failed")
 		os.Exit(1)
 	}
-	if len(os.Args) > 1 {
-		if os.Args[1] != "recovery-code" || len(os.Args) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: video-automation recovery-code")
-			os.Exit(2)
-		}
+	if mode == "recovery-code" {
 		code, err := generateRecoveryCode()
 		if err != nil || store.CreateRecoveryCode("sujanshrestha", recoveryCodeHash(code), time.Now().Add(recoveryCodeLifetime).Unix()) != nil {
 			fmt.Fprintln(os.Stderr, "unable to generate recovery code")

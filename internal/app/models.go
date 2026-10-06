@@ -27,13 +27,23 @@ type GenerateRequest struct {
 
 // Generation is the normalized state returned to the browser.
 type Generation struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Model     string `json:"model,omitempty"`
-	Progress  *int   `json:"progress,omitempty"`
-	OutputURL string `json:"output_url,omitempty"`
-	Error     string `json:"error,omitempty"`
-	CostUSD   string `json:"cost_usd,omitempty"`
+	ID               string                      `json:"id"`
+	Status           string                      `json:"status"`
+	Model            string                      `json:"model,omitempty"`
+	Progress         *int                        `json:"progress,omitempty"`
+	OutputURL        string                      `json:"output_url,omitempty"`
+	Error            string                      `json:"error,omitempty"`
+	CostUSD          string                      `json:"cost_usd,omitempty"`
+	CallbackDelivery *CallbackDeliveryDiagnostic `json:"-"`
+}
+
+// CallbackDeliveryDiagnostic is returned only by the authenticated Modal API
+// for the sparse watchdog. It is never sent to browser clients.
+type CallbackDeliveryDiagnostic struct {
+	State      string `json:"state"`
+	Code       string `json:"code"`
+	StatusCode int    `json:"status_code"`
+	Attempts   int    `json:"attempts"`
 }
 
 // VideoModel describes the capabilities OpenRouter exposes for a video model.
@@ -87,7 +97,7 @@ const (
 	ProjectSceneCount   = 5
 	ProjectSceneSeconds = 6
 	ProjectAspectRatio  = "9:16"
-	ScriptModel         = "inclusionai/ling-3.0-flash-fin:free"
+	ScriptModel         = "anthropic/claude-haiku-4.5"
 	ProjectResolution   = "480p"
 )
 
@@ -136,8 +146,9 @@ type RandomPromptRequest struct {
 }
 
 type ProjectRequest struct {
-	Topic string `json:"topic"`
-	Model string `json:"model"`
+	Topic    string `json:"topic"`
+	Model    string `json:"model"`
+	Category string `json:"category,omitempty"`
 }
 
 type StoryPlan struct {
@@ -180,7 +191,9 @@ type ProjectScene struct {
 
 type VideoProject struct {
 	ID               string         `json:"id"`
+	RequestID        string         `json:"request_id,omitempty"`
 	Topic            string         `json:"topic"`
+	Category         string         `json:"category,omitempty"`
 	Title            string         `json:"title,omitempty"`
 	Story            string         `json:"story,omitempty"`
 	Script           string         `json:"script,omitempty"`
@@ -207,7 +220,7 @@ type VideoProject struct {
 	UpdatedAt      int64           `json:"updated_at"`
 }
 
-// TextGenerationTrace is the durable record of a free-text script-generation
+// TextGenerationTrace is the durable record of a text script-generation
 // request. RawResponse is the assistant content exactly as received, subject
 // to MaxScriptRawResponseBytes.
 type TextGenerationTrace struct {

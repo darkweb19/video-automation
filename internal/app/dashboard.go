@@ -15,6 +15,9 @@ type dashboardApp struct {
 	baseURL                   string
 	callbackBaseURL           string
 	videoCallbackBaseURL      string
+	youtubeHTTPClient         *http.Client
+	youtubeOAuthTokenEndpoint string
+	youtubeDataAPIOrigin      string
 	limiter                   *loginThrottle
 	recoveryLimiter           *loginThrottle
 	legacySnapshotBackfillErr error
@@ -35,6 +38,7 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.HandleFunc("GET /static/model-picker.css", app.static("static/model-picker.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/project.css", app.static("static/project.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/history-settings.css", app.static("static/history-settings.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /static/youtube.css", app.static("static/youtube.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /health", app.health)
 	// Modal is an external worker and does not have a browser session. Its
 	// callback is authenticated by a per-job capability token instead.
@@ -80,6 +84,18 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("POST /api/settings/video-provider/test", app.requirePasswordChanged(http.HandlerFunc(app.testVideoProvider)))
 	mux.Handle("PUT /api/settings/password", app.requireAuth(http.HandlerFunc(app.updatePassword)))
 	mux.Handle("PUT /api/settings/vault-code", app.requirePasswordChanged(http.HandlerFunc(app.updateVaultCode)))
+	mux.Handle("GET /api/youtube/status", app.requirePasswordChanged(http.HandlerFunc(app.youtubeStatus)))
+	mux.Handle("PUT /api/youtube/config", app.requirePasswordChanged(http.HandlerFunc(app.updateYouTubeConfig)))
+	mux.Handle("POST /api/youtube/connect", app.requirePasswordChanged(http.HandlerFunc(app.connectYouTube)))
+	mux.HandleFunc("GET /api/youtube/oauth/callback", app.youtubeOAuthCallback)
+	mux.Handle("DELETE /api/youtube/connection", app.requirePasswordChanged(http.HandlerFunc(app.disconnectYouTube)))
+	mux.Handle("GET /api/youtube/uploads", app.requirePasswordChanged(http.HandlerFunc(app.youtubeUploads)))
+	mux.Handle("POST /api/youtube/uploads", app.requirePasswordChanged(http.HandlerFunc(app.createYouTubeUpload)))
+	mux.Handle("GET /api/youtube/uploads/{id}", app.requirePasswordChanged(http.HandlerFunc(app.youtubeUpload)))
+	mux.Handle("POST /api/youtube/uploads/{id}/retry", app.requirePasswordChanged(http.HandlerFunc(app.retryYouTubeUpload)))
+	mux.Handle("POST /api/youtube/uploads/{id}/cancel", app.requirePasswordChanged(http.HandlerFunc(app.cancelYouTubeUpload)))
+	mux.Handle("POST /api/youtube/uploads/{id}/restart", app.requirePasswordChanged(http.HandlerFunc(app.restartYouTubeUpload)))
+	mux.Handle("POST /api/youtube/metadata", app.requirePasswordChanged(http.HandlerFunc(app.generateYouTubeMetadata)))
 	if security != nil {
 		if err := app.migrateLegacyModalAccount(); err != nil {
 			logger.Warn("legacy Modal account migration failed")
