@@ -15,10 +15,11 @@ from urllib import request as urllib_request
 
 
 SOURCE = Path(__file__).with_name("video.py")
+WORKER_SOURCES = (SOURCE, Path(__file__).with_name("skyreels.py"))
 
 
-def extracted(name, namespace):
-    tree = ast.parse(SOURCE.read_text())
+def extracted(name, namespace, source=SOURCE):
+    tree = ast.parse(source.read_text())
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
             node.decorator_list = []
@@ -27,6 +28,40 @@ def extracted(name, namespace):
             exec(compile(module, f"<extracted {name}>", "exec"), namespace)
             return namespace[name]
     raise AssertionError(f"{name} is missing from video.py")
+
+
+def test_both_workers_identify_callback_requests_and_preserve_redirect_safety():
+    token = "c" * 43
+    payload = {"id": "user-agent-job", "status": "completed"}
+    for source in WORKER_SOURCES:
+        requests = []
+        namespace, _logs, _fake_time = callback_namespace()
+        namespace["log_event"] = lambda *args, **fields: None
+        namespace["CALLBACK_DELIVERY_MAX_ATTEMPTS"] = 1
+        namespace["CALLBACK_DELIVERY_TIMEOUT_SECONDS"] = 10
+        namespace["open_callback_request"] = lambda request, timeout: (
+            requests.append((request, timeout)) or FakeResponse(204)
+        )
+
+        handler_type = extracted("CallbackNoRedirectHandler", namespace, source)
+        request = urllib_request.Request("https://example.test/callback", data=b"{}")
+        assert handler_type().redirect_request(
+            request, None, 302, "Found", Message(), "https://redirect.test/capture"
+        ) is None
+
+        legacy = extracted("deliver_terminal_callback", namespace, source)
+        legacy("https://example.test/legacy", token, payload)
+        bearer = extracted("post_video_callback_once", namespace, source)
+        assert bearer("https://example.test/durable", token, payload) == 204
+
+        assert len(requests) == 2
+        legacy_request, bearer_request = (entry[0] for entry in requests)
+        assert legacy_request.get_header("User-agent") == "FrameVault-Modal-Callback/1.0"
+        assert legacy_request.get_header("X-modal-callback-token") == token
+        assert bearer_request.get_header("User-agent") == "FrameVault-Modal-Callback/1.0"
+        assert bearer_request.get_header("Authorization") == f"Bearer {token}"
+        assert legacy_request.full_url.endswith("/legacy")
+        assert bearer_request.full_url.endswith("/durable")
 
 
 class FakeTime:
@@ -399,6 +434,7 @@ def test_supervisor_uses_bounded_modal_retries_and_propagates_cancellation():
 
 
 if __name__ == "__main__":
+    test_both_workers_identify_callback_requests_and_preserve_redirect_safety()
     test_redirects_are_not_followed_and_are_terminal()
     test_success_retry_and_auth_rejection_keep_credentials_out_of_the_payload()
     test_permanent_callback_rejection_is_durable_and_replay_skips_generation()
