@@ -1,69 +1,54 @@
-# FrameVault frontend redesign
+﻿# FrameVault studio redesign
 
-## Brief
+## Product intent and critique
 
-FrameVault is a self-hosted video workspace. The main job is to start a single clip or a fixed 30-second project, follow its progress, then organize completed videos in History or the protected Vault. The visual direction is professional, monochrome, and inspired by Apple's clear typographic hierarchy and generous spacing.
+FrameVault turns an idea into a single clip or a fixed five-scene story, then preserves the result and its production history. The existing monochrome interface is visually consistent, but its oversized promotional banner, four equally weighted metrics, ambiguous format switch, category slider, and exposed technical traces distract from that job. History has no discovery controls, and provider setup competes with account security in a single settings grid.
 
-## Critique of the previous interface
+The redesign makes FrameVault feel like a quiet production workspace: choose what to make, see the cost and output before starting, follow the story as it develops, and find finished work quickly. The primary product decision is to retain both existing formats and make their differences explicit. Pipeline and retry evidence remain available through disclosures rather than occupying the main result surface.
 
-The dashboard used a generic purple SaaS-card style: colored metric icons, repeated rounded panels, soft shadows, and an oversized two-column generator. The dark job console introduced a separate visual language. Four equal-weight metric cards competed with the primary create action, while dense settings and history surfaces had inconsistent treatments.
+## Design direction
 
-## Design system
-
-| Token | Value | Use |
+| Token | Value | Role |
 | --- | --- | --- |
-| Ink | `#000000` | Primary text, actions, selected navigation, and the video stage |
-| White | `#FFFFFF` | Main surfaces and text on black |
-| Cloud | `#F5F5F7` | Quiet grouped surfaces and selected navigation |
-| Rule | `#D2D2D7` | Dividers, control borders, and outlines |
-| Muted | `#6E6E73` | Secondary copy and metadata |
-| Graphite | `#3A3A3C` | Emphasis on secondary content |
+| Ink | `#000000` | Typography and primary action |
+| Paper | `#FFFFFF` | Work surfaces |
+| Canvas | `#F5F6F7` | Studio background |
+| Line | `#D7DBDE` | Controls and dividers |
+| Slate | `#59636C` | Secondary copy |
+| Graphite | `#28313A` | Supporting emphasis |
 
-Typography uses the platform system sans stack, with compact sentence-case labels, large page and hero headings, and readable body copy. Controls use an 8px radius, video previews 14px, and panels 18px. Primary actions are black. Focus is visibly outlined; motion follows the reduced-motion preference. Toasts remain white cards.
-
-## Layout
-
-The dashboard keeps a compact left rail and a sticky page header. On narrow screens, the rail becomes a drawer below the header so its toggle stays reachable. Content uses a restrained maximum width and collapses to one column at tablet widths.
-
-Content is left-aligned throughout. Page titles, headings, labels, and form fields share the same reading edge; short empty-state messages and the Vault gate use centered copy.
+Use the installed system sans family with a broad page title, restrained headings, tabular data, and compact supporting text. No remote fonts, image placeholders, gradients, or ornamental metric cards. Radius follows purpose: compact controls, larger preview surfaces. White cards and modest borders keep notifications quiet.
 
 ```text
-Overview
-+------+  Workspace / Overview                         account
-| rail |  + black creation lead ----------------+
-|      |  | Turn a topic into a video.          |  project facts
-|      |  +-------------------------------------+
-|      |  live metrics in a divider strip
-|      |  Recent generations as a clean list
+Studio         Workspace title                 account
+navigation     What would you like to make?
+               [Five-scene story] [Single clip]
+               Actual activity strip
+               Recent work, media first
 
-Generate
-+------+  Generate
-| rail |  + format / idea / model / options ----+
-|      |  | estimate and Generate action        |  status + preview
-|      |  +-------------------------------------+
+Create         Format choices
+               Idea + category        Production / result
+               Model + output         Story / five scenes
+               Estimate + action      Details disclosure
+
+Library        Search + status + format
+               Results summary
+               Responsive media grid
 ```
 
-The overview's black feature panel is the single strong visual element. Its project facts describe the real fixed preset. The generator status panel uses a neutral empty state and a black preview stage; it displays real output after a job starts. History, Vault, and Settings reuse the same typography, spacing, borders, and status language.
+All content is left aligned, except bounded authentication and Vault gate states. The creation format choices are the memorable element: their small frame sequences describe the real output rather than suggesting generated assets.
 
-## Product and interaction decisions
+## Execution and acceptance
 
-- Keep the 30-second project preset at five six-second scenes, each generated at 480p and 9:16. The existing FFmpeg pipeline joins them into a 30-second 1080×1920 MP4.
-- Populate model, duration, resolution, aspect ratio, audio, and pricing details from runtime model capabilities. The interface only states the fixed project requirements and relies on the existing capability validation.
-- Label dashboard cost as provider-reported. Do not imply a price where the provider supplies none.
-- Keep the existing IDs, forms, data attributes, and same-origin authenticated API flow. Keep model-specific request logic and provider selection behavior outside the visual layer.
-- Keep credentials out of browser responses. Preserve the Vault's in-memory grant behavior and lock on refresh or explicit lock.
-- Use status text, neutral fills, and borders to distinguish job states. Do not use decorative semantic colors, gradients, fake thumbnails, or sample generation data.
-- Preserve history logs and project audit details while presenting them in the same light, readable interface as other screens.
+1. Establish tokens, shell, navigation, login, skip link, connection state, focus and motion rules.
+2. Replace the overview banner with descriptive creation choices and actual workspace activity.
+3. Rebuild creation hierarchy around format, idea, category, model, output, estimate and action.
+4. Bring preview, story and scene progress forward; move technical logs into native disclosures.
+5. Add History discovery controls and refine media browsing, empty states and the Vault gate.
+6. Group Settings by generation, publishing and security; refine YouTube and narrow layouts.
 
-## Verification
+Implement and review these as six coherent visual commits. Interaction changes and regression tests are separate commits. Preserve DOM IDs and API hooks; coordinate additional hooks before changing them. No new frontend framework or dependency is justified for this embedded Go dashboard.
 
-- Run `go test ./...`, `go vet ./...`, `node --check internal/webui/static/app.js`, `node --test tests/dashboard-ui.test.cjs`, and `git diff --check`.
-- The Node regression suite executes the application state handlers with a small DOM stub. It checks pending submissions, format changes, submission errors, project compatibility, stored result visibility, and mobile navigation accessibility. It does not verify rendered layout.
-- The HTTP smoke check starts a compiled server with a fresh temporary SQLite directory and no provider key. It checks the embedded assets, login/password gate, non-secret settings, History endpoints, and Vault setup, unlock, lock, and logout.
-- The existing desktop visual direction is retained. Browser access was unavailable during this continuation, so fresh desktop/mobile screenshots and visual approval remain outstanding.
-- Test model capabilities and submission messages are synthetic fixtures used only by the regression suite. No sample videos or invented usage/pricing data are added to the dashboard.
-- No paid provider generation is part of UI verification.
+The fixed project remains five sequential six-second 480p scenes at 9:16 without generated audio, joined into silent 1080×1920 output. Model capabilities and prices come from runtime data. Retain same-origin authenticated requests, EventSource updates, encrypted credentials, Vault grants and local media authorization. Never imply unavailable pricing or invent usage metrics, thumbnails or results.
 
-## Continuation review
-
-Keep the existing monochrome structure rather than introducing a new template. The refinement pass restores sentence-case project labels, resolves keyboard-focus cascade conflicts, and makes narrow-screen project facts, metadata, and History logs wrap without truncation. Submission feedback stays associated with its selected format, and model updates cannot enable a second submission while the first request is in flight.
+Verify JavaScript syntax and dashboard regression tests, Go tests, Python callback tests and whitespace checks. Review widths down to 320px, keyboard focus, labels and reduced motion in source. Browser access is unavailable in this environment; do not claim rendered screenshots or visual approval. No paid generation or deployment is part of verification.
