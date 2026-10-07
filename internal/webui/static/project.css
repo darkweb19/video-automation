@@ -21,33 +21,10 @@
   transition: width .2s ease;
 }
 
-.project-options {
-  display: grid;
-  min-width: 0;
-  gap: 5px;
-  margin: 16px 0;
-  padding: 14px 16px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 14px;
-  background: var(--cloud, #f5f5f7);
-}
-
-.project-options span {
-  color: var(--muted, #6e6e73);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0;
-  line-height: 1.4;
-  text-transform: none;
-}
-
-.project-options strong {
-  color: var(--ink, #000);
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
+.project-options { display: grid; gap: 5px; margin: 0; padding: 14px 16px; border-left: 2px solid var(--graphite); background: var(--cloud); }
+.project-options > span { color: var(--muted); font-size: 11px; }
+.project-options strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.project-options p { color: var(--muted); font-size: 11px; line-height: 1.6; }
 
 .project-pipeline,
 .project-trace {

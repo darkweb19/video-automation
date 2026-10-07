@@ -101,55 +101,56 @@
 
         <section class="view" data-page="generate">
           <div class="two-column">
-            <section class="panel generator-panel">
-              <div class="panel-head"><div><h2>New video</h2><p>Choose a format, add your idea, and set the output.</p></div></div>
-              <div id="generation-mode" class="mode-switch" role="tablist" aria-label="Generation type">
-                <button class="mode-option active" type="button" data-mode="project" role="tab" aria-selected="true">30-second project</button>
-                <button class="mode-option" type="button" data-mode="single" role="tab" aria-selected="false">Single clip</button>
+            <section class="panel generator-panel" aria-labelledby="creator-heading">
+              <div class="panel-head"><div><h2 id="creator-heading">New video</h2><p>Start with the format. Shape the idea. Choose how to make it.</p></div></div>
+              <div id="generation-mode" class="mode-switch" role="tablist" aria-label="Video format">
+                <button id="generation-mode-project" class="mode-option active" type="button" data-mode="project" role="tab" aria-selected="true" aria-controls="project-inputs"><span class="mode-label">30-second story</span><span class="mode-description">One idea. Five connected scenes.</span></button>
+                <button id="generation-mode-single" class="mode-option" type="button" data-mode="single" role="tab" aria-selected="false" aria-controls="single-prompt-field"><span class="mode-label">Single clip</span><span class="mode-description">One prompt. Your output settings.</span></button>
               </div>
               <form id="generator-form" novalidate>
-                <div id="project-inputs">
-                  <div class="field"><div class="label-row"><label for="project-topic">Topic or story idea</label><span>Auto-scripted</span></div><textarea id="project-topic" rows="7" placeholder="What should this 30-second Short be about?" aria-describedby="project-topic-note project-topic-error" required></textarea><p id="project-topic-error" class="form-error" role="alert" aria-live="polite"></p></div>
-                  <p id="project-topic-note" class="field-hint">We turn your idea into a story, script, and five connected six-second scenes.</p>
-                </div>
-                <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count" aria-live="polite">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" aria-describedby="prompt-count prompt-error" required></textarea><p id="prompt-error" class="form-error" role="alert" aria-live="polite"></p></div>
-                <div class="random-prompt-controls field">
-                  <label for="prompt-category">Category: <strong id="prompt-category-name" aria-live="polite">Kid Animation</strong></label>
-                  <input id="prompt-category" type="range" min="0" max="5" step="1" value="0" aria-valuetext="Kid Animation">
-                  <button id="random-prompt" class="button secondary" type="button">Generate random prompt</button>
-                </div>
-                <div class="field model-field">
-                  <label id="model-label" for="model-trigger">Video model and price</label>
-                  <div id="model-picker" class="model-picker">
-                    <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
-                      <span id="model-trigger-content" class="model-trigger-content"><span class="model-placeholder">Loading models…</span></span>
-                      <span class="model-chevron" aria-hidden="true"></span>
-                    </button>
-                    <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
+                <section class="creator-section" aria-labelledby="idea-heading">
+                  <div class="creator-section-heading"><h3 id="idea-heading">The idea</h3><span>What should we make?</span></div>
+                  <div id="project-inputs" role="tabpanel" aria-labelledby="generation-mode-project">
+                    <div class="field"><label for="project-topic">Topic or story idea</label><textarea id="project-topic" rows="5" placeholder="Describe the story you want to tell, who it follows, and what happens." aria-describedby="project-topic-note project-topic-error" required></textarea><p id="project-topic-error" class="form-error" role="alert" aria-live="polite"></p></div>
+                    <p id="project-topic-note" class="field-hint">Your idea becomes a story, a script and five six-second scenes. Story planning uses OpenRouter with any video provider.</p>
                   </div>
-                  <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models…</option></select>
-                  <small id="project-model-note" aria-live="polite">Choose a model that supports six-second clips at 480p in 9:16.</small>
+                  <div id="single-prompt-field" class="field" role="tabpanel" aria-labelledby="generation-mode-single"><div class="label-row"><label for="prompt">Scene prompt</label><span id="prompt-count" aria-live="polite">0 / 4000</span></div><textarea id="prompt" rows="5" placeholder="Describe the subject, motion, framing, lighting and mood." aria-describedby="prompt-count prompt-error" required></textarea><p id="prompt-error" class="form-error" role="alert" aria-live="polite"></p></div>
+                  <div class="random-prompt-controls">
+                    <div class="field"><label for="prompt-category">Idea category <strong id="prompt-category-name" class="visually-hidden" aria-live="polite">Kid Animation</strong></label><select id="prompt-category" aria-describedby="category-note"><option value="0">Kid Animation</option><option value="1">Horror Story</option><option value="2">Nature</option><option value="3">Seduction</option><option value="4">Mature Content</option><option value="5">Soft Corn</option></select></div>
+                    <button id="random-prompt" class="button secondary" type="button">Suggest an idea</button>
+                    <p id="category-note" class="field-hint">Guides suggested ideas and story planning.</p>
+                  </div>
+                </section>
+                <section class="creator-section" aria-labelledby="production-heading">
+                  <div class="creator-section-heading"><h3 id="production-heading">The production</h3><span>Model and output</span></div>
+                  <div class="field model-field">
+                    <label id="model-label" for="model-trigger">Video model</label>
+                    <div id="model-picker" class="model-picker">
+                      <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
+                        <span id="model-trigger-content" class="model-trigger-content"><span class="model-placeholder">Loading available models...</span></span><span class="model-chevron" aria-hidden="true"></span>
+                      </button>
+                      <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
+                    </div>
+                    <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models...</option></select>
+                    <small id="project-model-note" aria-live="polite">Choose a model that supports six-second clips at 480p in 9:16.</small>
+                  </div>
+                  <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
+                  <div id="creator-provider-help" class="creator-provider-help" hidden><p id="creator-provider-message">Connect your video provider in Settings to continue.</p><button id="creator-open-settings" class="text-button" data-go="settings" type="button" hidden>Open provider settings</button></div>
+                  <div id="modal-account-project-field" class="field modal-account-field" hidden><label for="modal-account-project">Production account</label><select id="modal-account-project" required><option value="">Choose a Modal account</option></select><small>The Modal account that will generate your five scenes.</small></div>
+                  <div id="modal-account-single-field" class="field modal-account-field" hidden><label for="modal-account-single">Production account</label><select id="modal-account-single" required><option value="">Choose a Modal account</option></select><small>The Modal account that will generate this clip.</small></div>
+                  <div id="single-options" class="form-grid">
+                    <div class="field"><label for="duration">Duration</label><select id="duration"></select></div>
+                    <div id="resolution-field" class="field"><label for="resolution">Resolution</label><select id="resolution"></select></div>
+                    <div class="field"><label for="aspect-ratio">Framing</label><select id="aspect-ratio"></select></div>
+                    <div id="audio-option" class="field audio-option" hidden><label class="checkbox-label" for="generate-audio"><input id="generate-audio" type="checkbox"> Generate audio</label></div>
+                  </div>
+                  <div id="project-options" class="project-options"><span>Story output</span><strong>30 seconds, vertical and silent</strong><p>Five 480p scenes, joined into a 1080 &times; 1920 video.</p></div>
+                </section>
+                <div class="creator-submit">
+                  <div class="estimate"><span>Estimated video cost</span><strong id="cost-estimate">Unavailable</strong><small>Shown when the provider supplies pricing.<span id="project-cost-note"> Story planning is charged separately through OpenRouter.</span></small></div>
+                  <button id="generate" class="button primary full" type="submit" disabled>Generate 30-second project</button>
+                  <p class="submission-note">The result saves to History. You can keep working while it generates.</p>
                 </div>
-                <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
-                <div id="modal-account-project-field" class="field modal-account-field" hidden>
-                  <label for="modal-account-project">Modal account for this submission</label>
-                  <select id="modal-account-project" required><option value="">Choose a Modal account</option></select>
-                  <small>Choose which Modal endpoint and account will run this project.</small>
-                </div>
-                <div id="modal-account-single-field" class="field modal-account-field" hidden>
-                  <label for="modal-account-single">Modal account for this submission</label>
-                  <select id="modal-account-single" required><option value="">Choose a Modal account</option></select>
-                  <small>Choose which Modal endpoint and account will run this clip.</small>
-                </div>
-                <div id="single-options" class="form-grid">
-                  <div class="field"><label for="duration">Duration</label><select id="duration"></select></div>
-                  <div id="resolution-field" class="field"><label for="resolution">Resolution</label><select id="resolution"></select></div>
-                  <div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div>
-                  <div id="audio-option" class="field audio-option" hidden><label class="checkbox-label" for="generate-audio"><input id="generate-audio" type="checkbox"> Generate audio</label></div>
-                </div>
-                <div id="project-options" class="project-options"><span>Project output</span><strong>30-second 9:16 video · 5 × 6-second scenes at 480p</strong></div>
-                <div class="estimate"><span>Estimated generation cost</span><strong id="cost-estimate">Unavailable</strong><small>Costs are shown when the selected video provider supplies pricing.</small></div>
-                <button id="generate" class="button primary full" type="submit" disabled>Generate 30-second project</button>
               </form>
             </section>
             <aside class="panel status-panel">
