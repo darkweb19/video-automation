@@ -54,6 +54,7 @@
     projectOptions: $("#project-options"),
     projectModelNote: $("#project-model-note"),
     modeOptions: $$(".mode-option"),
+    createModeButtons: $$('[data-create-mode]'),
     promptCount: $("#prompt-count"),
     promptError: $("#prompt-error"),
     costEstimate: $("#cost-estimate"),
@@ -195,8 +196,8 @@
   };
 
   const viewMeta = {
-    overview: { title: "Overview", kicker: "Workspace" },
-    generate: { title: "Generate", kicker: "Create" },
+    overview: { title: "Workspace", kicker: "Studio" },
+    generate: { title: "Create", kicker: "Studio" },
     history: { title: "History", kicker: "Library" },
     vault: { title: "Vault", kicker: "Private library" },
     settings: { title: "Settings", kicker: "AI providers" }
@@ -932,6 +933,7 @@
       }
     }
 
+    renderRecent();
     if (becameTerminal) {
       queueTerminalRefresh(kind);
       if (selected) {
@@ -1090,6 +1092,13 @@
     target.click();
   }
 
+  function openCreator(mode) {
+    if (!state.authenticated || state.mustChangePassword) return;
+    setGenerationMode(mode);
+    navigate("generate");
+    if (state.videoProvider === "modal") void loadModels(false);
+  }
+
   function selectedPromptCategory() {
     return promptCategories[Number(elements.promptCategory.value)] || promptCategories[0];
   }
@@ -1143,6 +1152,9 @@
       button.disabled = state.mustChangePassword && button.dataset.view !== "settings";
     });
     $$('[data-go]').forEach((button) => {
+      button.disabled = state.mustChangePassword;
+    });
+    elements.createModeButtons.forEach((button) => {
       button.disabled = state.mustChangePassword;
     });
 
@@ -1857,26 +1869,45 @@
   }
   function renderRecent() {
     elements.recentList.replaceChildren();
-    const recent = state.generations.slice(0, 5);
+    const recent = [
+      ...state.projects.map((record) => ({ kind: "project", record })),
+      ...state.generations.map((record) => ({ kind: "single", record }))
+    ].sort((left, right) => numericStat(projectValue(right.record, "created_at", "createdAt"))
+      - numericStat(projectValue(left.record, "created_at", "createdAt"))).slice(0, 5);
     if (!recent.length) {
-      elements.recentList.append(emptyState("No generations yet."));
+      elements.recentList.append(emptyState("Your projects and clips will appear here.", "Create a video"));
       return;
     }
-    recent.forEach((record) => {
+    recent.forEach(({ kind, record }) => {
+      const project = kind === "project";
+      const title = String(projectValue(record, project ? "topic" : "prompt") || (project ? "Untitled project" : "Untitled clip"));
+      const status = String(projectValue(record, "status") || "queued").toLowerCase();
+      const model = projectValue(record, "model");
+      const videoReady = status === "completed" && Boolean(projectValue(record, project ? "final_video_ready" : "video_ready"));
       const row = make("div", { className: "recent-item" });
+      row.dataset.kind = kind;
+      row.dataset.id = project ? projectID(record) : String(record.id || "");
       const main = make("div", { className: "recent-main" });
+      const open = make("button", { className: "text-button recent-open", type: "button", text: title });
+      open.setAttribute("aria-label", `Open ${project ? "30-second project" : "single clip"}: ${title}`);
+      open.addEventListener("click", () => {
+        openCreator(kind);
+        if (!state.authenticated || state.mustChangePassword) return;
+        if (project) renderProject(record);
+        else setStatusRecord(record);
+      });
       main.append(
-        make("strong", { text: record.prompt || "Untitled generation" }),
-        make("span", { text: friendlyModel(record.model) })
+        open,
+        make("span", { text: `${project ? "30-second project" : "Single clip"} · ${friendlyModel(model)}` })
       );
-      if (String(record.status || "").toLowerCase() === "completed" && record.video_ready) {
+      if (videoReady) {
         const upload = make("button", { className: "button text-button recent-upload", type: "button", text: "Upload to YouTube" });
-        upload.addEventListener("click", () => openYouTubeUpload(generationYouTubeSource(record)));
+        upload.addEventListener("click", () => openYouTubeUpload(project ? projectYouTubeSource(record) : generationYouTubeSource(record)));
         main.append(upload);
       }
-      const date = make("span", { className: "meta", text: formatDate(record.created_at) });
-      const badge = statusBadge(record.status);
-      const cost = make("strong", { text: recordCost(record).value });
+      const date = make("span", { className: "meta", text: formatDate(projectValue(record, "created_at", "createdAt")) });
+      const badge = statusBadge(status);
+      const cost = make("strong", { text: project ? projectRecordedCost(record) : recordCost(record).value });
       row.append(main, date, badge, cost);
       elements.recentList.append(row);
     });
@@ -2944,6 +2975,7 @@
         }
       }
       renderHistory();
+      renderRecent();
       if (restoreSelection && !state.submissionPending && state.pendingProjectSubmission) {
         await recoverPendingProjectSubmission({ notifyUncertain: true });
       }
@@ -4732,6 +4764,9 @@
         if (state.videoProvider === "modal") void loadModels(false);
       });
       button.addEventListener("keydown", moveGenerationMode);
+    });
+    elements.createModeButtons.forEach((button) => {
+      button.addEventListener("click", () => openCreator(button.dataset.createMode));
     });
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
     elements.vaultCodeForm.addEventListener("submit", saveVaultCode);

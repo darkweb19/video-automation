@@ -103,6 +103,7 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       const emitted = { preventDefault() {}, ...event };
       return (this.listeners.get(name) ?? []).map((callback) => callback(emitted));
     }
+    click() { this.emit('click'); }
     showModal() { this.open = true; }
     close() { this.open = false; this.emit('close'); }
     remove() {
@@ -121,10 +122,16 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
     tab.dataset.mode = mode;
     return tab;
   });
+  const createModeButtons = [...markup.matchAll(/<button\b[^>]*\bdata-create-mode="([^"]+)"[^>]*>/g)].map((match) => {
+    const button = new Element('button');
+    button.dataset.createMode = match[1];
+    return button;
+  });
   document = {
     activeElement: null,
     querySelector: (selector) => selector === '.sidebar' ? sidebar : nodes.get(selector.slice(1)) ?? null,
-    querySelectorAll: (selector) => selector === '.mode-option' ? tabs : [],
+    querySelectorAll: (selector) => selector === '.mode-option' ? tabs
+      : selector === '[data-create-mode]' ? createModeButtons : [],
     createElement: (tag) => new Element(tag),
     createDocumentFragment: () => new Element('fragment'),
     addEventListener() {},
@@ -157,7 +164,7 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
     request = (...args) => globalThis.uiTestRequest(...args);
     loadHistory = async () => {};
     globalThis.ui = {
-      state, elements, setGenerationMode, syncGenerationModeDisplay,
+      state, elements, setGenerationMode, syncGenerationModeDisplay, applyPasswordGate,
       submitGeneration, submitProject, generateRandomPrompt, updateModelOptions,
       syncNavigationAccessibility, setNavigationOpen,
       handleJobSnapshot, bindEvents, renderRecent, renderHistory, renderProject,
@@ -710,6 +717,84 @@ test('initial HTML IDs are unique and JavaScript bindings resolve', () => {
   for (const match of bindings.matchAll(/\$\("#([a-z0-9-]+)"\)/g)) {
     assert.ok(ids.includes(match[1]), `missing initial binding: ${match[1]}`);
   }
+});
+
+test('overview creation actions select their format while preserving ideas and saved results', () => {
+  const app = configuredApp('project');
+  app.elements.promptCategory.value = '2';
+  const project = { id: 'fixture-overview-project', topic: 'Saved project', status: 'processing', scenes: [], events: [] };
+  const clip = { id: 'fixture-overview-clip', prompt: 'Saved clip', status: 'failed', events: [] };
+  app.renderProject(project);
+  app.setStatusRecord(clip);
+  app.bindEvents();
+  assert.deepEqual(Array.from(app.elements.createModeButtons, (button) => button.dataset.createMode).sort(), ['project', 'single']);
+
+  for (const mode of ['single', 'project']) {
+    app.elements.createModeButtons.find((button) => button.dataset.createMode === mode).emit('click');
+    assert.equal(app.state.mode, mode);
+    assert.equal(app.state.currentView, 'generate');
+    assert.equal(app.elements.prompt.value, 'Test single clip prompt');
+    assert.equal(app.elements.projectTopic.value, 'Test project topic');
+    assert.equal(app.elements.promptCategory.value, '2');
+    assert.equal(app.state.displayedProjectID, project.id);
+    assert.equal(app.state.displayedGenerationID, clip.id);
+  }
+});
+
+test('overview creation actions respect the password gate and signed-out session', () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  app.applyPasswordGate(true);
+  assert.ok(app.elements.createModeButtons.length);
+  for (const button of app.elements.createModeButtons) {
+    assert.equal(button.disabled, true);
+    button.emit('click');
+  }
+  assert.equal(app.state.mode, 'project');
+  assert.equal(app.state.currentView, '');
+  app.applyPasswordGate(false);
+  app.state.authenticated = false;
+  app.elements.createModeButtons.find((button) => button.dataset.createMode === 'single').emit('click');
+  assert.equal(app.state.mode, 'project');
+  assert.equal(app.state.currentView, '');
+});
+
+test('recent activity combines real projects and clips in creation order and opens the correct result', () => {
+  const app = configuredApp('single');
+  const project = { id: 'fixture-recent-project', topic: 'Newest project', status: 'processing', model: 'fixture/video', created_at: 9, scenes: [], events: [] };
+  app.state.projects = [project, { ...project, id: 'fixture-earlier-project', topic: 'Earlier project', created_at: 3 }];
+  app.state.generations = [8, 7, 6, 5, 4].map((created) => ({
+    id: `fixture-recent-clip-${created}`, prompt: `Clip ${created}`, status: 'processing', created_at: created, model: 'fixture/video', events: [],
+  }));
+  app.renderRecent();
+  assert.deepEqual(Array.from(app.elements.recentList.children, (row) => row.dataset.id), [
+    project.id, 'fixture-recent-clip-8', 'fixture-recent-clip-7', 'fixture-recent-clip-6', 'fixture-recent-clip-5',
+  ]);
+  assert.match(collectText(app.elements.recentList.children[0]), /30-second project/);
+  assert.match(collectText(app.elements.recentList.children[1]), /Single clip/);
+  assert.match(collectText(app.elements.recentList.children[0]), /Not recorded/);
+  findTextButton(app.elements.recentList, 'Newest project').emit('click');
+  assert.equal(app.state.mode, 'project');
+  assert.equal(app.state.currentView, 'generate');
+  assert.equal(app.state.displayedProjectID, project.id);
+  findTextButton(app.elements.recentList, 'Clip 8').emit('click');
+  assert.equal(app.state.mode, 'single');
+  assert.equal(app.state.displayedGenerationID, 'fixture-recent-clip-8');
+  assert.equal(app.elements.projectTopic.value, 'Test project topic');
+  assert.equal(app.elements.prompt.value, 'Test single clip prompt');
+});
+
+test('recent project activity updates on list loads and accepted live snapshots', async () => {
+  const app = configuredApp('project');
+  const project = { id: 'fixture-recent-live', topic: 'Live project', status: 'planning', model: 'fixture/video', created_at: 9, updated_at: 10, scenes: [], events: [] };
+  app.setRequest(() => Promise.resolve({ projects: [project] }));
+  await app.loadProjects(false);
+  assert.match(collectText(app.elements.recentList), /Live project/);
+  assert.match(collectText(app.elements.recentList), /planning/);
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project: { ...project, status: 'generating', updated_at: 12 } }) });
+  assert.match(collectText(app.elements.recentList), /generating/);
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project }) });
+  assert.match(collectText(app.elements.recentList), /generating/);
 });
 
 for (const mode of ['project', 'single']) {
