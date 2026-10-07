@@ -55,6 +55,9 @@
     projectOptions: $("#project-options"),
     projectModelNote: $("#project-model-note"),
     projectCostNote: $("#project-cost-note"),
+    creatorProviderHelp: $("#creator-provider-help"),
+    creatorProviderMessage: $("#creator-provider-message"),
+    creatorOpenSettings: $("#creator-open-settings"),
     modeOptions: $$(".mode-option"),
     createModeButtons: $$('[data-create-mode]'),
     promptCount: $("#prompt-count"),
@@ -218,6 +221,10 @@
     modalAccountsActiveID: "",
     modalAccountsRequestID: 0,
     modelRequestID: 0,
+    modelsLoading: false,
+    modelLoadError: "",
+    modelCredentialsMissing: false,
+    openRouterConfigured: null,
     videoProvider: "openrouter",
     generations: [],
     stats: null,
@@ -258,6 +265,7 @@
     displayedProjectID: "",
     displayedProjectStatus: "",
     currentProjectRecord: null,
+    projectStoryRevision: null,
     projectTraceFetches: new Map(),
     projectTraceRequestEpoch: 0,
     projectRawTraceOpenKey: "",
@@ -1326,6 +1334,12 @@
     clearGenerationDisplay();
     clearProjectDisplay();
     state.authenticated = false;
+    state.openRouterConfigured = null;
+    state.modelsLoading = false;
+    state.modelLoadError = "";
+    state.modelCredentialsMissing = false;
+    state.modelRequestID++;
+    elements.creatorProviderHelp.hidden = true;
     renderConnectionState();
     state.vaultConfigured = false;
     state.currentGenerationID = "";
@@ -1626,11 +1640,45 @@
 
   function updateGenerateAvailability() {
     const model = selectedModel();
-    elements.generate.disabled = state.submissionPending || !model
-      || (state.mode === "project" && !supportsProject(model));
+    elements.generate.disabled = state.submissionPending || state.modelsLoading || !model
+      || (state.videoProvider === "modal" && !selectedModalAccountID())
+      || (state.mode === "project" && (!supportsProject(model) || state.openRouterConfigured === false));
     if (!state.submissionPending) {
       updateCreatorActionLabels();
     }
+    renderCreatorProviderHelp();
+  }
+
+  function renderCreatorProviderHelp() {
+    let message = "";
+    let settingsNeeded = false;
+    if (state.authenticated && !state.mustChangePassword) {
+      if (state.modelsLoading) {
+        message = "Loading available video models…";
+      } else if (state.videoProvider === "modal" && !selectedModalAccountID()) {
+        message = state.modalAccounts.length
+          ? "Choose a production account to load its video models. Manage production accounts in Settings."
+          : "Add a Modal production account in Settings to load its video models.";
+        settingsNeeded = true;
+      } else if (!state.models.length) {
+        message = state.modelCredentialsMissing
+          ? `Configure ${videoProviderName()} credentials in Settings to load video models.`
+          : state.modelLoadError
+            ? `Video models could not be loaded. ${state.modelLoadError} Review the provider in Settings and try again.`
+            : "No video models are available. Review your provider in Settings and try again.";
+        settingsNeeded = true;
+      } else if (state.mode === "project" && state.openRouterConfigured === false) {
+        message = "Add an OpenRouter API key in Settings for story planning. Stories require it with every video provider.";
+        settingsNeeded = true;
+      }
+      if (message && !state.modelsLoading && state.mode === "project" && state.openRouterConfigured === false
+        && !message.includes("story planning")) {
+        message += " Add an OpenRouter API key there for story planning as well.";
+      }
+    }
+    elements.creatorProviderHelp.hidden = !message;
+    elements.creatorProviderMessage.textContent = message;
+    elements.creatorOpenSettings.hidden = !settingsNeeded;
   }
 
   function fillSelect(select, values, formatter, fallbackLabel) {
@@ -1705,14 +1753,20 @@
 
   async function loadModels(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
+    const authGeneration = state.authGeneration;
     const requestID = ++state.modelRequestID;
     const requestedProvider = state.videoProvider;
     const requestedMode = state.mode;
     const modalAccountID = requestedProvider === "modal" ? selectedModalAccountID() : "";
-    const isCurrentRequest = () => requestID === state.modelRequestID
+    const isCurrentRequest = () => state.authenticated && !state.mustChangePassword && state.authGeneration === authGeneration
+      && requestID === state.modelRequestID
       && requestedProvider === state.videoProvider
-      && requestedMode === state.mode
+      && (requestedProvider !== "modal" || requestedMode === state.mode)
       && (requestedProvider !== "modal" || modalAccountID === selectedModalAccountID());
+    state.modelsLoading = true;
+    state.modelLoadError = "";
+    state.modelCredentialsMissing = false;
+    renderCreatorProviderHelp();
     elements.model.disabled = true;
     elements.modelTrigger.disabled = true;
     closeModelMenu();
@@ -1725,6 +1779,7 @@
     try {
       if (requestedProvider === "modal" && !modalAccountID) {
         if (!isCurrentRequest()) return;
+        state.modelsLoading = false;
         state.models = [];
         elements.model.replaceChildren(make("option", { text: "Choose a Modal account first" }));
         elements.model.options[0].value = "";
@@ -1740,6 +1795,7 @@
         : `/models?provider=${encodeURIComponent(requestedProvider)}`;
       const payload = await request(modelPath);
       if (!isCurrentRequest()) return;
+      state.modelsLoading = false;
       state.models = Array.isArray(payload && payload.models) ? payload.models : [];
       elements.model.replaceChildren();
       if (!state.models.length) {
@@ -1761,7 +1817,7 @@
       });
       const requestedModel = payload && payload.selected_model;
       const savedModel = state.models.find((model) => model.id === requestedModel);
-      const selected = (savedModel && (state.mode !== "project" || supportsProject(savedModel)))
+      const selected = (savedModel && (state.mode !== "project" || supportsProject(savedModel)) ? savedModel : null)
         || (state.mode === "project" ? state.models.find(supportsProject) : null)
         || savedModel
         || state.models[0];
@@ -1777,6 +1833,9 @@
       renderRecent();
     } catch (error) {
       if (!isCurrentRequest()) return;
+      state.modelsLoading = false;
+      state.modelLoadError = error.message;
+      state.modelCredentialsMissing = error.status === 422;
       state.models = [];
       elements.model.replaceChildren();
       const option = make("option", { text: error.status === 422 ? "Configure provider credentials in Settings" : "Models unavailable" });
@@ -2476,6 +2535,7 @@
     elements.projectDownload.removeAttribute("download");
     elements.projectYouTubeUpload.hidden = true;
     elements.projectStory.replaceChildren();
+    state.projectStoryRevision = null;
     elements.projectStory.hidden = true;
     elements.projectScenes.replaceChildren();
     elements.projectPipelineList.replaceChildren();
@@ -2780,6 +2840,7 @@
 
   function renderProjectPipeline(project, scenes, status) {
     const events = projectPipelineEvents(project, scenes, status);
+    elements.projectPipeline.hidden = !events.length;
     elements.projectPipelineList.replaceChildren();
     events.forEach((event) => {
       const item = make("li", { className: `pipeline-item pipeline-${event.status}` });
@@ -2886,9 +2947,33 @@
     elements.projectTrace.hidden = false;
   }
 
+  function renderProjectStory(project) {
+    const value = projectValue(project, "story", "story_text", "storyText");
+    const story = typeof value === "string" ? value.trim() : "";
+    const id = projectID(project);
+    if (state.projectStoryRevision?.id === id && state.projectStoryRevision.story === story) return;
+    state.projectStoryRevision = { id, story };
+    elements.projectStory.replaceChildren();
+    elements.projectStory.hidden = !story;
+    if (!story) return;
+    elements.projectStory.append(make("strong", { text: "Story" }));
+    const characters = Array.from(story);
+    if (characters.length <= 600) {
+      elements.projectStory.append(make("p", { text: story }));
+    } else {
+      elements.projectStory.append(make("p", { text: characters.slice(0, 300).join("") + "…" }));
+      const details = make("details");
+      details.append(make("summary", { text: "Read story" }), make("p", { text: story }));
+      elements.projectStory.append(details);
+    }
+  }
+
   function renderProject(project, authoritative = false) {
     if (!project) return;
     const incomingID = projectID(project);
+    const openScenePrompts = incomingID === state.displayedProjectID
+      ? new Map($$(".scene-prompt-details", elements.projectScenes).filter((details) => details.open).map((details) => [details.dataset.scene, details.children[1].textContent]))
+      : new Map();
     const displayedPrevious = state.currentProjectRecord && projectID(state.currentProjectRecord) === incomingID ? state.currentProjectRecord : null;
     if (state.displayedProjectID && state.displayedProjectID !== incomingID) invalidateProjectRawTraceRequests();
     const previous = state.projects.find((item) => projectID(item) === incomingID) || displayedPrevious;
@@ -2937,8 +3022,7 @@
     renderJobTerminal(elements.projectTerminal, projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"));
     renderProjectTrace(project, scenes, status);
 
-    elements.projectStory.hidden = true;
-    elements.projectStory.replaceChildren();
+    renderProjectStory(project);
 
     elements.projectScenes.replaceChildren();
     scenes.forEach((scene, index) => {
@@ -2959,7 +3043,13 @@
       const sceneScript = projectValue(scene, "script", "scene_script", "description");
       const prompt = projectValue(scene, "prompt", "video_prompt", "generation_prompt");
       if (sceneScript) card.append(make("p", { className: "scene-copy", text: sceneScript }));
-      if (prompt) card.append(make("p", { className: "scene-prompt", text: prompt }));
+      if (prompt) {
+        const details = make("details", { className: "scene-prompt-details" });
+        details.dataset.scene = String(number);
+        details.open = openScenePrompts.get(String(number)) === String(prompt);
+        details.append(make("summary", { text: "Scene prompt" }), make("p", { className: "scene-prompt", text: prompt }));
+        card.append(details);
+      }
       const sceneError = projectValue(scene, "error", "message");
       if (sceneError) card.append(make("div", { className: "alert error", text: sceneError }));
       if (["failed", "error"].includes(sceneStatus)) {
@@ -3032,13 +3122,14 @@
     project = mergeProjectRawTrace(existing, project);
     if (!existing) state.projects.unshift(project);
     else state.projects = state.projects.map((item) => projectID(item) === projectIDValue ? project : item);
+    const formEdited = state.pendingProjectFormEdited;
     clearPendingProjectSubmission(id);
     state.projectSubmissionPending = false;
     state.projectSubmissionFailed = false;
-    if (elements.projectTopic.value.trim() === String(pending.body.topic || "").trim()) {
+    if (!formEdited && elements.projectTopic.value.trim() === String(pending.body.topic || "").trim()) {
       elements.projectTopic.value = "";
+      elements.projectTopicError.textContent = "";
     }
-    elements.projectTopicError.textContent = "";
     renderProject(project, true);
     toast("Project submission restored after a connection interruption.");
     return { status: "recovered", project };
@@ -3182,8 +3273,19 @@
   }
 
   async function submitProject() {
-    if (state.submissionPending) return;
-    const topic = elements.projectTopic.value.trim();
+    if (state.submissionPending || state.modelsLoading || !state.authenticated) return;
+    if (state.mustChangePassword) {
+      navigate("settings");
+      return;
+    }
+    if (state.openRouterConfigured === false) {
+      renderCreatorProviderHelp();
+      elements.creatorOpenSettings.focus({ preventScroll: true });
+      return;
+    }
+    const submittedValue = elements.projectTopic.value;
+    const submittedRevision = state.promptEditRevisions.project;
+    const topic = submittedValue.trim();
     const topicLength = Array.from(topic).length;
     elements.projectTopicError.textContent = "";
     if (!topic || topicLength > 4000) {
@@ -3247,8 +3349,10 @@
       state.projectSubmissionPending = false;
       state.projectSubmissionFailed = false;
       renderProject(project, true);
-      elements.projectTopic.value = "";
-      elements.projectTopicError.textContent = "";
+      if (elements.projectTopic.value === submittedValue && state.promptEditRevisions.project === submittedRevision) {
+        elements.projectTopic.value = "";
+        elements.projectTopicError.textContent = "";
+      }
       toast("Project submitted. Script generation has started.");
       loadProjects(false);
     } catch (error) {
@@ -3288,7 +3392,7 @@
 
   async function submitGeneration(event) {
     event.preventDefault();
-    if (state.submissionPending) return;
+    if (state.submissionPending || state.modelsLoading || !state.authenticated) return;
     if (state.mode === "project") {
       await submitProject();
       return;
@@ -3297,7 +3401,10 @@
       navigate("settings");
       return;
     }
-    const prompt = elements.prompt.value.trim();
+    const submittedValue = elements.prompt.value;
+    const submittedRevision = state.promptEditRevisions.single;
+    const authGeneration = state.authGeneration;
+    const prompt = submittedValue.trim();
     const promptLength = Array.from(prompt).length;
     elements.promptError.textContent = "";
     if (!prompt || promptLength > 4000) {
@@ -3344,16 +3451,20 @@
 
     try {
       const record = await request("/generate", { method: "POST", body: JSON.stringify(requestBody) });
+      if (!state.authenticated || state.authGeneration !== authGeneration) return;
       state.singleSubmissionPending = false;
       state.singleSubmissionFailed = false;
       setStatusRecord(record);
-      elements.prompt.value = "";
-      elements.promptCount.textContent = "0 / 4000";
-      elements.promptError.textContent = "";
+      if (elements.prompt.value === submittedValue && state.promptEditRevisions.single === submittedRevision) {
+        elements.prompt.value = "";
+        elements.promptCount.textContent = "0 / 4000";
+        elements.promptError.textContent = "";
+      }
       updateModelOptions();
       toast("Generation submitted.");
       loadHistory(false);
     } catch (error) {
+      if (!state.authenticated || state.authGeneration !== authGeneration) return;
       state.singleSubmissionPending = false;
       state.singleSubmissionFailed = true;
       elements.statusBadge.className = "badge failed";
@@ -3365,10 +3476,12 @@
       syncGenerationModeDisplay();
       if (error.status !== 401) toast(error.message, true);
     } finally {
-      state.submissionPending = false;
-      setButtonBusy(elements.generate, false);
-      updateGenerateAvailability();
-      syncGenerationModeDisplay();
+      if (state.authGeneration === authGeneration) {
+        state.submissionPending = false;
+        setButtonBusy(elements.generate, false);
+        updateGenerateAvailability();
+        syncGenerationModeDisplay();
+      }
     }
   }
 
@@ -3380,6 +3493,7 @@
     elements.videoProviderState.className = "badge completed";
     elements.videoProviderState.textContent = `Active: ${videoProviderName()}`;
     elements.modalBaseURL.value = settings.modal_video_base_url || "";
+    state.openRouterConfigured = typeof settings.openrouter_api_key_configured === "boolean" ? settings.openrouter_api_key_configured : null;
     const openRouterConfigured = Boolean(settings.openrouter_api_key_configured);
     elements.keyState.className = `badge ${openRouterConfigured ? "completed" : "neutral"}`;
     elements.keyState.textContent = openRouterConfigured ? "Configured" : "Not configured";
@@ -3391,6 +3505,7 @@
       ? "A key is saved securely. Leave this field blank to keep it while changing the URL."
       : "A key is required for the first save. The saved key is never returned to the browser.";
     renderVaultCodeSettings(Boolean(settings.vault_code_configured));
+    updateGenerateAvailability();
   }
 
   function renderVaultCodeSettings(configured) {
@@ -4716,6 +4831,7 @@
 
   async function saveAPIKey(event) {
     event.preventDefault();
+    if (!state.authenticated) return;
     if (state.mustChangePassword) {
       navigate("settings");
       return;
@@ -4727,16 +4843,20 @@
       return;
     }
     const button = $("button[type='submit']", elements.apiKeyForm);
+    const authGeneration = state.authGeneration;
     setButtonBusy(button, true, "Testing key…");
     try {
       await request("/api/settings/api-key", {
         method: "PUT",
         body: JSON.stringify({ api_key: key })
       });
+      if (!state.authenticated || state.authGeneration !== authGeneration) return;
+      state.openRouterConfigured = true;
       elements.apiKey.value = "";
       elements.keyState.className = "badge completed";
       elements.keyState.textContent = "Configured";
       elements.maskedKey.textContent = "Configured";
+      updateGenerateAvailability();
       toast("API key tested and saved.");
       if (state.videoProvider === "openrouter") await loadModels(false);
     } catch (error) {
