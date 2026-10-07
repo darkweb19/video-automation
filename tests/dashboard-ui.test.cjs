@@ -10,17 +10,21 @@ const source = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 
 // This DOM stub tests application state and events, not browser layout.
 let requestIDSeed = 0;
-function createApp({ sessionData = new Map(), storageThrows = false, stubHistory = true } = {}) {
+function createApp({ sessionData = new Map(), storageThrows = false, stubHistory = true, eventSourceAvailable = true, eventSourceThrows = false } = {}) {
   let document;
   let compact = false;
   const timers = [];
   const eventSources = [];
+  const windowListeners = new Map();
+  let online = true;
   class EventSourceStub {
     constructor(url, options) {
+      if (eventSourceThrows) throw new Error('Fixture browser cannot open EventSource');
       this.url = url;
       this.options = options;
       this.listeners = new Map();
       this.closed = false;
+      this.readyState = 0;
       eventSources.push(this);
     }
     addEventListener(name, callback) {
@@ -29,9 +33,11 @@ function createApp({ sessionData = new Map(), storageThrows = false, stubHistory
       this.listeners.set(name, callbacks);
     }
     emit(name, event = {}) {
+      if (name === 'open') this.readyState = 1;
+      if (name === 'error' && this.readyState !== 2) this.readyState = 0;
       for (const callback of this.listeners.get(name) ?? []) callback(event);
     }
-    close() { this.closed = true; }
+    close() { this.closed = true; this.readyState = 2; }
   }
   const sessionStorage = {
     getItem: (key) => { if (storageThrows) throw new Error('Storage unavailable'); return sessionData.get(key) ?? null; },
@@ -160,12 +166,17 @@ function createApp({ sessionData = new Map(), storageThrows = false, stubHistory
       history: { replaceState() {} },
       sessionStorage,
       crypto: { randomUUID: () => `fixture-project-request-${++requestIDSeed}` },
-      EventSource: EventSourceStub,
+      EventSource: eventSourceAvailable ? EventSourceStub : undefined,
+      navigator: { get onLine() { return online; } },
       matchMedia: () => ({ matches: compact }),
       setTimeout: (callback) => { timers.push(callback); return timers.length; },
       clearTimeout() {},
       requestAnimationFrame: (callback) => callback(),
-      addEventListener() {},
+      addEventListener(name, callback) {
+        const callbacks = windowListeners.get(name) ?? [];
+        callbacks.push(callback);
+        windowListeners.set(name, callbacks);
+      },
       scrollTo() {},
     },
     URL,
@@ -201,6 +212,8 @@ function createApp({ sessionData = new Map(), storageThrows = false, stubHistory
     document,
     takeTimer: () => timers.shift(),
     eventSources,
+    setOnline: (value) => { online = value; },
+    emitWindow: (name, event = {}) => (windowListeners.get(name) ?? []).map((callback) => callback(event)),
     setCompact: (value) => { compact = value; },
     setRequest: (request) => { context.uiTestRequest = request; },
     setFetch: (fetcher) => { context.fetch = fetcher; },
@@ -1151,6 +1164,115 @@ test('late History pages cannot insert private results or clear a newer session 
   await newLoad;
   assert.equal(app.state.historyLoading, false);
   assert.equal(app.elements.refreshHistory.disabled, false);
+});
+
+test('the connection indicator follows one authenticated native stream and refreshes only on open', async () => {
+  const app = configuredApp('project');
+  const calls = [];
+  const sessionCheck = deferred();
+  app.setRequest((requestPath) => {
+    calls.push(requestPath);
+    if (requestPath === '/api/session') return sessionCheck.promise;
+    return Promise.resolve({ projects: [] });
+  });
+  app.startJobEventStream();
+  app.startJobEventStream();
+  assert.equal(app.eventSources.length, 1);
+  const source = app.eventSources[0];
+  assert.equal(source.url, '/api/events');
+  assert.equal(source.options.withCredentials, true);
+  assert.equal(app.elements.connectionState.dataset.state, 'connecting');
+  source.emit('ready');
+  source.emit('ping');
+  assert.equal(app.elements.connectionState.dataset.state, 'connecting');
+  assert.equal(calls.length, 0);
+  source.emit('open');
+  await flushUI();
+  assert.equal(app.elements.connectionState.dataset.state, 'live');
+  assert.equal(calls.filter((requestPath) => requestPath === '/api/projects').length, 1);
+  source.emit('ready');
+  source.emit('ping');
+  assert.equal(calls.filter((requestPath) => requestPath === '/api/projects').length, 1);
+
+  source.emit('error');
+  source.emit('error');
+  assert.equal(app.elements.connectionState.dataset.state, 'reconnecting');
+  assert.equal(calls.filter((requestPath) => requestPath === '/api/session').length, 1);
+  assert.equal(source.closed, false);
+  assert.equal(app.eventSources.length, 1);
+  sessionCheck.reject(new Error('Fixture network interruption'));
+  await flushUI();
+  assert.equal(app.state.authenticated, true);
+  assert.equal(app.state.jobEventSource, source);
+  source.emit('open');
+  await flushUI();
+  assert.equal(app.elements.connectionState.dataset.state, 'live');
+  assert.equal(calls.filter((requestPath) => requestPath === '/api/projects').length, 2);
+});
+
+test('offline and terminally closed streams show honest state and manual History refresh can recover', async () => {
+  const app = configuredApp('project');
+  app.setRequest(() => Promise.resolve({ projects: [] }));
+  app.bindEvents();
+  app.startJobEventStream();
+  const first = app.eventSources[0];
+  first.emit('open');
+  await flushUI();
+  app.setOnline(false);
+  app.emitWindow('offline');
+  assert.equal(app.elements.connectionState.dataset.state, 'offline');
+  assert.match(app.elements.connectionState.title, /jobs may continue running/);
+  app.setOnline(true);
+  first.emit('error');
+  app.emitWindow('online');
+  assert.equal(app.elements.connectionState.dataset.state, 'reconnecting');
+  assert.equal(app.eventSources.length, 1, 'native reconnection must retain its existing stream');
+  first.readyState = 2;
+  first.emit('error');
+  assert.equal(app.elements.connectionState.dataset.state, 'paused');
+  app.elements.refreshHistory.emit('click');
+  assert.equal(first.closed, true);
+  assert.equal(app.eventSources.length, 2);
+  const next = app.eventSources[1];
+  first.emit('open');
+  assert.equal(app.state.jobEventSource, next);
+  assert.equal(app.elements.connectionState.dataset.state, 'reconnecting');
+  next.emit('open');
+  await flushUI();
+  assert.equal(app.elements.connectionState.dataset.state, 'live');
+});
+
+test('unsupported or blocked live streams report unavailable without ending a valid session', () => {
+  for (const options of [{ eventSourceAvailable: false }, { eventSourceThrows: true }]) {
+    const app = configuredApp('project', true, options);
+    app.startJobEventStream();
+    assert.equal(app.elements.connectionState.dataset.state, 'unavailable');
+    assert.equal(app.state.authenticated, true);
+    assert.equal(app.state.jobEventSource, null);
+    assert.equal(app.eventSources.length, 0);
+    assert.match(app.elements.connectionState.title, /Refresh in History/);
+  }
+});
+
+test('stream session gates and logout keep stale events from announcing a live workspace', async () => {
+  const app = configuredApp('project');
+  app.setRequest((requestPath) => Promise.resolve(requestPath === '/api/session' ? { must_change_password: true } : { projects: [] }));
+  app.startJobEventStream();
+  const source = app.eventSources[0];
+  source.emit('error');
+  await flushUI();
+  assert.equal(app.elements.connectionState.dataset.state, 'locked');
+  assert.equal(app.state.mustChangePassword, true);
+  assert.equal(app.state.currentView, 'settings');
+  assert.equal(source.closed, true);
+  source.emit('open');
+  app.startJobEventStream();
+  assert.equal(app.elements.connectionState.dataset.state, 'locked');
+  assert.equal(app.eventSources.length, 1);
+  app.showLoggedOut();
+  source.emit('open');
+  assert.equal(app.elements.connectionState.dataset.state, 'signed-out');
+  assert.equal(app.state.jobEventSource, null);
 });
 
 for (const mode of ['project', 'single']) {

@@ -27,6 +27,7 @@
     menuButton: $("#menu-button"),
     pageKicker: $("#page-kicker"),
     pageTitle: $("#page-title"),
+    connectionState: $("#connection-state"),
     model: $("#model"),
     modelPicker: $("#model-picker"),
     modelTrigger: $("#model-trigger"),
@@ -264,6 +265,7 @@
     jobStreamHasOpened: false,
     jobStreamDisconnected: false,
     jobStreamAuthCheckPending: false,
+    jobStreamUnavailable: false,
     terminalRefreshTimer: 0,
     terminalRefreshKinds: new Set(),
     toastTimer: 0,
@@ -958,6 +960,30 @@
     }
   }
 
+  function renderConnectionState() {
+    let status = "paused";
+    if (!state.authenticated) status = "signed-out";
+    else if (state.mustChangePassword) status = "locked";
+    else if (window.navigator?.onLine === false) status = "offline";
+    else if (typeof window.EventSource !== "function" || state.jobStreamUnavailable) status = "unavailable";
+    else if (state.jobEventSource && state.jobEventSource.readyState !== 2) {
+      status = state.jobStreamDisconnected ? "reconnecting" : state.jobStreamHasOpened ? "live" : "connecting";
+    }
+    const messages = {
+      "signed-out": ["Sign in to connect", "Live updates start after you sign in."],
+      locked: ["Workspace locked", "Change your temporary password to enable live updates."],
+      offline: ["Offline · updates paused", "Your jobs may continue running. Updates resume when your connection returns."],
+      unavailable: ["Live updates unavailable", "Use Refresh in History to check your jobs."],
+      paused: ["Live updates paused", "Use Refresh in History to reconnect and check your jobs."],
+      connecting: ["Connecting to workspace", "Waiting for the live update connection."],
+      reconnecting: ["Reconnecting to workspace", "Your jobs may continue running. Waiting to reconnect for their latest status."],
+      live: ["Live updates connected", "Job updates are connected to this workspace."]
+    };
+    elements.connectionState.dataset.state = status;
+    elements.connectionState.textContent = messages[status][0];
+    elements.connectionState.title = messages[status][1];
+  }
+
   function stopJobEventStream(reset = false) {
     if (state.jobEventSource) {
       state.jobEventSource.close();
@@ -968,21 +994,38 @@
     if (reset) {
       state.jobStreamHasOpened = false;
       state.jobStreamDisconnected = false;
+      state.jobStreamUnavailable = false;
       window.clearTimeout(state.terminalRefreshTimer);
       state.terminalRefreshTimer = 0;
       state.terminalRefreshKinds.clear();
     }
+    renderConnectionState();
   }
 
   function startJobEventStream() {
-    if (!state.authenticated || state.mustChangePassword || state.jobEventSource || typeof window.EventSource !== "function") return;
-    const source = new window.EventSource("/api/events", { withCredentials: true });
+    if (state.jobEventSource?.readyState === 2) stopJobEventStream();
+    if (!state.authenticated || state.mustChangePassword || state.jobEventSource || typeof window.EventSource !== "function") {
+      renderConnectionState();
+      return;
+    }
+    state.jobStreamUnavailable = false;
+    let source;
+    try {
+      source = new window.EventSource("/api/events", { withCredentials: true });
+    } catch (_error) {
+      state.jobStreamUnavailable = true;
+      renderConnectionState();
+      return;
+    }
     state.jobEventSource = source;
+    state.jobStreamDisconnected = state.jobStreamHasOpened;
+    renderConnectionState();
     source.addEventListener("open", () => {
       if (state.jobEventSource !== source) return;
       state.jobStreamHasOpened = true;
       state.jobStreamDisconnected = false;
       state.jobStreamAuthCheckPending = false;
+      renderConnectionState();
       // The normal API loads happen before subscription. Refresh after every
       // successful open so a transition in that small gap is authoritative.
       // The ready event stays informational and does not duplicate this read.
@@ -995,6 +1038,7 @@
     source.addEventListener("error", () => {
       if (state.jobEventSource !== source) return;
       state.jobStreamDisconnected = true;
+      renderConnectionState();
       if (state.jobStreamAuthCheckPending) return;
       state.jobStreamAuthCheckPending = true;
       void request("/api/session").then((session) => {
@@ -1208,6 +1252,7 @@
       elements.keyState.textContent = "Locked";
       elements.maskedKey.textContent = "Change password first";
     }
+    renderConnectionState();
   }
 
   function resetVaultRestoreState() {
@@ -1281,6 +1326,7 @@
     clearGenerationDisplay();
     clearProjectDisplay();
     state.authenticated = false;
+    renderConnectionState();
     state.vaultConfigured = false;
     state.currentGenerationID = "";
     state.currentProjectID = "";
@@ -4891,6 +4937,7 @@
 
   function bindEvents() {
     syncNavigationAccessibility();
+    renderConnectionState();
     elements.loginForm.addEventListener("submit", submitLogin);
     elements.recoveryForm.addEventListener("submit", submitRecovery);
     elements.showRecovery.addEventListener("click", showRecoveryView);
@@ -4978,7 +5025,11 @@
     elements.videoProvider.addEventListener("change", changeVideoProvider);
     elements.testVideoProvider.addEventListener("click", testVideoProvider);
     elements.passwordForm.addEventListener("submit", updatePassword);
-    elements.refreshHistory.addEventListener("click", () => { loadHistory(true); loadProjects(true); });
+    elements.refreshHistory.addEventListener("click", () => {
+      startJobEventStream();
+      loadHistory(true);
+      loadProjects(true);
+    });
     elements.historySearch.addEventListener("input", renderHistory);
     [elements.historyStatus, elements.historyFormat].forEach((select) => select.addEventListener("change", renderHistory));
     elements.historyClearFilters.addEventListener("click", clearHistoryFilters);
@@ -5058,6 +5109,8 @@
       }
     });
     window.addEventListener("resize", syncNavigationAccessibility);
+    window.addEventListener("offline", renderConnectionState);
+    window.addEventListener("online", startJobEventStream);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && state.authenticated && !state.mustChangePassword) void refreshJobState();
     });
