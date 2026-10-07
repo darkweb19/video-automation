@@ -153,42 +153,29 @@
                 </div>
               </form>
             </section>
-            <aside class="panel status-panel">
-              <div class="panel-head"><div><h2>Generation status</h2><p>Live progress and result</p></div><span id="status-badge" class="badge neutral">Idle</span></div>
-              <div id="status-empty" class="status-empty"><div class="status-stage" aria-hidden="true"><span class="status-stage-frame"></span><span>Video preview</span></div><h3>Ready when you are</h3><p>Progress and your preview will appear here when generation starts.</p></div>
+            <aside class="panel status-panel" aria-labelledby="production-result-heading">
+              <div class="panel-head"><div><h2 id="production-result-heading">Your production</h2><p>Progress, story and finished video.</p></div><span id="status-badge" class="badge neutral">Idle</span></div>
+              <div id="status-empty" class="status-empty"><div class="status-stage" aria-hidden="true"><span class="status-stage-frame"></span></div><h3>A space for your next video</h3><p>Start a generation to follow its progress here. The result saves to History.</p></div>
               <div id="status-active" hidden>
-                <div id="progress-wrap" class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
-                <p id="status-detail" class="subtle"></p>
+                <div id="progress-wrap" class="progress-wrap"><div id="progress-bar" class="progress-bar" role="progressbar" aria-label="Clip generation progress" aria-valuemin="0" aria-valuemax="100"></div></div>
+                <p id="status-detail" class="production-status-copy" role="status" aria-live="polite"></p>
                 <div id="error" class="alert error" role="alert" hidden></div>
-                <section id="single-terminal-section" class="job-terminal-section" hidden aria-labelledby="single-terminal-title">
-                  <div class="trace-heading"><div><h3 id="single-terminal-title">Job console</h3><p>Normalized generation events</p></div></div>
-                  <ol id="single-terminal" class="job-terminal" aria-live="polite"></ol>
-                </section>
                 <button id="retry-status" class="button secondary" type="button" hidden>Retry status</button>
                 <video id="generated-video" aria-label="Generated video preview" controls playsinline preload="metadata" hidden></video>
-                <a id="open-video" class="button secondary full" hidden>Download video</a>
-                <button id="single-youtube-upload" class="button secondary full youtube-entry" type="button" hidden>Upload to YouTube</button>
+                <div class="result-actions"><a id="open-video" class="button primary" hidden>Download video</a><button id="single-youtube-upload" class="button secondary" type="button" hidden>Upload to YouTube</button></div>
+                <details id="single-terminal-section" class="technical-disclosure job-terminal-section" hidden aria-labelledby="single-terminal-title"><summary><span id="single-terminal-title" class="disclosure-title">Job events</span><span class="disclosure-note">Generation details</span></summary><ol id="single-terminal" class="job-terminal" aria-live="polite"></ol></details>
               </div>
               <div id="project-status" hidden>
-                <div id="project-progress-wrap" class="progress-wrap"><div id="project-progress-bar" class="progress-bar"></div></div>
-                <p id="project-status-detail" class="subtle">Preparing your project…</p>
+                <div id="project-progress-wrap" class="progress-wrap"><div id="project-progress-bar" class="progress-bar" role="progressbar" aria-label="Story generation progress" aria-valuemin="0" aria-valuemax="100"></div></div>
+                <p id="project-status-detail" class="production-status-copy" role="status" aria-live="polite">Preparing your story...</p>
                 <div id="project-error" class="alert error" role="alert" hidden></div>
                 <button id="retry-project" class="button secondary" type="button" hidden>Retry project</button>
-                <section id="project-pipeline" class="project-pipeline" aria-labelledby="project-pipeline-title">
-                  <div class="trace-heading"><h3 id="project-pipeline-title">Pipeline</h3><span class="trace-caption">Process trace</span></div>
-                  <ol id="project-pipeline-list" class="pipeline-list"></ol>
-                </section>
-                <section class="job-terminal-section project-terminal-section" aria-labelledby="project-terminal-title">
-                  <div class="trace-heading"><div><h3 id="project-terminal-title">Job console</h3><p>Normalized generation events</p></div></div>
-                  <ol id="project-terminal" class="job-terminal" aria-live="polite"></ol>
-                </section>
+                <div id="project-final" class="project-final" hidden><video id="project-video" aria-label="30-second story preview" controls playsinline preload="metadata"></video><div class="result-actions"><a id="project-download" class="button primary">Download video</a><button id="project-youtube-upload" class="button secondary" type="button">Upload to YouTube</button></div></div>
                 <div id="project-story" class="project-story" hidden></div>
-                <div id="project-scenes" class="project-scenes"></div>
-                <section id="project-trace" class="project-trace" aria-labelledby="project-trace-title">
-                  <div class="trace-heading"><div><h3 id="project-trace-title">Generation details</h3><p>Recorded inputs, outputs, and retry history.</p></div></div>
-                  <div id="project-trace-sections" class="trace-sections"></div>
-                </section>
-                <div id="project-final" class="project-final" hidden><video id="project-video" aria-label="30-second project preview" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a><button id="project-youtube-upload" class="button secondary full youtube-entry" type="button">Upload to YouTube</button></div>
+                <section class="scene-sequence" aria-labelledby="scene-sequence-heading"><h3 id="scene-sequence-heading">Scene sequence</h3><div id="project-scenes" class="project-scenes"></div></section>
+                <details id="project-pipeline" class="technical-disclosure project-pipeline" aria-labelledby="project-pipeline-title"><summary><span id="project-pipeline-title" class="disclosure-title">Production timeline</span><span class="disclosure-note">Stages and retries</span></summary><ol id="project-pipeline-list" class="pipeline-list"></ol></details>
+                <details class="technical-disclosure job-terminal-section project-terminal-section" aria-labelledby="project-terminal-title"><summary><span id="project-terminal-title" class="disclosure-title">Job events</span><span class="disclosure-note">Recorded updates</span></summary><ol id="project-terminal" class="job-terminal" aria-live="polite"></ol></details>
+                <details id="project-trace" class="technical-disclosure project-trace" aria-labelledby="project-trace-title"><summary><span id="project-trace-title" class="disclosure-title">Generation details</span><span class="disclosure-note">Inputs and outputs</span></summary><div id="project-trace-sections" class="trace-sections"></div></details>
               </div>
             </aside>
           </div>
