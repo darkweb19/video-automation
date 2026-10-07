@@ -229,6 +229,8 @@
     historyTerminalOpen: new Map(),
     historyCards: new Map(),
     historyChrome: new Map(),
+    recentRows: new Map(),
+    recentEmpty: null,
     currentGenerationID: "",
     displayedGenerationID: "",
     currentGenerationRecord: null,
@@ -1271,6 +1273,8 @@
     elements.refreshHistory.disabled = false;
     state.historyCards.clear();
     state.historyChrome.clear();
+    state.recentRows.clear();
+    state.recentEmpty = null;
     state.historyNextOffset = 0;
     state.historyNextCursor = "";
     state.historyCursorParam = "before";
@@ -1880,49 +1884,69 @@
     return empty;
   }
   function renderRecent() {
-    elements.recentList.replaceChildren();
     const recent = [
       ...state.projects.map((record) => ({ kind: "project", record })),
       ...state.generations.map((record) => ({ kind: "single", record }))
     ].sort((left, right) => numericStat(projectValue(right.record, "created_at", "createdAt"))
       - numericStat(projectValue(left.record, "created_at", "createdAt"))).slice(0, 5);
+    const keys = new Set(recent.map(({ kind, record }) => `${kind}:${kind === "project" ? projectID(record) : String(record.id || "")}`));
+    state.recentRows.forEach((_value, key) => { if (!keys.has(key)) state.recentRows.delete(key); });
     if (!recent.length) {
-      elements.recentList.append(emptyState("Your projects and clips will appear here.", "Create a video"));
+      if (!state.recentEmpty) state.recentEmpty = emptyState("Your projects and clips will appear here.", "Create a video");
+      reconcileChildren(elements.recentList, [state.recentEmpty]);
       return;
     }
+    const rows = [];
     recent.forEach(({ kind, record }) => {
       const project = kind === "project";
-      const title = String(projectValue(record, project ? "topic" : "prompt") || (project ? "Untitled project" : "Untitled clip"));
-      const status = String(projectValue(record, "status") || "queued").toLowerCase();
-      const model = projectValue(record, "model");
-      const videoReady = status === "completed" && Boolean(projectValue(record, project ? "final_video_ready" : "video_ready"));
-      const row = make("div", { className: "recent-item" });
-      row.dataset.kind = kind;
-      row.dataset.id = project ? projectID(record) : String(record.id || "");
-      const main = make("div", { className: "recent-main" });
-      const open = make("button", { className: "text-button recent-open", type: "button", text: title });
-      open.setAttribute("aria-label", `Open ${project ? "30-second project" : "single clip"}: ${title}`);
-      open.addEventListener("click", () => {
-        openCreator(kind);
-        if (!state.authenticated || state.mustChangePassword) return;
-        if (project) renderProject(record);
-        else setStatusRecord(record);
-      });
-      main.append(
-        open,
-        make("span", { text: `${project ? "30-second project" : "Single clip"} · ${friendlyModel(model)}` })
-      );
-      if (videoReady) {
+      const id = project ? projectID(record) : String(record.id || "");
+      const key = `${kind}:${id}`;
+      let entry = state.recentRows.get(key);
+      if (!entry) {
+        const row = make("div", { className: "recent-item" });
+        row.dataset.kind = kind;
+        row.dataset.id = id;
+        const main = make("div", { className: "recent-main" });
+        const open = make("button", { className: "text-button recent-open", type: "button" });
+        const model = make("span");
         const upload = make("button", { className: "button text-button recent-upload", type: "button", text: "Upload to YouTube" });
-        upload.addEventListener("click", () => openYouTubeUpload(project ? projectYouTubeSource(record) : generationYouTubeSource(record)));
-        main.append(upload);
+        const latestRecord = () => project ? state.projects.find((item) => projectID(item) === id)
+          : state.generations.find((item) => String(item.id) === id);
+        open.addEventListener("click", () => {
+          const latest = latestRecord();
+          if (!latest || !state.authenticated || state.mustChangePassword) return;
+          openCreator(kind);
+          if (project) renderProject(latest);
+          else setStatusRecord(latest);
+        });
+        upload.addEventListener("click", () => {
+          const latest = latestRecord();
+          if (latest) void openYouTubeUpload(project ? projectYouTubeSource(latest) : generationYouTubeSource(latest));
+        });
+        main.append(open, model, upload);
+        const date = make("span", { className: "meta" });
+        const badge = statusBadge("queued");
+        const cost = make("strong");
+        row.append(main, date, badge, cost);
+        entry = { row, open, model, upload, date, badge, cost, record: null };
+        state.recentRows.set(key, entry);
       }
-      const date = make("span", { className: "meta", text: formatDate(projectValue(record, "created_at", "createdAt")) });
-      const badge = statusBadge(status);
-      const cost = make("strong", { text: project ? projectRecordedCost(record) : recordCost(record).value });
-      row.append(main, date, badge, cost);
-      elements.recentList.append(row);
+      if (entry.record !== record) {
+        const title = String(projectValue(record, project ? "topic" : "prompt") || (project ? "Untitled project" : "Untitled clip"));
+        const status = String(projectValue(record, "status") || "queued").toLowerCase();
+        entry.open.textContent = title;
+        entry.open.setAttribute("aria-label", `Open ${project ? "30-second project" : "single clip"}: ${title}`);
+        entry.model.textContent = `${project ? "30-second project" : "Single clip"} · ${friendlyModel(projectValue(record, "model"))}`;
+        entry.upload.hidden = status !== "completed" || !Boolean(projectValue(record, project ? "final_video_ready" : "video_ready"));
+        entry.date.textContent = formatDate(projectValue(record, "created_at", "createdAt"));
+        entry.badge.className = "badge " + statusClass(status);
+        entry.badge.textContent = status.replaceAll("_", " ");
+        entry.cost.textContent = project ? projectRecordedCost(record) : recordCost(record).value;
+        entry.record = record;
+      }
+      rows.push(entry.row);
     });
+    reconcileChildren(elements.recentList, rows);
   }
 
   function metadataItem(label, value) {
@@ -3677,6 +3701,8 @@
     if (wasOpen) elements.youtubeDialog.close();
     if (restoreFocus && focusTarget && focusTarget.isConnected !== false && typeof focusTarget.focus === "function") {
       focusTarget.focus({ preventScroll: true });
+    } else if (restoreFocus && state.authenticated && !state.mustChangePassword) {
+      focusPageTitle();
     }
   }
 

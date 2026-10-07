@@ -70,6 +70,7 @@ function createApp({ sessionData = new Map(), storageThrows = false, stubHistory
       };
     }
     get options() { return this.children; }
+    get isConnected() { return Boolean(this.connectedRoot || this.parent?.isConnected); }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) ?? null; }
     removeAttribute(name) { this.attributes.delete(name); }
@@ -127,8 +128,10 @@ function createApp({ sessionData = new Map(), storageThrows = false, stubHistory
   }
   const nodes = new Map([...markup.matchAll(/<([a-z][a-z0-9-]*)\b[^>]*\bid="([^"]+)"[^>]*>/g)]
     .map((match) => [match[2], new Element(match[1])]));
+  nodes.forEach((node) => { node.connectedRoot = true; });
   nodes.get('password-form').parentElement = new Element('div');
   const sidebar = new Element('aside');
+  sidebar.connectedRoot = true;
   const tabs = ['project', 'single'].map((mode) => {
     const tab = new Element('button');
     tab.dataset.mode = mode;
@@ -807,6 +810,59 @@ test('recent project activity updates on list loads and accepted live snapshots'
   assert.match(collectText(app.elements.recentList), /generating/);
   app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project }) });
   assert.match(collectText(app.elements.recentList), /generating/);
+});
+
+test('live recent activity preserves focused actions and a YouTube dialog opener through record updates', async () => {
+  const { app } = connectedYouTubeApp();
+  const completed = { id: 'fixture-recent-opener', prompt: 'Completed source', status: 'completed', video_ready: true, created_at: 3, updated_at: 3 };
+  const active = { id: 'fixture-recent-other', topic: 'Active story', status: 'generating', created_at: 2, updated_at: 2, scenes: [] };
+  app.state.generations = [completed];
+  app.state.projects = [active];
+  app.renderRecent();
+  const completedRow = app.state.recentRows.get(`single:${completed.id}`);
+  const activeRow = app.state.recentRows.get(`project:${active.id}`);
+  const before = [completedRow.row, completedRow.upload, activeRow.row, activeRow.open, app.elements.recentList]
+    .map((node) => ({ node, detachments: node.detachments, replacements: node.replacements }));
+  activeRow.open.focus();
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: active.id, project: { ...active, progress: 60, updated_at: 4 } }) });
+  assert.equal(app.document.activeElement, activeRow.open);
+  assert.equal(activeRow.open.isConnected, true);
+  completedRow.upload.focus();
+  completedRow.upload.emit('click');
+  await flushUI();
+  assert.equal(app.elements.youtubeDialog.open, true);
+  assert.equal(app.state.youtubeRestoreFocus, completedRow.upload);
+  app.handleJobSnapshot('generation', { data: JSON.stringify({ id: completed.id, generation: { ...completed, prompt: 'Updated source title', updated_at: 5 } }) });
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: active.id, project: { ...active, status: 'completed', final_video_ready: true, updated_at: 5 } }) });
+  assert.equal(app.state.recentRows.get(`single:${completed.id}`), completedRow);
+  assert.equal(completedRow.open.textContent, 'Updated source title');
+  assert.equal(activeRow.upload.hidden, false);
+  app.closeYouTubeComposer();
+  assert.equal(app.document.activeElement, completedRow.upload);
+  assert.equal(completedRow.upload.isConnected, true);
+  for (const { node, detachments, replacements } of before) {
+    assert.equal(node.detachments, detachments, 'recent actions and their rows must stay attached');
+    assert.equal(node.replacements, replacements, 'recent action ancestry must not be cleared');
+  }
+});
+
+test('recent rows remain bounded and a removed dialog opener returns focus to the page', async () => {
+  const { app } = connectedYouTubeApp();
+  const completed = { id: 'fixture-recent-removed', prompt: 'Older completed clip', status: 'completed', video_ready: true, created_at: 1 };
+  app.state.generations = [completed];
+  app.renderRecent();
+  const upload = app.state.recentRows.get(`single:${completed.id}`).upload;
+  upload.focus();
+  upload.emit('click');
+  await flushUI();
+  app.state.projects = [2, 3, 4, 5, 6].map((created) => ({ id: `fixture-new-story-${created}`, topic: `Newer story ${created}`, status: 'queued', created_at: created, scenes: [] }));
+  app.renderRecent();
+  assert.equal(app.state.recentRows.size, 5);
+  assert.equal(upload.isConnected, false);
+  app.closeYouTubeComposer();
+  assert.equal(app.document.activeElement, app.elements.pageTitle);
+  app.showLoggedOut();
+  assert.equal(app.state.recentRows.size, 0);
 });
 
 function historyFixtures(app) {
