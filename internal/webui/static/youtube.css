@@ -1,509 +1,81 @@
-.settings-grid > .youtube-settings-panel {
-  grid-column: 1 / -1;
+/* Publishing shares the studio's light surfaces and explicit review hierarchy. */
+.youtube-channel-summary, .youtube-channel-ready { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 22px; padding: 14px 16px; border: 1px solid var(--rule); border-radius: 10px; background: var(--cloud); }
+.youtube-channel-summary > div { min-width: 0; }
+.youtube-channel-summary span, .youtube-channel-ready span { display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; }
+.youtube-channel-summary strong, .youtube-channel-ready strong { display: block; color: var(--ink); font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.youtube-config-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.youtube-config-form .field { min-width: 0; margin: 0; }
+.youtube-config-form input[readonly] { background: var(--cloud); color: var(--graphite); }
+.youtube-config-form > .alert { grid-column: 1 / -1; margin: 0; }
+.youtube-config-actions { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 10px; }
+.recent-upload { min-height: 28px; margin-top: 4px; padding: 0; color: var(--graphite); font-size: 11px; font-weight: 600; text-align: left; }
+.recent-upload:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
+.youtube-dialog { width: min(940px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); margin: auto; overflow: hidden; padding: 0; border: 1px solid var(--rule); border-radius: 16px; background: var(--white); color: var(--ink); box-shadow: 0 24px 70px rgb(0 0 0 / 25%); }
+.youtube-dialog::backdrop { background: rgb(0 0 0 / 58%); }
+.youtube-dialog-shell { display: grid; grid-template-rows: auto minmax(0, 1fr); max-height: calc(100dvh - 34px); }
+.youtube-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 24px 26px 22px; border-bottom: 1px solid var(--rule); }
+.youtube-dialog-header h2 { margin: 0 0 6px; font-size: 24px; font-weight: 600; letter-spacing: -.04em; line-height: 1.2; }
+.youtube-dialog-header p { max-width: 55ch; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.youtube-dialog-header > .button { flex: 0 0 auto; min-height: 38px; }
+.youtube-dialog-body { display: grid; min-height: 0; grid-template-columns: minmax(210px, .72fr) minmax(0, 1fr); align-items: start; gap: 28px; padding: 24px 26px 26px; overflow: auto; overscroll-behavior: contain; }
+.youtube-preview-column { position: sticky; top: 0; min-width: 0; }
+.youtube-composer-column { display: grid; min-width: 0; gap: 16px; }
+.youtube-preview-frame { display: grid; min-height: 160px; place-items: center; overflow: hidden; border-radius: 12px; background: var(--ink); }
+.youtube-preview-frame video { display: block; width: 100%; max-height: min(62dvh, 600px); aspect-ratio: 9 / 16; margin: 0; border: 0; border-radius: 12px; object-fit: contain; }
+.youtube-source-label { margin: 12px 1px 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.youtube-upload-form { gap: 20px; }
+.youtube-upload-form .youtube-channel-ready { margin: 0; }
+.youtube-composer-section { display: grid; gap: 14px; }
+.youtube-composer-section + .youtube-composer-section { padding-top: 22px; border-top: 1px solid var(--rule); }
+.youtube-composer-section h3 { margin: 0 0 2px; font-size: 17px; }
+.youtube-upload-form .field { margin: 0; }
+.youtube-upload-form textarea { min-height: 130px; resize: vertical; }
+.youtube-metadata-button { justify-self: start; min-height: 36px; font-size: 11px; }
+.youtube-audience-fieldset { display: grid; min-width: 0; gap: 12px; margin: 0; padding: 15px; border: 1px solid var(--rule); border-radius: 8px; }
+.youtube-audience-fieldset legend { padding: 0 4px; font-size: 12px; font-weight: 600; }
+.youtube-choice { display: flex; min-height: 32px; align-items: flex-start; gap: 10px; color: var(--graphite); font-size: 12px; line-height: 1.6; cursor: pointer; }
+.youtube-choice input { width: 17px; height: 17px; min-height: 17px; flex: 0 0 17px; margin: 2px 0 0; padding: 0; accent-color: var(--ink); }
+.youtube-disclosure { padding: 14px 15px; border: 1px solid var(--rule); border-radius: 8px; background: var(--cloud); }
+.youtube-connect-required, .youtube-upload-status, .youtube-duplicate-recovery { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--rule); border-radius: 10px; background: var(--cloud); }
+.youtube-connect-required p, .youtube-duplicate-recovery p { margin: 0; color: var(--graphite); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.youtube-connect-required > .button, .youtube-duplicate-recovery > .button { justify-self: start; }
+.youtube-upload-status-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.youtube-upload-status-head strong { font-size: 12px; font-weight: 600; }
+.youtube-upload-status-head span { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.youtube-upload-progress-wrap { height: 4px; overflow: hidden; border-radius: 4px; background: var(--rule); }
+.youtube-upload-progress-bar { width: 0; height: 100%; border-radius: inherit; background: var(--ink); transition: width 180ms linear; }
+.youtube-upload-progress-bar.indeterminate { width: 38%; animation: youtube-progress 1.4s ease-in-out infinite alternate; }
+.youtube-upload-error, .youtube-upload-note { margin: 0; color: var(--graphite); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.youtube-duplicate-recovery > strong { font-size: 13px; font-weight: 600; }
+#youtube-recovery-confirm-controls { display: grid; gap: 10px; }
+#youtube-recovery-confirm-controls .button { justify-self: start; }
+.youtube-upload-actions { display: flex; flex-wrap: wrap; gap: 10px; padding-top: 4px; }
+.youtube-upload-actions .button { min-height: 42px; }
+@keyframes youtube-progress { from { transform: translateX(-22%); } to { transform: translateX(210%); } }
+@media (max-width: 900px) {
+  .youtube-config-form { grid-template-columns: minmax(0, 1fr); }
+  .youtube-channel-summary { align-items: flex-start; flex-direction: column; }
 }
-
-.youtube-settings-panel .panel-head {
-  align-items: flex-start;
-}
-
-.youtube-channel-summary,
-.youtube-channel-ready {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-width: 0;
-  margin: 0 0 18px;
-  padding: 14px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 12px;
-  background: var(--cloud, #f5f5f7);
-}
-
-.youtube-channel-summary > div,
-.youtube-channel-ready {
-  min-width: 0;
-}
-
-.youtube-channel-summary span,
-.youtube-channel-ready span {
-  display: block;
-  margin-bottom: 3px;
-  color: var(--muted, #6e6e73);
-  font-size: 12px;
-}
-
-.youtube-channel-summary strong,
-.youtube-channel-ready strong {
-  display: block;
-  overflow-wrap: anywhere;
-  color: var(--ink, #000);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.youtube-config-form {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 18px;
-}
-
-.youtube-config-form .field {
-  min-width: 0;
-  margin: 0;
-}
-
-.youtube-config-form input[readonly] {
-  background: var(--cloud, #f5f5f7);
-  color: var(--graphite, #3a3a3c);
-}
-
-.youtube-config-actions {
-  display: flex;
-  flex-wrap: wrap;
-  grid-column: 1 / -1;
-  gap: 8px;
-}
-
-.youtube-entry {
-  margin-top: 8px;
-}
-
-.recent-upload {
-  min-height: 30px;
-  margin-top: 5px;
-  padding: 0;
-  color: var(--graphite, #3a3a3c);
-  font-size: 12px;
-  font-weight: 600;
-  text-align: left;
-}
-
-.recent-upload:hover {
-  color: var(--ink, #000);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-.recent-upload:focus-visible,
-.youtube-dialog button:focus-visible,
-.youtube-dialog a:focus-visible,
-.youtube-dialog input:focus-visible,
-.youtube-dialog textarea:focus-visible,
-.youtube-dialog select:focus-visible {
-  outline: 3px solid var(--ink, #000);
-  outline-offset: 2px;
-}
-
-.youtube-dialog {
-  width: min(900px, calc(100vw - 32px));
-  max-width: none;
-  max-height: calc(100dvh - 32px);
-  margin: auto;
-  padding: 0;
-  overflow: hidden;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 18px;
-  background: var(--white, #fff);
-  color: var(--ink, #000);
-  box-shadow: 0 18px 54px rgb(0 0 0 / 20%);
-}
-
-.youtube-dialog::backdrop {
-  background: rgb(0 0 0 / 48%);
-}
-
-.youtube-dialog-shell {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  max-height: calc(100dvh - 34px);
-}
-
-.youtube-dialog-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 20px 22px 16px;
-  border-bottom: 1px solid var(--rule, #d2d2d7);
-}
-
-.youtube-dialog-header h2 {
-  margin: 0 0 5px;
-  color: var(--ink, #000);
-  font-size: 23px;
-  font-weight: 650;
-  letter-spacing: -.035em;
-  line-height: 1.15;
-}
-
-.youtube-dialog-header p {
-  max-width: 52ch;
-  margin: 0;
-  color: var(--muted, #6e6e73);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.youtube-dialog-header > .button {
-  flex: 0 0 auto;
-  min-height: 36px;
-}
-
-.youtube-dialog-body {
-  display: grid;
-  grid-template-columns: minmax(190px, .76fr) minmax(0, 1fr);
-  align-items: start;
-  gap: 22px;
-  min-height: 0;
-  padding: 18px 22px 22px;
-  overflow: auto;
-  overscroll-behavior: contain;
-}
-
-.youtube-preview-column,
-.youtube-composer-column {
-  min-width: 0;
-}
-
-.youtube-preview-frame {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  min-height: 160px;
-  overflow: hidden;
-  border-radius: 14px;
-  background: var(--ink, #000);
-}
-
-.youtube-preview-frame video {
-  display: block;
-  width: 100%;
-  max-height: min(64dvh, 580px);
-  aspect-ratio: 9 / 16;
-  border: 0;
-  border-radius: 14px;
-  background: var(--ink, #000);
-  object-fit: contain;
-}
-
-.youtube-source-label {
-  margin: 9px 1px 0;
-  color: var(--muted, #6e6e73);
-  font-size: 12px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.youtube-composer-column {
-  display: grid;
-  gap: 12px;
-}
-
-.youtube-upload-form {
-  gap: 12px;
-}
-
-.youtube-upload-form .field {
-  margin: 0;
-}
-
-.youtube-upload-form textarea {
-  min-height: 112px;
-  resize: vertical;
-}
-
-.youtube-metadata-button {
-  width: fit-content;
-  min-height: 36px;
-  margin-top: -3px;
-  font-size: 12px;
-}
-
-.youtube-audience-fieldset {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  margin: 0;
-  padding: 13px 14px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 12px;
-}
-
-.youtube-audience-fieldset legend {
-  padding: 0 4px;
-  color: var(--ink, #000);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.youtube-choice {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  min-width: 0;
-  color: var(--graphite, #3a3a3c);
-  font-size: 13px;
-  line-height: 1.4;
-  cursor: pointer;
-}
-
-.youtube-choice input {
-  flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-  margin: 1px 0 0;
-  accent-color: var(--ink, #000);
-}
-
-.youtube-disclosure {
-  padding: 12px 14px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 12px;
-}
-
-.youtube-connect-required {
-  padding: 14px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 12px;
-  background: var(--cloud, #f5f5f7);
-}
-
-.youtube-connect-required p {
-  margin: 0 0 10px;
-  color: var(--graphite, #3a3a3c);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.youtube-upload-status {
-  display: grid;
-  gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 12px;
-  background: var(--cloud, #f5f5f7);
-}
-
-.youtube-upload-status-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.youtube-upload-status-head strong {
-  color: var(--ink, #000);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.youtube-upload-status-head span {
-  color: var(--muted, #6e6e73);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.youtube-upload-progress-wrap {
-  height: 5px;
-  overflow: hidden;
-  border-radius: 99px;
-  background: var(--rule, #d2d2d7);
-}
-
-.youtube-upload-progress-bar {
-  width: 0;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--ink, #000);
-  transition: width 180ms linear;
-}
-
-.youtube-upload-progress-bar.indeterminate {
-  width: 38%;
-  animation: youtube-progress 1.4s ease-in-out infinite alternate;
-}
-
-.youtube-upload-error,
-.youtube-upload-note {
-  margin: 0;
-  color: var(--graphite, #3a3a3c);
-  font-size: 12px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.youtube-duplicate-recovery {
-  display: grid;
-  gap: 9px;
-  padding: 14px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 12px;
-  background: var(--cloud, #f5f5f7);
-}
-
-.youtube-duplicate-recovery > strong {
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.youtube-duplicate-recovery > p {
-  margin: 0;
-  color: var(--graphite, #3a3a3c);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-#youtube-recovery-confirm-controls {
-  display: grid;
-  gap: 9px;
-}
-
-#youtube-recovery-confirm-controls .button,
-.youtube-duplicate-recovery > .button {
-  justify-self: start;
-}
-
-.youtube-upload-error {
-  color: var(--ink, #000);
-}
-
-.youtube-upload-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding-top: 2px;
-}
-
-.youtube-upload-actions .button {
-  min-height: 40px;
-}
-
-.youtube-dialog a.button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  text-decoration: none;
-}
-
-@keyframes youtube-progress {
-  from { transform: translateX(-22%); }
-  to { transform: translateX(210%); }
-}
-
 @media (max-width: 700px) {
-  .youtube-dialog {
-    width: calc(100vw - 20px);
-    max-height: calc(100dvh - 20px);
-    border-radius: 15px;
-  }
-
-  .youtube-dialog-shell {
-    max-height: calc(100dvh - 22px);
-  }
-
-  .youtube-dialog-header {
-    padding: 16px 16px 13px;
-  }
-
-  .youtube-dialog-header h2 {
-    font-size: 21px;
-  }
-
-  .youtube-dialog-body {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 16px;
-    padding: 14px 16px 18px;
-  }
-
-  .youtube-preview-column {
-    display: grid;
-    grid-template-columns: minmax(74px, 104px) minmax(0, 1fr);
-    align-items: center;
-    gap: 10px;
-  }
-
-  .youtube-preview-frame {
-    min-height: 0;
-  }
-
-  .youtube-preview-frame video {
-    max-height: 33dvh;
-  }
-
-  .youtube-source-label {
-    margin: 0;
-  }
-
-  .youtube-config-form {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .youtube-config-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
+  .youtube-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); border-radius: 12px; }
+  .youtube-dialog-shell { max-height: calc(100dvh - 22px); }
+  .youtube-dialog-header { gap: 14px; padding: 18px; }
+  .youtube-dialog-header h2 { font-size: 21px; }
+  .youtube-dialog-header p { font-size: 12px; }
+  .youtube-dialog-body { grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 18px; }
+  .youtube-preview-column { position: static; display: grid; grid-template-columns: 88px minmax(0, 1fr); align-items: center; gap: 14px; }
+  .youtube-preview-frame { min-height: 0; }
+  .youtube-preview-frame video { max-height: 30dvh; }
+  .youtube-source-label { margin: 0; }
 }
-
 @media (max-width: 380px) {
-  .youtube-dialog {
-    width: calc(100vw - 12px);
-    max-height: calc(100dvh - 12px);
-  }
-
-  .youtube-dialog-shell {
-    max-height: calc(100dvh - 14px);
-  }
-
-  .youtube-dialog-header {
-    gap: 8px;
-    padding: 13px 12px 11px;
-  }
-
-  .youtube-dialog-header h2 {
-    font-size: 19px;
-  }
-
-  .youtube-dialog-header p {
-    font-size: 12px;
-  }
-
-  .youtube-dialog-header > .button {
-    min-height: 34px;
-    padding: 0 10px;
-  }
-
-  .youtube-dialog-body {
-    padding: 12px;
-  }
-
-  .youtube-upload-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .youtube-upload-actions .button {
-    width: 100%;
-  }
-
-  .vault-player-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    width: 100%;
-  }
-
-  .vault-player-actions .button {
-    width: 100%;
-  }
+  .youtube-dialog { width: calc(100vw - 12px); max-height: calc(100dvh - 12px); }
+  .youtube-dialog-shell { max-height: calc(100dvh - 14px); }
+  .youtube-dialog-header { gap: 10px; padding: 14px; }
+  .youtube-dialog-header h2 { font-size: 19px; }
+  .youtube-dialog-header > .button { padding-inline: 10px; }
+  .youtube-dialog-body { padding: 14px; }
+  .youtube-upload-actions, .youtube-config-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .youtube-upload-actions .button { width: 100%; }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .youtube-upload-progress-bar {
-    transition: none;
-  }
-
-  .youtube-upload-progress-bar.indeterminate {
-    animation: none;
-    width: 38%;
-  }
-}
+@media (prefers-reduced-motion: reduce) { .youtube-upload-progress-bar { transition: none; } .youtube-upload-progress-bar.indeterminate { animation: none; } }

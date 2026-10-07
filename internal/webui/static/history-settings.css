@@ -81,165 +81,65 @@
 .vault-player-actions .button { min-height: 38px; font-size: 12px; }
 .vault-player-dialog video { width: 100%; max-height: calc(100dvh - 150px); margin: 0; border-radius: 0; background: var(--ink); }
 
-.settings-grid {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 18px;
-}
+/* Configuration is grouped by the user's task, not by credential type. */
+.settings-layout { display: grid; grid-template-columns: 148px minmax(0, 1fr); align-items: start; gap: 30px; }
+.settings-navigation { position: sticky; top: 120px; display: grid; gap: 5px; }
+.settings-navigation a { display: flex; min-height: 40px; align-items: center; padding: 9px 12px; border-radius: 7px; color: var(--muted); font-size: 12px; font-weight: 600; text-decoration: none; }
+.settings-navigation a:hover, .settings-navigation a:focus-visible { background: var(--white); color: var(--ink); }
+.settings-body { min-width: 0; }
+.settings-group { scroll-margin-top: 120px; }
+.settings-group + .settings-group { margin-top: 36px; }
+.settings-group-heading { margin-bottom: 18px; }
+.settings-group-heading h2 { margin: 0 0 5px; font-size: 22px; }
+.settings-group-heading p { color: var(--muted); font-size: 12px; }
+.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.settings-grid > .panel { min-width: 0; padding: 24px; }
+.settings-grid > .settings-provider-panel, .settings-grid > .settings-account-panel, .settings-grid > .youtube-settings-panel { grid-column: 1 / -1; }
+.settings-grid .panel-head { gap: 12px; margin-bottom: 22px; }
+.settings-grid .panel-head h3 { margin: 0 0 5px; font-size: 17px; }
+.settings-grid .panel-head p { font-size: 12px; line-height: 1.6; }
+.settings-provider-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 22px; }
+.settings-provider-controls .field { margin: 0; }
+.provider-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 44px; }
+.settings-key-panel { grid-column: 1 / -1; }
+.key-display { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 20px; padding: 13px 14px; border: 1px solid var(--rule); border-radius: 8px; background: var(--cloud); font-size: 12px; }
+.key-display > span { color: var(--muted); }
+.key-display > strong { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.settings-key-panel .field { max-width: 620px; }
+.settings-grid .stack > .button { justify-self: start; }
+.settings-grid .stack > small { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.modal-account-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
+.modal-account-row { display: flex; min-width: 0; flex-direction: column; gap: 14px; padding: 16px; border: 1px solid var(--rule); border-radius: 10px; background: var(--cloud); }
+.modal-account-copy { display: grid; min-width: 0; gap: 5px; }
+.modal-account-copy strong { font-size: 13px; font-weight: 600; }
+.modal-account-copy span, .modal-account-copy small { color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.modal-account-copy .modal-default-badge { width: max-content; padding: 3px 7px; border: 1px solid var(--rule); border-radius: 5px; background: var(--white); color: var(--graphite); font-size: 10px; }
+.modal-account-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.modal-account-actions .button { flex: 1 1 80px; min-height: 36px; padding: 8px; font-size: 11px; }
+.modal-account-empty { grid-column: 1 / -1; padding: 22px 16px; border: 1px dashed var(--rule); border-radius: 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.modal-account-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding-top: 24px; border-top: 1px solid var(--rule); }
+.modal-account-form h3 { grid-column: 1 / -1; margin: 0; font-size: 15px; }
+.modal-account-form .field { margin: 0; }
+.modal-account-form-actions { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 8px; }
 
-.settings-grid > .panel {
-  grid-column: span 6;
-  min-width: 0;
-  padding: 24px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 16px;
-  background: var(--white, #fff);
-  box-shadow: none;
-}
-
-.settings-grid > .settings-provider-panel,
-.settings-grid > .settings-account-panel {
-  grid-column: 1 / -1;
-}
-
-.settings-provider-panel {
-  border-top: 3px solid var(--ink, #000) !important;
-}
-
-.settings-provider-controls {
-  display: grid;
-  grid-template-columns: minmax(220px, .8fr) minmax(0, 1.2fr);
-  align-items: end;
-  gap: 24px;
-}
-
-.settings-provider-controls .field {
-  margin: 0;
-}
-
-.settings-provider-controls .provider-actions {
-  justify-content: flex-start;
-  min-height: 42px;
-  padding-bottom: 0;
-}
-
-.settings-key-panel .key-display {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-height: 52px;
-  margin: 0 0 18px;
-  padding: 14px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 12px;
-  background: var(--cloud, #f5f5f7);
-}
-
-.settings-key-panel .stack .field:last-of-type,
-.settings-password-panel .stack .field:last-of-type {
-  margin-bottom: 12px;
-}
-
-.settings-account-panel .modal-account-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.settings-account-panel .modal-account-row {
-  display: flex;
-  align-items: flex-start;
-  min-width: 0;
-  flex-direction: column;
-  padding: 15px;
-  border-color: var(--rule, #d2d2d7);
-  border-radius: 12px;
-  background: var(--cloud, #f5f5f7);
-}
-
-.settings-account-panel .modal-account-copy {
-  display: grid;
-  gap: 4px;
-  width: 100%;
-}
-
-.settings-account-panel .modal-account-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  width: 100%;
-}
-
-.settings-account-panel .modal-account-actions .button {
-  flex: 1;
-}
-
-.settings-account-panel .modal-account-form {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 18px;
-}
-
-.settings-account-panel .modal-account-form h3,
-.settings-account-panel .modal-account-form-actions {
-  grid-column: 1 / -1;
-}
-
-.settings-account-panel .modal-account-form .field {
-  margin: 0;
-}
-
-.settings-password-panel .stack {
-  gap: 2px;
-}
-
-.modal-account-copy strong {
-  color: var(--ink, #000);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.modal-account-copy span,
-.modal-account-copy small {
-  overflow-wrap: anywhere;
-  color: var(--muted, #6e6e73);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.modal-account-copy .modal-default-badge {
-  width: max-content;
-  padding: 3px 7px;
-  border: 1px solid var(--rule, #d2d2d7);
-  border-radius: 999px;
-  background: var(--white, #fff);
-  color: var(--graphite, #3a3a3c);
-  font-size: 10px;
-}
-
-.modal-account-form-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.modal-account-empty {
-  padding: 22px 14px;
-  border: 1px dashed var(--rule, #d2d2d7);
-  border-radius: 12px;
-  color: var(--muted, #6e6e73);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
+/* The real password gate puts its required action before unrelated setup. */
+.settings-layout:has(#forced-password-notice:not([hidden])) { grid-template-columns: minmax(0, 1fr); }
+.settings-layout:has(#forced-password-notice:not([hidden])) .settings-navigation,
+.settings-layout:has(#forced-password-notice:not([hidden])) #settings-generation,
+.settings-layout:has(#forced-password-notice:not([hidden])) #settings-publishing { display: none; }
+.settings-layout:has(#forced-password-notice:not([hidden])) #settings-security { margin-top: 0; }
+.settings-layout:has(#forced-password-notice:not([hidden])) .security-settings-grid { max-width: 620px; grid-template-columns: minmax(0, 1fr); }
 
 @media (max-width: 1100px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 26px; }
+  .settings-navigation { position: static; display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
+  .settings-navigation a { padding-inline: 14px; background: var(--white); }
   .history-filter-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .history-search-field { grid-column: 1 / -1; }
   .history-filter-row > .button { grid-column: 1 / -1; justify-self: start; min-width: 140px; }
 }
 @media (max-width: 900px) {
+  .settings-grid { grid-template-columns: minmax(0, 1fr); }
   .settings-grid > .panel { grid-column: 1 / -1; }
   .settings-provider-controls { grid-template-columns: minmax(0, 1fr); gap: 15px; }
 }
@@ -249,6 +149,8 @@
   .history-grid, .project-history-list, .settings-account-panel .modal-account-list, .settings-account-panel .modal-account-form { grid-template-columns: minmax(0, 1fr); }
   .settings-grid > .panel { padding: 20px; }
   .settings-account-panel .modal-account-form h3, .settings-account-panel .modal-account-form-actions { grid-column: auto; }
+  .key-display { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .settings-group { scroll-margin-top: 108px; }
   .vault-lock-panel { min-height: 410px; padding: 30px 22px; }
   .vault-player-head { align-items: flex-start; flex-direction: column; padding: 16px; }
 }

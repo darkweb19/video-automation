@@ -116,7 +116,7 @@
                   </div>
                   <div id="single-prompt-field" class="field" role="tabpanel" aria-labelledby="generation-mode-single"><div class="label-row"><label for="prompt">Scene prompt</label><span id="prompt-count" aria-live="polite">0 / 4000</span></div><textarea id="prompt" rows="5" placeholder="Describe the subject, motion, framing, lighting and mood." aria-describedby="prompt-count prompt-error" required></textarea><p id="prompt-error" class="form-error" role="alert" aria-live="polite"></p></div>
                   <div class="random-prompt-controls">
-                    <div class="field"><label for="prompt-category">Idea category <strong id="prompt-category-name" class="visually-hidden" aria-live="polite">Kid Animation</strong></label><select id="prompt-category" aria-describedby="category-note"><option value="0">Kid Animation</option><option value="1">Horror Story</option><option value="2">Nature</option><option value="3">Seduction</option><option value="4">Mature Content</option><option value="5">Soft Corn</option></select></div>
+                    <div class="field"><label for="prompt-category">Idea category</label><span id="prompt-category-name" hidden>Kid Animation</span><select id="prompt-category" aria-describedby="category-note"><option value="0">Kid Animation</option><option value="1">Horror Story</option><option value="2">Nature</option><option value="3">Seduction</option><option value="4">Mature Content</option><option value="5">Soft Corn</option></select></div>
                     <button id="random-prompt" class="button secondary" type="button">Suggest an idea</button>
                     <p id="category-note" class="field-hint">Guides suggested ideas and story planning.</p>
                   </div>
@@ -249,16 +249,46 @@
 
         <section class="view" data-page="settings" aria-labelledby="settings-view-heading">
           <h2 id="settings-view-heading" class="visually-hidden">Settings</h2>
-          <div class="settings-grid">
+          <div class="settings-layout">
+            <nav class="settings-navigation" aria-label="Settings sections"><a href="#settings-generation">Generation</a><a href="#settings-publishing">Publishing</a><a href="#settings-security">Security</a></nav>
+            <div class="settings-body">
+              <section id="settings-generation" class="settings-group" aria-labelledby="settings-generation-heading">
+                <div class="settings-group-heading"><h2 id="settings-generation-heading">Generation</h2><p>The services behind your ideas and videos.</p></div>
+                <div class="settings-grid generation-settings-grid">
             <section class="panel settings-provider-panel">
-              <div class="panel-head"><div><h2>Video generation</h2><p>Select the provider used for new video jobs.</p></div></div>
+              <div class="panel-head"><div><h3>Video generation</h3><p>Choose how new clips and story scenes are generated.</p></div></div>
               <div class="settings-provider-controls">
                 <div class="field"><label for="video-provider">Video provider</label><select id="video-provider"><option value="modal">Modal</option><option value="openrouter">OpenRouter</option></select><small id="provider-help">Model options and capabilities follow the selected provider.</small></div>
                 <div class="provider-actions"><span id="video-provider-state" class="badge neutral">Checking</span><button id="test-video-provider" class="button secondary" type="button">Test video provider</button></div>
               </div>
             </section>
+            <section id="openrouter-settings" class="panel settings-key-panel">
+              <div class="panel-head"><div><h3>OpenRouter API key</h3><p>Required for story planning with any video provider. Also powers OpenRouter clips.</p></div><span id="key-state" class="badge neutral">Checking</span></div>
+              <div class="key-display"><span>Saved key status</span><strong id="masked-key">Not configured</strong></div>
+              <form id="api-key-form" class="stack">
+                <div class="field"><label for="api-key">Replace API key</label><input id="api-key" type="password" autocomplete="off" placeholder="sk-or-v1-…" required><small>The key is tested before it is saved.</small></div>
+                <button class="button primary" type="submit">Test and save key</button>
+              </form>
+            </section>
+            <section id="modal-settings" class="panel settings-account-panel" hidden>
+              <div class="panel-head"><div><h3>Modal accounts</h3><p>Manage the accounts and endpoints used for Modal generation. Saved keys stay encrypted.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
+              <div id="modal-account-list" class="modal-account-list"></div>
+              <form id="modal-config-form" class="stack modal-account-form">
+                <h3 id="modal-account-form-title">Add Modal account</h3>
+                <input id="modal-account-id" type="hidden">
+                <div class="field"><label for="modal-account-name">Account name</label><input id="modal-account-name" autocomplete="off" placeholder="e.g. Production" required></div>
+                <div class="field"><label for="modal-base-url">Modal endpoint URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
+                <div class="field"><label for="modal-api-key">Secret API key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key" required><small id="modal-key-help">Required when adding an account. Leave blank when editing to keep its saved key.</small></div>
+                <div class="modal-account-form-actions"><button class="button primary" type="submit">Save Modal account</button><button id="modal-account-cancel" class="button secondary" type="button" hidden>Cancel edit</button></div>
+              </form>
+            </section>
+                </div>
+              </section>
+              <section id="settings-publishing" class="settings-group" aria-labelledby="settings-publishing-heading">
+                <div class="settings-group-heading"><h2 id="settings-publishing-heading">Publishing</h2><p>Send finished work to your YouTube channel.</p></div>
+                <div class="settings-grid">
             <section id="youtube-settings" class="panel youtube-settings-panel">
-              <div class="panel-head"><div><h2>YouTube</h2><p>Connect one channel for manual video uploads.</p></div><span id="youtube-channel-state" class="badge neutral">Checking</span></div>
+              <div class="panel-head"><div><h3>YouTube</h3><p>Connect a channel. You choose which video to upload and when.</p></div><span id="youtube-channel-state" class="badge neutral">Checking</span></div>
               <div id="youtube-channel-summary" class="youtube-channel-summary" hidden>
                 <div><span>Connected channel</span><strong id="youtube-channel-name"></strong></div>
                 <button id="youtube-disconnect" class="button secondary" type="button">Disconnect channel</button>
@@ -275,16 +305,21 @@
                 </div>
               </form>
             </section>
-            <section id="openrouter-settings" class="panel settings-key-panel">
-              <div class="panel-head"><div><h2>OpenRouter API key</h2><p>Used for story generation and OpenRouter video. Encrypted at rest.</p></div><span id="key-state" class="badge neutral">Checking</span></div>
-              <div class="key-display"><span>Saved key status</span><strong id="masked-key">Not configured</strong></div>
-              <form id="api-key-form" class="stack">
-                <div class="field"><label for="api-key">Replace API key</label><input id="api-key" type="password" autocomplete="off" placeholder="sk-or-v1-…" required><small>The key is tested before it is saved.</small></div>
-                <button class="button primary" type="submit">Test and save key</button>
+                </div>
+              </section>
+              <section id="settings-security" class="settings-group" aria-labelledby="settings-security-heading">
+                <div class="settings-group-heading"><h2 id="settings-security-heading">Security</h2><p>Your sign-in and the extra lock for protected videos.</p></div>
+                <div class="settings-grid security-settings-grid">
+            <section class="panel settings-password-panel">
+              <div class="panel-head"><div><h3>Change password</h3><p>Changing your password signs out all existing sessions.</p></div></div>
+              <form id="password-form" class="stack">
+                <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password" autocomplete="current-password" required></div>
+                <div class="field"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="10" required><small>Use at least 10 characters.</small></div>
+                <button class="button secondary" type="submit">Update password</button>
               </form>
             </section>
             <section class="panel vault-settings-panel">
-              <div class="panel-head"><div><h2>Vault code</h2><p>Set the four-digit code used to open your protected videos.</p></div><span id="vault-code-state" class="badge neutral">Checking</span></div>
+              <div class="panel-head"><div><h3>Vault code</h3><p>Set the four-digit code used to open your protected videos.</p></div><span id="vault-code-state" class="badge neutral">Checking</span></div>
               <form id="vault-code-form" class="stack">
                 <div id="vault-current-code-field" class="field" hidden><label for="vault-current-code">Current code</label><input id="vault-current-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password"><small>Enter the current code before changing it.</small></div>
                 <div class="field"><label for="vault-new-code">New four-digit code</label><input id="vault-new-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></div>
@@ -293,26 +328,9 @@
                 <small id="vault-code-help">Keep this code safe. If you lose it, the Vault cannot be opened in this version.</small>
               </form>
             </section>
-            <section id="modal-settings" class="panel settings-account-panel" hidden>
-              <div class="panel-head"><div><h2>Modal accounts</h2><p>Store multiple endpoints. Saved API keys are never returned to the browser.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
-              <div id="modal-account-list" class="modal-account-list"></div>
-              <form id="modal-config-form" class="stack modal-account-form">
-                <h3 id="modal-account-form-title">Add Modal account</h3>
-                <input id="modal-account-id" type="hidden">
-                <div class="field"><label for="modal-account-name">Account name</label><input id="modal-account-name" autocomplete="off" placeholder="e.g. Production" required></div>
-                <div class="field"><label for="modal-base-url">Modal endpoint URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
-                <div class="field"><label for="modal-api-key">Secret API key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key" required><small id="modal-key-help">Required when adding an account. Leave blank when editing to keep its saved key.</small></div>
-                <div class="modal-account-form-actions"><button class="button primary" type="submit">Save Modal account</button><button id="modal-account-cancel" class="button secondary" type="button" hidden>Cancel edit</button></div>
-              </form>
-            </section>
-            <section class="panel settings-password-panel">
-              <div class="panel-head"><div><h2>Change password</h2><p>All existing sessions will be signed out</p></div></div>
-              <form id="password-form" class="stack">
-                <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password" autocomplete="current-password" required></div>
-                <div class="field"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="10" required><small>Use at least 10 characters.</small></div>
-                <button class="button secondary" type="submit">Update password</button>
-              </form>
-            </section>
+                </div>
+              </section>
+            </div>
           </div>
         </section>
       </div>
@@ -336,13 +354,17 @@
           </div>
           <form id="youtube-upload-form" class="stack youtube-upload-form">
             <div class="youtube-channel-ready"><span>Channel</span><strong id="youtube-upload-channel"></strong></div>
-            <div class="field"><label for="youtube-title">Video title</label><input id="youtube-title" name="title" autocomplete="off" required></div>
+            <section class="youtube-composer-section" aria-labelledby="youtube-details-heading"><h3 id="youtube-details-heading">Video details</h3>
+            <div class="field"><label for="youtube-title">Video title</label><input id="youtube-title" name="title" autocomplete="off" aria-describedby="youtube-metadata-error" required></div>
             <div class="field"><label for="youtube-description">Description</label><textarea id="youtube-description" name="description" rows="5"></textarea></div>
             <button id="youtube-generate-metadata" class="button secondary youtube-metadata-button" type="button">Generate title and description</button>
             <p id="youtube-metadata-error" class="alert error" role="alert" hidden></p>
+            </section>
+            <section class="youtube-composer-section" aria-labelledby="youtube-publishing-heading"><h3 id="youtube-publishing-heading">Audience and visibility</h3>
             <div class="field"><label for="youtube-visibility">Visibility</label><select id="youtube-visibility" name="privacy_status"><option value="private" selected>Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select><small id="youtube-visibility-help">Private is selected by default. Some Google API projects can upload only privately until audited.</small></div>
             <fieldset class="youtube-audience-fieldset"><legend>Is this video made for kids?</legend><label class="youtube-choice"><input id="youtube-made-for-kids-yes" type="radio" name="made_for_kids" value="true" required><span>Yes, it is made for kids</span></label><label class="youtube-choice"><input id="youtube-made-for-kids-no" type="radio" name="made_for_kids" value="false" required><span>No, it is not made for kids</span></label></fieldset>
             <label class="youtube-choice youtube-disclosure"><input id="youtube-synthetic" name="contains_synthetic_media" type="checkbox" checked><span>This video contains AI-generated or synthetic content</span></label>
+            </section>
             <div id="youtube-upload-status" class="youtube-upload-status" role="status" aria-live="polite" hidden>
               <div class="youtube-upload-status-head"><strong id="youtube-upload-status-label"></strong><span id="youtube-upload-progress-label"></span></div>
               <div id="youtube-upload-progress-wrap" class="youtube-upload-progress-wrap" hidden><div id="youtube-upload-progress-bar" class="youtube-upload-progress-bar"></div></div>
