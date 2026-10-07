@@ -10,7 +10,7 @@ const source = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 
 // This DOM stub tests application state and events, not browser layout.
 let requestIDSeed = 0;
-function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
+function createApp({ sessionData = new Map(), storageThrows = false, stubHistory = true } = {}) {
   let document;
   let compact = false;
   const timers = [];
@@ -53,6 +53,8 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       this.disabled = false;
       this.checked = false;
       this.open = false;
+      this.detachments = 0;
+      this.replacements = 0;
       this.classList = {
         contains: (name) => this.className.split(/\s+/).includes(name),
         toggle: (name, enabled) => {
@@ -76,12 +78,21 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       else this.removeAttribute(name);
     }
     append(...nodes) {
-      this.children.push(...nodes);
-      nodes.forEach((node) => { node.parent = this; });
+      nodes.forEach((node) => {
+        node.remove();
+        this.children.push(node);
+        node.parent = this;
+      });
       if (this.tagName === 'select' && !this.value && nodes[0]) this.value = nodes[0].value;
     }
-    replaceChildren(...nodes) { this.children.forEach((child) => { child.parent = null; }); this.children = []; this.append(...nodes); }
+    replaceChildren(...nodes) {
+      this.replacements++;
+      [...this.children].forEach((child) => child.remove());
+      this.append(...nodes);
+    }
     insertBefore(node, reference) {
+      if (node === reference) return;
+      node.remove();
       const index = this.children.indexOf(reference);
       node.parent = this;
       this.children.splice(index < 0 ? this.children.length : index, 0, node);
@@ -108,6 +119,7 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
     close() { this.open = false; this.emit('close'); }
     remove() {
       if (!this.parent) return;
+      this.detachments++;
       this.parent.children = this.parent.children.filter((child) => child !== this);
       this.parent = null;
     }
@@ -162,7 +174,7 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
   });
   const instrumented = source.replace('  bootstrap();', `
     request = (...args) => globalThis.uiTestRequest(...args);
-    loadHistory = async () => {};
+    ${stubHistory ? 'loadHistory = async () => {};' : ''}
     globalThis.ui = {
       state, elements, setGenerationMode, syncGenerationModeDisplay, applyPasswordGate,
       submitGeneration, submitProject, generateRandomPrompt, updateModelOptions,
@@ -171,7 +183,7 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       startJobEventStream, stopJobEventStream,
       setStatusRecord, renderVaultItems, openYouTubeUpload, closeYouTubeComposer, renderYouTubeUpload,
       renderYouTubeSettings, loadYouTubeStatus, renderVaultLocked, showLoggedOut, generateYouTubeMetadata, submitYouTubeUpload, retryYouTubeUpload,
-      abandonYouTubeUpload, restartYouTubeUpload, moveHistoryItem, openVaultVideo, loadProjects
+      abandonYouTubeUpload, restartYouTubeUpload, moveHistoryItem, openVaultVideo, loadProjects, loadHistory
     };
   `);
   assert.notEqual(instrumented, source, 'bootstrap instrumentation must match');
@@ -795,6 +807,185 @@ test('recent project activity updates on list loads and accepted live snapshots'
   assert.match(collectText(app.elements.recentList), /generating/);
   app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project }) });
   assert.match(collectText(app.elements.recentList), /generating/);
+});
+
+function historyFixtures(app) {
+  app.state.projects = [
+    { id: 'fixture-nature-project', topic: 'River landscape', category: 'Nature', status: 'completed', model: 'fixture/cinema', created_at: 3, scenes: [] },
+    { id: 'fixture-active-project', topic: 'Mountain expedition', status: 'combining', model: 'fixture/action', created_at: 2, scenes: [] },
+    { id: 'fixture-error-project', topic: 'City sunset', status: 'error', model: 'fixture/cinema', created_at: 1, scenes: [] },
+  ];
+  app.state.generations = [
+    { id: 'fixture-nature-clip', prompt: 'River wildlife', status: 'completed', model: 'fixture/nature', created_at: 3, events: [] },
+    { id: 'fixture-active-clip', prompt: 'Ocean waves', status: 'download_failed', model: 'fixture/action', created_at: 2, events: [] },
+    { id: 'fixture-failed-clip', prompt: 'City skyline', status: 'failed', model: 'fixture/cinema', created_at: 1, events: [] },
+  ];
+}
+
+test('History search and status filters cover loaded projects and clips without provider requests', () => {
+  const app = configuredApp('project');
+  historyFixtures(app);
+  let requests = 0;
+  app.setRequest(() => { requests++; return Promise.resolve({}); });
+  app.bindEvents();
+  app.elements.historySearch.value = '  RIVER  ';
+  app.elements.historySearch.emit('input');
+  assert.match(collectText(app.elements.projectHistory), /River landscape/);
+  assert.match(collectText(app.elements.historyGrid), /River wildlife/);
+  assert.doesNotMatch(collectText(app.elements.projectHistory), /Mountain expedition/);
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 2 of 6 loaded items: 1 project, 1 clip/);
+
+  app.elements.historySearch.value = '';
+  app.elements.historyStatus.value = 'active';
+  app.elements.historyStatus.emit('change');
+  assert.match(collectText(app.elements.projectHistory), /Mountain expedition/);
+  assert.match(collectText(app.elements.historyGrid), /Ocean waves/);
+  assert.doesNotMatch(collectText(app.elements.historyGrid), /River wildlife/);
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 2 of 6 loaded items/);
+
+  app.elements.historyStatus.value = 'failed';
+  app.elements.historyStatus.emit('change');
+  assert.match(collectText(app.elements.projectHistory), /City sunset/);
+  assert.match(collectText(app.elements.historyGrid), /City skyline/);
+  assert.equal(requests, 0);
+});
+
+test('History format filters and reset preserve loaded data, pagination, creation input and result selection', () => {
+  const app = configuredApp('project');
+  historyFixtures(app);
+  Object.assign(app.state, { historyHasMore: true, historyNextCursor: 'fixture-cursor', historyNextOffset: 24, displayedProjectID: 'fixture-selected-project' });
+  app.bindEvents();
+  app.elements.historySearch.value = 'nature';
+  app.elements.historyStatus.value = 'completed';
+  app.elements.historyFormat.value = 'project';
+  app.elements.historyFormat.emit('change');
+  assert.match(collectText(app.elements.projectHistory), /River landscape/);
+  assert.equal(app.elements.historyGrid.hidden, true);
+  assert.match(app.elements.historyResultsSummary.textContent, /1 project, 0 clips/);
+  assert.equal(app.elements.historyClearFilters.disabled, false);
+
+  app.elements.historyFormat.value = 'single';
+  app.elements.historyFormat.emit('change');
+  assert.equal(app.elements.projectHistory.hidden, true);
+  assert.match(collectText(app.elements.historyGrid), /River wildlife/);
+  app.elements.historyClearFilters.emit('click');
+  assert.equal(app.elements.historySearch.value, '');
+  assert.equal(app.elements.historyStatus.value, 'all');
+  assert.equal(app.elements.historyFormat.value, 'all');
+  assert.equal(app.elements.historyClearFilters.disabled, true);
+  assert.equal(app.document.activeElement, app.elements.historySearch);
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 6 of 6 loaded items/);
+  assert.equal(app.state.projects.length, 3);
+  assert.equal(app.state.generations.length, 3);
+  assert.equal(app.state.historyNextCursor, 'fixture-cursor');
+  assert.equal(app.state.historyNextOffset, 24);
+  assert.equal(app.state.displayedProjectID, 'fixture-selected-project');
+  assert.equal(app.elements.projectTopic.value, 'Test project topic');
+});
+
+test('History keeps bounded pagination available when no loaded records match', async () => {
+  const app = configuredApp('project', true, { stubHistory: false });
+  historyFixtures(app);
+  Object.assign(app.state, { historyHasMore: true, historyNextCursor: 'fixture-page-2', historyNextOffset: 24 });
+  app.elements.historySearch.value = 'Older matching clip';
+  const page = deferred();
+  const calls = [];
+  app.setRequest((requestPath) => { calls.push(requestPath); return page.promise; });
+  app.renderHistory();
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 0 of 6 loaded items/);
+  assert.match(app.elements.historyResultsSummary.textContent, /older clips/);
+  assert.match(collectText(app.elements.historyGrid), /No loaded items match/);
+  const more = findTextButton(app.elements.historyGrid, 'Load more');
+  assert.ok(more);
+  const loading = more.emit('click');
+  assert.equal(more.disabled, true);
+  assert.equal(calls.length, 1);
+  const query = new URL(calls[0], 'http://localhost').searchParams;
+  assert.equal(query.get('limit'), '24');
+  assert.equal(query.get('before'), 'fixture-page-2');
+  assert.equal(query.has('query'), false);
+  page.resolve({ generations: [{ id: 'fixture-older-match', prompt: 'Older matching clip', status: 'failed', created_at: 0 }], has_more: true, next_page: 'fixture-page-3' });
+  await Promise.all(loading);
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 1 of 7 loaded items/);
+  assert.match(collectText(app.elements.historyGrid), /Older matching clip/);
+  assert.equal(app.elements.historySearch.value, 'Older matching clip');
+  assert.equal(app.state.historyNextCursor, 'fixture-page-3');
+  assert.equal(findTextButton(app.elements.historyGrid, 'Load more').disabled, false);
+});
+
+test('accepted live snapshots update filtered History counts for both formats', () => {
+  const app = configuredApp('project');
+  historyFixtures(app);
+  app.elements.historyStatus.value = 'completed';
+  app.renderHistory();
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 2 of 6 loaded items/);
+  const project = app.state.projects[1];
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project: { ...project, status: 'completed', updated_at: 10 } }) });
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 3 of 6 loaded items: 2 projects, 1 clip/);
+  const clip = app.state.generations[1];
+  app.handleJobSnapshot('generation', { data: JSON.stringify({ id: clip.id, generation: { ...clip, status: 'completed', updated_at: 10 } }) });
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 4 of 6 loaded items: 2 projects, 2 clips/);
+});
+
+test('unrelated live updates keep completed History media and action focus attached', () => {
+  const app = configuredApp('project');
+  const completedProject = { id: 'fixture-watched-project', topic: 'Watched project', status: 'completed', final_video_ready: true, scenes: [], created_at: 1 };
+  const completedClip = { id: 'fixture-watched-clip', prompt: 'Watched clip', status: 'completed', video_ready: true, created_at: 1, events: [] };
+  const activeProject = { id: 'fixture-other-project', topic: 'Other project', status: 'generating', updated_at: 1, scenes: [], created_at: 2 };
+  const activeClip = { id: 'fixture-other-clip', prompt: 'Other clip', status: 'processing', updated_at: 1, created_at: 2, events: [] };
+  app.state.projects = [activeProject, completedProject];
+  app.state.generations = [activeClip, completedClip];
+  app.elements.historyStatus.value = 'completed';
+  app.renderHistory();
+  const projectCard = app.state.historyCards.get(`project:${completedProject.id}`).node;
+  const clipCard = app.state.historyCards.get(`single:${completedClip.id}`).node;
+  const projectVideo = projectCard.children[0].children[0];
+  const clipVideo = clipCard.children[0].children[0];
+  assert.equal(projectVideo.tagName, 'video');
+  assert.equal(clipVideo.tagName, 'video');
+  const upload = findTextButton(clipCard, 'Upload to YouTube');
+  upload.focus();
+  const ancestry = new Set();
+  for (const video of [projectVideo, clipVideo]) {
+    for (let node = video; node; node = node.parent) ancestry.add(node);
+  }
+  const before = new Map([...ancestry].map((node) => [node, { detachments: node.detachments, replacements: node.replacements }]));
+
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: activeProject.id, project: { ...activeProject, progress: 60, updated_at: 2 } }) });
+  app.handleJobSnapshot('generation', { data: JSON.stringify({ id: activeClip.id, generation: { ...activeClip, status: 'completed', video_ready: true, updated_at: 2 } }) });
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: activeProject.id, project: { ...activeProject, status: 'completed', final_video_ready: true, updated_at: 3 } }) });
+  assert.equal(app.state.historyCards.get(`project:${completedProject.id}`).node, projectCard);
+  assert.equal(app.state.historyCards.get(`single:${completedClip.id}`).node, clipCard);
+  assert.equal(app.document.activeElement, upload);
+  for (const [node, counts] of before) {
+    assert.equal(node.detachments, counts.detachments, 'unchanged video ancestry must stay attached');
+    assert.equal(node.replacements, counts.replacements, 'unchanged video ancestry must not be cleared');
+  }
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 4 of 4 loaded items/);
+  app.state.projects = [];
+  app.state.generations = [];
+  app.renderHistory();
+  assert.equal(app.state.historyCards.size, 0, 'caches must not retain unloaded private records');
+});
+
+test('late History pages cannot insert private results or clear a newer session load', async () => {
+  const app = configuredApp('project', true, { stubHistory: false });
+  const oldPage = deferred();
+  app.setRequest(() => oldPage.promise);
+  const oldLoad = app.loadHistory(false);
+  app.showLoggedOut();
+  app.state.authenticated = true;
+  const newPage = deferred();
+  app.setRequest(() => newPage.promise);
+  const newLoad = app.loadHistory(false);
+  oldPage.resolve({ generations: [{ id: 'fixture-private-old', prompt: 'Previous session', status: 'completed' }] });
+  await oldLoad;
+  assert.equal(app.state.generations.length, 0);
+  assert.equal(app.state.historyLoading, true);
+  newPage.resolve({ generations: [] });
+  await newLoad;
+  assert.equal(app.state.historyLoading, false);
+  assert.equal(app.elements.refreshHistory.disabled, false);
 });
 
 for (const mode of ['project', 'single']) {

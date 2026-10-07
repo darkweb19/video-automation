@@ -91,6 +91,11 @@
     projectYouTubeUpload: $("#project-youtube-upload"),
     projectHistory: $("#project-history"),
     historyGrid: $("#history-grid"),
+    historySearch: $("#history-search"),
+    historyStatus: $("#history-status"),
+    historyFormat: $("#history-format"),
+    historyResultsSummary: $("#history-results-summary"),
+    historyClearFilters: $("#history-clear-filters"),
     vaultLock: $("#vault-lock"),
     vaultLocked: $("#vault-locked"),
     vaultGateTitle: $("#vault-gate-title"),
@@ -222,6 +227,8 @@
     historyNextBeforeID: "",
     historyLoading: false,
     historyTerminalOpen: new Map(),
+    historyCards: new Map(),
+    historyChrome: new Map(),
     currentGenerationID: "",
     displayedGenerationID: "",
     currentGenerationRecord: null,
@@ -934,6 +941,7 @@
     }
 
     renderRecent();
+    renderHistory();
     if (becameTerminal) {
       queueTerminalRefresh(kind);
       if (selected) {
@@ -1259,6 +1267,10 @@
     state.projects = [];
     state.stats = null;
     state.historyHasMore = false;
+    state.historyLoading = false;
+    elements.refreshHistory.disabled = false;
+    state.historyCards.clear();
+    state.historyChrome.clear();
     state.historyNextOffset = 0;
     state.historyNextCursor = "";
     state.historyCursorParam = "before";
@@ -1857,12 +1869,12 @@
     };
   }
 
-  function emptyState(message, actionLabel = "") {
+  function emptyState(message, actionLabel = "", onAction = () => navigate("generate")) {
     const empty = make("div", { className: "empty" });
     empty.append(make("p", { text: message }));
     if (actionLabel) {
       const action = make("button", { className: "button secondary empty-action", type: "button", text: actionLabel });
-      action.addEventListener("click", () => navigate("generate"));
+      action.addEventListener("click", onAction);
       empty.append(action);
     }
     return empty;
@@ -1972,96 +1984,254 @@
     body.append(details);
   }
 
+  function reconcileChildren(parent, children) {
+    const wanted = new Set(children);
+    Array.from(parent.children).forEach((child) => {
+      if (!wanted.has(child)) child.remove();
+    });
+    children.forEach((child, index) => {
+      if (parent.children[index] !== child) parent.insertBefore(child, parent.children[index] || null);
+    });
+  }
+
+  function retainedNode(cache, key, revision, create) {
+    const previous = cache.get(key);
+    if (previous && previous.revision === revision) return previous.node;
+    const node = create();
+    cache.set(key, { revision, node });
+    return node;
+  }
+
+  function historyHeading(key, title, count, className = "history-section-heading") {
+    return retainedNode(state.historyChrome, key, count, () => {
+      const heading = make("div", { className });
+      heading.append(make("h3", { text: title }), make("span", { className: "history-count", text: String(count) }));
+      return heading;
+    });
+  }
+
+  function historyFilters() {
+    return {
+      query: elements.historySearch.value.trim().toLowerCase(),
+      status: elements.historyStatus.value || "all",
+      format: elements.historyFormat.value || "all"
+    };
+  }
+
+  function hasHistoryFilters(filters) {
+    return Boolean(filters.query || filters.status !== "all" || filters.format !== "all");
+  }
+
+  function historyMatches(record, kind, filters) {
+    if (filters.format !== "all" && filters.format !== kind) return false;
+    const status = String(projectValue(record, "status") || "queued").toLowerCase();
+    if (filters.status === "active" && isTerminalJobStatus(status)) return false;
+    if (filters.status === "completed" && !["completed", "complete"].includes(status)) return false;
+    if (filters.status === "failed" && !["failed", "error"].includes(status)) return false;
+    if (!filters.query) return true;
+    const searchable = ["topic", "prompt", "model", "category", "id"]
+      .map((key) => String(projectValue(record, key) || "")).join(" ").toLowerCase();
+    return searchable.includes(filters.query);
+  }
+
+  function clearHistoryFilters() {
+    elements.historySearch.value = "";
+    elements.historyStatus.value = "all";
+    elements.historyFormat.value = "all";
+    renderHistory();
+    elements.historySearch.focus({ preventScroll: true });
+  }
+
+  function renderProjectHistory(projects) {
+    const children = [];
+    if (projects.length) {
+      children.push(historyHeading("project-heading", "30-second projects", projects.length));
+      const list = retainedNode(state.historyChrome, "project-list", true, () => make("div", { className: "project-history-list" }));
+      const cards = [];
+      projects.forEach((project, index) => {
+        const key = `project:${projectID(project) || index}`;
+        const item = retainedNode(state.historyCards, key, project, () => {
+          const id = projectID(project);
+          const status = String(projectValue(project, "status") || "queued");
+          const videoReady = String(status).toLowerCase() === "completed" && Boolean(projectValue(project, "final_video_ready"));
+          const videoURL = id ? `/api/projects/${encodeURIComponent(id)}/video` : "";
+          const item = make("article", { className: "history-card" });
+          let download;
+          const topic = String(projectValue(project, "topic") || "30-second project").slice(0, 120);
+          const preview = historyPreview(videoReady, videoURL, status, () => download?.remove(), "Project video: " + topic);
+          const body = make("div", { className: "history-body" });
+          historyPrompt(body, "topic", projectValue(project, "topic"));
+          const metadata = make("div", { className: "history-meta" });
+          metadata.append(
+            metadataItem("Recorded video cost", projectRecordedCost(project)),
+            metadataItem("Status", status.replaceAll("_", " ")),
+            metadataItem("Created", formatDate(projectValue(project, "created_at", "createdAt"))),
+            metadataItem("Model", friendlyModel(projectValue(project, "model"))),
+            metadataItem("File size", formatBytes(projectValue(project, "final_size_bytes")))
+          );
+          body.append(metadata);
+          const projectError = projectValue(project, "error", "message");
+          if (projectError) body.append(make("div", { className: "alert error history-error", text: projectError }));
+          body.append(historyTerminal(
+            projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"),
+            `project:${id || projectValue(project, "created_at", "createdAt") || index}`,
+            status
+          ));
+          const actions = make("div", { className: "history-actions" });
+          if (videoReady && videoURL) {
+            download = make("a", { className: "button secondary", text: "Download" });
+            download.href = videoURL;
+            download.download = `project-${id}.mp4`;
+            actions.append(download);
+          }
+          if (videoReady && videoURL) {
+            const upload = make("button", { className: "button secondary", type: "button", text: "Upload to YouTube" });
+            upload.addEventListener("click", () => openYouTubeUpload(projectYouTubeSource(project)));
+            actions.append(upload);
+          }
+          if (status === "completed" && videoReady) {
+            const move = make("button", { className: "button secondary vault-move-button", type: "button", text: "Move to Vault" });
+            move.addEventListener("click", () => moveHistoryItem("project", id, move));
+            actions.append(move);
+          }
+          const open = make("button", { className: "button secondary", type: "button", text: "Open" });
+          open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); });
+          actions.append(open);
+          if (isTerminalJobStatus(status)) {
+            const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
+            remove.addEventListener("click", () => deleteProject(project));
+            actions.append(remove);
+          }
+          body.append(actions);
+          item.append(preview, body);
+          return item;
+        });
+        cards.push(item);
+      });
+      reconcileChildren(list, cards);
+      children.push(list);
+    }
+    reconcileChildren(elements.projectHistory, children);
+    elements.projectHistory.hidden = !projects.length;
+  }
+
   function renderHistory() {
-    elements.historyGrid.replaceChildren();
-    if (!state.generations.length && !state.projects.length) {
-      elements.historyGrid.append(emptyState("No generations yet.", "Create a video"));
-      return;
+    const keys = new Set([
+      ...state.projects.map((record, index) => `project:${projectID(record) || index}`),
+      ...state.generations.map((record, index) => `single:${String(record.id || index)}`)
+    ]);
+    state.historyCards.forEach((_value, key) => { if (!keys.has(key)) state.historyCards.delete(key); });
+    const filters = historyFilters();
+    const filtered = hasHistoryFilters(filters);
+    const projects = state.projects.filter((record) => historyMatches(record, "project", filters));
+    const generations = state.generations.filter((record) => historyMatches(record, "single", filters));
+    const loaded = state.projects.length + state.generations.length;
+    const matched = projects.length + generations.length;
+    elements.historyResultsSummary.textContent = `Showing ${matched} of ${loaded} loaded ${loaded === 1 ? "item" : "items"}: ${projects.length} ${projects.length === 1 ? "project" : "projects"}, ${generations.length} ${generations.length === 1 ? "clip" : "clips"}.`
+      + (state.historyHasMore ? " Load more to include older clips." : "");
+    elements.historyClearFilters.disabled = !filtered;
+    renderProjectHistory(projects);
+    const children = [];
+    elements.historyGrid.hidden = filters.format === "project" && projects.length > 0;
+    if (!matched) {
+      elements.historyGrid.hidden = false;
+      children.push(retainedNode(state.historyChrome, "history-empty", filtered, () => filtered
+        ? emptyState("No loaded items match these filters.", "Clear filters", clearHistoryFilters)
+        : emptyState("Your projects and clips will appear here.", "Create a video")));
     }
 
-    if (state.generations.length || state.projects.length) {
-      const heading = make("div", { className: "history-section-heading history-generation-heading" });
-      heading.append(
-        make("h3", { text: "Video generations" }),
-        make("span", { className: "history-count", text: String(state.generations.length) })
-      );
-      elements.historyGrid.append(heading);
+    if (generations.length) {
+      children.push(historyHeading("single-heading", "Single clips", generations.length, "history-section-heading history-generation-heading"));
     }
 
-    if (!state.generations.length && state.projects.length) {
-      elements.historyGrid.append(make("div", {
+    if (!generations.length && projects.length && filters.format !== "project" && state.historyHasMore) {
+      children.push(retainedNode(state.historyChrome, "history-clips-empty", true, () => make("div", {
         className: "empty history-generation-empty",
-        text: "No individual video generations yet."
-      }));
-      return;
+        text: "No loaded clips match. Load more to include older clips."
+      })));
     }
 
-    state.generations.forEach((record, index) => {
-      const card = make("article", { className: "history-card" });
-      const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
-      const videoReady = String(record.status || "").toLowerCase() === "completed" && Boolean(record.video_ready);
-      let download;
-      const previewLabel = record.prompt
-        ? "Generated video: " + record.prompt.slice(0, 120)
-        : "Generated video";
-      const preview = historyPreview(videoReady, videoURL, record.status, () => download?.remove(), previewLabel);
+    generations.forEach((record, index) => {
+      const key = `single:${String(record.id || index)}`;
+      const card = retainedNode(state.historyCards, key, record, () => {
+        const card = make("article", { className: "history-card" });
+        const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
+        const videoReady = String(record.status || "").toLowerCase() === "completed" && Boolean(record.video_ready);
+        let download;
+        const previewLabel = record.prompt
+          ? "Generated video: " + record.prompt.slice(0, 120)
+          : "Generated video";
+        const preview = historyPreview(videoReady, videoURL, record.status, () => download?.remove(), previewLabel);
 
-      const body = make("div", { className: "history-body" });
-      historyPrompt(body, "prompt", record.prompt);
-      const metadata = make("div", { className: "history-meta" });
-      const cost = recordCost(record);
-      metadata.append(
-        metadataItem("Model", friendlyModel(record.model)),
-        metadataItem("Created", formatDate(record.created_at)),
-        metadataItem("Duration", record.duration ? `${record.duration} sec` : "Provider default"),
-        metadataItem(cost.label, cost.value),
-        metadataItem("Aspect ratio", record.aspect_ratio || "Provider default"),
-        metadataItem("File size", formatBytes(record.size_bytes))
-      );
-      body.append(metadata);
-      if (record.error) body.append(make("div", { className: "alert error history-error", text: record.error }));
-      body.append(historyTerminal(
-        record.events || record.pipeline_events || record.logs,
-        `generation:${record.id || record.created_at || index}`,
-        record.status
-      ));
+        const body = make("div", { className: "history-body" });
+        historyPrompt(body, "prompt", record.prompt);
+        const metadata = make("div", { className: "history-meta" });
+        const cost = recordCost(record);
+        metadata.append(
+          metadataItem("Model", friendlyModel(record.model)),
+          metadataItem("Created", formatDate(record.created_at)),
+          metadataItem("Duration", record.duration ? `${record.duration} sec` : "Provider default"),
+          metadataItem(cost.label, cost.value),
+          metadataItem("Aspect ratio", record.aspect_ratio || "Provider default"),
+          metadataItem("File size", formatBytes(record.size_bytes))
+        );
+        body.append(metadata);
+        if (record.error) body.append(make("div", { className: "alert error history-error", text: record.error }));
+        body.append(historyTerminal(
+          record.events || record.pipeline_events || record.logs,
+          `generation:${record.id || record.created_at || index}`,
+          record.status
+        ));
 
-      const actions = make("div", { className: "history-actions" });
-      if (videoReady) {
-        download = make("a", { className: "button secondary", text: "Download" });
-        download.href = videoURL;
-        download.download = `generation-${record.id}.mp4`;
-        actions.append(download);
-      }
-      if (videoReady) {
-        const upload = make("button", { className: "button secondary", text: "Upload to YouTube", type: "button" });
-        upload.addEventListener("click", () => openYouTubeUpload(generationYouTubeSource(record)));
-        actions.append(upload);
-      }
-      if (videoReady) {
-        const move = make("button", { className: "button secondary vault-move-button", text: "Move to Vault", type: "button" });
-        move.addEventListener("click", () => moveHistoryItem("generation", record.id, move));
-        actions.append(move);
-      }
-      const remove = make("button", { className: "button secondary danger-button", text: "Delete", type: "button" });
-      remove.addEventListener("click", () => deleteGeneration(record));
-      actions.append(remove);
-      body.append(actions);
-      card.append(preview, body);
-      elements.historyGrid.append(card);
+        const actions = make("div", { className: "history-actions" });
+        if (videoReady) {
+          download = make("a", { className: "button secondary", text: "Download" });
+          download.href = videoURL;
+          download.download = `generation-${record.id}.mp4`;
+          actions.append(download);
+        }
+        if (videoReady) {
+          const upload = make("button", { className: "button secondary", text: "Upload to YouTube", type: "button" });
+          upload.addEventListener("click", () => openYouTubeUpload(generationYouTubeSource(record)));
+          actions.append(upload);
+        }
+        if (videoReady) {
+          const move = make("button", { className: "button secondary vault-move-button", text: "Move to Vault", type: "button" });
+          move.addEventListener("click", () => moveHistoryItem("generation", record.id, move));
+          actions.append(move);
+        }
+        const remove = make("button", { className: "button secondary danger-button", text: "Delete", type: "button" });
+        remove.addEventListener("click", () => deleteGeneration(record));
+        actions.append(remove);
+        body.append(actions);
+        card.append(preview, body);
+        return card;
+      });
+      children.push(card);
     });
 
-    if (state.historyHasMore) {
-      const more = make("div", { className: "empty" });
-      const button = make("button", { className: "button secondary", text: "Load more", type: "button" });
-      button.addEventListener("click", () => loadHistory(true, true));
-      more.append(button);
-      elements.historyGrid.append(more);
+    if (state.historyHasMore && filters.format !== "project") {
+      const more = retainedNode(state.historyChrome, "history-more", true, () => {
+        const container = make("div", { className: "empty" });
+        const button = make("button", { className: "button secondary", text: "Load more", type: "button" });
+        button.addEventListener("click", async () => {
+          setButtonBusy(button, true, "Loading older clips…");
+          await loadHistory(true, true);
+          setButtonBusy(button, false);
+        });
+        container.append(button);
+        return container;
+      });
+      setButtonBusy(more.children[0], state.historyLoading, "Loading older clips…");
+      children.push(more);
     }
+    reconcileChildren(elements.historyGrid, children);
   }
+
 
   async function loadHistory(notify = true, append = false) {
     if (!state.authenticated || state.mustChangePassword || state.historyLoading) return;
+    const authGeneration = state.authGeneration;
     state.historyLoading = true;
     elements.refreshHistory.disabled = true;
     try {
@@ -2076,6 +2246,7 @@
         query.set("offset", String(offset));
       }
       const payload = await request(`/api/generations?${query.toString()}`);
+      if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration) return;
       const records = preserveNewerSnapshots(
         Array.isArray(payload && payload.generations) ? payload.generations : [],
         state.generations,
@@ -2129,12 +2300,14 @@
       );
       renderStats();
       renderRecent();
-      renderHistory();
     } catch (error) {
-      if (notify && error.status !== 401) toast(error.message, true);
+      if (notify && state.authenticated && state.authGeneration === authGeneration && error.status !== 401) toast(error.message, true);
     } finally {
-      state.historyLoading = false;
-      elements.refreshHistory.disabled = false;
+      if (state.authGeneration === authGeneration) {
+        state.historyLoading = false;
+        elements.refreshHistory.disabled = false;
+        renderHistory();
+      }
     }
   }
 
@@ -2900,79 +3073,9 @@
       const selectedProject = state.projects.find((project) => projectID(project) === state.currentProjectID);
       if (selectedProject) state.currentProjectRecord = selectedProject;
       setGenerationMode(state.mode);
-      elements.projectHistory.replaceChildren();
-      if (state.projects.length) {
-        const heading = make("div", { className: "history-section-heading" });
-        heading.append(
-          make("h3", { text: "30-second projects" }),
-          make("span", { className: "history-count", text: String(state.projects.length) })
-        );
-        elements.projectHistory.append(heading);
-        const list = make("div", { className: "project-history-list" });
-        state.projects.forEach((project, index) => {
-          const id = projectID(project);
-          const status = String(projectValue(project, "status") || "queued");
-          const videoReady = String(status).toLowerCase() === "completed" && Boolean(projectValue(project, "final_video_ready"));
-          const videoURL = id ? `/api/projects/${encodeURIComponent(id)}/video` : "";
-          const item = make("article", { className: "history-card" });
-          let download;
-          const topic = String(projectValue(project, "topic") || "30-second project").slice(0, 120);
-          const preview = historyPreview(videoReady, videoURL, status, () => download?.remove(), "Project video: " + topic);
-          const body = make("div", { className: "history-body" });
-          historyPrompt(body, "topic", projectValue(project, "topic"));
-          const metadata = make("div", { className: "history-meta" });
-          metadata.append(
-            metadataItem("Recorded video cost", projectRecordedCost(project)),
-            metadataItem("Status", status.replaceAll("_", " ")),
-            metadataItem("Created", formatDate(projectValue(project, "created_at", "createdAt"))),
-            metadataItem("Model", friendlyModel(projectValue(project, "model"))),
-            metadataItem("File size", formatBytes(projectValue(project, "final_size_bytes")))
-          );
-          body.append(metadata);
-          const projectError = projectValue(project, "error", "message");
-          if (projectError) body.append(make("div", { className: "alert error history-error", text: projectError }));
-          body.append(historyTerminal(
-            projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"),
-            `project:${id || projectValue(project, "created_at", "createdAt") || index}`,
-            status
-          ));
-          const actions = make("div", { className: "history-actions" });
-          if (videoReady && videoURL) {
-            download = make("a", { className: "button secondary", text: "Download" });
-            download.href = videoURL;
-            download.download = `project-${id}.mp4`;
-            actions.append(download);
-          }
-          if (videoReady && videoURL) {
-            const upload = make("button", { className: "button secondary", type: "button", text: "Upload to YouTube" });
-            upload.addEventListener("click", () => openYouTubeUpload(projectYouTubeSource(project)));
-            actions.append(upload);
-          }
-          if (status === "completed" && videoReady) {
-            const move = make("button", { className: "button secondary vault-move-button", type: "button", text: "Move to Vault" });
-            move.addEventListener("click", () => moveHistoryItem("project", id, move));
-            actions.append(move);
-          }
-          const open = make("button", { className: "button secondary", type: "button", text: "Open" });
-          open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); });
-          actions.append(open);
-          if (isTerminalJobStatus(status)) {
-            const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
-            remove.addEventListener("click", () => deleteProject(project));
-            actions.append(remove);
-          }
-          body.append(actions);
-          item.append(preview, body);
-          list.append(item);
-        });
-        elements.projectHistory.append(list);
-        if (state.currentProjectID && state.mode === "project") {
-          const active = state.projects.find((project) => projectID(project) === state.currentProjectID);
-          if (active) {
-            setGenerationMode("project");
-            renderProject(active);
-          }
-        }
+      if (state.currentProjectID && state.mode === "project") {
+        const active = state.projects.find((project) => projectID(project) === state.currentProjectID);
+        if (active) renderProject(active);
       }
       renderHistory();
       renderRecent();
@@ -4825,6 +4928,9 @@
     elements.testVideoProvider.addEventListener("click", testVideoProvider);
     elements.passwordForm.addEventListener("submit", updatePassword);
     elements.refreshHistory.addEventListener("click", () => { loadHistory(true); loadProjects(true); });
+    elements.historySearch.addEventListener("input", renderHistory);
+    [elements.historyStatus, elements.historyFormat].forEach((select) => select.addEventListener("change", renderHistory));
+    elements.historyClearFilters.addEventListener("click", clearHistoryFilters);
     elements.model.addEventListener("change", () => {
       markPendingProjectFormEdited();
       updateModelOptions();
