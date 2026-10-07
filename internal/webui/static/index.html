@@ -59,30 +59,43 @@
 
     <main class="main">
       <header class="topbar">
-        <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation" aria-controls="workspace-navigation" aria-expanded="false">☰</button>
+        <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation" aria-controls="workspace-navigation" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"/></svg></button>
         <div class="page-heading"><p class="eyebrow" id="page-kicker">Studio</p><h1 id="page-title" tabindex="-1">Workspace</h1></div>
         <div class="account"><div class="avatar" aria-hidden="true"></div><div class="account-copy"><strong id="account-name">Signed in</strong><span>Private studio</span></div><button id="logout" class="text-button">Log out</button></div>
       </header>
 
       <div class="content">
         <section class="view active" data-page="overview">
-          <div class="hero">
-            <div class="hero-copy"><p class="eyebrow light">Video workspace</p><h2>Turn a topic into a video.</h2><p>Generate one clip or build a 30-second Short from five connected scenes.</p><button class="button light" data-go="generate">Create video</button></div>
-            <div class="hero-facts" role="group" aria-label="30-second project format">
-              <div><strong>30 sec</strong><span>Finished project</span></div>
-              <div><strong>5 × 6 sec</strong><span>Connected scenes</span></div>
-              <div><strong>9:16</strong><span>Vertical output</span></div>
-            </div>
+          <div class="workspace-intro">
+            <div><h2>Start with an idea.</h2><p>Build a connected story or direct a single shot.</p></div>
+            <span class="workspace-note">Your private production workspace</span>
           </div>
-          <section class="stats-grid" aria-label="Workspace activity">
-            <article class="stat-card"><span>Total generations</span><strong id="stat-total">0</strong></article>
-            <article class="stat-card"><span>Completed</span><strong id="stat-completed">0</strong></article>
-            <article class="stat-card"><span>In progress</span><strong id="stat-active">0</strong></article>
-            <article class="stat-card"><span>Provider-reported cost</span><strong id="stat-cost">$0.00</strong></article>
+          <div class="creation-choices" aria-label="Choose what to create">
+            <button class="creation-choice" type="button" data-create-mode="project">
+              <span class="format-illustration story-illustration" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span>
+              <span class="creation-copy"><strong>30-second story</strong><span>Give us an idea. Get a script and five connected scenes, joined into one video.</span></span>
+              <span class="format-facts"><span>5 scenes</span><span>Vertical</span><span>Silent</span></span>
+              <span class="choice-action">Create a story<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12M11 5l5 5-5 5"/></svg></span>
+            </button>
+            <button class="creation-choice" type="button" data-create-mode="single">
+              <span class="format-illustration clip-illustration" aria-hidden="true"><span></span></span>
+              <span class="creation-copy"><strong>Single clip</strong><span>Describe a shot. Choose a model and set its duration, framing and output.</span></span>
+              <span class="format-facts"><span>Your prompt</span><span>Flexible output</span></span>
+              <span class="choice-action">Create a clip<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12M11 5l5 5-5 5"/></svg></span>
+            </button>
+          </div>
+          <section class="activity-section" aria-labelledby="activity-heading">
+            <div class="activity-heading"><h2 id="activity-heading">Clip activity</h2><p>Totals for single clips. Project runs appear in recent work below.</p></div>
+            <div class="stats-grid">
+              <article class="stat-card"><span>Total clips</span><strong id="stat-total">&mdash;</strong></article>
+              <article class="stat-card"><span>Completed clips</span><strong id="stat-completed">&mdash;</strong></article>
+              <article class="stat-card"><span>Active clips</span><strong id="stat-active">&mdash;</strong></article>
+              <article class="stat-card"><span>Recorded clip cost</span><strong id="stat-cost">&mdash;</strong></article>
+            </div>
           </section>
           <section class="panel overview-recent" aria-labelledby="recent-heading">
-            <div class="panel-head"><div><h2 id="recent-heading">Recent generations</h2><p>Your latest completed and active work</p></div><button class="text-button" data-go="history">View history</button></div>
-            <div id="recent-list" class="recent-list"><div class="empty">No generations yet.</div></div>
+            <div class="panel-head"><div><h2 id="recent-heading">Recent work</h2><p>Stories and clips, with live progress and saved results.</p></div><button class="text-button" data-go="history" type="button">Browse History</button></div>
+            <div id="recent-list" class="recent-list"><div class="empty">Your work will appear here after you start a generation.</div></div>
           </section>
         </section>
 
