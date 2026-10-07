@@ -1163,6 +1163,62 @@ test('unrelated live updates keep completed History media and action focus attac
   assert.equal(app.state.historyCards.size, 0, 'caches must not retain unloaded private records');
 });
 
+for (const kind of ['project', 'single']) {
+  test(`manual History refresh retries a failed ${kind} preview while healthy media stays attached`, async () => {
+    const app = configuredApp('single', true, { stubHistory: false });
+    const failed = { id: `fixture-error-preview-${kind}`, status: 'completed', video_ready: true, final_video_ready: true,
+      prompt: 'Transient preview fixture', topic: 'Transient preview fixture', created_at: 2, updated_at: 2, scenes: [], events: [] };
+    const healthy = { ...failed, id: `fixture-healthy-preview-${kind}`, prompt: 'Healthy preview fixture', topic: 'Healthy preview fixture', created_at: 1 };
+    if (kind === 'project') app.state.projects = [failed, healthy];
+    else app.state.generations = [failed, healthy];
+    app.bindEvents();
+    app.renderHistory();
+    const failedKey = `${kind}:${failed.id}`;
+    const healthyKey = `${kind}:${healthy.id}`;
+    const failedCard = app.state.historyCards.get(failedKey).node;
+    const healthyCard = app.state.historyCards.get(healthyKey).node;
+    const video = failedCard.children[0].children[0];
+    const healthyVideo = healthyCard.children[0].children[0];
+    const findDownload = (card) => card.querySelectorAll('.button').find((node) => node.tagName === 'a' && node.textContent === 'Download');
+    assert.ok(findDownload(failedCard));
+    const ancestry = [];
+    for (let node = healthyVideo; node; node = node.parent) ancestry.push({ node, detachments: node.detachments, replacements: node.replacements });
+    const focused = findTextButton(healthyCard, 'Upload to YouTube');
+    focused.focus();
+    video.emit('error');
+    assert.equal(failedCard.dataset.previewFailed, 'true');
+    assert.equal(video.isConnected, false);
+    assert.equal(findDownload(failedCard), undefined);
+    assert.match(collectText(failedCard.children[0]), /Video unavailable/);
+    app.renderHistory();
+    assert.equal(app.state.historyCards.get(failedKey).node, failedCard, 'routine snapshots must not repeatedly retry failed previews');
+
+    const requests = [];
+    app.setRequest((requestPath) => {
+      requests.push(requestPath);
+      if (requestPath.startsWith('/api/generations?')) return Promise.resolve({ generations: JSON.parse(JSON.stringify(app.state.generations)) });
+      if (requestPath === '/api/projects') return Promise.resolve({ projects: JSON.parse(JSON.stringify(app.state.projects)) });
+      throw new Error(`Unexpected request: ${requestPath}`);
+    });
+    app.elements.refreshHistory.emit('click');
+    await flushUI();
+    const recovered = app.state.historyCards.get(failedKey).node;
+    assert.notEqual(recovered, failedCard);
+    assert.equal(recovered.children[0].children[0].tagName, 'video');
+    assert.equal(recovered.children[0].children[0].isConnected, true);
+    assert.ok(findDownload(recovered));
+    const records = kind === 'project' ? app.state.projects : app.state.generations;
+    assert.equal(records.find((record) => record.id === failed.id), failed, 'identical cloned API payloads retain immutable snapshots');
+    assert.equal(app.state.historyCards.get(healthyKey).node, healthyCard);
+    assert.equal(app.document.activeElement, focused);
+    for (const { node, detachments, replacements } of ancestry) {
+      assert.equal(node.detachments, detachments, 'healthy video ancestry must stay attached during retry');
+      assert.equal(node.replacements, replacements, 'healthy video ancestry must not be cleared during retry');
+    }
+    assert.equal(requests.length, 2, 'manual refresh should use only existing History endpoints');
+  });
+}
+
 test('late History pages cannot insert private results or clear a newer session load', async () => {
   const app = configuredApp('project', true, { stubHistory: false });
   const oldPage = deferred();

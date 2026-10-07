@@ -2192,6 +2192,12 @@
     elements.historySearch.focus({ preventScroll: true });
   }
 
+  function retryFailedHistoryPreviews() {
+    state.historyCards.forEach((entry, key) => {
+      if (entry.node.dataset.previewFailed === "true") state.historyCards.delete(key);
+    });
+  }
+
   function renderProjectHistory(projects) {
     const children = [];
     if (projects.length) {
@@ -2208,7 +2214,10 @@
           const item = make("article", { className: "history-card" });
           let download;
           const topic = String(projectValue(project, "topic") || "30-second project").slice(0, 120);
-          const preview = historyPreview(videoReady, videoURL, status, () => download?.remove(), "Project video: " + topic);
+          const preview = historyPreview(videoReady, videoURL, status, () => {
+            if (videoReady && videoURL) item.dataset.previewFailed = "true";
+            download?.remove();
+          }, "Project video: " + topic);
           const body = make("div", { className: "history-body" });
           historyPrompt(body, "topic", projectValue(project, "topic"));
           const metadata = make("div", { className: "history-meta" });
@@ -2311,7 +2320,10 @@
         const previewLabel = record.prompt
           ? "Generated video: " + record.prompt.slice(0, 120)
           : "Generated video";
-        const preview = historyPreview(videoReady, videoURL, record.status, () => download?.remove(), previewLabel);
+        const preview = historyPreview(videoReady, videoURL, record.status, () => {
+          if (videoReady) card.dataset.previewFailed = "true";
+          download?.remove();
+        }, previewLabel);
 
         const body = make("div", { className: "history-body" });
         historyPrompt(body, "prompt", record.prompt);
@@ -5146,6 +5158,7 @@
     elements.testVideoProvider.addEventListener("click", testVideoProvider);
     elements.passwordForm.addEventListener("submit", updatePassword);
     elements.refreshHistory.addEventListener("click", () => {
+      retryFailedHistoryPreviews();
       startJobEventStream();
       loadHistory(true);
       loadProjects(true);
