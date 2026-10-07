@@ -291,6 +291,115 @@ test('duplicate random idea requests are ignored while the first request is pend
   assert.equal(app.elements.randomPrompt.disabled, false);
 });
 
+test('the creator category uses a native select and preserves existing category values', () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  assert.equal(app.elements.promptCategory.tagName, 'select');
+  const select = markup.match(/<select\b[^>]*id="prompt-category"[^>]*>([\s\S]*?)<\/select>/);
+  assert.ok(select);
+  assert.deepEqual([...select[1].matchAll(/<option value="(\d)">([^<]+)<\/option>/g)].map((match) => [match[1], match[2]]), [
+    ['0', 'Kid Animation'], ['1', 'Horror Story'], ['2', 'Nature'], ['3', 'Seduction'], ['4', 'Mature Content'], ['5', 'Soft Corn'],
+  ]);
+  app.elements.promptCategory.value = '2';
+  app.elements.promptCategory.emit('input');
+  assert.equal(app.elements.promptCategoryName.textContent, 'Nature');
+  assert.equal(app.elements.promptCategory.getAttribute('aria-valuetext'), null);
+  assert.equal(app.elements.projectCostNote.hidden, false);
+  assert.equal(app.elements.randomPrompt.textContent, 'Suggest story idea');
+  app.setGenerationMode('single');
+  assert.equal(app.elements.projectCostNote.hidden, true);
+  assert.equal(app.elements.randomPrompt.textContent, 'Suggest clip prompt');
+});
+
+for (const mode of ['project', 'single']) {
+  test(`${mode} suggestions preserve manual edits, including edits reverted while waiting`, async () => {
+    const sessionData = new Map();
+    const app = configuredApp(mode, true, { sessionData });
+    app.bindEvents();
+    const field = mode === 'project' ? app.elements.projectTopic : app.elements.prompt;
+    const firstResponse = deferred();
+    app.setRequest(() => firstResponse.promise);
+    const first = app.generateRandomPrompt();
+    field.value = 'A manual idea entered while waiting';
+    field.emit('input');
+    firstResponse.resolve({ prompt: 'A late generated idea' });
+    await first;
+    assert.equal(field.value, 'A manual idea entered while waiting');
+    assert.match(app.elements.toast.textContent, /Your edits were kept/);
+
+    const secondResponse = deferred();
+    app.setRequest(() => secondResponse.promise);
+    const second = app.generateRandomPrompt();
+    field.value = 'A temporary edit';
+    field.emit('input');
+    field.value = 'A manual idea entered while waiting';
+    field.emit('input');
+    secondResponse.resolve({ prompt: 'Another late generated idea' });
+    await second;
+    assert.equal(field.value, 'A manual idea entered while waiting');
+    assert.equal(app.elements.randomPrompt.disabled, false);
+    assert.equal(sessionData.size, 0, 'suggestions must not persist private prompt drafts');
+  });
+}
+
+test('changing category keeps the current idea when a suggestion for the old category resolves', async () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  const response = deferred();
+  app.setRequest(() => response.promise);
+  const suggestion = app.generateRandomPrompt();
+  app.elements.promptCategory.value = '2';
+  app.elements.promptCategory.emit('input');
+  response.resolve({ prompt: 'A suggestion for the previous category' });
+  await suggestion;
+  assert.equal(app.elements.projectTopic.value, 'Test project topic');
+  assert.equal(app.elements.promptCategoryName.textContent, 'Nature');
+  assert.match(app.elements.toast.textContent, /Your edits were kept/);
+});
+
+test('a suggestion can fill its untouched originating format without focusing the now-hidden field', async () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  app.state.currentView = 'generate';
+  app.elements.randomPrompt.focus();
+  const response = deferred();
+  app.setRequest(() => response.promise);
+  const suggestion = app.generateRandomPrompt();
+  app.setGenerationMode('single');
+  app.elements.prompt.focus();
+  response.resolve({ prompt: 'An untouched project idea' });
+  await suggestion;
+  assert.equal(app.elements.projectTopic.value, 'An untouched project idea');
+  assert.equal(app.elements.prompt.value, 'Test single clip prompt');
+  assert.equal(app.document.activeElement, app.elements.prompt);
+  assert.equal(app.elements.randomPrompt.textContent, 'Suggest clip prompt');
+  assert.equal(app.state.mode, 'single');
+});
+
+test('a suggestion cannot steal focus after navigation or another creator control is selected', async () => {
+  for (const leaveCreator of [false, true]) {
+    const app = configuredApp('project');
+    app.state.currentView = 'generate';
+    app.elements.randomPrompt.focus();
+    const response = deferred();
+    app.setRequest(() => response.promise);
+    const suggestion = app.generateRandomPrompt();
+    if (leaveCreator) app.state.currentView = 'history';
+    const target = leaveCreator ? app.elements.historySearch : app.elements.modelTrigger;
+    target.focus();
+    response.resolve({ prompt: 'A safely generated idea' });
+    await suggestion;
+    assert.equal(app.elements.projectTopic.value, 'A safely generated idea');
+    assert.equal(app.document.activeElement, target);
+  }
+  const app = configuredApp('project');
+  app.state.currentView = 'generate';
+  app.elements.randomPrompt.focus();
+  app.setRequest(() => Promise.resolve({ prompt: 'A ready idea' }));
+  await app.generateRandomPrompt();
+  assert.equal(app.document.activeElement, app.elements.projectTopic, 'the unchanged suggestion action can move focus to its resulting idea');
+});
+
 test('a refreshed dashboard restores a project using its exact persisted request id', async () => {
   const sessionData = new Map();
   const firstApp = configuredApp('project', true, { sessionData });
@@ -1085,7 +1194,7 @@ test('failed single submission cannot enable an incompatible project', async () 
   pending.reject(new Error('Fixture submission failed'));
   await submission;
   assert.equal(app.elements.generate.disabled, true);
-  assert.equal(app.elements.generate.textContent, 'Generate 30-second project');
+  assert.equal(app.elements.generate.textContent, 'Generate 30-second story');
 });
 
 test('a repeated form submission cannot send a second request while busy', async () => {
@@ -1113,7 +1222,7 @@ test('a successful clip preserves a project idea entered while it was submitting
   assert.equal(app.elements.projectTopic.value, 'New project idea entered while the clip is submitting');
   assert.equal(app.elements.prompt.value, '');
   assert.equal(app.state.displayedGenerationID, 'fixture-clip');
-  assert.equal(app.elements.generate.textContent, 'Generate 30-second project');
+  assert.equal(app.elements.generate.textContent, 'Generate 30-second story');
 });
 
 test('completed and failed saved results remain scoped to their format', () => {

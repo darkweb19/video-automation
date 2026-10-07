@@ -53,6 +53,7 @@
     singleOptions: $("#single-options"),
     projectOptions: $("#project-options"),
     projectModelNote: $("#project-model-note"),
+    projectCostNote: $("#project-cost-note"),
     modeOptions: $$(".mode-option"),
     createModeButtons: $$('[data-create-mode]'),
     promptCount: $("#prompt-count"),
@@ -202,10 +203,10 @@
 
   const viewMeta = {
     overview: { title: "Workspace", kicker: "Studio" },
-    generate: { title: "Create", kicker: "Studio" },
+    generate: { title: "Create", kicker: "Production" },
     history: { title: "History", kicker: "Library" },
     vault: { title: "Vault", kicker: "Private library" },
-    settings: { title: "Settings", kicker: "AI providers" }
+    settings: { title: "Settings", kicker: "Workspace" }
   };
 
   const promptCategories = ["Kid Animation", "Horror Story", "Nature", "Seduction", "Mature Content", "Soft Corn"];
@@ -247,6 +248,8 @@
     pendingProjectFormEdited: false,
     authGeneration: 0,
     randomPromptPending: false,
+    promptEditRevisions: { project: 0, single: 0 },
+    categoryEditRevision: 0,
     singleSubmissionPending: false,
     singleSubmissionFailed: false,
     projects: [],
@@ -1057,10 +1060,11 @@
     elements.projectInputs.hidden = !project;
     elements.projectOptions.hidden = !project;
     elements.projectModelNote.hidden = !project;
+    elements.projectCostNote.hidden = !project;
     elements.singleOptions.hidden = project;
     elements.prompt.hidden = project;
     elements.prompt.closest(".field").hidden = project;
-    if (!state.submissionPending) elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
+    updateCreatorActionLabels();
     elements.modalAccountProjectField.hidden = state.videoProvider !== "modal" || !project;
     elements.modalAccountSingleField.hidden = state.videoProvider !== "modal" || project;
     if (project) {
@@ -1109,6 +1113,12 @@
     if (state.videoProvider === "modal") void loadModels(false);
   }
 
+  function updateCreatorActionLabels() {
+    const project = state.mode === "project";
+    if (!state.submissionPending) elements.generate.textContent = project ? "Generate 30-second story" : "Generate clip";
+    if (!state.randomPromptPending) elements.randomPrompt.textContent = project ? "Suggest story idea" : "Suggest clip prompt";
+  }
+
   function selectedPromptCategory() {
     return promptCategories[Number(elements.promptCategory.value)] || promptCategories[0];
   }
@@ -1116,36 +1126,47 @@
   function updatePromptCategory() {
     const category = selectedPromptCategory();
     elements.promptCategoryName.textContent = category;
-    elements.promptCategory.setAttribute("aria-valuetext", category);
+    elements.promptCategory.removeAttribute("aria-valuetext");
   }
 
   async function generateRandomPrompt() {
-    if (state.randomPromptPending) return;
+    if (state.randomPromptPending || !state.authenticated || state.mustChangePassword) return;
     const mode = state.mode;
     const category = selectedPromptCategory();
+    const field = mode === "project" ? elements.projectTopic : elements.prompt;
+    const previousValue = field.value;
+    const editRevision = state.promptEditRevisions[mode];
+    const categoryRevision = state.categoryEditRevision;
+    const focusOrigin = document.activeElement;
     const authGeneration = state.authGeneration;
     state.randomPromptPending = true;
-    setButtonBusy(elements.randomPrompt, true, "Generating…");
+    setButtonBusy(elements.randomPrompt, true, "Suggesting…");
     try {
       const payload = await request("/api/prompts/random", {
         method: "POST",
         body: JSON.stringify({ category, mode })
       });
-      if (state.authGeneration !== authGeneration || !state.authenticated) return;
+      if (state.authGeneration !== authGeneration || !state.authenticated || state.mustChangePassword) return;
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
       if (!prompt) throw new APIError("No prompt was returned. Try again.", 502);
-      const field = mode === "project" ? elements.projectTopic : elements.prompt;
+      if (field.value !== previousValue || state.promptEditRevisions[mode] !== editRevision
+        || selectedPromptCategory() !== category || state.categoryEditRevision !== categoryRevision) {
+        toast("Your edits were kept. Request another suggestion when you're ready.");
+        return;
+      }
       field.value = prompt;
       field.dispatchEvent(new Event("input", { bubbles: true }));
-      field.focus();
+      if (state.mode === mode && state.currentView === "generate" && document.activeElement === focusOrigin
+        && (focusOrigin === elements.randomPrompt || focusOrigin === field)) field.focus();
       if (mode === "project") elements.projectTopicError.textContent = "";
-      toast("Random prompt ready.");
+      toast(mode === "project" ? "Story idea ready." : "Clip prompt ready.");
     } catch (error) {
       if (state.authGeneration === authGeneration && state.authenticated && error.status !== 401) toast(error.message, true);
     } finally {
       if (state.authGeneration === authGeneration) {
         state.randomPromptPending = false;
         setButtonBusy(elements.randomPrompt, false);
+        updateCreatorActionLabels();
       }
     }
   }
@@ -1562,7 +1583,7 @@
     elements.generate.disabled = state.submissionPending || !model
       || (state.mode === "project" && !supportsProject(model));
     if (!state.submissionPending) {
-      elements.generate.textContent = state.mode === "project" ? "Generate 30-second project" : "Generate video";
+      updateCreatorActionLabels();
     }
   }
 
@@ -4882,9 +4903,13 @@
     elements.generatorForm.addEventListener("submit", submitGeneration);
     elements.promptCategory.addEventListener("input", () => {
       markPendingProjectFormEdited();
+      state.categoryEditRevision++;
       updatePromptCategory();
     });
-    elements.projectTopic.addEventListener("input", markPendingProjectFormEdited);
+    elements.projectTopic.addEventListener("input", () => {
+      markPendingProjectFormEdited();
+      state.promptEditRevisions.project++;
+    });
     elements.randomPrompt.addEventListener("click", generateRandomPrompt);
     elements.retryProject.addEventListener("click", retryCurrentProject);
     elements.modeOptions.forEach((button) => {
@@ -4993,6 +5018,7 @@
     elements.duration.addEventListener("change", updateEstimate);
     elements.resolution.addEventListener("change", updateEstimate);
     elements.prompt.addEventListener("input", () => {
+      state.promptEditRevisions.single++;
       const count = Array.from(elements.prompt.value).length;
       elements.promptCount.textContent = `${count.toLocaleString()} / 4000`;
       elements.promptError.textContent = count > 4000 ? "Prompt must be 4,000 characters or fewer." : "";
