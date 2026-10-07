@@ -4,20 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FrameVault — Video workspace</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260929-1">
-  <link rel="stylesheet" href="/static/model-picker.css?v=20260929-1">
-  <link rel="stylesheet" href="/static/project.css?v=20260929-1">
-  <link rel="stylesheet" href="/static/history-settings.css?v=20260929-1">
-  <link rel="stylesheet" href="/static/youtube.css?v=20261002-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/model-picker.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/project.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/history-settings.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/youtube.css?v=20261007-studio">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
     <div class="login-panel">
-      <div class="brand-mark" aria-hidden="true">F</div>
+      <div class="login-brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM5 8h14M5 16h14M9 4v4M15 4v4M9 16v4M15 16v4"/></svg></div><span>FrameVault</span></div>
       <div id="login-view">
-        <p class="eyebrow">Private workspace</p>
-        <h1>Welcome back</h1>
-        <p class="subtle">Sign in to manage generations and stored videos.</p>
+        <h1>Enter your studio.</h1>
+        <p class="subtle">A private space to create, follow and keep your video work.</p>
         <form id="login-form" class="stack" novalidate>
           <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required></div>
           <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required></div>
@@ -45,23 +44,24 @@
   </section>
 
   <div id="app-shell" class="app-shell" hidden>
+    <a class="skip-link" href="#page-title">Skip to content</a>
     <aside id="workspace-navigation" class="sidebar">
-      <div class="brand"><div class="brand-mark small">F</div><span>FrameVault</span></div>
+      <div class="brand"><div class="brand-mark small" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM5 8h14M5 16h14M9 4v4M15 4v4M9 16v4M15 16v4"/></svg></div><div><strong>FrameVault</strong><span>Production studio</span></div></div>
       <nav aria-label="Main navigation">
-        <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Overview</button>
-        <button class="nav-item" data-view="generate"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M9 3v12M3 9h12"></path></svg></span>Generate</button>
+        <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Workspace</button>
+        <button class="nav-item" data-view="generate"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M9 3v12M3 9h12"></path></svg></span>Create</button>
         <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="M9 5.5V9l2.5 1.5"></path></svg></span>History</button>
         <button class="nav-item" data-view="vault"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="3" y="7.5" width="12" height="8" rx="1.5"></rect><path d="M5.5 7.5V5a3.5 3.5 0 0 1 7 0v2.5"></path></svg></span>Vault</button>
         <button class="nav-item" data-view="settings"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"></path><circle cx="6" cy="5" r="1.5"></circle><circle cx="11" cy="9" r="1.5"></circle><circle cx="7" cy="13" r="1.5"></circle></svg></span>Settings</button>
       </nav>
-      <div class="sidebar-foot"><span class="status-dot" aria-hidden="true"></span><span>Private workspace</span></div>
+      <div class="sidebar-foot"><span class="connection-indicator" aria-hidden="true"></span><span id="connection-state" role="status" aria-live="polite" data-state="connecting">Connecting to workspace</span></div>
     </aside>
 
     <main class="main">
       <header class="topbar">
         <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation" aria-controls="workspace-navigation" aria-expanded="false">☰</button>
-        <div><p class="eyebrow" id="page-kicker">Workspace</p><h1 id="page-title" tabindex="-1">Overview</h1></div>
-        <div class="account"><div class="avatar" aria-hidden="true"></div><div class="account-copy"><strong id="account-name">Signed in</strong><span>Private workspace</span></div><button id="logout" class="text-button">Log out</button></div>
+        <div class="page-heading"><p class="eyebrow" id="page-kicker">Studio</p><h1 id="page-title" tabindex="-1">Workspace</h1></div>
+        <div class="account"><div class="avatar" aria-hidden="true"></div><div class="account-copy"><strong id="account-name">Signed in</strong><span>Private studio</span></div><button id="logout" class="text-button">Log out</button></div>
       </header>
 
       <div class="content">
@@ -361,6 +361,6 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20261002-1" defer></script>
+  <script src="/static/app.js?v=20261007-studio" defer></script>
 </body>
 </html>
