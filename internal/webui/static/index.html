@@ -195,23 +195,32 @@
 
         <section class="view" data-page="history">
           <div class="history-page-head">
-            <div><h2 class="visually-hidden">Generation history</h2><p>Videos, project runs, and the process logs saved with each run.</p></div>
-            <button id="refresh-history" class="button secondary">Refresh history</button>
+            <div><h2 class="visually-hidden">Generation history</h2><p>Revisit your stories, clips and saved production details.</p></div>
+            <button id="refresh-history" class="button secondary" type="button">Refresh history</button>
           </div>
+          <section class="history-discovery" aria-label="Find saved work">
+            <div class="history-filter-row">
+              <div class="field history-search-field"><label for="history-search">Search loaded work</label><input id="history-search" type="search" placeholder="Search by idea, prompt or model" autocomplete="off" aria-describedby="history-scope"></div>
+              <div class="field"><label for="history-status">Status</label><select id="history-status"><option value="all">All statuses</option><option value="active">In progress</option><option value="completed">Completed</option><option value="failed">Failed</option></select></div>
+              <div class="field"><label for="history-format">Format</label><select id="history-format"><option value="all">All formats</option><option value="project">30-second stories</option><option value="single">Single clips</option></select></div>
+              <button id="history-clear-filters" class="button secondary" type="button">Clear filters</button>
+            </div>
+            <div class="history-discovery-foot"><p id="history-results-summary" role="status" aria-live="polite">Loading saved work...</p><p id="history-scope">Search covers loaded work. Load older clips to include them.</p></div>
+          </section>
           <div class="history-library">
             <div id="project-history" class="project-history"></div>
-            <div id="history-grid" class="history-grid"><div class="empty">No generations yet.</div></div>
+            <div id="history-grid" class="history-grid"><div class="empty">Your saved work will appear here.</div></div>
           </div>
         </section>
 
         <section class="view" data-page="vault">
           <div class="vault-page-head">
-            <div><h2 class="visually-hidden">Vault</h2><p>Videos you moved out of History.</p></div>
+            <div><h2 class="visually-hidden">Vault</h2><p>A separate space for videos you choose to protect.</p></div>
             <button id="vault-lock" class="button secondary" type="button" hidden>Lock Vault</button>
           </div>
           <div id="vault-locked" class="panel vault-lock-panel">
             <div class="vault-gate">
-              <div class="vault-gate-mark" aria-hidden="true">▣</div>
+              <div class="vault-gate-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg></div>
               <h3 id="vault-gate-title">Vault is locked</h3>
               <p id="vault-gate-copy">Enter your four-digit code to view protected videos.</p>
               <form id="vault-unlock-form" class="vault-code-form">
@@ -221,7 +230,7 @@
                 <button id="vault-unlock-button" class="button primary full" type="submit">Unlock Vault</button>
               </form>
               <button id="vault-go-settings" class="text-button vault-settings-link" type="button" hidden>Set a code in Settings</button>
-              <p class="vault-gate-foot">The Vault locks when you refresh this page or choose Lock Vault.</p>
+              <p class="vault-gate-foot">Refresh this page or choose Lock Vault to close this session.</p>
             </div>
           </div>
           <div id="vault-content" class="vault-content" hidden>
@@ -230,7 +239,7 @@
               <span id="vault-count" class="history-count">0</span>
             </div>
             <div id="vault-empty" class="panel vault-empty" hidden>
-              <div class="vault-empty-mark" aria-hidden="true">▤</div>
+              <div class="vault-empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 8h16M4 16h16"/></svg></div>
               <h3>Nothing stored here yet</h3>
               <p>Move a completed video from History to keep it here.</p>
               <button class="button secondary" data-go="history" type="button">Go to History</button>
