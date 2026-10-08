@@ -4,6 +4,8 @@ FrameVault is a Go HTTP application with an embedded dashboard. SQLite holds set
 
 `AGENTS.md` is the authoritative detailed guide for architecture, storage and cost decisions, security invariants, operations, and routine checks. Keep its file map aligned with this guide when files or responsibilities change.
 
+For AI clipping work, also read root `SESSION.md`, `docs/clipping/PLAN.md`, `docs/clipping/TRACKER.md`, and `docs/architecture/004-ai-clipping.md`. The tracker owns cross-session task status and authorization. Follow the model-role, delegation, review, and handoff rules in `AGENTS.md`; documentation preferences do not change the model actually selected by the host.
+
 ## Repository structure and key files
 
 The executable entrypoint is under `cmd/`; the private backend package and Go tests are under `internal/app/`. `internal/webui/` embeds the browser dashboard, `workers/modal/` contains the separate Python worker, and `docs/` holds session notes and architecture decisions.
