@@ -225,6 +225,7 @@
     modelLoadError: "",
     modelCredentialsMissing: false,
     openRouterConfigured: null,
+    openRouterConfigurationRevision: 0,
     videoProvider: "openrouter",
     generations: [],
     stats: null,
@@ -494,19 +495,23 @@
 
   async function loadModalAccounts(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
+    const authGeneration = state.authGeneration;
     const requestID = ++state.modalAccountsRequestID;
+    const isCurrentRequest = () => state.authenticated && !state.mustChangePassword && state.authGeneration === authGeneration
+      && requestID === state.modalAccountsRequestID;
     try {
       const payload = await request("/api/modal-accounts");
-      if (requestID !== state.modalAccountsRequestID || !state.authenticated) return;
+      if (!isCurrentRequest()) return;
       state.modalAccounts = Array.isArray(payload && payload.accounts) ? payload.accounts : [];
       state.modalAccountsActiveID = String(payload && payload.active_id || "");
       renderModalAccountList();
       await refreshModalAccountSelectors();
+      if (!isCurrentRequest()) return;
       const configured = state.modalAccounts.filter((account) => account.configured).length;
       elements.modalKeyState.className = `badge ${configured ? "completed" : "neutral"}`;
       elements.modalKeyState.textContent = `${configured} configured`;
     } catch (error) {
-      if (requestID !== state.modalAccountsRequestID) return;
+      if (!isCurrentRequest()) return;
       elements.modalKeyState.className = "badge failed";
       elements.modalKeyState.textContent = "Unavailable";
       if (notify && error.status !== 401) toast(error.message, true);
@@ -1322,6 +1327,8 @@
     state.projectRecoveryPromise = null;
     setButtonBusy(elements.generate, false);
     setButtonBusy(elements.randomPrompt, false);
+    setButtonBusy($("button[type='submit']", elements.apiKeyForm), false);
+    elements.apiKey.value = "";
     stopJobEventStream(true);
     invalidateProjectRawTraceRequests();
     closeYouTubeComposer(false);
@@ -2983,9 +2990,11 @@
   function renderProject(project, authoritative = false) {
     if (!project) return;
     const incomingID = projectID(project);
-    const openScenePrompts = incomingID === state.displayedProjectID
-      ? new Map($$(".scene-prompt-details", elements.projectScenes).filter((details) => details.open).map((details) => [details.dataset.scene, details.children[1].textContent]))
-      : new Map();
+    const previousScenePrompts = incomingID === state.displayedProjectID
+      ? $$(".scene-prompt-details", elements.projectScenes) : [];
+    const openScenePrompts = new Map(previousScenePrompts.filter((details) => details.open).map((details) => [details.dataset.scene, details.children[1].textContent]));
+    const focusedScenePrompt = previousScenePrompts.find((details) => details.children[0] === document.activeElement);
+    let sceneFocusTarget = null;
     const displayedPrevious = state.currentProjectRecord && projectID(state.currentProjectRecord) === incomingID ? state.currentProjectRecord : null;
     if (state.displayedProjectID && state.displayedProjectID !== incomingID) invalidateProjectRawTraceRequests();
     const previous = state.projects.find((item) => projectID(item) === incomingID) || displayedPrevious;
@@ -3059,7 +3068,11 @@
         const details = make("details", { className: "scene-prompt-details" });
         details.dataset.scene = String(number);
         details.open = openScenePrompts.get(String(number)) === String(prompt);
-        details.append(make("summary", { text: "Scene prompt" }), make("p", { className: "scene-prompt", text: prompt }));
+        const summary = make("summary", { text: "Scene prompt" });
+        if (focusedScenePrompt?.dataset.scene === String(number) && focusedScenePrompt.children[1].textContent === String(prompt)) {
+          sceneFocusTarget = summary;
+        }
+        details.append(summary, make("p", { className: "scene-prompt", text: prompt }));
         card.append(details);
       }
       const sceneError = projectValue(scene, "error", "message");
@@ -3092,6 +3105,7 @@
       elements.projectYouTubeUpload.hidden = true;
     }
     syncGenerationModeDisplay();
+    if (sceneFocusTarget) sceneFocusTarget.focus({ preventScroll: true });
   }
 
   async function retryProjectScene(id, number, button) {
@@ -3497,7 +3511,7 @@
     }
   }
 
-  function renderProviderSettings(settings) {
+  function renderProviderSettings(settings, preserveOpenRouterConfiguration = false) {
     state.videoProvider = settings.video_provider === "modal" ? "modal" : "openrouter";
     elements.videoProvider.value = state.videoProvider;
     elements.modalSettings.hidden = false;
@@ -3505,8 +3519,10 @@
     elements.videoProviderState.className = "badge completed";
     elements.videoProviderState.textContent = `Active: ${videoProviderName()}`;
     elements.modalBaseURL.value = settings.modal_video_base_url || "";
-    state.openRouterConfigured = typeof settings.openrouter_api_key_configured === "boolean" ? settings.openrouter_api_key_configured : null;
-    const openRouterConfigured = Boolean(settings.openrouter_api_key_configured);
+    if (!preserveOpenRouterConfiguration) {
+      state.openRouterConfigured = typeof settings.openrouter_api_key_configured === "boolean" ? settings.openrouter_api_key_configured : null;
+    }
+    const openRouterConfigured = state.openRouterConfigured === true;
     elements.keyState.className = `badge ${openRouterConfigured ? "completed" : "neutral"}`;
     elements.keyState.textContent = openRouterConfigured ? "Configured" : "Not configured";
     elements.maskedKey.textContent = openRouterConfigured ? "Configured" : "Not configured";
@@ -3534,11 +3550,16 @@
 
   async function loadSettings(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
+    const authGeneration = state.authGeneration;
+    const openRouterConfigurationRevision = state.openRouterConfigurationRevision;
     try {
       const settings = await request("/api/settings");
-      renderProviderSettings(settings || {});
+      if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration) return;
+      // Keep a verified key save newer than this read; unrelated settings still apply.
+      renderProviderSettings(settings || {}, state.openRouterConfigurationRevision !== openRouterConfigurationRevision);
       await Promise.all([loadModalAccounts(notify), loadYouTubeStatus(notify)]);
     } catch (error) {
+      if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration) return;
       elements.keyState.className = "badge failed";
       elements.keyState.textContent = "Unavailable";
       if (notify && error.status !== 401) toast(error.message, true);
@@ -3696,17 +3717,21 @@
   }
 
   async function loadYouTubeStatus(notify = false, controller = null, dialogEpoch = 0) {
+    if (!state.authenticated || state.mustChangePassword) return null;
+    const authGeneration = state.authGeneration;
     const requestID = ++state.youtubeStatusRequestID;
+    const isCurrentRequest = () => state.authenticated && !state.mustChangePassword && state.authGeneration === authGeneration
+      && requestID === state.youtubeStatusRequestID;
     try {
       const options = controller ? { signal: controller.signal } : {};
       const status = await request("/api/youtube/status", options);
-      if (requestID !== state.youtubeStatusRequestID) return null;
+      if (!isCurrentRequest()) return null;
       if (dialogEpoch && !isCurrentYouTubeDialog(dialogEpoch)) return null;
       state.youtubeStatus = status || { configured: false, connected: false };
       renderYouTubeSettings(state.youtubeStatus);
       return state.youtubeStatus;
     } catch (error) {
-      if (error.name === "AbortError" || error.status === 401) return null;
+      if (!isCurrentRequest() || error.name === "AbortError" || error.status === 401) return null;
       if (notify) toast(error.message, true);
       if (!dialogEpoch) {
         elements.youtubeChannelState.className = "badge failed";
@@ -4863,6 +4888,7 @@
         body: JSON.stringify({ api_key: key })
       });
       if (!state.authenticated || state.authGeneration !== authGeneration) return;
+      state.openRouterConfigurationRevision += 1;
       state.openRouterConfigured = true;
       elements.apiKey.value = "";
       elements.keyState.className = "badge completed";
@@ -4872,9 +4898,10 @@
       toast("API key tested and saved.");
       if (state.videoProvider === "openrouter") await loadModels(false);
     } catch (error) {
+      if (!state.authenticated || state.authGeneration !== authGeneration) return;
       if (error.status !== 401) toast(error.message, true);
     } finally {
-      setButtonBusy(button, false);
+      if (state.authGeneration === authGeneration) setButtonBusy(button, false);
     }
   }
 

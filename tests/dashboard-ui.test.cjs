@@ -117,7 +117,7 @@ function createApp({ sessionData = new Map(), storageThrows = false, stubHistory
     }
     contains(node) { return node === this || this.children.some((child) => child.contains(node)); }
     closest() { return this.parent ??= new Element(); }
-    focus() { document.activeElement = this; }
+    focus(options) { document.activeElement = this; this.focusOptions = options; }
     reset() { this.onReset?.(); }
     load() {}
     pause() {}
@@ -214,7 +214,7 @@ function createApp({ sessionData = new Map(), storageThrows = false, stubHistory
       setStatusRecord, renderVaultItems, openYouTubeUpload, closeYouTubeComposer, renderYouTubeUpload,
       renderYouTubeSettings, loadYouTubeStatus, renderVaultLocked, showLoggedOut, generateYouTubeMetadata, submitYouTubeUpload, retryYouTubeUpload,
       abandonYouTubeUpload, restartYouTubeUpload, moveHistoryItem, openVaultVideo, loadProjects, loadHistory,
-      loadModels, renderProviderSettings, updateGenerateAvailability, clearProjectDisplay, saveAPIKey
+      loadModels, loadSettings, renderProviderSettings, updateGenerateAvailability, clearProjectDisplay, saveAPIKey
     };
   `);
   assert.notEqual(instrumented, source, 'bootstrap instrumentation must match');
@@ -1627,6 +1627,186 @@ test('saving verified OpenRouter setup enables a ready Modal story without requi
   assert.deepEqual(calls, [['/api/settings/api-key', 'PUT']]);
 });
 
+test('older Settings reads retain a newly saved OpenRouter key while applying unrelated provider settings', async () => {
+  const app = configuredApp('project');
+  const model = app.state.models[0];
+  app.state.videoProvider = 'modal';
+  app.elements.modalAccountProject.value = 'fixture-production-account';
+  app.elements.modalAccountSingle.value = 'fixture-production-account';
+  app.renderProviderSettings({ video_provider: 'modal', openrouter_api_key_configured: false });
+  const oldSettings = deferred();
+  const calls = [];
+  let settingsReads = 0;
+  app.setRequest((requestPath, options = {}) => {
+    calls.push([requestPath, options.method]);
+    if (requestPath === '/api/settings') {
+      return ++settingsReads === 1 ? oldSettings.promise
+        : Promise.resolve({ video_provider: 'modal', openrouter_api_key_configured: false });
+    }
+    if (requestPath === '/api/settings/api-key') return Promise.resolve({});
+    if (requestPath === '/api/modal-accounts') return Promise.resolve({
+      accounts: [{ id: 'fixture-production-account', name: 'Fixture production', configured: true }],
+      active_id: 'fixture-production-account'
+    });
+    if (requestPath.startsWith('/api/video-models')) return Promise.resolve({ models: [model], selected_model: model.id });
+    if (requestPath === '/api/youtube/status') return Promise.resolve({ configured: false, connected: false });
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  const loading = app.loadSettings(false);
+  app.elements.apiKey.value = 'fixture-only-key-not-a-real-secret';
+  await app.saveAPIKey({ preventDefault() {} });
+  assert.equal(app.state.openRouterConfigured, true);
+  assert.equal(app.elements.generate.disabled, false);
+  oldSettings.resolve({ video_provider: 'modal', openrouter_api_key_configured: false,
+    modal_video_base_url: 'https://fixture.invalid/modal', vault_code_configured: true });
+  await loading;
+  assert.equal(app.state.openRouterConfigured, true, 'the old read must not undo the verified save');
+  assert.equal(app.elements.keyState.textContent, 'Configured');
+  assert.equal(app.elements.maskedKey.textContent, 'Configured');
+  assert.equal(app.elements.generate.disabled, false);
+  assert.equal(app.elements.creatorProviderHelp.hidden, true);
+  assert.equal(app.elements.modalBaseURL.value, 'https://fixture.invalid/modal');
+  assert.equal(app.state.vaultConfigured, true, 'other real settings must still apply');
+  assert.equal(app.state.modalAccounts[0].id, 'fixture-production-account');
+  assert.ok(calls.some(([requestPath]) => requestPath === '/api/youtube/status'));
+  assert.equal(settingsReads, 1, 'protecting key state does not add a revalidation request');
+  await app.loadSettings(false);
+  assert.equal(app.state.openRouterConfigured, false, 'a later current read may report a real configuration change');
+  assert.equal(app.elements.generate.disabled, true);
+});
+
+test('Settings responses and failures from a prior session cannot change current feedback or start follow-up loads', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const app = configuredApp('single');
+    const oldSettings = deferred();
+    app.setRequest(() => oldSettings.promise);
+    const loading = app.loadSettings(true);
+    app.showLoggedOut();
+    app.state.authenticated = true;
+    app.renderProviderSettings({ video_provider: 'modal', openrouter_api_key_configured: true });
+    app.elements.toast.textContent = 'Current session feedback';
+    const followups = [];
+    app.setRequest((requestPath) => { followups.push(requestPath); return Promise.resolve({}); });
+    if (outcome === 'success') oldSettings.resolve({ video_provider: 'openrouter', openrouter_api_key_configured: false });
+    else oldSettings.reject(new Error('Prior session fixture error'));
+    await loading;
+    assert.equal(app.state.videoProvider, 'modal', outcome);
+    assert.equal(app.state.openRouterConfigured, true, outcome);
+    assert.equal(app.elements.keyState.textContent, 'Configured', outcome);
+    assert.equal(app.elements.toast.textContent, 'Current session feedback', outcome);
+    assert.deepEqual(followups, [], outcome);
+  }
+});
+
+test('Settings follow-ups from a prior session cannot replace accounts, channel status, or feedback', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const app = configuredApp('single');
+    const oldAccounts = deferred();
+    const oldChannel = deferred();
+    const calls = [];
+    app.setRequest((requestPath) => {
+      calls.push(requestPath);
+      if (requestPath === '/api/settings') return Promise.resolve({ video_provider: 'modal', openrouter_api_key_configured: false });
+      if (requestPath === '/api/modal-accounts') return oldAccounts.promise;
+      if (requestPath === '/api/youtube/status') return oldChannel.promise;
+      throw new Error('Unexpected old-session follow-up: ' + requestPath);
+    });
+    const loading = app.loadSettings(true);
+    await flushUI();
+    assert.deepEqual(calls, ['/api/settings', '/api/modal-accounts', '/api/youtube/status']);
+    app.showLoggedOut();
+    app.state.authenticated = true;
+    app.renderProviderSettings({ video_provider: 'modal', openrouter_api_key_configured: true });
+    app.state.modalAccounts = [{ id: 'fixture-current-account', configured: true }];
+    app.state.modalAccountsActiveID = 'fixture-current-account';
+    app.elements.modalAccountSingle.value = 'fixture-current-account';
+    app.elements.modalKeyState.textContent = 'Current account feedback';
+    const currentChannel = { configured: true, connected: true, channel: { id: 'fixture-current-channel' } };
+    app.state.youtubeStatus = currentChannel;
+    app.elements.youtubeChannelState.textContent = 'Current channel feedback';
+    app.elements.toast.textContent = 'Current session feedback';
+    if (outcome === 'success') {
+      oldAccounts.resolve({ accounts: [{ id: 'fixture-prior-account', configured: true }], active_id: 'fixture-prior-account' });
+      oldChannel.resolve({ configured: false, connected: false });
+    } else {
+      oldAccounts.reject(new Error('Prior session fixture account error'));
+      oldChannel.reject(new Error('Prior session fixture channel error'));
+    }
+    await loading;
+    assert.equal(app.state.modalAccounts[0].id, 'fixture-current-account', outcome);
+    assert.equal(app.state.modalAccountsActiveID, 'fixture-current-account', outcome);
+    assert.equal(app.elements.modalAccountSingle.value, 'fixture-current-account', outcome);
+    assert.equal(app.elements.modalKeyState.textContent, 'Current account feedback', outcome);
+    assert.equal(app.state.youtubeStatus, currentChannel, outcome);
+    assert.equal(app.elements.youtubeChannelState.textContent, 'Current channel feedback', outcome);
+    assert.equal(app.elements.toast.textContent, 'Current session feedback', outcome);
+    assert.deepEqual(calls, ['/api/settings', '/api/modal-accounts', '/api/youtube/status'], 'old accounts must not start a model request');
+  }
+});
+
+test('a Settings account refresh finishing its model load after logout keeps current account feedback', async () => {
+  const app = configuredApp('single');
+  const oldModels = deferred();
+  app.setRequest((requestPath) => {
+    if (requestPath === '/api/settings') return Promise.resolve({ video_provider: 'modal', openrouter_api_key_configured: true });
+    if (requestPath === '/api/modal-accounts') return Promise.resolve({
+      accounts: [{ id: 'fixture-prior-account', name: 'Prior fixture account', configured: true }], active_id: 'fixture-prior-account'
+    });
+    if (requestPath.startsWith('/api/video-models')) return oldModels.promise;
+    if (requestPath === '/api/youtube/status') return Promise.resolve({ configured: false, connected: false });
+    throw new Error('Unexpected request: ' + requestPath);
+  });
+  const loading = app.loadSettings(true);
+  await flushUI();
+  assert.equal(app.state.modelsLoading, true);
+  app.showLoggedOut();
+  app.state.authenticated = true;
+  app.state.modalAccounts = [{ id: 'fixture-current-account', configured: true }];
+  app.elements.modalKeyState.textContent = 'Current account feedback';
+  oldModels.resolve({ models: [] });
+  await loading;
+  assert.equal(app.elements.modalKeyState.textContent, 'Current account feedback');
+  assert.equal(app.state.modalAccounts[0].id, 'fixture-current-account');
+});
+
+test('a prior session key save cannot change feedback or unlock a new save button', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const app = configuredApp('single');
+    app.state.videoProvider = 'modal';
+    const button = app.document.createElement('button');
+    button.textContent = 'Test and save';
+    app.elements.apiKeyForm.querySelector = () => button;
+    app.elements.apiKey.value = 'fixture-only-old-key-not-a-real-secret';
+    const oldSave = deferred();
+    app.setRequest(() => oldSave.promise);
+    const saving = app.saveAPIKey({ preventDefault() {} });
+    app.showLoggedOut();
+    assert.equal(button.disabled, false, 'logout releases an abandoned save');
+    assert.equal(button.getAttribute('aria-busy'), null);
+    assert.equal(button.textContent, 'Test and save');
+    assert.equal(app.elements.apiKey.value, '', 'logout clears the write-only key input');
+    app.state.authenticated = true;
+    app.state.videoProvider = 'modal';
+    app.elements.apiKey.value = 'fixture-only-new-key-not-a-real-secret';
+    app.elements.toast.textContent = 'Current session feedback';
+    const newSave = deferred();
+    app.setRequest(() => newSave.promise);
+    const currentSaving = app.saveAPIKey({ preventDefault() {} });
+    if (outcome === 'success') oldSave.resolve({});
+    else oldSave.reject(new Error('Prior session fixture key error'));
+    await saving;
+    assert.equal(button.disabled, true, outcome);
+    assert.equal(button.getAttribute('aria-busy'), 'true', outcome);
+    assert.equal(app.elements.apiKey.value, 'fixture-only-new-key-not-a-real-secret', outcome);
+    assert.equal(app.elements.toast.textContent, 'Current session feedback', outcome);
+    assert.equal(app.state.openRouterConfigured, null, outcome);
+    newSave.resolve({});
+    await currentSaving;
+    assert.equal(button.disabled, false, outcome);
+    assert.equal(app.state.openRouterConfigured, true, outcome);
+  }
+});
+
 test('switching format during an OpenRouter catalog load resolves the current creator instead of staying busy', async () => {
   const app = configuredApp('project');
   const response = deferred();
@@ -1690,6 +1870,42 @@ test('project scene scripts stay visible while prompts and the timeline use actu
   prompt.open = true;
   app.renderProject({ ...project, updated_at: 2 });
   assert.equal(app.elements.projectScenes.children[0].children.find((node) => node.classList.contains('scene-prompt-details')).open, true);
+});
+
+test('live project progress restores matching scene-summary focus without stealing other focus', () => {
+  const app = configuredApp('project');
+  const project = { id: 'fixture-focused-scene', status: 'generating', updated_at: 1,
+    scenes: [{ scene_number: 1, status: 'processing', prompt: 'Fixture scene prompt' }] };
+  const scenePrompt = () => app.elements.projectScenes.children[0].children.find((node) => node.classList.contains('scene-prompt-details'));
+  const progress = (record) => app.handleJobSnapshot('project', { data: JSON.stringify({ id: record.id, project: record }) });
+  app.renderProject(project);
+  scenePrompt().open = true;
+  scenePrompt().children[0].focus();
+  const previousSummary = app.document.activeElement;
+  progress({ ...project, progress: 50, updated_at: 2 });
+  assert.equal(scenePrompt().open, true);
+  assert.equal(app.document.activeElement, scenePrompt().children[0]);
+  assert.equal(app.document.activeElement.isConnected, true);
+  assert.equal(app.document.activeElement.focusOptions.preventScroll, true);
+  assert.notEqual(app.document.activeElement, previousSummary);
+
+  scenePrompt().open = false;
+  scenePrompt().children[0].focus();
+  progress({ ...project, progress: 55, updated_at: 3 });
+  assert.equal(scenePrompt().open, false, 'a closed disclosure keeps its state');
+  assert.equal(app.document.activeElement, scenePrompt().children[0]);
+  app.elements.promptCategory.focus();
+  progress({ ...project, progress: 60, updated_at: 4 });
+  assert.equal(app.document.activeElement, app.elements.promptCategory, 'an unrelated control keeps focus');
+  scenePrompt().children[0].focus();
+  const changedProject = { ...project, updated_at: 5,
+    scenes: [{ ...project.scenes[0], prompt: 'A different fixture scene prompt' }] };
+  progress(changedProject);
+  assert.equal(scenePrompt().open, false, 'a changed prompt starts closed');
+  assert.notEqual(app.document.activeElement, scenePrompt().children[0], 'a new prompt must not inherit the old action focus');
+  scenePrompt().children[0].focus();
+  app.renderProject({ ...changedProject, id: 'fixture-other-project' });
+  assert.notEqual(app.document.activeElement, scenePrompt().children[0], 'a different project must not inherit focus');
 });
 
 test('completed and failed saved results remain scoped to their format', () => {
