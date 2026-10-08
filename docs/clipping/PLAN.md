@@ -2,7 +2,7 @@
 
 Planning baseline: 2026-10-08. Repository: https://github.com/darkweb19/video-automation.
 
-Implementation is awaiting user approval. Creating this plan is not approval to build, spend on providers, or deploy. See [TRACKER.md](TRACKER.md) for the current authorization and task states, [ADR-004](../architecture/004-ai-clipping.md) for the proposed architecture, and [AGENTS.md](../../AGENTS.md) for the execution workflow.
+M1 feasibility was approved on 2026-10-08, with C1.1 and C1.2 authorized to start. Publishing the feasibility snapshot to `feat/clipper-ai` from `430751e` was subsequently authorized. Later milestones, paid benchmark runs, live video publication, and deployment are not authorized. Creating this plan does not itself grant those permissions. See [TRACKER.md](TRACKER.md) for the current authorization and task states, [ADR-004](../architecture/004-ai-clipping.md) for the proposed architecture, and [AGENTS.md](../../AGENTS.md) for the execution workflow.
 
 ## Product requirements
 

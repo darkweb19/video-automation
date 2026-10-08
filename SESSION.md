@@ -1,10 +1,11 @@
 # Session handoff — 2026-10-08
 
-## Current focus — AI clipping planning
+## Current focus — AI clipping M1 feasibility
 
-- The user authorized repository planning/tracking documents and subsequently authorized committing and pushing those documents to `main`. Feature implementation, paid benchmarks, and deployment remain awaiting approval.
+- The user approved M1 on 2026-10-08 and authorized starting C1.1 and C1.2 with agents. Propose concrete benchmark inputs and a spending cap before any paid runs. The user subsequently authorized committing and pushing the feasibility work to `feat/clipper-ai`, based directly on `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`. Later milestones and deployment are not authorized. Earlier planning documents were committed/pushed to `main` separately.
 - Read `docs/clipping/PLAN.md`, `docs/clipping/TRACKER.md`, and `docs/architecture/004-ai-clipping.md` for scope, authoritative task state, proposed architecture, and next action. Keep cross-session status in the tracker.
-- Requested workflow: GPT-6.1 SOL High leads; TERRA Max and LUNA Max implement bounded tasks. Check actual availability; TERRA was unavailable in the planning session. `AGENTS.md` defines delegation, ownership, review, and handoff. These preferences do not configure the host or select runtime video-analysis models.
+- Requested workflow: GPT-6.1 SOL High leads; TERRA Max and LUNA Max implement bounded tasks. TERRA is unavailable in this session; acquisition, evaluation, and independent review use actual `gpt-6-luna` at `max`. Lead model/effort are not exposed by this interface. `AGENTS.md` defines ownership and handoff; developer-agent choices do not select runtime video-analysis models.
+- M1 branch snapshot: ACQUISITION.md and EVALUATION.md, three contracts, and two synthetic fixture bundles are integrated with offline checks. See docs/clipping/M1-STATUS.md; Git history records the feasibility commit on `feat/clipper-ai`. No paid calls, real-media import, live video publication, or deployment. Agents hit usage limits before final independent review; C1.1/C1.2 remain in review, and real inputs/labels plus C1.3 paid approval remain pending. Proposed cap is US$20 total, with US$0 currently authorized.
 - Resume from the next authorized dependency-ready task in TRACKER.md. Routine session continuation does not require renewed approval once implementation scope is explicitly authorized.
 
 ## What was done

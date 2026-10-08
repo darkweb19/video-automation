@@ -1,6 +1,6 @@
 # ADR-004: Integrated AI clipping with Go and a Modal worker
 
-**Status:** Proposed; awaiting implementation-plan approval and M1 evidence.
+**Status:** Proposed; M1 feasibility authorized on 2026-10-08, architecture acceptance pending M1 evidence.
 
 **Date:** 2026-10-08
 

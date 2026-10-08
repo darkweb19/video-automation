@@ -1,0 +1,237 @@
+{
+  "version": "ai-clip.transcript.v1",
+  "artifact_id": "fixture-comedy-en-01-transcript-v1",
+  "source": {
+    "version": "ai-clip.source.v1",
+    "source_id": "fixture-comedy-en-01",
+    "source_kind": "upload",
+    "source_sha256": "b4fabb0545ec0f980ddb3ae8f20492ef3e4cd478d38171f270d58caa2138e949",
+    "source_bytes": 69,
+    "duration_ms": 900000,
+    "container": "mp4",
+    "video_streams": [
+      {
+        "codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate_num": 30,
+        "frame_rate_den": 1
+      }
+    ],
+    "audio_streams": [
+      {
+        "codec": "aac",
+        "sample_rate_hz": 48000,
+        "channels": 2
+      }
+    ],
+    "acquisition_route": "local_upload",
+    "authorization_state": "attested",
+    "source_time_unit": "ms"
+  },
+  "source_time_unit": "ms",
+  "interval_semantics": "half_open",
+  "pipeline_version": "synthetic-fixture/1",
+  "pipeline_manifest_sha256": "3dd1c5f9b2d47bcb16a19bc4c11cfe09277c3539d8fb59e619fbc4af2c3acde1",
+  "original_script_preserved": true,
+  "translation_applied": false,
+  "generated_speech": false,
+  "dialogue_reordered": false,
+  "segments": [
+    {
+      "segment_id": "seg-1",
+      "start_ms": 105000,
+      "end_ms": 190000,
+      "text": "The punchline lands after a beat.",
+      "language_spans": [
+        {
+          "start_char": 0,
+          "end_char": 33,
+          "language": "en"
+        }
+      ],
+      "speaker_id": "speaker-1",
+      "evidence_refs": [
+        "ev-speech-1"
+      ]
+    },
+    {
+      "segment_id": "seg-2",
+      "start_ms": 300000,
+      "end_ms": 350000,
+      "text": "No, that was perfect.",
+      "language_spans": [
+        {
+          "start_char": 0,
+          "end_char": 21,
+          "language": "en"
+        }
+      ],
+      "speaker_id": null,
+      "evidence_refs": [
+        "ev-speech-2"
+      ]
+    }
+  ],
+  "words": [
+    {
+      "word_id": "seg-1-w1",
+      "segment_id": "seg-1",
+      "text": "The",
+      "start_ms": 106000,
+      "end_ms": 107000,
+      "language": "en",
+      "speaker_id": "speaker-1",
+      "alignment_state": "aligned",
+      "start_char": 0,
+      "end_char": 3
+    },
+    {
+      "word_id": "seg-1-w2",
+      "segment_id": "seg-1",
+      "text": "punchline",
+      "start_ms": 108000,
+      "end_ms": 112000,
+      "language": "en",
+      "speaker_id": "speaker-1",
+      "alignment_state": "aligned",
+      "start_char": 4,
+      "end_char": 13
+    },
+    {
+      "word_id": "seg-1-w3",
+      "segment_id": "seg-1",
+      "text": "lands",
+      "start_ms": 113000,
+      "end_ms": 116000,
+      "language": "en",
+      "speaker_id": "speaker-1",
+      "alignment_state": "aligned",
+      "start_char": 14,
+      "end_char": 19
+    },
+    {
+      "word_id": "seg-1-w4",
+      "segment_id": "seg-1",
+      "text": "after",
+      "start_ms": 117000,
+      "end_ms": 120000,
+      "language": "en",
+      "speaker_id": "speaker-1",
+      "alignment_state": "aligned",
+      "start_char": 20,
+      "end_char": 25
+    },
+    {
+      "word_id": "seg-1-w5",
+      "segment_id": "seg-1",
+      "text": "a",
+      "start_ms": 121000,
+      "end_ms": 122000,
+      "language": "en",
+      "speaker_id": "speaker-1",
+      "alignment_state": "aligned",
+      "start_char": 26,
+      "end_char": 27
+    },
+    {
+      "word_id": "seg-1-w6",
+      "segment_id": "seg-1",
+      "text": "beat.",
+      "start_ms": 123000,
+      "end_ms": 126000,
+      "language": "en",
+      "speaker_id": "speaker-1",
+      "alignment_state": "aligned",
+      "start_char": 28,
+      "end_char": 33
+    },
+    {
+      "word_id": "seg-2-w1",
+      "segment_id": "seg-2",
+      "text": "No,",
+      "start_ms": 301000,
+      "end_ms": 302000,
+      "language": "en",
+      "speaker_id": null,
+      "alignment_state": "aligned",
+      "start_char": 0,
+      "end_char": 3
+    },
+    {
+      "word_id": "seg-2-w2",
+      "segment_id": "seg-2",
+      "text": "that",
+      "start_ms": 303000,
+      "end_ms": 304000,
+      "language": "en",
+      "speaker_id": null,
+      "alignment_state": "aligned",
+      "start_char": 4,
+      "end_char": 8
+    },
+    {
+      "word_id": "seg-2-w3",
+      "segment_id": "seg-2",
+      "text": "was",
+      "start_ms": null,
+      "end_ms": null,
+      "language": "en",
+      "speaker_id": null,
+      "alignment_state": "unaligned",
+      "start_char": 9,
+      "end_char": 12
+    },
+    {
+      "word_id": "seg-2-w4",
+      "segment_id": "seg-2",
+      "text": "perfect.",
+      "start_ms": 307000,
+      "end_ms": 310000,
+      "language": "en",
+      "speaker_id": null,
+      "alignment_state": "aligned",
+      "start_char": 13,
+      "end_char": 21
+    }
+  ],
+  "evidence_events": [
+    {
+      "evidence_id": "ev-speech-1",
+      "start_ms": 105000,
+      "end_ms": 190000,
+      "kind": "speech",
+      "description": "Illustrative spoken setup and punchline.",
+      "speaker_id": "speaker-1"
+    },
+    {
+      "evidence_id": "ev-silence-1",
+      "start_ms": 190000,
+      "end_ms": 205000,
+      "kind": "silence",
+      "description": "Illustrative pause before the audience reaction."
+    },
+    {
+      "evidence_id": "ev-laugh-1",
+      "start_ms": 205000,
+      "end_ms": 235000,
+      "kind": "non_speech_audio",
+      "description": "Illustrative laughter, no transcript text."
+    },
+    {
+      "evidence_id": "ev-speech-2",
+      "start_ms": 300000,
+      "end_ms": 350000,
+      "kind": "speech",
+      "description": "Illustrative brief response.",
+      "speaker_id": null
+    },
+    {
+      "evidence_id": "ev-visual-1",
+      "start_ms": 310000,
+      "end_ms": 330000,
+      "kind": "visual_event",
+      "description": "Illustrative facial reaction."
+    }
+  ]
+}

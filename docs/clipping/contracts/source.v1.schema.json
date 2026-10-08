@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ai-clip.source.v1",
+  "title": "ai-clip.source.v1",
+  "description": "Successful source metadata envelope. Synthetic fixture values are illustrative only and never describe acquired media.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "source_id",
+    "source_kind",
+    "source_sha256",
+    "source_bytes",
+    "duration_ms",
+    "container",
+    "video_streams",
+    "audio_streams",
+    "acquisition_route",
+    "authorization_state",
+    "source_time_unit"
+  ],
+  "properties": {
+    "version": { "const": "ai-clip.source.v1" },
+    "source_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "source_kind": { "enum": ["upload", "youtube_original_file", "google_drive_public", "dropbox_public"] },
+    "source_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "source_bytes": { "type": "integer", "minimum": 1, "maximum": 17179869184 },
+    "duration_ms": { "type": "integer", "minimum": 1, "maximum": 14400000 },
+    "container": { "enum": ["mp4", "mov", "mkv", "webm"] },
+    "video_streams": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["codec", "width", "height", "frame_rate_num", "frame_rate_den"],
+        "properties": {
+          "codec": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "width": { "type": "integer", "minimum": 1 },
+          "height": { "type": "integer", "minimum": 1 },
+          "frame_rate_num": { "type": "integer", "minimum": 1 },
+          "frame_rate_den": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "audio_streams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["codec", "sample_rate_hz", "channels"],
+        "properties": {
+          "codec": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "sample_rate_hz": { "type": "integer", "minimum": 1 },
+          "channels": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "acquisition_route": { "enum": ["local_upload", "youtube_original_file_upload", "drive_public_content_url", "dropbox_public_dl1"] },
+    "authorization_state": { "const": "attested" },
+    "source_time_unit": { "const": "ms" }
+  }
+}

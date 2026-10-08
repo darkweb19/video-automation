@@ -1,0 +1,156 @@
+{
+  "version": "ai-clip.candidates.v1",
+  "artifact_id": "fixture-comedy-en-01-candidates-v1",
+  "source": {
+    "version": "ai-clip.source.v1",
+    "source_id": "fixture-comedy-en-01",
+    "source_kind": "upload",
+    "source_sha256": "b4fabb0545ec0f980ddb3ae8f20492ef3e4cd478d38171f270d58caa2138e949",
+    "source_bytes": 69,
+    "duration_ms": 900000,
+    "container": "mp4",
+    "video_streams": [
+      {
+        "codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate_num": 30,
+        "frame_rate_den": 1
+      }
+    ],
+    "audio_streams": [
+      {
+        "codec": "aac",
+        "sample_rate_hz": 48000,
+        "channels": 2
+      }
+    ],
+    "acquisition_route": "local_upload",
+    "authorization_state": "attested",
+    "source_time_unit": "ms"
+  },
+  "transcript_artifact_id": "fixture-comedy-en-01-transcript-v1",
+  "source_time_unit": "ms",
+  "interval_semantics": "half_open",
+  "ranking_policy_version": "synthetic-rank/1",
+  "deduplication_policy_version": "synthetic-dedup/1",
+  "evidence_version": "ai-clip.transcript.v1",
+  "pipeline_manifest_sha256": "3dd1c5f9b2d47bcb16a19bc4c11cfe09277c3539d8fb59e619fbc4af2c3acde1",
+  "generated_speech": false,
+  "dialogue_reordered": false,
+  "candidates": [
+    {
+      "candidate_id": "fixture-comedy-c1",
+      "rank": 1,
+      "start_ms": 105000,
+      "end_ms": 125000,
+      "evidence_refs": [
+        "ev-speech-1",
+        "ev-silence-1"
+      ],
+      "editorial_score": {
+        "scale": "editorial_ordinal_1_to_5_not_probability",
+        "components": {
+          "hook": {
+            "value": 5,
+            "rationale": "The setup creates a clear expectation.",
+            "evidence_refs": [
+              "ev-speech-1",
+              "ev-silence-1"
+            ]
+          },
+          "emotional_impact": {
+            "value": 4,
+            "rationale": "The pause heightens the reaction.",
+            "evidence_refs": [
+              "ev-speech-1",
+              "ev-silence-1"
+            ]
+          },
+          "retention": {
+            "value": 4,
+            "rationale": "The payoff arrives within the excerpt.",
+            "evidence_refs": [
+              "ev-speech-1",
+              "ev-silence-1"
+            ]
+          },
+          "shareability": {
+            "value": 4,
+            "rationale": "The premise is easy to retell.",
+            "evidence_refs": [
+              "ev-speech-1",
+              "ev-silence-1"
+            ]
+          },
+          "standalone_context": {
+            "value": 4,
+            "rationale": "The setup and response remain together.",
+            "evidence_refs": [
+              "ev-speech-1",
+              "ev-silence-1"
+            ]
+          }
+        },
+        "total": 21
+      }
+    },
+    {
+      "candidate_id": "fixture-comedy-c2",
+      "rank": 2,
+      "start_ms": 300000,
+      "end_ms": 320000,
+      "evidence_refs": [
+        "ev-speech-2",
+        "ev-visual-1"
+      ],
+      "editorial_score": {
+        "scale": "editorial_ordinal_1_to_5_not_probability",
+        "components": {
+          "hook": {
+            "value": 4,
+            "rationale": "The reply begins promptly.",
+            "evidence_refs": [
+              "ev-speech-2",
+              "ev-visual-1"
+            ]
+          },
+          "emotional_impact": {
+            "value": 4,
+            "rationale": "The reaction is visible.",
+            "evidence_refs": [
+              "ev-speech-2",
+              "ev-visual-1"
+            ]
+          },
+          "retention": {
+            "value": 4,
+            "rationale": "Speech and expression overlap.",
+            "evidence_refs": [
+              "ev-speech-2",
+              "ev-visual-1"
+            ]
+          },
+          "shareability": {
+            "value": 3,
+            "rationale": "Context is local to the source.",
+            "evidence_refs": [
+              "ev-speech-2",
+              "ev-visual-1"
+            ]
+          },
+          "standalone_context": {
+            "value": 4,
+            "rationale": "The prior premise is nearby.",
+            "evidence_refs": [
+              "ev-speech-2",
+              "ev-visual-1"
+            ]
+          }
+        },
+        "total": 19
+      }
+    }
+  ],
+  "suppressed_candidates": []
+}

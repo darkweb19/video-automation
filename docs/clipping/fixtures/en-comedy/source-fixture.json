@@ -1,0 +1,31 @@
+{
+  "simulated": true,
+  "source": {
+    "version": "ai-clip.source.v1",
+    "source_id": "fixture-comedy-en-01",
+    "source_kind": "upload",
+    "source_sha256": "b4fabb0545ec0f980ddb3ae8f20492ef3e4cd478d38171f270d58caa2138e949",
+    "source_bytes": 69,
+    "duration_ms": 900000,
+    "container": "mp4",
+    "video_streams": [
+      {
+        "codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate_num": 30,
+        "frame_rate_den": 1
+      }
+    ],
+    "audio_streams": [
+      {
+        "codec": "aac",
+        "sample_rate_hz": 48000,
+        "channels": 2
+      }
+    ],
+    "acquisition_route": "local_upload",
+    "authorization_state": "attested",
+    "source_time_unit": "ms"
+  }
+}

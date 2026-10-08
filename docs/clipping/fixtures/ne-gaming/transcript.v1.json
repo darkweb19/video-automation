@@ -1,0 +1,137 @@
+{
+  "version": "ai-clip.transcript.v1",
+  "artifact_id": "fixture-gaming-ne-01-transcript-v1",
+  "source": {
+    "version": "ai-clip.source.v1",
+    "source_id": "fixture-gaming-ne-01",
+    "source_kind": "upload",
+    "source_sha256": "905b6008b2b870b61479f315d80ce918b8b030b01d860b8071ec21122bddbb0f",
+    "source_bytes": 69,
+    "duration_ms": 900000,
+    "container": "mp4",
+    "video_streams": [
+      {
+        "codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate_num": 30,
+        "frame_rate_den": 1
+      }
+    ],
+    "audio_streams": [
+      {
+        "codec": "aac",
+        "sample_rate_hz": 48000,
+        "channels": 2
+      }
+    ],
+    "acquisition_route": "local_upload",
+    "authorization_state": "attested",
+    "source_time_unit": "ms"
+  },
+  "source_time_unit": "ms",
+  "interval_semantics": "half_open",
+  "pipeline_version": "synthetic-fixture/1",
+  "pipeline_manifest_sha256": "87f98ecd2f555ee6419d19c6d752f5a1a62b42e7feb25dac2355c7e2ec7aea51",
+  "original_script_preserved": true,
+  "translation_applied": false,
+  "generated_speech": false,
+  "dialogue_reordered": false,
+  "segments": [
+    {
+      "segment_id": "seg-1",
+      "start_ms": 1000,
+      "end_ms": 5000,
+      "text": "यो OK थियो",
+      "language_spans": [
+        {
+          "start_char": 0,
+          "end_char": 3,
+          "language": "ne"
+        },
+        {
+          "start_char": 3,
+          "end_char": 5,
+          "language": "en"
+        },
+        {
+          "start_char": 5,
+          "end_char": 10,
+          "language": "ne"
+        }
+      ],
+      "speaker_id": null,
+      "evidence_refs": [
+        "ev-speech-1"
+      ]
+    }
+  ],
+  "words": [
+    {
+      "word_id": "seg-1-w1",
+      "segment_id": "seg-1",
+      "text": "यो",
+      "start_ms": 1000,
+      "end_ms": 1800,
+      "language": "ne",
+      "speaker_id": null,
+      "alignment_state": "aligned",
+      "start_char": 0,
+      "end_char": 2
+    },
+    {
+      "word_id": "seg-1-w2",
+      "segment_id": "seg-1",
+      "text": "OK",
+      "start_ms": 1900,
+      "end_ms": 2400,
+      "language": "en",
+      "speaker_id": null,
+      "alignment_state": "aligned",
+      "start_char": 3,
+      "end_char": 5
+    },
+    {
+      "word_id": "seg-1-w3",
+      "segment_id": "seg-1",
+      "text": "थियो",
+      "start_ms": 2500,
+      "end_ms": 4000,
+      "language": "ne",
+      "speaker_id": null,
+      "alignment_state": "aligned",
+      "start_char": 6,
+      "end_char": 10
+    }
+  ],
+  "evidence_events": [
+    {
+      "evidence_id": "ev-speech-1",
+      "start_ms": 1000,
+      "end_ms": 5000,
+      "kind": "speech",
+      "description": "Illustrative Nepali and English code-switched speech."
+    },
+    {
+      "evidence_id": "ev-silence-1",
+      "start_ms": 700000,
+      "end_ms": 730000,
+      "kind": "silence",
+      "description": "Illustrative quiet interval."
+    },
+    {
+      "evidence_id": "ev-game-audio-1",
+      "start_ms": 740000,
+      "end_ms": 760000,
+      "kind": "non_speech_audio",
+      "description": "Illustrative game sound effect."
+    },
+    {
+      "evidence_id": "ev-visual-1",
+      "start_ms": 780000,
+      "end_ms": 790000,
+      "kind": "visual_event",
+      "description": "Illustrative visual-only game event late in the source."
+    }
+  ]
+}

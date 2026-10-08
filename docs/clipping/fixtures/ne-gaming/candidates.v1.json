@@ -1,0 +1,150 @@
+{
+  "version": "ai-clip.candidates.v1",
+  "artifact_id": "fixture-gaming-ne-01-candidates-v1",
+  "source": {
+    "version": "ai-clip.source.v1",
+    "source_id": "fixture-gaming-ne-01",
+    "source_kind": "upload",
+    "source_sha256": "905b6008b2b870b61479f315d80ce918b8b030b01d860b8071ec21122bddbb0f",
+    "source_bytes": 69,
+    "duration_ms": 900000,
+    "container": "mp4",
+    "video_streams": [
+      {
+        "codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate_num": 30,
+        "frame_rate_den": 1
+      }
+    ],
+    "audio_streams": [
+      {
+        "codec": "aac",
+        "sample_rate_hz": 48000,
+        "channels": 2
+      }
+    ],
+    "acquisition_route": "local_upload",
+    "authorization_state": "attested",
+    "source_time_unit": "ms"
+  },
+  "transcript_artifact_id": "fixture-gaming-ne-01-transcript-v1",
+  "source_time_unit": "ms",
+  "interval_semantics": "half_open",
+  "ranking_policy_version": "synthetic-rank/1",
+  "deduplication_policy_version": "synthetic-dedup/1",
+  "evidence_version": "ai-clip.transcript.v1",
+  "pipeline_manifest_sha256": "87f98ecd2f555ee6419d19c6d752f5a1a62b42e7feb25dac2355c7e2ec7aea51",
+  "generated_speech": false,
+  "dialogue_reordered": false,
+  "candidates": [
+    {
+      "candidate_id": "fixture-gaming-c1",
+      "rank": 1,
+      "start_ms": 770000,
+      "end_ms": 795000,
+      "evidence_refs": [
+        "ev-visual-1",
+        "ev-game-audio-1"
+      ],
+      "editorial_score": {
+        "scale": "editorial_ordinal_1_to_5_not_probability",
+        "components": {
+          "hook": {
+            "value": 5,
+            "rationale": "The visual event begins within the interval.",
+            "evidence_refs": [
+              "ev-visual-1",
+              "ev-game-audio-1"
+            ]
+          },
+          "emotional_impact": {
+            "value": 5,
+            "rationale": "The action is surprising.",
+            "evidence_refs": [
+              "ev-visual-1",
+              "ev-game-audio-1"
+            ]
+          },
+          "retention": {
+            "value": 5,
+            "rationale": "The action has a clear outcome.",
+            "evidence_refs": [
+              "ev-visual-1",
+              "ev-game-audio-1"
+            ]
+          },
+          "shareability": {
+            "value": 4,
+            "rationale": "The event reads without dialogue.",
+            "evidence_refs": [
+              "ev-visual-1",
+              "ev-game-audio-1"
+            ]
+          },
+          "standalone_context": {
+            "value": 5,
+            "rationale": "The gameplay action is self-contained.",
+            "evidence_refs": [
+              "ev-visual-1",
+              "ev-game-audio-1"
+            ]
+          }
+        },
+        "total": 24
+      }
+    },
+    {
+      "candidate_id": "fixture-gaming-c2",
+      "rank": 2,
+      "start_ms": 0,
+      "end_ms": 15000,
+      "evidence_refs": [
+        "ev-speech-1"
+      ],
+      "editorial_score": {
+        "scale": "editorial_ordinal_1_to_5_not_probability",
+        "components": {
+          "hook": {
+            "value": 4,
+            "rationale": "A short reaction opens the excerpt.",
+            "evidence_refs": [
+              "ev-speech-1"
+            ]
+          },
+          "emotional_impact": {
+            "value": 3,
+            "rationale": "The speaker sounds surprised.",
+            "evidence_refs": [
+              "ev-speech-1"
+            ]
+          },
+          "retention": {
+            "value": 4,
+            "rationale": "The words resolve quickly.",
+            "evidence_refs": [
+              "ev-speech-1"
+            ]
+          },
+          "shareability": {
+            "value": 4,
+            "rationale": "The reaction is understandable.",
+            "evidence_refs": [
+              "ev-speech-1"
+            ]
+          },
+          "standalone_context": {
+            "value": 4,
+            "rationale": "The excerpt starts at the speech onset.",
+            "evidence_refs": [
+              "ev-speech-1"
+            ]
+          }
+        },
+        "total": 19
+      }
+    }
+  ],
+  "suppressed_candidates": []
+}
