@@ -1,29 +1,29 @@
-# Session handoff — 2026-10-06
+# Session handoff — 2026-10-08
 
 ## What was done
-- Diagnosed job `gen_954e9ffbe0f220ddddbda41a2edb361f` callback rejection; the callback transport fix merged and pushed to main as `f34c12a`.
-- Added `FrameVault-Modal-Callback/1.0` User-Agent to Wan and SkyReels legacy and bearer callbacks, with regression coverage for all four request paths. Live probes with this identity avoid Cloudflare 1010 on the custom domain, but the header alone does not solve Railway's browser challenge.
-- Sujan deactivated Under Attack Mode. Afterward, production Railway `/health` returned 200 with the default Python User-Agent. A callback-shaped POST for job `gen_954e9ffbe0f220ddddbda41a2edb361f` with a dummy bearer token returned Go 404, "callback job not found". The same callback via the custom domain with the FrameVault User-Agent returned Go 404; a custom-domain diagnostic callback with default Python User-Agent still received Cloudflare 403/error 1010.
-- These probes establish routing to Go for those requests, not successful authenticated delivery. The original job is currently absent; the reason is unknown. No paid generation or deployment occurred.
+- The `feat/framevault-studio-ux` branch has 18 commits from `main`, including this handoff, covering the studio redesign and interaction improvements across all six visual areas. README workflows and `docs/frontend-redesign.md` were updated.
+- Added intent-aware story/clip entry, real recent project activity, loaded-record History filters, stable media and action focus during live updates, native categories, protected random ideas, in-flight prompt drafts, provider guidance, and accurate live connection and failure states.
+- Final diff was accepted by the independent reviewer. Verification passed: `go test ./...` (36.599s), `go vet ./...`, 87/87 Node dashboard tests (0 failed or skipped), JavaScript syntax, Python callback regressions, `git diff --check`, compiled Go binary, and 28 isolated local HTTP checks for embedded assets, CSP, auth/session/password gate, Settings, Vault grant revocation, logout, and the latest embedded `app.js`.
+- No provider operations or deployment occurred.
 
 ## Decisions locked
-- Keep Go + SQLite and production state/media on the service's own `/data` volume.
-- Production and Development have independent state. Never send production callbacks to Development or another service's volume.
-- The prior merge included `62726dc`, which stops Wan before inference when its initial callback is rejected; it did not change the callback origin, routing, bearer headers, or transport.
-- Keep bearer authentication, redirect protection, bounded retries, and stop-before-generation behavior intact.
-- Under Attack Mode is currently deactivated on the production service by Sujan. Do not add a callback relay; direct production-origin routing is now available and simpler.
+- Keep Go + SQLite, embedded plain JavaScript/CSS, same-origin authenticated APIs, EventSource updates, and local state/media on one `/data` volume. No new framework or frontend dependency.
+- Preserve the studio's quiet light surfaces, clear creation formats, and closed technical disclosures. Do not invent previews, usage totals, or unavailable provider pricing.
+- Activity totals count clips; recent work includes real projects. History filters loaded records, and older-clip pagination remains. Video pricing is runtime data; story planning cost is separate.
+- Projects remain five sequential six-second silent 480p scenes at 9:16, joined into a silent 1080×1920 output. Keep provider, Vault, YouTube, and callback authorization boundaries.
+- Production and Development have separate state and volumes. Keep encrypted credentials and `secret.key` with backups. Preserve bearer callbacks, redirect protection, bounded retries, and stop-before-inference behavior.
+- Callback fix `f34c12a` is on `main`. Sujan deactivated Under Attack Mode on 2026-10-06; no callback relay is selected.
 
 ## Open questions
 1. Sujan: backup frequency, retention, and recovery objectives remain undecided.
 
 ## Next steps
-1. Set production `VIDEO_CALLBACK_BASE_URL` to `https://video-automation-production-27b3.up.railway.app`, apply/redeploy the production app, and verify callback delivery before generation. This configuration has not been applied.
-2. Start a fresh generation attempt after routing is configured; the original job is absent and persisted callback URLs do not change when the setting changes. If retaining the custom callback domain, deploy both workers with the merged header fix first.
-3. Complete Railway persistence and YouTube upload smoke checks from the prior handoff.
+1. Review the redesigned screens in a rendered browser at desktop and mobile widths; visual review remains outstanding.
+2. Set production `VIDEO_CALLBACK_BASE_URL` to `https://video-automation-production-27b3.up.railway.app`, redeploy through the approved workflow, and verify authenticated callback delivery before generation. This configuration has not been applied. If retaining the custom callback domain, deploy both workers with the merged header fix first.
+3. After routing is verified, use a fresh generation; the absent original job cannot be recovered by changing its persisted callback origin. Complete the prior Railway persistence and real YouTube upload smoke checks.
 
 ## Gotchas
-- Header fix `f34c12a` is on main. A default Python callback to the custom domain still receives Cloudflare 403/error 1010; explicit FrameVault requests reach Go. Production Railway `/health` now returns 200 and callback-shaped probes return Go 404 for the absent job. No authenticated callback success has been verified.
-- Development `https://development-branch-development-60bf.up.railway.app` returns health 200 and callback 404 for both a diagnostic job and the supplied failed job; it is a separate service/volume and must not be used for production callbacks.
-- Verified: full Go suite in escalated execution, Python callback regression suite, dashboard JS syntax, and `git diff --check`. Default-sandbox full Go checks fail on cache/temp-path access.
-- No paid inference, provider credential access, or deployment was performed. The local Modal profile lists only the deployed Wan `video-generation` app; SkyReels deployment target is unverified.
-- Existing `workers/modal/__pycache__/` remains untracked and untouched. Never read `.env` or expose credentials; back up SQLite and `secret.key` together.
+- Browser automation could not start in the Windows sandbox. Verification covers source, contracts, simulated interactions, and isolated HTTP checks; rendered layout is unverified.
+- Production routing was not rechecked during this redesign. Probes on 2026-10-06 reached Go but returned 404 for absent job `gen_954e9ffbe0f220ddddbda41a2edb361f` (reason unknown); authenticated delivery remains unverified. Default Python requests to the custom domain received Cloudflare 403/1010 that day.
+- Development uses a different service and volume; never direct production callbacks there. The local Modal profile previously showed Wan only; the SkyReels deployment target remains unverified.
+- No paid generation, provider credential access, deployment, or `.env` read occurred. Existing `workers/modal/__pycache__/` remains untracked and untouched.

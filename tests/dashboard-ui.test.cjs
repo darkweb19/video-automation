@@ -10,17 +10,21 @@ const source = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 
 // This DOM stub tests application state and events, not browser layout.
 let requestIDSeed = 0;
-function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
+function createApp({ sessionData = new Map(), storageThrows = false, stubHistory = true, eventSourceAvailable = true, eventSourceThrows = false } = {}) {
   let document;
   let compact = false;
   const timers = [];
   const eventSources = [];
+  const windowListeners = new Map();
+  let online = true;
   class EventSourceStub {
     constructor(url, options) {
+      if (eventSourceThrows) throw new Error('Fixture browser cannot open EventSource');
       this.url = url;
       this.options = options;
       this.listeners = new Map();
       this.closed = false;
+      this.readyState = 0;
       eventSources.push(this);
     }
     addEventListener(name, callback) {
@@ -29,9 +33,11 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       this.listeners.set(name, callbacks);
     }
     emit(name, event = {}) {
+      if (name === 'open') this.readyState = 1;
+      if (name === 'error' && this.readyState !== 2) this.readyState = 0;
       for (const callback of this.listeners.get(name) ?? []) callback(event);
     }
-    close() { this.closed = true; }
+    close() { this.closed = true; this.readyState = 2; }
   }
   const sessionStorage = {
     getItem: (key) => { if (storageThrows) throw new Error('Storage unavailable'); return sessionData.get(key) ?? null; },
@@ -53,6 +59,8 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       this.disabled = false;
       this.checked = false;
       this.open = false;
+      this.detachments = 0;
+      this.replacements = 0;
       this.classList = {
         contains: (name) => this.className.split(/\s+/).includes(name),
         toggle: (name, enabled) => {
@@ -68,6 +76,7 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       };
     }
     get options() { return this.children; }
+    get isConnected() { return Boolean(this.connectedRoot || this.parent?.isConnected); }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) ?? null; }
     removeAttribute(name) { this.attributes.delete(name); }
@@ -76,21 +85,39 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       else this.removeAttribute(name);
     }
     append(...nodes) {
-      this.children.push(...nodes);
-      nodes.forEach((node) => { node.parent = this; });
-      if (this.tagName === 'select' && !this.value && nodes[0]) this.value = nodes[0].value;
+      const wasEmpty = this.children.length === 0;
+      nodes.forEach((node) => {
+        node.remove();
+        this.children.push(node);
+        node.parent = this;
+      });
+      if (this.tagName === 'select' && wasEmpty && nodes[0]) this.value = nodes[0].value;
     }
-    replaceChildren(...nodes) { this.children.forEach((child) => { child.parent = null; }); this.children = []; this.append(...nodes); }
+    replaceChildren(...nodes) {
+      this.replacements++;
+      [...this.children].forEach((child) => child.remove());
+      if (this.tagName === 'select') this.value = '';
+      this.append(...nodes);
+    }
     insertBefore(node, reference) {
+      if (node === reference) return;
+      node.remove();
       const index = this.children.indexOf(reference);
       node.parent = this;
       this.children.splice(index < 0 ? this.children.length : index, 0, node);
     }
     querySelector() { return null; }
-    querySelectorAll() { return []; }
+    querySelectorAll(selector) {
+      const matches = [];
+      for (const child of this.children) {
+        if (selector.startsWith('.') && child.classList.contains(selector.slice(1))) matches.push(child);
+        matches.push(...child.querySelectorAll(selector));
+      }
+      return matches;
+    }
     contains(node) { return node === this || this.children.some((child) => child.contains(node)); }
     closest() { return this.parent ??= new Element(); }
-    focus() { document.activeElement = this; }
+    focus(options) { document.activeElement = this; this.focusOptions = options; }
     reset() { this.onReset?.(); }
     load() {}
     pause() {}
@@ -103,10 +130,12 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       const emitted = { preventDefault() {}, ...event };
       return (this.listeners.get(name) ?? []).map((callback) => callback(emitted));
     }
+    click() { this.emit('click'); }
     showModal() { this.open = true; }
     close() { this.open = false; this.emit('close'); }
     remove() {
       if (!this.parent) return;
+      this.detachments++;
       this.parent.children = this.parent.children.filter((child) => child !== this);
       this.parent = null;
     }
@@ -114,17 +143,32 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
   }
   const nodes = new Map([...markup.matchAll(/<([a-z][a-z0-9-]*)\b[^>]*\bid="([^"]+)"[^>]*>/g)]
     .map((match) => [match[2], new Element(match[1])]));
+  nodes.forEach((node) => { node.connectedRoot = true; });
   nodes.get('password-form').parentElement = new Element('div');
   const sidebar = new Element('aside');
+  sidebar.connectedRoot = true;
   const tabs = ['project', 'single'].map((mode) => {
     const tab = new Element('button');
     tab.dataset.mode = mode;
     return tab;
   });
+  const createModeButtons = [...markup.matchAll(/<button\b[^>]*\bdata-create-mode="([^"]+)"[^>]*>/g)].map((match) => {
+    const button = new Element('button');
+    button.dataset.createMode = match[1];
+    return button;
+  });
+  const goButtons = [...markup.matchAll(/<button\b[^>]*\bdata-go="([^"]+)"[^>]*>/g)].map((match) => {
+    const id = match[0].match(/\bid="([^"]+)"/)?.[1];
+    const button = id ? nodes.get(id) : new Element('button');
+    button.dataset.go = match[1];
+    return button;
+  });
   document = {
     activeElement: null,
     querySelector: (selector) => selector === '.sidebar' ? sidebar : nodes.get(selector.slice(1)) ?? null,
-    querySelectorAll: (selector) => selector === '.mode-option' ? tabs : [],
+    querySelectorAll: (selector) => selector === '.mode-option' ? tabs
+      : selector === '[data-create-mode]' ? createModeButtons
+        : selector === '[data-go]' ? goButtons : [],
     createElement: (tag) => new Element(tag),
     createDocumentFragment: () => new Element('fragment'),
     addEventListener() {},
@@ -138,12 +182,17 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
       history: { replaceState() {} },
       sessionStorage,
       crypto: { randomUUID: () => `fixture-project-request-${++requestIDSeed}` },
-      EventSource: EventSourceStub,
+      EventSource: eventSourceAvailable ? EventSourceStub : undefined,
+      navigator: { get onLine() { return online; } },
       matchMedia: () => ({ matches: compact }),
       setTimeout: (callback) => { timers.push(callback); return timers.length; },
       clearTimeout() {},
       requestAnimationFrame: (callback) => callback(),
-      addEventListener() {},
+      addEventListener(name, callback) {
+        const callbacks = windowListeners.get(name) ?? [];
+        callbacks.push(callback);
+        windowListeners.set(name, callbacks);
+      },
       scrollTo() {},
     },
     URL,
@@ -155,16 +204,17 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
   });
   const instrumented = source.replace('  bootstrap();', `
     request = (...args) => globalThis.uiTestRequest(...args);
-    loadHistory = async () => {};
+    ${stubHistory ? 'loadHistory = async () => {};' : ''}
     globalThis.ui = {
-      state, elements, setGenerationMode, syncGenerationModeDisplay,
+      state, elements, setGenerationMode, syncGenerationModeDisplay, applyPasswordGate,
       submitGeneration, submitProject, generateRandomPrompt, updateModelOptions,
       syncNavigationAccessibility, setNavigationOpen,
       handleJobSnapshot, bindEvents, renderRecent, renderHistory, renderProject,
       startJobEventStream, stopJobEventStream,
       setStatusRecord, renderVaultItems, openYouTubeUpload, closeYouTubeComposer, renderYouTubeUpload,
       renderYouTubeSettings, loadYouTubeStatus, renderVaultLocked, showLoggedOut, generateYouTubeMetadata, submitYouTubeUpload, retryYouTubeUpload,
-      abandonYouTubeUpload, restartYouTubeUpload, moveHistoryItem, openVaultVideo, loadProjects
+      abandonYouTubeUpload, restartYouTubeUpload, moveHistoryItem, openVaultVideo, loadProjects, loadHistory,
+      loadModels, loadSettings, renderProviderSettings, updateGenerateAvailability, clearProjectDisplay, saveAPIKey
     };
   `);
   assert.notEqual(instrumented, source, 'bootstrap instrumentation must match');
@@ -179,6 +229,8 @@ function createApp({ sessionData = new Map(), storageThrows = false } = {}) {
     document,
     takeTimer: () => timers.shift(),
     eventSources,
+    setOnline: (value) => { online = value; },
+    emitWindow: (name, event = {}) => (windowListeners.get(name) ?? []).map((callback) => callback(event)),
     setCompact: (value) => { compact = value; },
     setRequest: (request) => { context.uiTestRequest = request; },
     setFetch: (fetcher) => { context.fetch = fetcher; },
@@ -267,6 +319,115 @@ test('duplicate random idea requests are ignored while the first request is pend
   assert.equal(app.elements.projectTopic.value, 'One generated idea');
   assert.equal(attempts, 1);
   assert.equal(app.elements.randomPrompt.disabled, false);
+});
+
+test('the creator category uses a native select and preserves existing category values', () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  assert.equal(app.elements.promptCategory.tagName, 'select');
+  const select = markup.match(/<select\b[^>]*id="prompt-category"[^>]*>([\s\S]*?)<\/select>/);
+  assert.ok(select);
+  assert.deepEqual([...select[1].matchAll(/<option value="(\d)">([^<]+)<\/option>/g)].map((match) => [match[1], match[2]]), [
+    ['0', 'Kid Animation'], ['1', 'Horror Story'], ['2', 'Nature'], ['3', 'Seduction'], ['4', 'Mature Content'], ['5', 'Soft Corn'],
+  ]);
+  app.elements.promptCategory.value = '2';
+  app.elements.promptCategory.emit('input');
+  assert.equal(app.elements.promptCategoryName.textContent, 'Nature');
+  assert.equal(app.elements.promptCategory.getAttribute('aria-valuetext'), null);
+  assert.equal(app.elements.projectCostNote.hidden, false);
+  assert.equal(app.elements.randomPrompt.textContent, 'Suggest story idea');
+  app.setGenerationMode('single');
+  assert.equal(app.elements.projectCostNote.hidden, true);
+  assert.equal(app.elements.randomPrompt.textContent, 'Suggest clip prompt');
+});
+
+for (const mode of ['project', 'single']) {
+  test(`${mode} suggestions preserve manual edits, including edits reverted while waiting`, async () => {
+    const sessionData = new Map();
+    const app = configuredApp(mode, true, { sessionData });
+    app.bindEvents();
+    const field = mode === 'project' ? app.elements.projectTopic : app.elements.prompt;
+    const firstResponse = deferred();
+    app.setRequest(() => firstResponse.promise);
+    const first = app.generateRandomPrompt();
+    field.value = 'A manual idea entered while waiting';
+    field.emit('input');
+    firstResponse.resolve({ prompt: 'A late generated idea' });
+    await first;
+    assert.equal(field.value, 'A manual idea entered while waiting');
+    assert.match(app.elements.toast.textContent, /Your edits were kept/);
+
+    const secondResponse = deferred();
+    app.setRequest(() => secondResponse.promise);
+    const second = app.generateRandomPrompt();
+    field.value = 'A temporary edit';
+    field.emit('input');
+    field.value = 'A manual idea entered while waiting';
+    field.emit('input');
+    secondResponse.resolve({ prompt: 'Another late generated idea' });
+    await second;
+    assert.equal(field.value, 'A manual idea entered while waiting');
+    assert.equal(app.elements.randomPrompt.disabled, false);
+    assert.equal(sessionData.size, 0, 'suggestions must not persist private prompt drafts');
+  });
+}
+
+test('changing category keeps the current idea when a suggestion for the old category resolves', async () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  const response = deferred();
+  app.setRequest(() => response.promise);
+  const suggestion = app.generateRandomPrompt();
+  app.elements.promptCategory.value = '2';
+  app.elements.promptCategory.emit('input');
+  response.resolve({ prompt: 'A suggestion for the previous category' });
+  await suggestion;
+  assert.equal(app.elements.projectTopic.value, 'Test project topic');
+  assert.equal(app.elements.promptCategoryName.textContent, 'Nature');
+  assert.match(app.elements.toast.textContent, /Your edits were kept/);
+});
+
+test('a suggestion can fill its untouched originating format without focusing the now-hidden field', async () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  app.state.currentView = 'generate';
+  app.elements.randomPrompt.focus();
+  const response = deferred();
+  app.setRequest(() => response.promise);
+  const suggestion = app.generateRandomPrompt();
+  app.setGenerationMode('single');
+  app.elements.prompt.focus();
+  response.resolve({ prompt: 'An untouched project idea' });
+  await suggestion;
+  assert.equal(app.elements.projectTopic.value, 'An untouched project idea');
+  assert.equal(app.elements.prompt.value, 'Test single clip prompt');
+  assert.equal(app.document.activeElement, app.elements.prompt);
+  assert.equal(app.elements.randomPrompt.textContent, 'Suggest clip prompt');
+  assert.equal(app.state.mode, 'single');
+});
+
+test('a suggestion cannot steal focus after navigation or another creator control is selected', async () => {
+  for (const leaveCreator of [false, true]) {
+    const app = configuredApp('project');
+    app.state.currentView = 'generate';
+    app.elements.randomPrompt.focus();
+    const response = deferred();
+    app.setRequest(() => response.promise);
+    const suggestion = app.generateRandomPrompt();
+    if (leaveCreator) app.state.currentView = 'history';
+    const target = leaveCreator ? app.elements.historySearch : app.elements.modelTrigger;
+    target.focus();
+    response.resolve({ prompt: 'A safely generated idea' });
+    await suggestion;
+    assert.equal(app.elements.projectTopic.value, 'A safely generated idea');
+    assert.equal(app.document.activeElement, target);
+  }
+  const app = configuredApp('project');
+  app.state.currentView = 'generate';
+  app.elements.randomPrompt.focus();
+  app.setRequest(() => Promise.resolve({ prompt: 'A ready idea' }));
+  await app.generateRandomPrompt();
+  assert.equal(app.document.activeElement, app.elements.projectTopic, 'the unchanged suggestion action can move focus to its resulting idea');
 });
 
 test('a refreshed dashboard restores a project using its exact persisted request id', async () => {
@@ -712,6 +873,481 @@ test('initial HTML IDs are unique and JavaScript bindings resolve', () => {
   }
 });
 
+test('overview creation actions select their format while preserving ideas and saved results', () => {
+  const app = configuredApp('project');
+  app.elements.promptCategory.value = '2';
+  const project = { id: 'fixture-overview-project', topic: 'Saved project', status: 'processing', scenes: [], events: [] };
+  const clip = { id: 'fixture-overview-clip', prompt: 'Saved clip', status: 'failed', events: [] };
+  app.renderProject(project);
+  app.setStatusRecord(clip);
+  app.bindEvents();
+  assert.deepEqual(Array.from(app.elements.createModeButtons, (button) => button.dataset.createMode).sort(), ['project', 'single']);
+
+  for (const mode of ['single', 'project']) {
+    app.elements.createModeButtons.find((button) => button.dataset.createMode === mode).emit('click');
+    assert.equal(app.state.mode, mode);
+    assert.equal(app.state.currentView, 'generate');
+    assert.equal(app.elements.prompt.value, 'Test single clip prompt');
+    assert.equal(app.elements.projectTopic.value, 'Test project topic');
+    assert.equal(app.elements.promptCategory.value, '2');
+    assert.equal(app.state.displayedProjectID, project.id);
+    assert.equal(app.state.displayedGenerationID, clip.id);
+  }
+});
+
+test('overview creation actions respect the password gate and signed-out session', () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  app.applyPasswordGate(true);
+  assert.ok(app.elements.createModeButtons.length);
+  for (const button of app.elements.createModeButtons) {
+    assert.equal(button.disabled, true);
+    button.emit('click');
+  }
+  assert.equal(app.state.mode, 'project');
+  assert.equal(app.state.currentView, '');
+  app.applyPasswordGate(false);
+  app.state.authenticated = false;
+  app.elements.createModeButtons.find((button) => button.dataset.createMode === 'single').emit('click');
+  assert.equal(app.state.mode, 'project');
+  assert.equal(app.state.currentView, '');
+});
+
+test('recent activity combines real projects and clips in creation order and opens the correct result', () => {
+  const app = configuredApp('single');
+  const project = { id: 'fixture-recent-project', topic: 'Newest project', status: 'processing', model: 'fixture/video', created_at: 9, scenes: [], events: [] };
+  app.state.projects = [project, { ...project, id: 'fixture-earlier-project', topic: 'Earlier project', created_at: 3 }];
+  app.state.generations = [8, 7, 6, 5, 4].map((created) => ({
+    id: `fixture-recent-clip-${created}`, prompt: `Clip ${created}`, status: 'processing', created_at: created, model: 'fixture/video', events: [],
+  }));
+  app.renderRecent();
+  assert.deepEqual(Array.from(app.elements.recentList.children, (row) => row.dataset.id), [
+    project.id, 'fixture-recent-clip-8', 'fixture-recent-clip-7', 'fixture-recent-clip-6', 'fixture-recent-clip-5',
+  ]);
+  assert.match(collectText(app.elements.recentList.children[0]), /30-second project/);
+  assert.match(collectText(app.elements.recentList.children[1]), /Single clip/);
+  assert.match(collectText(app.elements.recentList.children[0]), /Not recorded/);
+  findTextButton(app.elements.recentList, 'Newest project').emit('click');
+  assert.equal(app.state.mode, 'project');
+  assert.equal(app.state.currentView, 'generate');
+  assert.equal(app.state.displayedProjectID, project.id);
+  findTextButton(app.elements.recentList, 'Clip 8').emit('click');
+  assert.equal(app.state.mode, 'single');
+  assert.equal(app.state.displayedGenerationID, 'fixture-recent-clip-8');
+  assert.equal(app.elements.projectTopic.value, 'Test project topic');
+  assert.equal(app.elements.prompt.value, 'Test single clip prompt');
+});
+
+test('recent project activity updates on list loads and accepted live snapshots', async () => {
+  const app = configuredApp('project');
+  const project = { id: 'fixture-recent-live', topic: 'Live project', status: 'planning', model: 'fixture/video', created_at: 9, updated_at: 10, scenes: [], events: [] };
+  app.setRequest(() => Promise.resolve({ projects: [project] }));
+  await app.loadProjects(false);
+  assert.match(collectText(app.elements.recentList), /Live project/);
+  assert.match(collectText(app.elements.recentList), /planning/);
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project: { ...project, status: 'generating', updated_at: 12 } }) });
+  assert.match(collectText(app.elements.recentList), /generating/);
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project }) });
+  assert.match(collectText(app.elements.recentList), /generating/);
+});
+
+test('live recent activity preserves focused actions and a YouTube dialog opener through record updates', async () => {
+  const { app } = connectedYouTubeApp();
+  const completed = { id: 'fixture-recent-opener', prompt: 'Completed source', status: 'completed', video_ready: true, created_at: 3, updated_at: 3 };
+  const active = { id: 'fixture-recent-other', topic: 'Active story', status: 'generating', created_at: 2, updated_at: 2, scenes: [] };
+  app.state.generations = [completed];
+  app.state.projects = [active];
+  app.renderRecent();
+  const completedRow = app.state.recentRows.get(`single:${completed.id}`);
+  const activeRow = app.state.recentRows.get(`project:${active.id}`);
+  const before = [completedRow.row, completedRow.upload, activeRow.row, activeRow.open, app.elements.recentList]
+    .map((node) => ({ node, detachments: node.detachments, replacements: node.replacements }));
+  activeRow.open.focus();
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: active.id, project: { ...active, progress: 60, updated_at: 4 } }) });
+  assert.equal(app.document.activeElement, activeRow.open);
+  assert.equal(activeRow.open.isConnected, true);
+  completedRow.upload.focus();
+  completedRow.upload.emit('click');
+  await flushUI();
+  assert.equal(app.elements.youtubeDialog.open, true);
+  assert.equal(app.state.youtubeRestoreFocus, completedRow.upload);
+  app.handleJobSnapshot('generation', { data: JSON.stringify({ id: completed.id, generation: { ...completed, prompt: 'Updated source title', updated_at: 5 } }) });
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: active.id, project: { ...active, status: 'completed', final_video_ready: true, updated_at: 5 } }) });
+  assert.equal(app.state.recentRows.get(`single:${completed.id}`), completedRow);
+  assert.equal(completedRow.open.textContent, 'Updated source title');
+  assert.equal(activeRow.upload.hidden, false);
+  app.closeYouTubeComposer();
+  assert.equal(app.document.activeElement, completedRow.upload);
+  assert.equal(completedRow.upload.isConnected, true);
+  for (const { node, detachments, replacements } of before) {
+    assert.equal(node.detachments, detachments, 'recent actions and their rows must stay attached');
+    assert.equal(node.replacements, replacements, 'recent action ancestry must not be cleared');
+  }
+});
+
+test('recent rows remain bounded and a removed dialog opener returns focus to the page', async () => {
+  const { app } = connectedYouTubeApp();
+  const completed = { id: 'fixture-recent-removed', prompt: 'Older completed clip', status: 'completed', video_ready: true, created_at: 1 };
+  app.state.generations = [completed];
+  app.renderRecent();
+  const upload = app.state.recentRows.get(`single:${completed.id}`).upload;
+  upload.focus();
+  upload.emit('click');
+  await flushUI();
+  app.state.projects = [2, 3, 4, 5, 6].map((created) => ({ id: `fixture-new-story-${created}`, topic: `Newer story ${created}`, status: 'queued', created_at: created, scenes: [] }));
+  app.renderRecent();
+  assert.equal(app.state.recentRows.size, 5);
+  assert.equal(upload.isConnected, false);
+  app.closeYouTubeComposer();
+  assert.equal(app.document.activeElement, app.elements.pageTitle);
+  app.showLoggedOut();
+  assert.equal(app.state.recentRows.size, 0);
+});
+
+function historyFixtures(app) {
+  app.state.projects = [
+    { id: 'fixture-nature-project', topic: 'River landscape', category: 'Nature', status: 'completed', model: 'fixture/cinema', created_at: 3, scenes: [] },
+    { id: 'fixture-active-project', topic: 'Mountain expedition', status: 'combining', model: 'fixture/action', created_at: 2, scenes: [] },
+    { id: 'fixture-error-project', topic: 'City sunset', status: 'error', model: 'fixture/cinema', created_at: 1, scenes: [] },
+  ];
+  app.state.generations = [
+    { id: 'fixture-nature-clip', prompt: 'River wildlife', status: 'completed', model: 'fixture/nature', created_at: 3, events: [] },
+    { id: 'fixture-active-clip', prompt: 'Ocean waves', status: 'download_failed', model: 'fixture/action', created_at: 2, events: [] },
+    { id: 'fixture-failed-clip', prompt: 'City skyline', status: 'failed', model: 'fixture/cinema', created_at: 1, events: [] },
+  ];
+}
+
+test('History search and status filters cover loaded projects and clips without provider requests', () => {
+  const app = configuredApp('project');
+  historyFixtures(app);
+  let requests = 0;
+  app.setRequest(() => { requests++; return Promise.resolve({}); });
+  app.bindEvents();
+  app.elements.historySearch.value = '  RIVER  ';
+  app.elements.historySearch.emit('input');
+  assert.match(collectText(app.elements.projectHistory), /River landscape/);
+  assert.match(collectText(app.elements.historyGrid), /River wildlife/);
+  assert.doesNotMatch(collectText(app.elements.projectHistory), /Mountain expedition/);
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 2 of 6 loaded items: 1 project, 1 clip/);
+
+  app.elements.historySearch.value = '';
+  app.elements.historyStatus.value = 'active';
+  app.elements.historyStatus.emit('change');
+  assert.match(collectText(app.elements.projectHistory), /Mountain expedition/);
+  assert.match(collectText(app.elements.historyGrid), /Ocean waves/);
+  assert.doesNotMatch(collectText(app.elements.historyGrid), /River wildlife/);
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 2 of 6 loaded items/);
+
+  app.elements.historyStatus.value = 'failed';
+  app.elements.historyStatus.emit('change');
+  assert.match(collectText(app.elements.projectHistory), /City sunset/);
+  assert.match(collectText(app.elements.historyGrid), /City skyline/);
+  assert.equal(requests, 0);
+});
+
+test('History format filters and reset preserve loaded data, pagination, creation input and result selection', () => {
+  const app = configuredApp('project');
+  historyFixtures(app);
+  Object.assign(app.state, { historyHasMore: true, historyNextCursor: 'fixture-cursor', historyNextOffset: 24, displayedProjectID: 'fixture-selected-project' });
+  app.bindEvents();
+  app.elements.historySearch.value = 'nature';
+  app.elements.historyStatus.value = 'completed';
+  app.elements.historyFormat.value = 'project';
+  app.elements.historyFormat.emit('change');
+  assert.match(collectText(app.elements.projectHistory), /River landscape/);
+  assert.equal(app.elements.historyGrid.hidden, true);
+  assert.match(app.elements.historyResultsSummary.textContent, /1 project, 0 clips/);
+  assert.equal(app.elements.historyClearFilters.disabled, false);
+
+  app.elements.historyFormat.value = 'single';
+  app.elements.historyFormat.emit('change');
+  assert.equal(app.elements.projectHistory.hidden, true);
+  assert.match(collectText(app.elements.historyGrid), /River wildlife/);
+  app.elements.historyClearFilters.emit('click');
+  assert.equal(app.elements.historySearch.value, '');
+  assert.equal(app.elements.historyStatus.value, 'all');
+  assert.equal(app.elements.historyFormat.value, 'all');
+  assert.equal(app.elements.historyClearFilters.disabled, true);
+  assert.equal(app.document.activeElement, app.elements.historySearch);
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 6 of 6 loaded items/);
+  assert.equal(app.state.projects.length, 3);
+  assert.equal(app.state.generations.length, 3);
+  assert.equal(app.state.historyNextCursor, 'fixture-cursor');
+  assert.equal(app.state.historyNextOffset, 24);
+  assert.equal(app.state.displayedProjectID, 'fixture-selected-project');
+  assert.equal(app.elements.projectTopic.value, 'Test project topic');
+});
+
+test('History keeps bounded pagination available when no loaded records match', async () => {
+  const app = configuredApp('project', true, { stubHistory: false });
+  historyFixtures(app);
+  Object.assign(app.state, { historyHasMore: true, historyNextCursor: 'fixture-page-2', historyNextOffset: 24 });
+  app.elements.historySearch.value = 'Older matching clip';
+  const page = deferred();
+  const calls = [];
+  app.setRequest((requestPath) => { calls.push(requestPath); return page.promise; });
+  app.renderHistory();
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 0 of 6 loaded items/);
+  assert.match(app.elements.historyResultsSummary.textContent, /older clips/);
+  assert.match(collectText(app.elements.historyGrid), /No loaded items match/);
+  const more = findTextButton(app.elements.historyGrid, 'Load more');
+  assert.ok(more);
+  const loading = more.emit('click');
+  assert.equal(more.disabled, true);
+  assert.equal(calls.length, 1);
+  const query = new URL(calls[0], 'http://localhost').searchParams;
+  assert.equal(query.get('limit'), '24');
+  assert.equal(query.get('before'), 'fixture-page-2');
+  assert.equal(query.has('query'), false);
+  page.resolve({ generations: [{ id: 'fixture-older-match', prompt: 'Older matching clip', status: 'failed', created_at: 0 }], has_more: true, next_page: 'fixture-page-3' });
+  await Promise.all(loading);
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 1 of 7 loaded items/);
+  assert.match(collectText(app.elements.historyGrid), /Older matching clip/);
+  assert.equal(app.elements.historySearch.value, 'Older matching clip');
+  assert.equal(app.state.historyNextCursor, 'fixture-page-3');
+  assert.equal(findTextButton(app.elements.historyGrid, 'Load more').disabled, false);
+});
+
+test('accepted live snapshots update filtered History counts for both formats', () => {
+  const app = configuredApp('project');
+  historyFixtures(app);
+  app.elements.historyStatus.value = 'completed';
+  app.renderHistory();
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 2 of 6 loaded items/);
+  const project = app.state.projects[1];
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project: { ...project, status: 'completed', updated_at: 10 } }) });
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 3 of 6 loaded items: 2 projects, 1 clip/);
+  const clip = app.state.generations[1];
+  app.handleJobSnapshot('generation', { data: JSON.stringify({ id: clip.id, generation: { ...clip, status: 'completed', updated_at: 10 } }) });
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 4 of 6 loaded items: 2 projects, 2 clips/);
+});
+
+test('unrelated live updates keep completed History media and action focus attached', () => {
+  const app = configuredApp('project');
+  const completedProject = { id: 'fixture-watched-project', topic: 'Watched project', status: 'completed', final_video_ready: true, scenes: [], created_at: 1 };
+  const completedClip = { id: 'fixture-watched-clip', prompt: 'Watched clip', status: 'completed', video_ready: true, created_at: 1, events: [] };
+  const activeProject = { id: 'fixture-other-project', topic: 'Other project', status: 'generating', updated_at: 1, scenes: [], created_at: 2 };
+  const activeClip = { id: 'fixture-other-clip', prompt: 'Other clip', status: 'processing', updated_at: 1, created_at: 2, events: [] };
+  app.state.projects = [activeProject, completedProject];
+  app.state.generations = [activeClip, completedClip];
+  app.elements.historyStatus.value = 'completed';
+  app.renderHistory();
+  const projectCard = app.state.historyCards.get(`project:${completedProject.id}`).node;
+  const clipCard = app.state.historyCards.get(`single:${completedClip.id}`).node;
+  const projectVideo = projectCard.children[0].children[0];
+  const clipVideo = clipCard.children[0].children[0];
+  assert.equal(projectVideo.tagName, 'video');
+  assert.equal(clipVideo.tagName, 'video');
+  const upload = findTextButton(clipCard, 'Upload to YouTube');
+  upload.focus();
+  const ancestry = new Set();
+  for (const video of [projectVideo, clipVideo]) {
+    for (let node = video; node; node = node.parent) ancestry.add(node);
+  }
+  const before = new Map([...ancestry].map((node) => [node, { detachments: node.detachments, replacements: node.replacements }]));
+
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: activeProject.id, project: { ...activeProject, progress: 60, updated_at: 2 } }) });
+  app.handleJobSnapshot('generation', { data: JSON.stringify({ id: activeClip.id, generation: { ...activeClip, status: 'completed', video_ready: true, updated_at: 2 } }) });
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: activeProject.id, project: { ...activeProject, status: 'completed', final_video_ready: true, updated_at: 3 } }) });
+  assert.equal(app.state.historyCards.get(`project:${completedProject.id}`).node, projectCard);
+  assert.equal(app.state.historyCards.get(`single:${completedClip.id}`).node, clipCard);
+  assert.equal(app.document.activeElement, upload);
+  for (const [node, counts] of before) {
+    assert.equal(node.detachments, counts.detachments, 'unchanged video ancestry must stay attached');
+    assert.equal(node.replacements, counts.replacements, 'unchanged video ancestry must not be cleared');
+  }
+  assert.match(app.elements.historyResultsSummary.textContent, /Showing 4 of 4 loaded items/);
+  app.state.projects = [];
+  app.state.generations = [];
+  app.renderHistory();
+  assert.equal(app.state.historyCards.size, 0, 'caches must not retain unloaded private records');
+});
+
+for (const kind of ['project', 'single']) {
+  test(`manual History refresh retries a failed ${kind} preview while healthy media stays attached`, async () => {
+    const app = configuredApp('single', true, { stubHistory: false });
+    const failed = { id: `fixture-error-preview-${kind}`, status: 'completed', video_ready: true, final_video_ready: true,
+      prompt: 'Transient preview fixture', topic: 'Transient preview fixture', created_at: 2, updated_at: 2, scenes: [], events: [] };
+    const healthy = { ...failed, id: `fixture-healthy-preview-${kind}`, prompt: 'Healthy preview fixture', topic: 'Healthy preview fixture', created_at: 1 };
+    if (kind === 'project') app.state.projects = [failed, healthy];
+    else app.state.generations = [failed, healthy];
+    app.bindEvents();
+    app.renderHistory();
+    const failedKey = `${kind}:${failed.id}`;
+    const healthyKey = `${kind}:${healthy.id}`;
+    const failedCard = app.state.historyCards.get(failedKey).node;
+    const healthyCard = app.state.historyCards.get(healthyKey).node;
+    const video = failedCard.children[0].children[0];
+    const healthyVideo = healthyCard.children[0].children[0];
+    const findDownload = (card) => card.querySelectorAll('.button').find((node) => node.tagName === 'a' && node.textContent === 'Download');
+    assert.ok(findDownload(failedCard));
+    const ancestry = [];
+    for (let node = healthyVideo; node; node = node.parent) ancestry.push({ node, detachments: node.detachments, replacements: node.replacements });
+    const focused = findTextButton(healthyCard, 'Upload to YouTube');
+    focused.focus();
+    video.emit('error');
+    assert.equal(failedCard.dataset.previewFailed, 'true');
+    assert.equal(video.isConnected, false);
+    assert.equal(findDownload(failedCard), undefined);
+    assert.match(collectText(failedCard.children[0]), /Video unavailable/);
+    app.renderHistory();
+    assert.equal(app.state.historyCards.get(failedKey).node, failedCard, 'routine snapshots must not repeatedly retry failed previews');
+
+    const requests = [];
+    app.setRequest((requestPath) => {
+      requests.push(requestPath);
+      if (requestPath.startsWith('/api/generations?')) return Promise.resolve({ generations: JSON.parse(JSON.stringify(app.state.generations)) });
+      if (requestPath === '/api/projects') return Promise.resolve({ projects: JSON.parse(JSON.stringify(app.state.projects)) });
+      throw new Error(`Unexpected request: ${requestPath}`);
+    });
+    app.elements.refreshHistory.emit('click');
+    await flushUI();
+    const recovered = app.state.historyCards.get(failedKey).node;
+    assert.notEqual(recovered, failedCard);
+    assert.equal(recovered.children[0].children[0].tagName, 'video');
+    assert.equal(recovered.children[0].children[0].isConnected, true);
+    assert.ok(findDownload(recovered));
+    const records = kind === 'project' ? app.state.projects : app.state.generations;
+    assert.equal(records.find((record) => record.id === failed.id), failed, 'identical cloned API payloads retain immutable snapshots');
+    assert.equal(app.state.historyCards.get(healthyKey).node, healthyCard);
+    assert.equal(app.document.activeElement, focused);
+    for (const { node, detachments, replacements } of ancestry) {
+      assert.equal(node.detachments, detachments, 'healthy video ancestry must stay attached during retry');
+      assert.equal(node.replacements, replacements, 'healthy video ancestry must not be cleared during retry');
+    }
+    assert.equal(requests.length, 2, 'manual refresh should use only existing History endpoints');
+  });
+}
+
+test('late History pages cannot insert private results or clear a newer session load', async () => {
+  const app = configuredApp('project', true, { stubHistory: false });
+  const oldPage = deferred();
+  app.setRequest(() => oldPage.promise);
+  const oldLoad = app.loadHistory(false);
+  app.showLoggedOut();
+  app.state.authenticated = true;
+  const newPage = deferred();
+  app.setRequest(() => newPage.promise);
+  const newLoad = app.loadHistory(false);
+  oldPage.resolve({ generations: [{ id: 'fixture-private-old', prompt: 'Previous session', status: 'completed' }] });
+  await oldLoad;
+  assert.equal(app.state.generations.length, 0);
+  assert.equal(app.state.historyLoading, true);
+  newPage.resolve({ generations: [] });
+  await newLoad;
+  assert.equal(app.state.historyLoading, false);
+  assert.equal(app.elements.refreshHistory.disabled, false);
+});
+
+test('the connection indicator follows one authenticated native stream and refreshes only on open', async () => {
+  const app = configuredApp('project');
+  const calls = [];
+  const sessionCheck = deferred();
+  app.setRequest((requestPath) => {
+    calls.push(requestPath);
+    if (requestPath === '/api/session') return sessionCheck.promise;
+    return Promise.resolve({ projects: [] });
+  });
+  app.startJobEventStream();
+  app.startJobEventStream();
+  assert.equal(app.eventSources.length, 1);
+  const source = app.eventSources[0];
+  assert.equal(source.url, '/api/events');
+  assert.equal(source.options.withCredentials, true);
+  assert.equal(app.elements.connectionState.dataset.state, 'connecting');
+  source.emit('ready');
+  source.emit('ping');
+  assert.equal(app.elements.connectionState.dataset.state, 'connecting');
+  assert.equal(calls.length, 0);
+  source.emit('open');
+  await flushUI();
+  assert.equal(app.elements.connectionState.dataset.state, 'live');
+  assert.equal(calls.filter((requestPath) => requestPath === '/api/projects').length, 1);
+  source.emit('ready');
+  source.emit('ping');
+  assert.equal(calls.filter((requestPath) => requestPath === '/api/projects').length, 1);
+
+  source.emit('error');
+  source.emit('error');
+  assert.equal(app.elements.connectionState.dataset.state, 'reconnecting');
+  assert.equal(calls.filter((requestPath) => requestPath === '/api/session').length, 1);
+  assert.equal(source.closed, false);
+  assert.equal(app.eventSources.length, 1);
+  sessionCheck.reject(new Error('Fixture network interruption'));
+  await flushUI();
+  assert.equal(app.state.authenticated, true);
+  assert.equal(app.state.jobEventSource, source);
+  source.emit('open');
+  await flushUI();
+  assert.equal(app.elements.connectionState.dataset.state, 'live');
+  assert.equal(calls.filter((requestPath) => requestPath === '/api/projects').length, 2);
+});
+
+test('offline and terminally closed streams show honest state and manual History refresh can recover', async () => {
+  const app = configuredApp('project');
+  app.setRequest(() => Promise.resolve({ projects: [] }));
+  app.bindEvents();
+  app.startJobEventStream();
+  const first = app.eventSources[0];
+  first.emit('open');
+  await flushUI();
+  app.setOnline(false);
+  app.emitWindow('offline');
+  assert.equal(app.elements.connectionState.dataset.state, 'offline');
+  assert.match(app.elements.connectionState.title, /jobs may continue running/);
+  app.setOnline(true);
+  first.emit('error');
+  app.emitWindow('online');
+  assert.equal(app.elements.connectionState.dataset.state, 'reconnecting');
+  assert.equal(app.eventSources.length, 1, 'native reconnection must retain its existing stream');
+  first.readyState = 2;
+  first.emit('error');
+  assert.equal(app.elements.connectionState.dataset.state, 'paused');
+  app.elements.refreshHistory.emit('click');
+  assert.equal(first.closed, true);
+  assert.equal(app.eventSources.length, 2);
+  const next = app.eventSources[1];
+  first.emit('open');
+  assert.equal(app.state.jobEventSource, next);
+  assert.equal(app.elements.connectionState.dataset.state, 'reconnecting');
+  next.emit('open');
+  await flushUI();
+  assert.equal(app.elements.connectionState.dataset.state, 'live');
+});
+
+test('unsupported or blocked live streams report unavailable without ending a valid session', () => {
+  for (const options of [{ eventSourceAvailable: false }, { eventSourceThrows: true }]) {
+    const app = configuredApp('project', true, options);
+    app.startJobEventStream();
+    assert.equal(app.elements.connectionState.dataset.state, 'unavailable');
+    assert.equal(app.state.authenticated, true);
+    assert.equal(app.state.jobEventSource, null);
+    assert.equal(app.eventSources.length, 0);
+    assert.match(app.elements.connectionState.title, /Refresh in History/);
+  }
+});
+
+test('stream session gates and logout keep stale events from announcing a live workspace', async () => {
+  const app = configuredApp('project');
+  app.setRequest((requestPath) => Promise.resolve(requestPath === '/api/session' ? { must_change_password: true } : { projects: [] }));
+  app.startJobEventStream();
+  const source = app.eventSources[0];
+  source.emit('error');
+  await flushUI();
+  assert.equal(app.elements.connectionState.dataset.state, 'locked');
+  assert.equal(app.state.mustChangePassword, true);
+  assert.equal(app.state.currentView, 'settings');
+  assert.equal(source.closed, true);
+  source.emit('open');
+  app.startJobEventStream();
+  assert.equal(app.elements.connectionState.dataset.state, 'locked');
+  assert.equal(app.eventSources.length, 1);
+  app.showLoggedOut();
+  source.emit('open');
+  assert.equal(app.elements.connectionState.dataset.state, 'signed-out');
+  assert.equal(app.state.jobEventSource, null);
+});
+
 for (const mode of ['project', 'single']) {
   test(`${mode} submission stays busy across format changes and restores its error`, async () => {
     const app = configuredApp(mode);
@@ -753,7 +1389,7 @@ test('failed single submission cannot enable an incompatible project', async () 
   pending.reject(new Error('Fixture submission failed'));
   await submission;
   assert.equal(app.elements.generate.disabled, true);
-  assert.equal(app.elements.generate.textContent, 'Generate 30-second project');
+  assert.equal(app.elements.generate.textContent, 'Generate 30-second story');
 });
 
 test('a repeated form submission cannot send a second request while busy', async () => {
@@ -781,7 +1417,495 @@ test('a successful clip preserves a project idea entered while it was submitting
   assert.equal(app.elements.projectTopic.value, 'New project idea entered while the clip is submitting');
   assert.equal(app.elements.prompt.value, '');
   assert.equal(app.state.displayedGenerationID, 'fixture-clip');
-  assert.equal(app.elements.generate.textContent, 'Generate 30-second project');
+  assert.equal(app.elements.generate.textContent, 'Generate 30-second story');
+});
+
+for (const mode of ['project', 'single']) {
+  test(`${mode} submission preserves the next draft and edits reverted during its request`, async () => {
+    for (const revert of [false, true]) {
+      const app = configuredApp(mode);
+      app.bindEvents();
+      const field = mode === 'project' ? app.elements.projectTopic : app.elements.prompt;
+      const original = field.value;
+      const response = deferred();
+      let submitted;
+      const accepted = { id: `fixture-accepted-${mode}`, status: 'queued', topic: original, scenes: [], events: [] };
+      app.setRequest((requestPath, options = {}) => {
+        if (options.method === 'POST') { submitted = JSON.parse(options.body); return response.promise; }
+        if (requestPath === '/api/projects') return Promise.resolve({ projects: [accepted] });
+        throw new Error(`Unexpected request: ${requestPath}`);
+      });
+      const submission = app.submitGeneration({ preventDefault() {} });
+      field.value = 'My next draft while the first request is pending';
+      field.emit('input');
+      if (revert) { field.value = original; field.emit('input'); }
+      response.resolve(accepted);
+      await submission;
+      assert.equal(submitted[mode === 'project' ? 'topic' : 'prompt'], original);
+      assert.equal(field.value, revert ? original : 'My next draft while the first request is pending');
+      assert.equal(app.state[mode === 'project' ? 'displayedProjectID' : 'displayedGenerationID'], accepted.id);
+      assert.equal(app.elements.generate.disabled, false);
+    }
+  });
+
+  test(`${mode} submission clears its untouched submitted field`, async () => {
+    const app = configuredApp(mode);
+    const accepted = { id: `fixture-clear-${mode}`, status: 'queued', scenes: [], events: [] };
+    app.setRequest((_requestPath, options = {}) => Promise.resolve(options.method === 'POST' ? accepted : { projects: [accepted] }));
+    await app.submitGeneration({ preventDefault() {} });
+    const field = mode === 'project' ? app.elements.projectTopic : app.elements.prompt;
+    assert.equal(field.value, '');
+    if (mode === 'single') assert.equal(app.elements.promptCount.textContent, '0 / 4000');
+  });
+}
+
+test('uncertain project recovery preserves a draft edited and reverted while acceptance is checked', async () => {
+  const app = configuredApp('project');
+  app.bindEvents();
+  const original = app.elements.projectTopic.value;
+  const post = deferred();
+  const lookup = deferred();
+  let requestID;
+  app.setRequest((requestPath, options = {}) => {
+    if (requestPath === '/api/projects' && options.method === 'POST') {
+      requestID = JSON.parse(options.body).request_id;
+      return post.promise;
+    }
+    if (requestPath === `/api/projects?request_id=${encodeURIComponent(requestID)}`) return lookup.promise;
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  const submission = app.submitProject();
+  post.reject(new Error('Fixture connection interruption'));
+  await flushUI();
+  app.elements.projectTopic.value = 'A temporary next idea';
+  app.elements.projectTopic.emit('input');
+  app.elements.projectTopic.value = original;
+  app.elements.projectTopic.emit('input');
+  lookup.resolve({ projects: [{ id: 'fixture-recovered-edited', request_id: requestID, topic: original, status: 'planning', scenes: [] }] });
+  await submission;
+  assert.equal(app.elements.projectTopic.value, original);
+  assert.equal(app.state.displayedProjectID, 'fixture-recovered-edited');
+  assert.equal(app.state.pendingProjectSubmission, null);
+  assert.equal(app.elements.generate.disabled, false);
+});
+
+test('a late clip response cannot clear a later session draft or unlock its newer request', async () => {
+  const app = configuredApp('single');
+  const first = deferred();
+  app.setRequest(() => first.promise);
+  const oldSubmission = app.submitGeneration({ preventDefault() {} });
+  app.showLoggedOut();
+  app.state.authenticated = true;
+  app.setGenerationMode('single');
+  app.elements.prompt.value = 'New session prompt';
+  const next = deferred();
+  app.setRequest(() => next.promise);
+  const newSubmission = app.submitGeneration({ preventDefault() {} });
+  first.resolve({ id: 'fixture-old-session-clip', status: 'queued' });
+  await oldSubmission;
+  assert.equal(app.elements.prompt.value, 'New session prompt');
+  assert.equal(app.state.displayedGenerationID, '');
+  assert.equal(app.state.submissionPending, true);
+  assert.equal(app.elements.generate.disabled, true);
+  next.resolve({ id: 'fixture-new-session-clip', status: 'queued' });
+  await newSubmission;
+  assert.equal(app.state.displayedGenerationID, 'fixture-new-session-clip');
+  assert.equal(app.elements.prompt.value, '');
+});
+
+test('clip acceptance preserves the validation error attached to a newer invalid draft', async () => {
+  const app = configuredApp('single');
+  app.bindEvents();
+  const response = deferred();
+  app.setRequest(() => response.promise);
+  const submission = app.submitGeneration({ preventDefault() {} });
+  app.elements.prompt.value = 'x'.repeat(4001);
+  app.elements.prompt.emit('input');
+  response.resolve({ id: 'fixture-accepted-with-next-invalid-draft', status: 'queued' });
+  await submission;
+  assert.equal(app.elements.prompt.value.length, 4001);
+  assert.equal(app.elements.promptCount.textContent, '4,001 / 4000');
+  assert.equal(app.elements.promptError.textContent, 'Prompt must be 4,000 characters or fewer.');
+});
+
+test('creator provider recovery reports loading, missing credentials, failure and runtime recovery', async () => {
+  const app = configuredApp('single');
+  app.bindEvents();
+  const response = deferred();
+  app.setRequest(() => response.promise);
+  const loading = app.loadModels(false);
+  assert.equal(app.elements.creatorProviderHelp.hidden, false);
+  assert.match(app.elements.creatorProviderMessage.textContent, /Loading available video models/);
+  assert.equal(app.elements.creatorOpenSettings.hidden, true);
+  assert.equal(app.elements.generate.disabled, true);
+  response.reject(Object.assign(new Error('Fixture key is not configured'), { status: 422 }));
+  await loading;
+  assert.match(app.elements.creatorProviderMessage.textContent, /Configure OpenRouter credentials in Settings/);
+  assert.equal(app.elements.creatorOpenSettings.hidden, false);
+  assert.equal(app.elements.generate.disabled, true);
+  app.setRequest(() => Promise.reject(new Error('Fixture provider is temporarily unavailable')));
+  await app.loadModels(false);
+  assert.match(app.elements.creatorProviderMessage.textContent, /temporarily unavailable/);
+
+  app.setRequest(() => Promise.resolve({ models: [{ id: 'fixture/recovered-model', durations: [9], resolutions: ['720p'], aspect_ratios: ['16:9'], audio: true }], selected_model: 'fixture/recovered-model' }));
+  await app.loadModels(false);
+  assert.equal(app.elements.creatorProviderHelp.hidden, true);
+  assert.equal(app.elements.creatorOpenSettings.hidden, true);
+  assert.equal(app.elements.generate.disabled, false, app.elements.creatorProviderMessage.textContent);
+  assert.equal(app.elements.model.value, 'fixture/recovered-model', 'persisted selection must resolve to its model object');
+  assert.equal(app.elements.duration.value, '9');
+  assert.equal(app.elements.aspectRatio.value, '16:9');
+});
+
+test('missing Modal accounts and OpenRouter story setup have a direct authenticated Settings action', async () => {
+  const app = configuredApp('project');
+  app.state.videoProvider = 'modal';
+  app.bindEvents();
+  await app.loadModels(false);
+  assert.equal(app.elements.generate.disabled, true);
+  assert.match(app.elements.creatorProviderMessage.textContent, /Add a Modal production account in Settings/);
+  assert.equal(app.elements.creatorOpenSettings.hidden, false);
+  app.setRequest((requestPath) => Promise.resolve(requestPath === '/api/settings'
+    ? { video_provider: 'modal', openrouter_api_key_configured: true } : {}));
+  app.elements.creatorOpenSettings.emit('click');
+  assert.equal(app.state.currentView, 'settings');
+  await flushUI();
+
+  app.state.models = [{ id: 'fixture/ready-modal', durations: [6], resolutions: ['480p'], aspect_ratios: ['9:16'] }];
+  app.elements.model.value = 'fixture/ready-modal';
+  app.elements.modalAccountProject.value = 'fixture-account';
+  app.elements.modalAccountSingle.value = 'fixture-account';
+  app.renderProviderSettings({ video_provider: 'modal', openrouter_api_key_configured: false });
+  assert.match(app.elements.creatorProviderMessage.textContent, /OpenRouter API key.*story planning/);
+  assert.equal(app.elements.generate.disabled, true);
+  let requests = 0;
+  app.setRequest(() => { requests++; return Promise.resolve({}); });
+  await app.submitProject();
+  assert.equal(requests, 0, 'known missing story setup must not start a project');
+  app.setGenerationMode('single');
+  assert.equal(app.elements.generate.disabled, false, 'Modal clips do not require OpenRouter story planning');
+  app.setGenerationMode('project');
+  app.renderProviderSettings({ video_provider: 'modal' });
+  assert.equal(app.state.openRouterConfigured, null);
+  assert.equal(app.elements.generate.disabled, false, 'an unknown setup flag must not be treated as missing');
+});
+
+test('provider loads from a prior session cannot replace a new model request or its feedback', async () => {
+  const app = configuredApp('single');
+  const oldModels = deferred();
+  app.setRequest(() => oldModels.promise);
+  const oldLoad = app.loadModels(false);
+  app.showLoggedOut();
+  app.state.authenticated = true;
+  const newModels = deferred();
+  app.setRequest(() => newModels.promise);
+  const newLoad = app.loadModels(false);
+  oldModels.resolve({ models: [{ id: 'fixture/old-model' }], selected_model: 'fixture/old-model' });
+  await oldLoad;
+  assert.equal(app.state.modelsLoading, true);
+  assert.match(app.elements.creatorProviderMessage.textContent, /Loading available video models/);
+  newModels.resolve({ models: [] });
+  await newLoad;
+  assert.equal(app.state.modelsLoading, false);
+  assert.match(app.elements.creatorProviderMessage.textContent, /No video models are available/);
+});
+
+test('saving verified OpenRouter setup enables a ready Modal story without requiring another model load', async () => {
+  const app = configuredApp('project');
+  app.state.videoProvider = 'modal';
+  app.elements.modalAccountProject.value = 'fixture-production-account';
+  app.renderProviderSettings({ video_provider: 'modal', openrouter_api_key_configured: false });
+  assert.equal(app.elements.generate.disabled, true);
+  app.elements.apiKey.value = 'fixture-only-key-not-a-real-secret';
+  const calls = [];
+  app.setRequest((requestPath, options = {}) => { calls.push([requestPath, options.method]); return Promise.resolve({}); });
+  await app.saveAPIKey({ preventDefault() {} });
+  assert.equal(app.state.openRouterConfigured, true);
+  assert.equal(app.elements.creatorProviderHelp.hidden, true);
+  assert.equal(app.elements.generate.disabled, false);
+  assert.equal(app.elements.apiKey.value, '');
+  assert.deepEqual(calls, [['/api/settings/api-key', 'PUT']]);
+});
+
+test('older Settings reads retain a newly saved OpenRouter key while applying unrelated provider settings', async () => {
+  const app = configuredApp('project');
+  const model = app.state.models[0];
+  app.state.videoProvider = 'modal';
+  app.elements.modalAccountProject.value = 'fixture-production-account';
+  app.elements.modalAccountSingle.value = 'fixture-production-account';
+  app.renderProviderSettings({ video_provider: 'modal', openrouter_api_key_configured: false });
+  const oldSettings = deferred();
+  const calls = [];
+  let settingsReads = 0;
+  app.setRequest((requestPath, options = {}) => {
+    calls.push([requestPath, options.method]);
+    if (requestPath === '/api/settings') {
+      return ++settingsReads === 1 ? oldSettings.promise
+        : Promise.resolve({ video_provider: 'modal', openrouter_api_key_configured: false });
+    }
+    if (requestPath === '/api/settings/api-key') return Promise.resolve({});
+    if (requestPath === '/api/modal-accounts') return Promise.resolve({
+      accounts: [{ id: 'fixture-production-account', name: 'Fixture production', configured: true }],
+      active_id: 'fixture-production-account'
+    });
+    if (requestPath.startsWith('/api/video-models')) return Promise.resolve({ models: [model], selected_model: model.id });
+    if (requestPath === '/api/youtube/status') return Promise.resolve({ configured: false, connected: false });
+    throw new Error(`Unexpected request: ${requestPath}`);
+  });
+  const loading = app.loadSettings(false);
+  app.elements.apiKey.value = 'fixture-only-key-not-a-real-secret';
+  await app.saveAPIKey({ preventDefault() {} });
+  assert.equal(app.state.openRouterConfigured, true);
+  assert.equal(app.elements.generate.disabled, false);
+  oldSettings.resolve({ video_provider: 'modal', openrouter_api_key_configured: false,
+    modal_video_base_url: 'https://fixture.invalid/modal', vault_code_configured: true });
+  await loading;
+  assert.equal(app.state.openRouterConfigured, true, 'the old read must not undo the verified save');
+  assert.equal(app.elements.keyState.textContent, 'Configured');
+  assert.equal(app.elements.maskedKey.textContent, 'Configured');
+  assert.equal(app.elements.generate.disabled, false);
+  assert.equal(app.elements.creatorProviderHelp.hidden, true);
+  assert.equal(app.elements.modalBaseURL.value, 'https://fixture.invalid/modal');
+  assert.equal(app.state.vaultConfigured, true, 'other real settings must still apply');
+  assert.equal(app.state.modalAccounts[0].id, 'fixture-production-account');
+  assert.ok(calls.some(([requestPath]) => requestPath === '/api/youtube/status'));
+  assert.equal(settingsReads, 1, 'protecting key state does not add a revalidation request');
+  await app.loadSettings(false);
+  assert.equal(app.state.openRouterConfigured, false, 'a later current read may report a real configuration change');
+  assert.equal(app.elements.generate.disabled, true);
+});
+
+test('Settings responses and failures from a prior session cannot change current feedback or start follow-up loads', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const app = configuredApp('single');
+    const oldSettings = deferred();
+    app.setRequest(() => oldSettings.promise);
+    const loading = app.loadSettings(true);
+    app.showLoggedOut();
+    app.state.authenticated = true;
+    app.renderProviderSettings({ video_provider: 'modal', openrouter_api_key_configured: true });
+    app.elements.toast.textContent = 'Current session feedback';
+    const followups = [];
+    app.setRequest((requestPath) => { followups.push(requestPath); return Promise.resolve({}); });
+    if (outcome === 'success') oldSettings.resolve({ video_provider: 'openrouter', openrouter_api_key_configured: false });
+    else oldSettings.reject(new Error('Prior session fixture error'));
+    await loading;
+    assert.equal(app.state.videoProvider, 'modal', outcome);
+    assert.equal(app.state.openRouterConfigured, true, outcome);
+    assert.equal(app.elements.keyState.textContent, 'Configured', outcome);
+    assert.equal(app.elements.toast.textContent, 'Current session feedback', outcome);
+    assert.deepEqual(followups, [], outcome);
+  }
+});
+
+test('Settings follow-ups from a prior session cannot replace accounts, channel status, or feedback', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const app = configuredApp('single');
+    const oldAccounts = deferred();
+    const oldChannel = deferred();
+    const calls = [];
+    app.setRequest((requestPath) => {
+      calls.push(requestPath);
+      if (requestPath === '/api/settings') return Promise.resolve({ video_provider: 'modal', openrouter_api_key_configured: false });
+      if (requestPath === '/api/modal-accounts') return oldAccounts.promise;
+      if (requestPath === '/api/youtube/status') return oldChannel.promise;
+      throw new Error('Unexpected old-session follow-up: ' + requestPath);
+    });
+    const loading = app.loadSettings(true);
+    await flushUI();
+    assert.deepEqual(calls, ['/api/settings', '/api/modal-accounts', '/api/youtube/status']);
+    app.showLoggedOut();
+    app.state.authenticated = true;
+    app.renderProviderSettings({ video_provider: 'modal', openrouter_api_key_configured: true });
+    app.state.modalAccounts = [{ id: 'fixture-current-account', configured: true }];
+    app.state.modalAccountsActiveID = 'fixture-current-account';
+    app.elements.modalAccountSingle.value = 'fixture-current-account';
+    app.elements.modalKeyState.textContent = 'Current account feedback';
+    const currentChannel = { configured: true, connected: true, channel: { id: 'fixture-current-channel' } };
+    app.state.youtubeStatus = currentChannel;
+    app.elements.youtubeChannelState.textContent = 'Current channel feedback';
+    app.elements.toast.textContent = 'Current session feedback';
+    if (outcome === 'success') {
+      oldAccounts.resolve({ accounts: [{ id: 'fixture-prior-account', configured: true }], active_id: 'fixture-prior-account' });
+      oldChannel.resolve({ configured: false, connected: false });
+    } else {
+      oldAccounts.reject(new Error('Prior session fixture account error'));
+      oldChannel.reject(new Error('Prior session fixture channel error'));
+    }
+    await loading;
+    assert.equal(app.state.modalAccounts[0].id, 'fixture-current-account', outcome);
+    assert.equal(app.state.modalAccountsActiveID, 'fixture-current-account', outcome);
+    assert.equal(app.elements.modalAccountSingle.value, 'fixture-current-account', outcome);
+    assert.equal(app.elements.modalKeyState.textContent, 'Current account feedback', outcome);
+    assert.equal(app.state.youtubeStatus, currentChannel, outcome);
+    assert.equal(app.elements.youtubeChannelState.textContent, 'Current channel feedback', outcome);
+    assert.equal(app.elements.toast.textContent, 'Current session feedback', outcome);
+    assert.deepEqual(calls, ['/api/settings', '/api/modal-accounts', '/api/youtube/status'], 'old accounts must not start a model request');
+  }
+});
+
+test('a Settings account refresh finishing its model load after logout keeps current account feedback', async () => {
+  const app = configuredApp('single');
+  const oldModels = deferred();
+  app.setRequest((requestPath) => {
+    if (requestPath === '/api/settings') return Promise.resolve({ video_provider: 'modal', openrouter_api_key_configured: true });
+    if (requestPath === '/api/modal-accounts') return Promise.resolve({
+      accounts: [{ id: 'fixture-prior-account', name: 'Prior fixture account', configured: true }], active_id: 'fixture-prior-account'
+    });
+    if (requestPath.startsWith('/api/video-models')) return oldModels.promise;
+    if (requestPath === '/api/youtube/status') return Promise.resolve({ configured: false, connected: false });
+    throw new Error('Unexpected request: ' + requestPath);
+  });
+  const loading = app.loadSettings(true);
+  await flushUI();
+  assert.equal(app.state.modelsLoading, true);
+  app.showLoggedOut();
+  app.state.authenticated = true;
+  app.state.modalAccounts = [{ id: 'fixture-current-account', configured: true }];
+  app.elements.modalKeyState.textContent = 'Current account feedback';
+  oldModels.resolve({ models: [] });
+  await loading;
+  assert.equal(app.elements.modalKeyState.textContent, 'Current account feedback');
+  assert.equal(app.state.modalAccounts[0].id, 'fixture-current-account');
+});
+
+test('a prior session key save cannot change feedback or unlock a new save button', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const app = configuredApp('single');
+    app.state.videoProvider = 'modal';
+    const button = app.document.createElement('button');
+    button.textContent = 'Test and save';
+    app.elements.apiKeyForm.querySelector = () => button;
+    app.elements.apiKey.value = 'fixture-only-old-key-not-a-real-secret';
+    const oldSave = deferred();
+    app.setRequest(() => oldSave.promise);
+    const saving = app.saveAPIKey({ preventDefault() {} });
+    app.showLoggedOut();
+    assert.equal(button.disabled, false, 'logout releases an abandoned save');
+    assert.equal(button.getAttribute('aria-busy'), null);
+    assert.equal(button.textContent, 'Test and save');
+    assert.equal(app.elements.apiKey.value, '', 'logout clears the write-only key input');
+    app.state.authenticated = true;
+    app.state.videoProvider = 'modal';
+    app.elements.apiKey.value = 'fixture-only-new-key-not-a-real-secret';
+    app.elements.toast.textContent = 'Current session feedback';
+    const newSave = deferred();
+    app.setRequest(() => newSave.promise);
+    const currentSaving = app.saveAPIKey({ preventDefault() {} });
+    if (outcome === 'success') oldSave.resolve({});
+    else oldSave.reject(new Error('Prior session fixture key error'));
+    await saving;
+    assert.equal(button.disabled, true, outcome);
+    assert.equal(button.getAttribute('aria-busy'), 'true', outcome);
+    assert.equal(app.elements.apiKey.value, 'fixture-only-new-key-not-a-real-secret', outcome);
+    assert.equal(app.elements.toast.textContent, 'Current session feedback', outcome);
+    assert.equal(app.state.openRouterConfigured, null, outcome);
+    newSave.resolve({});
+    await currentSaving;
+    assert.equal(button.disabled, false, outcome);
+    assert.equal(app.state.openRouterConfigured, true, outcome);
+  }
+});
+
+test('switching format during an OpenRouter catalog load resolves the current creator instead of staying busy', async () => {
+  const app = configuredApp('project');
+  const response = deferred();
+  app.setRequest(() => response.promise);
+  const loading = app.loadModels(false);
+  app.setGenerationMode('single');
+  response.resolve({ models: [{ id: 'fixture/flexible-clip', durations: [9], resolutions: ['720p'], aspect_ratios: ['16:9'] }], selected_model: 'fixture/flexible-clip' });
+  await loading;
+  assert.equal(app.state.mode, 'single');
+  assert.equal(app.state.modelsLoading, false);
+  assert.equal(app.elements.model.value, 'fixture/flexible-clip');
+  assert.equal(app.elements.modelTrigger.disabled, false);
+  assert.equal(app.elements.generate.disabled, false);
+  assert.equal(app.elements.duration.value, '9');
+  assert.equal(app.elements.creatorProviderHelp.hidden, true);
+});
+
+test('project results expose only actual story content and preserve a compact story disclosure during progress', () => {
+  const app = configuredApp('project');
+  const story = 'A real synthetic fixture story sentence. '.repeat(30);
+  const project = { id: 'fixture-visible-story', status: 'generating', story, script: 'Fixture script kept in details', updated_at: 1, scenes: [] };
+  app.renderProject(project);
+  assert.equal(app.elements.projectStory.hidden, false);
+  const details = app.elements.projectStory.children.find((node) => node.tagName === 'details');
+  assert.ok(details);
+  assert.equal(details.open, false);
+  assert.equal(details.children[0].textContent, 'Read story');
+  assert.equal(details.children[1].textContent, story.trim());
+  assert.ok(Array.from(app.elements.projectStory.children[1].textContent).length <= 301);
+  assert.doesNotMatch(collectText(app.elements.projectStory), /Fixture script kept in details/);
+  details.open = true;
+  app.handleJobSnapshot('project', { data: JSON.stringify({ id: project.id, project: { ...project, progress: 60, updated_at: 2 } }) });
+  assert.equal(app.elements.projectStory.children.find((node) => node.tagName === 'details'), details);
+  assert.equal(details.open, true);
+  assert.equal(details.detachments, 0);
+  app.clearProjectDisplay();
+  app.renderProject({ id: 'fixture-no-story', status: 'queued', scenes: [] });
+  assert.equal(app.elements.projectStory.hidden, true);
+  assert.equal(app.elements.projectStory.children.length, 0);
+});
+
+test('project scene scripts stay visible while prompts and the timeline use actual native disclosures', () => {
+  const app = configuredApp('project');
+  const project = { id: 'fixture-story-disclosures', status: 'generating', updated_at: 1,
+    story: 'A compact fixture story', scenes: [{ scene_number: 1, status: 'processing', script: 'Visible fixture scene script', prompt: 'Detailed fixture generation prompt' }],
+    pipeline_events: [{ stage: 'scene_generation', status: 'processing', message: 'Actual fixture pipeline event' }] };
+  app.clearProjectDisplay();
+  assert.equal(app.elements.projectPipeline.hidden, true);
+  app.renderProject(project);
+  assert.equal(app.elements.projectPipeline.hidden, false);
+  assert.match(collectText(app.elements.projectPipelineList), /Actual fixture pipeline event/);
+  assert.equal(app.elements.projectStory.hidden, false);
+  assert.match(collectText(app.elements.projectStory), /A compact fixture story/);
+  const scene = app.elements.projectScenes.children[0];
+  const prompt = scene.children.find((node) => node.classList.contains('scene-prompt-details'));
+  assert.ok(scene.children.find((node) => node.classList.contains('scene-copy')));
+  assert.equal(prompt.tagName, 'details');
+  assert.equal(prompt.open, false);
+  assert.equal(prompt.children[0].textContent, 'Scene prompt');
+  assert.equal(prompt.children[1].textContent, 'Detailed fixture generation prompt');
+  prompt.open = true;
+  app.renderProject({ ...project, updated_at: 2 });
+  assert.equal(app.elements.projectScenes.children[0].children.find((node) => node.classList.contains('scene-prompt-details')).open, true);
+});
+
+test('live project progress restores matching scene-summary focus without stealing other focus', () => {
+  const app = configuredApp('project');
+  const project = { id: 'fixture-focused-scene', status: 'generating', updated_at: 1,
+    scenes: [{ scene_number: 1, status: 'processing', prompt: 'Fixture scene prompt' }] };
+  const scenePrompt = () => app.elements.projectScenes.children[0].children.find((node) => node.classList.contains('scene-prompt-details'));
+  const progress = (record) => app.handleJobSnapshot('project', { data: JSON.stringify({ id: record.id, project: record }) });
+  app.renderProject(project);
+  scenePrompt().open = true;
+  scenePrompt().children[0].focus();
+  const previousSummary = app.document.activeElement;
+  progress({ ...project, progress: 50, updated_at: 2 });
+  assert.equal(scenePrompt().open, true);
+  assert.equal(app.document.activeElement, scenePrompt().children[0]);
+  assert.equal(app.document.activeElement.isConnected, true);
+  assert.equal(app.document.activeElement.focusOptions.preventScroll, true);
+  assert.notEqual(app.document.activeElement, previousSummary);
+
+  scenePrompt().open = false;
+  scenePrompt().children[0].focus();
+  progress({ ...project, progress: 55, updated_at: 3 });
+  assert.equal(scenePrompt().open, false, 'a closed disclosure keeps its state');
+  assert.equal(app.document.activeElement, scenePrompt().children[0]);
+  app.elements.promptCategory.focus();
+  progress({ ...project, progress: 60, updated_at: 4 });
+  assert.equal(app.document.activeElement, app.elements.promptCategory, 'an unrelated control keeps focus');
+  scenePrompt().children[0].focus();
+  const changedProject = { ...project, updated_at: 5,
+    scenes: [{ ...project.scenes[0], prompt: 'A different fixture scene prompt' }] };
+  progress(changedProject);
+  assert.equal(scenePrompt().open, false, 'a changed prompt starts closed');
+  assert.notEqual(app.document.activeElement, scenePrompt().children[0], 'a new prompt must not inherit the old action focus');
+  scenePrompt().children[0].focus();
+  app.renderProject({ ...changedProject, id: 'fixture-other-project' });
+  assert.notEqual(app.document.activeElement, scenePrompt().children[0], 'a different project must not inherit focus');
 });
 
 test('completed and failed saved results remain scoped to their format', () => {

@@ -4,20 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FrameVault — Video workspace</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260929-1">
-  <link rel="stylesheet" href="/static/model-picker.css?v=20260929-1">
-  <link rel="stylesheet" href="/static/project.css?v=20260929-1">
-  <link rel="stylesheet" href="/static/history-settings.css?v=20260929-1">
-  <link rel="stylesheet" href="/static/youtube.css?v=20261002-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/model-picker.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/project.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/history-settings.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/youtube.css?v=20261007-studio">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
     <div class="login-panel">
-      <div class="brand-mark" aria-hidden="true">F</div>
+      <div class="login-brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM5 8h14M5 16h14M9 4v4M15 4v4M9 16v4M15 16v4"/></svg></div><span>FrameVault</span></div>
       <div id="login-view">
-        <p class="eyebrow">Private workspace</p>
-        <h1>Welcome back</h1>
-        <p class="subtle">Sign in to manage generations and stored videos.</p>
+        <h1>Enter your studio.</h1>
+        <p class="subtle">A private space to create, follow and keep your video work.</p>
         <form id="login-form" class="stack" novalidate>
           <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required></div>
           <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required></div>
@@ -45,136 +44,138 @@
   </section>
 
   <div id="app-shell" class="app-shell" hidden>
+    <a class="skip-link" href="#page-title">Skip to content</a>
     <aside id="workspace-navigation" class="sidebar">
-      <div class="brand"><div class="brand-mark small">F</div><span>FrameVault</span></div>
+      <div class="brand"><div class="brand-mark small" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM5 8h14M5 16h14M9 4v4M15 4v4M9 16v4M15 16v4"/></svg></div><div><strong>FrameVault</strong><span>Production studio</span></div></div>
       <nav aria-label="Main navigation">
-        <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Overview</button>
-        <button class="nav-item" data-view="generate"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M9 3v12M3 9h12"></path></svg></span>Generate</button>
+        <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Workspace</button>
+        <button class="nav-item" data-view="generate"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M9 3v12M3 9h12"></path></svg></span>Create</button>
         <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="M9 5.5V9l2.5 1.5"></path></svg></span>History</button>
         <button class="nav-item" data-view="vault"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="3" y="7.5" width="12" height="8" rx="1.5"></rect><path d="M5.5 7.5V5a3.5 3.5 0 0 1 7 0v2.5"></path></svg></span>Vault</button>
         <button class="nav-item" data-view="settings"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"></path><circle cx="6" cy="5" r="1.5"></circle><circle cx="11" cy="9" r="1.5"></circle><circle cx="7" cy="13" r="1.5"></circle></svg></span>Settings</button>
       </nav>
-      <div class="sidebar-foot"><span class="status-dot" aria-hidden="true"></span><span>Private workspace</span></div>
+      <div class="sidebar-foot"><span class="connection-indicator" aria-hidden="true"></span><span id="connection-state" role="status" aria-live="polite" data-state="connecting">Connecting to workspace</span></div>
     </aside>
 
     <main class="main">
       <header class="topbar">
-        <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation" aria-controls="workspace-navigation" aria-expanded="false">☰</button>
-        <div><p class="eyebrow" id="page-kicker">Workspace</p><h1 id="page-title" tabindex="-1">Overview</h1></div>
-        <div class="account"><div class="avatar" aria-hidden="true"></div><div class="account-copy"><strong id="account-name">Signed in</strong><span>Private workspace</span></div><button id="logout" class="text-button">Log out</button></div>
+        <button id="menu-button" class="icon-button menu-button" aria-label="Open navigation" aria-controls="workspace-navigation" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"/></svg></button>
+        <div class="page-heading"><p class="eyebrow" id="page-kicker">Studio</p><h1 id="page-title" tabindex="-1">Workspace</h1></div>
+        <div class="account"><div class="avatar" aria-hidden="true"></div><div class="account-copy"><strong id="account-name">Signed in</strong><span>Private studio</span></div><button id="logout" class="text-button">Log out</button></div>
       </header>
 
       <div class="content">
         <section class="view active" data-page="overview">
-          <div class="hero">
-            <div class="hero-copy"><p class="eyebrow light">Video workspace</p><h2>Turn a topic into a video.</h2><p>Generate one clip or build a 30-second Short from five connected scenes.</p><button class="button light" data-go="generate">Create video</button></div>
-            <div class="hero-facts" role="group" aria-label="30-second project format">
-              <div><strong>30 sec</strong><span>Finished project</span></div>
-              <div><strong>5 × 6 sec</strong><span>Connected scenes</span></div>
-              <div><strong>9:16</strong><span>Vertical output</span></div>
-            </div>
+          <div class="workspace-intro">
+            <div><h2>Start with an idea.</h2><p>Build a connected story or direct a single shot.</p></div>
+            <span class="workspace-note">Your private production workspace</span>
           </div>
-          <section class="stats-grid" aria-label="Workspace activity">
-            <article class="stat-card"><span>Total generations</span><strong id="stat-total">0</strong></article>
-            <article class="stat-card"><span>Completed</span><strong id="stat-completed">0</strong></article>
-            <article class="stat-card"><span>In progress</span><strong id="stat-active">0</strong></article>
-            <article class="stat-card"><span>Provider-reported cost</span><strong id="stat-cost">$0.00</strong></article>
+          <div class="creation-choices" aria-label="Choose what to create">
+            <button class="creation-choice" type="button" data-create-mode="project">
+              <span class="format-illustration story-illustration" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span>
+              <span class="creation-copy"><strong>30-second story</strong><span>Give us an idea. Get a script and five connected scenes, joined into one video.</span></span>
+              <span class="format-facts"><span>5 scenes</span><span>Vertical</span><span>Silent</span></span>
+              <span class="choice-action">Create a story<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12M11 5l5 5-5 5"/></svg></span>
+            </button>
+            <button class="creation-choice" type="button" data-create-mode="single">
+              <span class="format-illustration clip-illustration" aria-hidden="true"><span></span></span>
+              <span class="creation-copy"><strong>Single clip</strong><span>Describe a shot. Choose a model and set its duration, framing and output.</span></span>
+              <span class="format-facts"><span>Your prompt</span><span>Flexible output</span></span>
+              <span class="choice-action">Create a clip<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12M11 5l5 5-5 5"/></svg></span>
+            </button>
+          </div>
+          <section class="activity-section" aria-labelledby="activity-heading">
+            <div class="activity-heading"><h2 id="activity-heading">Clip activity</h2><p>Totals for single clips. Project runs appear in recent work below.</p></div>
+            <div class="stats-grid">
+              <article class="stat-card"><span>Total clips</span><strong id="stat-total">&mdash;</strong></article>
+              <article class="stat-card"><span>Completed clips</span><strong id="stat-completed">&mdash;</strong></article>
+              <article class="stat-card"><span>Active clips</span><strong id="stat-active">&mdash;</strong></article>
+              <article class="stat-card"><span>Recorded clip cost</span><strong id="stat-cost">&mdash;</strong></article>
+            </div>
           </section>
           <section class="panel overview-recent" aria-labelledby="recent-heading">
-            <div class="panel-head"><div><h2 id="recent-heading">Recent generations</h2><p>Your latest completed and active work</p></div><button class="text-button" data-go="history">View history</button></div>
-            <div id="recent-list" class="recent-list"><div class="empty">No generations yet.</div></div>
+            <div class="panel-head"><div><h2 id="recent-heading">Recent work</h2><p>Stories and clips, with live progress and saved results.</p></div><button class="text-button" data-go="history" type="button">Browse History</button></div>
+            <div id="recent-list" class="recent-list"><div class="empty">Your work will appear here after you start a generation.</div></div>
           </section>
         </section>
 
         <section class="view" data-page="generate">
           <div class="two-column">
-            <section class="panel generator-panel">
-              <div class="panel-head"><div><h2>New video</h2><p>Choose a format, add your idea, and set the output.</p></div></div>
-              <div id="generation-mode" class="mode-switch" role="tablist" aria-label="Generation type">
-                <button class="mode-option active" type="button" data-mode="project" role="tab" aria-selected="true">30-second project</button>
-                <button class="mode-option" type="button" data-mode="single" role="tab" aria-selected="false">Single clip</button>
+            <section class="panel generator-panel" aria-labelledby="creator-heading">
+              <div class="panel-head"><div><h2 id="creator-heading">New video</h2><p>Start with the format. Shape the idea. Choose how to make it.</p></div></div>
+              <div id="generation-mode" class="mode-switch" role="tablist" aria-label="Video format">
+                <button id="generation-mode-project" class="mode-option active" type="button" data-mode="project" role="tab" aria-selected="true" aria-controls="project-inputs"><span class="mode-label">30-second story</span><span class="mode-description">One idea. Five connected scenes.</span></button>
+                <button id="generation-mode-single" class="mode-option" type="button" data-mode="single" role="tab" aria-selected="false" aria-controls="single-prompt-field"><span class="mode-label">Single clip</span><span class="mode-description">One prompt. Your output settings.</span></button>
               </div>
               <form id="generator-form" novalidate>
-                <div id="project-inputs">
-                  <div class="field"><div class="label-row"><label for="project-topic">Topic or story idea</label><span>Auto-scripted</span></div><textarea id="project-topic" rows="7" placeholder="What should this 30-second Short be about?" aria-describedby="project-topic-note project-topic-error" required></textarea><p id="project-topic-error" class="form-error" role="alert" aria-live="polite"></p></div>
-                  <p id="project-topic-note" class="field-hint">We turn your idea into a story, script, and five connected six-second scenes.</p>
-                </div>
-                <div class="field"><div class="label-row"><label for="prompt">Prompt</label><span id="prompt-count" aria-live="polite">0 / 4000</span></div><textarea id="prompt" rows="7" placeholder="Describe the scene, movement, lighting, and mood…" aria-describedby="prompt-count prompt-error" required></textarea><p id="prompt-error" class="form-error" role="alert" aria-live="polite"></p></div>
-                <div class="random-prompt-controls field">
-                  <label for="prompt-category">Category: <strong id="prompt-category-name" aria-live="polite">Kid Animation</strong></label>
-                  <input id="prompt-category" type="range" min="0" max="5" step="1" value="0" aria-valuetext="Kid Animation">
-                  <button id="random-prompt" class="button secondary" type="button">Generate random prompt</button>
-                </div>
-                <div class="field model-field">
-                  <label id="model-label" for="model-trigger">Video model and price</label>
-                  <div id="model-picker" class="model-picker">
-                    <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
-                      <span id="model-trigger-content" class="model-trigger-content"><span class="model-placeholder">Loading models…</span></span>
-                      <span class="model-chevron" aria-hidden="true"></span>
-                    </button>
-                    <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
+                <section class="creator-section" aria-labelledby="idea-heading">
+                  <div class="creator-section-heading"><h3 id="idea-heading">The idea</h3><span>What should we make?</span></div>
+                  <div id="project-inputs" role="tabpanel" aria-labelledby="generation-mode-project">
+                    <div class="field"><label for="project-topic">Topic or story idea</label><textarea id="project-topic" rows="5" placeholder="Describe the story you want to tell, who it follows, and what happens." aria-describedby="project-topic-note project-topic-error" required></textarea><p id="project-topic-error" class="form-error" role="alert" aria-live="polite"></p></div>
+                    <p id="project-topic-note" class="field-hint">Your idea becomes a story, a script and five six-second scenes. Story planning uses OpenRouter with any video provider.</p>
                   </div>
-                  <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models…</option></select>
-                  <small id="project-model-note" aria-live="polite">Choose a model that supports six-second clips at 480p in 9:16.</small>
+                  <div id="single-prompt-field" class="field" role="tabpanel" aria-labelledby="generation-mode-single"><div class="label-row"><label for="prompt">Scene prompt</label><span id="prompt-count" aria-live="polite">0 / 4000</span></div><textarea id="prompt" rows="5" placeholder="Describe the subject, motion, framing, lighting and mood." aria-describedby="prompt-count prompt-error" required></textarea><p id="prompt-error" class="form-error" role="alert" aria-live="polite"></p></div>
+                  <div class="random-prompt-controls">
+                    <div class="field"><label for="prompt-category">Idea category</label><span id="prompt-category-name" hidden>Kid Animation</span><select id="prompt-category" aria-describedby="category-note"><option value="0">Kid Animation</option><option value="1">Horror Story</option><option value="2">Nature</option><option value="3">Seduction</option><option value="4">Mature Content</option><option value="5">Soft Corn</option></select></div>
+                    <button id="random-prompt" class="button secondary" type="button">Suggest an idea</button>
+                    <p id="category-note" class="field-hint">Guides suggested ideas and story planning.</p>
+                  </div>
+                </section>
+                <section class="creator-section" aria-labelledby="production-heading">
+                  <div class="creator-section-heading"><h3 id="production-heading">The production</h3><span>Model and output</span></div>
+                  <div class="field model-field">
+                    <label id="model-label" for="model-trigger">Video model</label>
+                    <div id="model-picker" class="model-picker">
+                      <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="listbox" aria-controls="model-menu" aria-expanded="false" aria-labelledby="model-label model-trigger" disabled>
+                        <span id="model-trigger-content" class="model-trigger-content"><span class="model-placeholder">Loading available models...</span></span><span class="model-chevron" aria-hidden="true"></span>
+                      </button>
+                      <div id="model-menu" class="model-menu" role="listbox" aria-labelledby="model-label" tabindex="-1" hidden></div>
+                    </div>
+                    <select id="model" class="visually-hidden" required disabled aria-hidden="true" tabindex="-1"><option value="">Loading models...</option></select>
+                    <small id="project-model-note" aria-live="polite">Choose a model that supports six-second clips at 480p in 9:16.</small>
+                  </div>
+                  <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
+                  <div id="creator-provider-help" class="creator-provider-help" hidden><p id="creator-provider-message">Connect your video provider in Settings to continue.</p><button id="creator-open-settings" class="text-button" data-go="settings" type="button" hidden>Open provider settings</button></div>
+                  <div id="modal-account-project-field" class="field modal-account-field" hidden><label for="modal-account-project">Production account</label><select id="modal-account-project" required><option value="">Choose a Modal account</option></select><small>The Modal account that will generate your five scenes.</small></div>
+                  <div id="modal-account-single-field" class="field modal-account-field" hidden><label for="modal-account-single">Production account</label><select id="modal-account-single" required><option value="">Choose a Modal account</option></select><small>The Modal account that will generate this clip.</small></div>
+                  <div id="single-options" class="form-grid">
+                    <div class="field"><label for="duration">Duration</label><select id="duration"></select></div>
+                    <div id="resolution-field" class="field"><label for="resolution">Resolution</label><select id="resolution"></select></div>
+                    <div class="field"><label for="aspect-ratio">Framing</label><select id="aspect-ratio"></select></div>
+                    <div id="audio-option" class="field audio-option" hidden><label class="checkbox-label" for="generate-audio"><input id="generate-audio" type="checkbox"> Generate audio</label></div>
+                  </div>
+                  <div id="project-options" class="project-options"><span>Story output</span><strong>30 seconds, vertical and silent</strong><p>Five 480p scenes, joined into a 1080 &times; 1920 video.</p></div>
+                </section>
+                <div class="creator-submit">
+                  <div class="estimate"><span>Estimated video cost</span><strong id="cost-estimate">Unavailable</strong><small>Shown when the provider supplies pricing.<span id="project-cost-note"> Story planning is charged separately through OpenRouter.</span></small></div>
+                  <button id="generate" class="button primary full" type="submit" disabled>Generate 30-second project</button>
+                  <p class="submission-note">The result saves to History. You can keep working while it generates.</p>
                 </div>
-                <p id="active-video-provider" class="provider-caption" aria-live="polite"></p>
-                <div id="modal-account-project-field" class="field modal-account-field" hidden>
-                  <label for="modal-account-project">Modal account for this submission</label>
-                  <select id="modal-account-project" required><option value="">Choose a Modal account</option></select>
-                  <small>Choose which Modal endpoint and account will run this project.</small>
-                </div>
-                <div id="modal-account-single-field" class="field modal-account-field" hidden>
-                  <label for="modal-account-single">Modal account for this submission</label>
-                  <select id="modal-account-single" required><option value="">Choose a Modal account</option></select>
-                  <small>Choose which Modal endpoint and account will run this clip.</small>
-                </div>
-                <div id="single-options" class="form-grid">
-                  <div class="field"><label for="duration">Duration</label><select id="duration"></select></div>
-                  <div id="resolution-field" class="field"><label for="resolution">Resolution</label><select id="resolution"></select></div>
-                  <div class="field"><label for="aspect-ratio">Aspect ratio</label><select id="aspect-ratio"></select></div>
-                  <div id="audio-option" class="field audio-option" hidden><label class="checkbox-label" for="generate-audio"><input id="generate-audio" type="checkbox"> Generate audio</label></div>
-                </div>
-                <div id="project-options" class="project-options"><span>Project output</span><strong>30-second 9:16 video · 5 × 6-second scenes at 480p</strong></div>
-                <div class="estimate"><span>Estimated generation cost</span><strong id="cost-estimate">Unavailable</strong><small>Costs are shown when the selected video provider supplies pricing.</small></div>
-                <button id="generate" class="button primary full" type="submit" disabled>Generate 30-second project</button>
               </form>
             </section>
-            <aside class="panel status-panel">
-              <div class="panel-head"><div><h2>Generation status</h2><p>Live progress and result</p></div><span id="status-badge" class="badge neutral">Idle</span></div>
-              <div id="status-empty" class="status-empty"><div class="status-stage" aria-hidden="true"><span class="status-stage-frame"></span><span>Video preview</span></div><h3>Ready when you are</h3><p>Progress and your preview will appear here when generation starts.</p></div>
+            <aside class="panel status-panel" aria-labelledby="production-result-heading">
+              <div class="panel-head"><div><h2 id="production-result-heading">Your production</h2><p>Progress, story and finished video.</p></div><span id="status-badge" class="badge neutral">Idle</span></div>
+              <div id="status-empty" class="status-empty"><div class="status-stage" aria-hidden="true"><span class="status-stage-frame"></span></div><h3>A space for your next video</h3><p>Start a generation to follow its progress here. The result saves to History.</p></div>
               <div id="status-active" hidden>
-                <div id="progress-wrap" class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
-                <p id="status-detail" class="subtle"></p>
+                <div id="progress-wrap" class="progress-wrap"><div id="progress-bar" class="progress-bar" role="progressbar" aria-label="Clip generation progress" aria-valuemin="0" aria-valuemax="100"></div></div>
+                <p id="status-detail" class="production-status-copy" role="status" aria-live="polite"></p>
                 <div id="error" class="alert error" role="alert" hidden></div>
-                <section id="single-terminal-section" class="job-terminal-section" hidden aria-labelledby="single-terminal-title">
-                  <div class="trace-heading"><div><h3 id="single-terminal-title">Job console</h3><p>Normalized generation events</p></div></div>
-                  <ol id="single-terminal" class="job-terminal" aria-live="polite"></ol>
-                </section>
                 <button id="retry-status" class="button secondary" type="button" hidden>Retry status</button>
                 <video id="generated-video" aria-label="Generated video preview" controls playsinline preload="metadata" hidden></video>
-                <a id="open-video" class="button secondary full" hidden>Download video</a>
-                <button id="single-youtube-upload" class="button secondary full youtube-entry" type="button" hidden>Upload to YouTube</button>
+                <div class="result-actions"><a id="open-video" class="button primary" hidden>Download video</a><button id="single-youtube-upload" class="button secondary" type="button" hidden>Upload to YouTube</button></div>
+                <details id="single-terminal-section" class="technical-disclosure job-terminal-section" hidden aria-labelledby="single-terminal-title"><summary><span id="single-terminal-title" class="disclosure-title">Job events</span><span class="disclosure-note">Generation details</span></summary><ol id="single-terminal" class="job-terminal" aria-live="polite"></ol></details>
               </div>
               <div id="project-status" hidden>
-                <div id="project-progress-wrap" class="progress-wrap"><div id="project-progress-bar" class="progress-bar"></div></div>
-                <p id="project-status-detail" class="subtle">Preparing your project…</p>
+                <div id="project-progress-wrap" class="progress-wrap"><div id="project-progress-bar" class="progress-bar" role="progressbar" aria-label="Story generation progress" aria-valuemin="0" aria-valuemax="100"></div></div>
+                <p id="project-status-detail" class="production-status-copy" role="status" aria-live="polite">Preparing your story...</p>
                 <div id="project-error" class="alert error" role="alert" hidden></div>
                 <button id="retry-project" class="button secondary" type="button" hidden>Retry project</button>
-                <section id="project-pipeline" class="project-pipeline" aria-labelledby="project-pipeline-title">
-                  <div class="trace-heading"><h3 id="project-pipeline-title">Pipeline</h3><span class="trace-caption">Process trace</span></div>
-                  <ol id="project-pipeline-list" class="pipeline-list"></ol>
-                </section>
-                <section class="job-terminal-section project-terminal-section" aria-labelledby="project-terminal-title">
-                  <div class="trace-heading"><div><h3 id="project-terminal-title">Job console</h3><p>Normalized generation events</p></div></div>
-                  <ol id="project-terminal" class="job-terminal" aria-live="polite"></ol>
-                </section>
+                <div id="project-final" class="project-final" hidden><video id="project-video" aria-label="30-second story preview" controls playsinline preload="metadata"></video><div class="result-actions"><a id="project-download" class="button primary">Download video</a><button id="project-youtube-upload" class="button secondary" type="button">Upload to YouTube</button></div></div>
                 <div id="project-story" class="project-story" hidden></div>
-                <div id="project-scenes" class="project-scenes"></div>
-                <section id="project-trace" class="project-trace" aria-labelledby="project-trace-title">
-                  <div class="trace-heading"><div><h3 id="project-trace-title">Generation details</h3><p>Recorded inputs, outputs, and retry history.</p></div></div>
-                  <div id="project-trace-sections" class="trace-sections"></div>
-                </section>
-                <div id="project-final" class="project-final" hidden><video id="project-video" aria-label="30-second project preview" controls playsinline preload="metadata"></video><a id="project-download" class="button secondary full">Download 30-second video</a><button id="project-youtube-upload" class="button secondary full youtube-entry" type="button">Upload to YouTube</button></div>
+                <section class="scene-sequence" aria-labelledby="scene-sequence-heading"><h3 id="scene-sequence-heading">Scene sequence</h3><div id="project-scenes" class="project-scenes"></div></section>
+                <details id="project-pipeline" class="technical-disclosure project-pipeline" aria-labelledby="project-pipeline-title"><summary><span id="project-pipeline-title" class="disclosure-title">Production timeline</span><span class="disclosure-note">Stages and retries</span></summary><ol id="project-pipeline-list" class="pipeline-list"></ol></details>
+                <details class="technical-disclosure job-terminal-section project-terminal-section" aria-labelledby="project-terminal-title"><summary><span id="project-terminal-title" class="disclosure-title">Job events</span><span class="disclosure-note">Recorded updates</span></summary><ol id="project-terminal" class="job-terminal" aria-live="polite"></ol></details>
+                <details id="project-trace" class="technical-disclosure project-trace" aria-labelledby="project-trace-title"><summary><span id="project-trace-title" class="disclosure-title">Generation details</span><span class="disclosure-note">Inputs and outputs</span></summary><div id="project-trace-sections" class="trace-sections"></div></details>
               </div>
             </aside>
           </div>
@@ -182,23 +183,32 @@
 
         <section class="view" data-page="history">
           <div class="history-page-head">
-            <div><h2 class="visually-hidden">Generation history</h2><p>Videos, project runs, and the process logs saved with each run.</p></div>
-            <button id="refresh-history" class="button secondary">Refresh history</button>
+            <div><h2 class="visually-hidden">Generation history</h2><p>Revisit your stories, clips and saved production details.</p></div>
+            <button id="refresh-history" class="button secondary" type="button">Refresh history</button>
           </div>
+          <section class="history-discovery" aria-label="Find saved work">
+            <div class="history-filter-row">
+              <div class="field history-search-field"><label for="history-search">Search loaded work</label><input id="history-search" type="search" placeholder="Search by idea, prompt or model" autocomplete="off" aria-describedby="history-scope"></div>
+              <div class="field"><label for="history-status">Status</label><select id="history-status"><option value="all">All statuses</option><option value="active">In progress</option><option value="completed">Completed</option><option value="failed">Failed</option></select></div>
+              <div class="field"><label for="history-format">Format</label><select id="history-format"><option value="all">All formats</option><option value="project">30-second stories</option><option value="single">Single clips</option></select></div>
+              <button id="history-clear-filters" class="button secondary" type="button">Clear filters</button>
+            </div>
+            <div class="history-discovery-foot"><p id="history-results-summary" role="status" aria-live="polite">Loading saved work...</p><p id="history-scope">Search covers loaded work. Load older clips to include them.</p></div>
+          </section>
           <div class="history-library">
             <div id="project-history" class="project-history"></div>
-            <div id="history-grid" class="history-grid"><div class="empty">No generations yet.</div></div>
+            <div id="history-grid" class="history-grid"><div class="empty">Your saved work will appear here.</div></div>
           </div>
         </section>
 
         <section class="view" data-page="vault">
           <div class="vault-page-head">
-            <div><h2 class="visually-hidden">Vault</h2><p>Videos you moved out of History.</p></div>
+            <div><h2 class="visually-hidden">Vault</h2><p>A separate space for videos you choose to protect.</p></div>
             <button id="vault-lock" class="button secondary" type="button" hidden>Lock Vault</button>
           </div>
           <div id="vault-locked" class="panel vault-lock-panel">
             <div class="vault-gate">
-              <div class="vault-gate-mark" aria-hidden="true">▣</div>
+              <div class="vault-gate-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg></div>
               <h3 id="vault-gate-title">Vault is locked</h3>
               <p id="vault-gate-copy">Enter your four-digit code to view protected videos.</p>
               <form id="vault-unlock-form" class="vault-code-form">
@@ -208,7 +218,7 @@
                 <button id="vault-unlock-button" class="button primary full" type="submit">Unlock Vault</button>
               </form>
               <button id="vault-go-settings" class="text-button vault-settings-link" type="button" hidden>Set a code in Settings</button>
-              <p class="vault-gate-foot">The Vault locks when you refresh this page or choose Lock Vault.</p>
+              <p class="vault-gate-foot">Refresh this page or choose Lock Vault to close this session.</p>
             </div>
           </div>
           <div id="vault-content" class="vault-content" hidden>
@@ -217,7 +227,7 @@
               <span id="vault-count" class="history-count">0</span>
             </div>
             <div id="vault-empty" class="panel vault-empty" hidden>
-              <div class="vault-empty-mark" aria-hidden="true">▤</div>
+              <div class="vault-empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 8h16M4 16h16"/></svg></div>
               <h3>Nothing stored here yet</h3>
               <p>Move a completed video from History to keep it here.</p>
               <button class="button secondary" data-go="history" type="button">Go to History</button>
@@ -239,16 +249,46 @@
 
         <section class="view" data-page="settings" aria-labelledby="settings-view-heading">
           <h2 id="settings-view-heading" class="visually-hidden">Settings</h2>
-          <div class="settings-grid">
+          <div class="settings-layout">
+            <nav class="settings-navigation" aria-label="Settings sections"><a href="#settings-generation">Generation</a><a href="#settings-publishing">Publishing</a><a href="#settings-security">Security</a></nav>
+            <div class="settings-body">
+              <section id="settings-generation" class="settings-group" aria-labelledby="settings-generation-heading">
+                <div class="settings-group-heading"><h2 id="settings-generation-heading">Generation</h2><p>The services behind your ideas and videos.</p></div>
+                <div class="settings-grid generation-settings-grid">
             <section class="panel settings-provider-panel">
-              <div class="panel-head"><div><h2>Video generation</h2><p>Select the provider used for new video jobs.</p></div></div>
+              <div class="panel-head"><div><h3>Video generation</h3><p>Choose how new clips and story scenes are generated.</p></div></div>
               <div class="settings-provider-controls">
                 <div class="field"><label for="video-provider">Video provider</label><select id="video-provider"><option value="modal">Modal</option><option value="openrouter">OpenRouter</option></select><small id="provider-help">Model options and capabilities follow the selected provider.</small></div>
                 <div class="provider-actions"><span id="video-provider-state" class="badge neutral">Checking</span><button id="test-video-provider" class="button secondary" type="button">Test video provider</button></div>
               </div>
             </section>
+            <section id="openrouter-settings" class="panel settings-key-panel">
+              <div class="panel-head"><div><h3>OpenRouter API key</h3><p>Required for story planning with any video provider. Also powers OpenRouter clips.</p></div><span id="key-state" class="badge neutral">Checking</span></div>
+              <div class="key-display"><span>Saved key status</span><strong id="masked-key">Not configured</strong></div>
+              <form id="api-key-form" class="stack">
+                <div class="field"><label for="api-key">Replace API key</label><input id="api-key" type="password" autocomplete="off" placeholder="sk-or-v1-…" required><small>The key is tested before it is saved.</small></div>
+                <button class="button primary" type="submit">Test and save key</button>
+              </form>
+            </section>
+            <section id="modal-settings" class="panel settings-account-panel" hidden>
+              <div class="panel-head"><div><h3>Modal accounts</h3><p>Manage the accounts and endpoints used for Modal generation. Saved keys stay encrypted.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
+              <div id="modal-account-list" class="modal-account-list"></div>
+              <form id="modal-config-form" class="stack modal-account-form">
+                <h3 id="modal-account-form-title">Add Modal account</h3>
+                <input id="modal-account-id" type="hidden">
+                <div class="field"><label for="modal-account-name">Account name</label><input id="modal-account-name" autocomplete="off" placeholder="e.g. Production" required></div>
+                <div class="field"><label for="modal-base-url">Modal endpoint URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
+                <div class="field"><label for="modal-api-key">Secret API key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key" required><small id="modal-key-help">Required when adding an account. Leave blank when editing to keep its saved key.</small></div>
+                <div class="modal-account-form-actions"><button class="button primary" type="submit">Save Modal account</button><button id="modal-account-cancel" class="button secondary" type="button" hidden>Cancel edit</button></div>
+              </form>
+            </section>
+                </div>
+              </section>
+              <section id="settings-publishing" class="settings-group" aria-labelledby="settings-publishing-heading">
+                <div class="settings-group-heading"><h2 id="settings-publishing-heading">Publishing</h2><p>Send finished work to your YouTube channel.</p></div>
+                <div class="settings-grid">
             <section id="youtube-settings" class="panel youtube-settings-panel">
-              <div class="panel-head"><div><h2>YouTube</h2><p>Connect one channel for manual video uploads.</p></div><span id="youtube-channel-state" class="badge neutral">Checking</span></div>
+              <div class="panel-head"><div><h3>YouTube</h3><p>Connect a channel. You choose which video to upload and when.</p></div><span id="youtube-channel-state" class="badge neutral">Checking</span></div>
               <div id="youtube-channel-summary" class="youtube-channel-summary" hidden>
                 <div><span>Connected channel</span><strong id="youtube-channel-name"></strong></div>
                 <button id="youtube-disconnect" class="button secondary" type="button">Disconnect channel</button>
@@ -265,16 +305,21 @@
                 </div>
               </form>
             </section>
-            <section id="openrouter-settings" class="panel settings-key-panel">
-              <div class="panel-head"><div><h2>OpenRouter API key</h2><p>Used for story generation and OpenRouter video. Encrypted at rest.</p></div><span id="key-state" class="badge neutral">Checking</span></div>
-              <div class="key-display"><span>Saved key status</span><strong id="masked-key">Not configured</strong></div>
-              <form id="api-key-form" class="stack">
-                <div class="field"><label for="api-key">Replace API key</label><input id="api-key" type="password" autocomplete="off" placeholder="sk-or-v1-…" required><small>The key is tested before it is saved.</small></div>
-                <button class="button primary" type="submit">Test and save key</button>
+                </div>
+              </section>
+              <section id="settings-security" class="settings-group" aria-labelledby="settings-security-heading">
+                <div class="settings-group-heading"><h2 id="settings-security-heading">Security</h2><p>Your sign-in and the extra lock for protected videos.</p></div>
+                <div class="settings-grid security-settings-grid">
+            <section class="panel settings-password-panel">
+              <div class="panel-head"><div><h3>Change password</h3><p>Changing your password signs out all existing sessions.</p></div></div>
+              <form id="password-form" class="stack">
+                <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password" autocomplete="current-password" required></div>
+                <div class="field"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="10" required><small>Use at least 10 characters.</small></div>
+                <button class="button secondary" type="submit">Update password</button>
               </form>
             </section>
             <section class="panel vault-settings-panel">
-              <div class="panel-head"><div><h2>Vault code</h2><p>Set the four-digit code used to open your protected videos.</p></div><span id="vault-code-state" class="badge neutral">Checking</span></div>
+              <div class="panel-head"><div><h3>Vault code</h3><p>Set the four-digit code used to open your protected videos.</p></div><span id="vault-code-state" class="badge neutral">Checking</span></div>
               <form id="vault-code-form" class="stack">
                 <div id="vault-current-code-field" class="field" hidden><label for="vault-current-code">Current code</label><input id="vault-current-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="current-password"><small>Enter the current code before changing it.</small></div>
                 <div class="field"><label for="vault-new-code">New four-digit code</label><input id="vault-new-code" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required></div>
@@ -283,26 +328,9 @@
                 <small id="vault-code-help">Keep this code safe. If you lose it, the Vault cannot be opened in this version.</small>
               </form>
             </section>
-            <section id="modal-settings" class="panel settings-account-panel" hidden>
-              <div class="panel-head"><div><h2>Modal accounts</h2><p>Store multiple endpoints. Saved API keys are never returned to the browser.</p></div><span id="modal-key-state" class="badge neutral">Checking</span></div>
-              <div id="modal-account-list" class="modal-account-list"></div>
-              <form id="modal-config-form" class="stack modal-account-form">
-                <h3 id="modal-account-form-title">Add Modal account</h3>
-                <input id="modal-account-id" type="hidden">
-                <div class="field"><label for="modal-account-name">Account name</label><input id="modal-account-name" autocomplete="off" placeholder="e.g. Production" required></div>
-                <div class="field"><label for="modal-base-url">Modal endpoint URL</label><input id="modal-base-url" type="url" autocomplete="url" placeholder="https://your-deployment.modal.run/api/v1" required></div>
-                <div class="field"><label for="modal-api-key">Secret API key</label><input id="modal-api-key" type="password" autocomplete="new-password" placeholder="Enter a new key" required><small id="modal-key-help">Required when adding an account. Leave blank when editing to keep its saved key.</small></div>
-                <div class="modal-account-form-actions"><button class="button primary" type="submit">Save Modal account</button><button id="modal-account-cancel" class="button secondary" type="button" hidden>Cancel edit</button></div>
-              </form>
-            </section>
-            <section class="panel settings-password-panel">
-              <div class="panel-head"><div><h2>Change password</h2><p>All existing sessions will be signed out</p></div></div>
-              <form id="password-form" class="stack">
-                <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password" autocomplete="current-password" required></div>
-                <div class="field"><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="10" required><small>Use at least 10 characters.</small></div>
-                <button class="button secondary" type="submit">Update password</button>
-              </form>
-            </section>
+                </div>
+              </section>
+            </div>
           </div>
         </section>
       </div>
@@ -326,13 +354,17 @@
           </div>
           <form id="youtube-upload-form" class="stack youtube-upload-form">
             <div class="youtube-channel-ready"><span>Channel</span><strong id="youtube-upload-channel"></strong></div>
-            <div class="field"><label for="youtube-title">Video title</label><input id="youtube-title" name="title" autocomplete="off" required></div>
+            <section class="youtube-composer-section" aria-labelledby="youtube-details-heading"><h3 id="youtube-details-heading">Video details</h3>
+            <div class="field"><label for="youtube-title">Video title</label><input id="youtube-title" name="title" autocomplete="off" aria-describedby="youtube-metadata-error" required></div>
             <div class="field"><label for="youtube-description">Description</label><textarea id="youtube-description" name="description" rows="5"></textarea></div>
             <button id="youtube-generate-metadata" class="button secondary youtube-metadata-button" type="button">Generate title and description</button>
             <p id="youtube-metadata-error" class="alert error" role="alert" hidden></p>
+            </section>
+            <section class="youtube-composer-section" aria-labelledby="youtube-publishing-heading"><h3 id="youtube-publishing-heading">Audience and visibility</h3>
             <div class="field"><label for="youtube-visibility">Visibility</label><select id="youtube-visibility" name="privacy_status"><option value="private" selected>Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select><small id="youtube-visibility-help">Private is selected by default. Some Google API projects can upload only privately until audited.</small></div>
             <fieldset class="youtube-audience-fieldset"><legend>Is this video made for kids?</legend><label class="youtube-choice"><input id="youtube-made-for-kids-yes" type="radio" name="made_for_kids" value="true" required><span>Yes, it is made for kids</span></label><label class="youtube-choice"><input id="youtube-made-for-kids-no" type="radio" name="made_for_kids" value="false" required><span>No, it is not made for kids</span></label></fieldset>
             <label class="youtube-choice youtube-disclosure"><input id="youtube-synthetic" name="contains_synthetic_media" type="checkbox" checked><span>This video contains AI-generated or synthetic content</span></label>
+            </section>
             <div id="youtube-upload-status" class="youtube-upload-status" role="status" aria-live="polite" hidden>
               <div class="youtube-upload-status-head"><strong id="youtube-upload-status-label"></strong><span id="youtube-upload-progress-label"></span></div>
               <div id="youtube-upload-progress-wrap" class="youtube-upload-progress-wrap" hidden><div id="youtube-upload-progress-bar" class="youtube-upload-progress-bar"></div></div>
@@ -361,6 +393,6 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20261002-1" defer></script>
+  <script src="/static/app.js?v=20261007-studio" defer></script>
 </body>
 </html>

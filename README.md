@@ -245,6 +245,18 @@ For OpenRouter, the model list includes provider-supplied per-second pricing whe
 
 Jobs are stored before asynchronous provider work begins. OpenRouter video jobs use background status polling. New Modal jobs transition through authenticated per-job callbacks, then the Go processor downloads completed video into `/data/videos`; the callback watchdog resumes idempotent submissions and reports callback timeouts. Closing the dashboard does not cancel a job. Live job views and History receive same-origin authenticated server-sent events and retain persisted, application-normalized event messages and progress for project and single-clip jobs. Provider, scene submission, and download failures remain visible on the job or project timeline; failed project scenes can be retried without rerunning successful scenes. History includes the prompt, model, date, duration, status, cost, local playback/download, and manual deletion. Deletion removes the corresponding database record and local video file. Files are retained until deleted in History.
 
+### Using the dashboard
+
+The main destinations are **Workspace**, **Create**, **History**, **Vault**, and **Settings**. Workspace shows a combined recent list of projects and individual clips. Create offers a 30-second project or a single clip. A project always uses OpenRouter to plan and validate its story, even when Modal is selected for video; the selected video provider then generates its five connected six-second scenes. A single clip goes directly to the selected video provider.
+
+While a job runs, its current status and progress stay with that job. Project and clip details can be opened when you need the process log or generation trace. The connection indicator reports the current live-update state, including connecting, live, reconnecting, unavailable, or locked. A lost dashboard connection can delay visible updates, but closing the browser does not stop submitted work; reopen the dashboard to see persisted job state.
+
+History search and status/format filters apply to the records currently loaded in the page. Use **Load more** to fetch older clips, then search or filter the expanded loaded set. The result count describes that loaded set; it does not imply that every saved record has been fetched. Projects and clips remain identifiable by format in the combined recent list and History.
+
+The cost estimate uses prices supplied by the selected video provider. If no price is supplied, the dashboard cannot estimate that job's video cost; Modal infrastructure usage is billed separately by Modal. Project planning also uses OpenRouter, so a configured OpenRouter key is required for projects regardless of the selected video provider. Configure provider credentials and select a provider in **Settings**; a Modal account must also be configured and selected when Modal runs a job.
+
+YouTube uploads are manual. Review the video and metadata in the upload dialog and submit when ready; FrameVault does not publish automatically.
+
 Completed videos can be moved from History into the separate Vault tab; this hides them from regular History without moving or copying their files. Set the four-digit Vault code in Settings first. Enter the code to list, play, or download Vault videos. The Vault locks when you refresh the page or choose **Lock Vault**. Change the code in Settings with the current code; keep it safe, because a forgotten code cannot be recovered in this version. Returning a Vault video restores it to History.
 
 ## Code organization

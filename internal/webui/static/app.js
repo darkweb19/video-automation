@@ -27,6 +27,7 @@
     menuButton: $("#menu-button"),
     pageKicker: $("#page-kicker"),
     pageTitle: $("#page-title"),
+    connectionState: $("#connection-state"),
     model: $("#model"),
     modelPicker: $("#model-picker"),
     modelTrigger: $("#model-trigger"),
@@ -53,7 +54,12 @@
     singleOptions: $("#single-options"),
     projectOptions: $("#project-options"),
     projectModelNote: $("#project-model-note"),
+    projectCostNote: $("#project-cost-note"),
+    creatorProviderHelp: $("#creator-provider-help"),
+    creatorProviderMessage: $("#creator-provider-message"),
+    creatorOpenSettings: $("#creator-open-settings"),
     modeOptions: $$(".mode-option"),
+    createModeButtons: $$('[data-create-mode]'),
     promptCount: $("#prompt-count"),
     promptError: $("#prompt-error"),
     costEstimate: $("#cost-estimate"),
@@ -90,6 +96,11 @@
     projectYouTubeUpload: $("#project-youtube-upload"),
     projectHistory: $("#project-history"),
     historyGrid: $("#history-grid"),
+    historySearch: $("#history-search"),
+    historyStatus: $("#history-status"),
+    historyFormat: $("#history-format"),
+    historyResultsSummary: $("#history-results-summary"),
+    historyClearFilters: $("#history-clear-filters"),
     vaultLock: $("#vault-lock"),
     vaultLocked: $("#vault-locked"),
     vaultGateTitle: $("#vault-gate-title"),
@@ -195,11 +206,11 @@
   };
 
   const viewMeta = {
-    overview: { title: "Overview", kicker: "Workspace" },
-    generate: { title: "Generate", kicker: "Create" },
+    overview: { title: "Workspace", kicker: "Studio" },
+    generate: { title: "Create", kicker: "Production" },
     history: { title: "History", kicker: "Library" },
     vault: { title: "Vault", kicker: "Private library" },
-    settings: { title: "Settings", kicker: "AI providers" }
+    settings: { title: "Settings", kicker: "Workspace" }
   };
 
   const promptCategories = ["Kid Animation", "Horror Story", "Nature", "Seduction", "Mature Content", "Soft Corn"];
@@ -210,6 +221,11 @@
     modalAccountsActiveID: "",
     modalAccountsRequestID: 0,
     modelRequestID: 0,
+    modelsLoading: false,
+    modelLoadError: "",
+    modelCredentialsMissing: false,
+    openRouterConfigured: null,
+    openRouterConfigurationRevision: 0,
     videoProvider: "openrouter",
     generations: [],
     stats: null,
@@ -221,6 +237,10 @@
     historyNextBeforeID: "",
     historyLoading: false,
     historyTerminalOpen: new Map(),
+    historyCards: new Map(),
+    historyChrome: new Map(),
+    recentRows: new Map(),
+    recentEmpty: null,
     currentGenerationID: "",
     displayedGenerationID: "",
     currentGenerationRecord: null,
@@ -237,6 +257,8 @@
     pendingProjectFormEdited: false,
     authGeneration: 0,
     randomPromptPending: false,
+    promptEditRevisions: { project: 0, single: 0 },
+    categoryEditRevision: 0,
     singleSubmissionPending: false,
     singleSubmissionFailed: false,
     projects: [],
@@ -244,6 +266,7 @@
     displayedProjectID: "",
     displayedProjectStatus: "",
     currentProjectRecord: null,
+    projectStoryRevision: null,
     projectTraceFetches: new Map(),
     projectTraceRequestEpoch: 0,
     projectRawTraceOpenKey: "",
@@ -251,6 +274,7 @@
     jobStreamHasOpened: false,
     jobStreamDisconnected: false,
     jobStreamAuthCheckPending: false,
+    jobStreamUnavailable: false,
     terminalRefreshTimer: 0,
     terminalRefreshKinds: new Set(),
     toastTimer: 0,
@@ -471,19 +495,23 @@
 
   async function loadModalAccounts(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
+    const authGeneration = state.authGeneration;
     const requestID = ++state.modalAccountsRequestID;
+    const isCurrentRequest = () => state.authenticated && !state.mustChangePassword && state.authGeneration === authGeneration
+      && requestID === state.modalAccountsRequestID;
     try {
       const payload = await request("/api/modal-accounts");
-      if (requestID !== state.modalAccountsRequestID || !state.authenticated) return;
+      if (!isCurrentRequest()) return;
       state.modalAccounts = Array.isArray(payload && payload.accounts) ? payload.accounts : [];
       state.modalAccountsActiveID = String(payload && payload.active_id || "");
       renderModalAccountList();
       await refreshModalAccountSelectors();
+      if (!isCurrentRequest()) return;
       const configured = state.modalAccounts.filter((account) => account.configured).length;
       elements.modalKeyState.className = `badge ${configured ? "completed" : "neutral"}`;
       elements.modalKeyState.textContent = `${configured} configured`;
     } catch (error) {
-      if (requestID !== state.modalAccountsRequestID) return;
+      if (!isCurrentRequest()) return;
       elements.modalKeyState.className = "badge failed";
       elements.modalKeyState.textContent = "Unavailable";
       if (notify && error.status !== 401) toast(error.message, true);
@@ -932,6 +960,8 @@
       }
     }
 
+    renderRecent();
+    renderHistory();
     if (becameTerminal) {
       queueTerminalRefresh(kind);
       if (selected) {
@@ -941,6 +971,30 @@
           : (failed ? "Project failed." : "30-second video saved."), failed);
       }
     }
+  }
+
+  function renderConnectionState() {
+    let status = "paused";
+    if (!state.authenticated) status = "signed-out";
+    else if (state.mustChangePassword) status = "locked";
+    else if (window.navigator?.onLine === false) status = "offline";
+    else if (typeof window.EventSource !== "function" || state.jobStreamUnavailable) status = "unavailable";
+    else if (state.jobEventSource && state.jobEventSource.readyState !== 2) {
+      status = state.jobStreamDisconnected ? "reconnecting" : state.jobStreamHasOpened ? "live" : "connecting";
+    }
+    const messages = {
+      "signed-out": ["Sign in to connect", "Live updates start after you sign in."],
+      locked: ["Workspace locked", "Change your temporary password to enable live updates."],
+      offline: ["Offline · updates paused", "Your jobs may continue running. Updates resume when your connection returns."],
+      unavailable: ["Live updates unavailable", "Use Refresh in History to check your jobs."],
+      paused: ["Live updates paused", "Use Refresh in History to reconnect and check your jobs."],
+      connecting: ["Connecting to workspace", "Waiting for the live update connection."],
+      reconnecting: ["Reconnecting to workspace", "Your jobs may continue running. Waiting to reconnect for their latest status."],
+      live: ["Live updates connected", "Job updates are connected to this workspace."]
+    };
+    elements.connectionState.dataset.state = status;
+    elements.connectionState.textContent = messages[status][0];
+    elements.connectionState.title = messages[status][1];
   }
 
   function stopJobEventStream(reset = false) {
@@ -953,21 +1007,38 @@
     if (reset) {
       state.jobStreamHasOpened = false;
       state.jobStreamDisconnected = false;
+      state.jobStreamUnavailable = false;
       window.clearTimeout(state.terminalRefreshTimer);
       state.terminalRefreshTimer = 0;
       state.terminalRefreshKinds.clear();
     }
+    renderConnectionState();
   }
 
   function startJobEventStream() {
-    if (!state.authenticated || state.mustChangePassword || state.jobEventSource || typeof window.EventSource !== "function") return;
-    const source = new window.EventSource("/api/events", { withCredentials: true });
+    if (state.jobEventSource?.readyState === 2) stopJobEventStream();
+    if (!state.authenticated || state.mustChangePassword || state.jobEventSource || typeof window.EventSource !== "function") {
+      renderConnectionState();
+      return;
+    }
+    state.jobStreamUnavailable = false;
+    let source;
+    try {
+      source = new window.EventSource("/api/events", { withCredentials: true });
+    } catch (_error) {
+      state.jobStreamUnavailable = true;
+      renderConnectionState();
+      return;
+    }
     state.jobEventSource = source;
+    state.jobStreamDisconnected = state.jobStreamHasOpened;
+    renderConnectionState();
     source.addEventListener("open", () => {
       if (state.jobEventSource !== source) return;
       state.jobStreamHasOpened = true;
       state.jobStreamDisconnected = false;
       state.jobStreamAuthCheckPending = false;
+      renderConnectionState();
       // The normal API loads happen before subscription. Refresh after every
       // successful open so a transition in that small gap is authoritative.
       // The ready event stays informational and does not duplicate this read.
@@ -980,6 +1051,7 @@
     source.addEventListener("error", () => {
       if (state.jobEventSource !== source) return;
       state.jobStreamDisconnected = true;
+      renderConnectionState();
       if (state.jobStreamAuthCheckPending) return;
       state.jobStreamAuthCheckPending = true;
       void request("/api/session").then((session) => {
@@ -1045,10 +1117,11 @@
     elements.projectInputs.hidden = !project;
     elements.projectOptions.hidden = !project;
     elements.projectModelNote.hidden = !project;
+    elements.projectCostNote.hidden = !project;
     elements.singleOptions.hidden = project;
     elements.prompt.hidden = project;
     elements.prompt.closest(".field").hidden = project;
-    if (!state.submissionPending) elements.generate.textContent = project ? "Generate 30-second project" : "Generate video";
+    updateCreatorActionLabels();
     elements.modalAccountProjectField.hidden = state.videoProvider !== "modal" || !project;
     elements.modalAccountSingleField.hidden = state.videoProvider !== "modal" || project;
     if (project) {
@@ -1090,6 +1163,19 @@
     target.click();
   }
 
+  function openCreator(mode) {
+    if (!state.authenticated || state.mustChangePassword) return;
+    setGenerationMode(mode);
+    navigate("generate");
+    if (state.videoProvider === "modal") void loadModels(false);
+  }
+
+  function updateCreatorActionLabels() {
+    const project = state.mode === "project";
+    if (!state.submissionPending) elements.generate.textContent = project ? "Generate 30-second story" : "Generate clip";
+    if (!state.randomPromptPending) elements.randomPrompt.textContent = project ? "Suggest story idea" : "Suggest clip prompt";
+  }
+
   function selectedPromptCategory() {
     return promptCategories[Number(elements.promptCategory.value)] || promptCategories[0];
   }
@@ -1097,36 +1183,47 @@
   function updatePromptCategory() {
     const category = selectedPromptCategory();
     elements.promptCategoryName.textContent = category;
-    elements.promptCategory.setAttribute("aria-valuetext", category);
+    elements.promptCategory.removeAttribute("aria-valuetext");
   }
 
   async function generateRandomPrompt() {
-    if (state.randomPromptPending) return;
+    if (state.randomPromptPending || !state.authenticated || state.mustChangePassword) return;
     const mode = state.mode;
     const category = selectedPromptCategory();
+    const field = mode === "project" ? elements.projectTopic : elements.prompt;
+    const previousValue = field.value;
+    const editRevision = state.promptEditRevisions[mode];
+    const categoryRevision = state.categoryEditRevision;
+    const focusOrigin = document.activeElement;
     const authGeneration = state.authGeneration;
     state.randomPromptPending = true;
-    setButtonBusy(elements.randomPrompt, true, "Generating…");
+    setButtonBusy(elements.randomPrompt, true, "Suggesting…");
     try {
       const payload = await request("/api/prompts/random", {
         method: "POST",
         body: JSON.stringify({ category, mode })
       });
-      if (state.authGeneration !== authGeneration || !state.authenticated) return;
+      if (state.authGeneration !== authGeneration || !state.authenticated || state.mustChangePassword) return;
       const prompt = typeof payload?.prompt === "string" ? payload.prompt.trim() : "";
       if (!prompt) throw new APIError("No prompt was returned. Try again.", 502);
-      const field = mode === "project" ? elements.projectTopic : elements.prompt;
+      if (field.value !== previousValue || state.promptEditRevisions[mode] !== editRevision
+        || selectedPromptCategory() !== category || state.categoryEditRevision !== categoryRevision) {
+        toast("Your edits were kept. Request another suggestion when you're ready.");
+        return;
+      }
       field.value = prompt;
       field.dispatchEvent(new Event("input", { bubbles: true }));
-      field.focus();
+      if (state.mode === mode && state.currentView === "generate" && document.activeElement === focusOrigin
+        && (focusOrigin === elements.randomPrompt || focusOrigin === field)) field.focus();
       if (mode === "project") elements.projectTopicError.textContent = "";
-      toast("Random prompt ready.");
+      toast(mode === "project" ? "Story idea ready." : "Clip prompt ready.");
     } catch (error) {
       if (state.authGeneration === authGeneration && state.authenticated && error.status !== 401) toast(error.message, true);
     } finally {
       if (state.authGeneration === authGeneration) {
         state.randomPromptPending = false;
         setButtonBusy(elements.randomPrompt, false);
+        updateCreatorActionLabels();
       }
     }
   }
@@ -1143,6 +1240,9 @@
       button.disabled = state.mustChangePassword && button.dataset.view !== "settings";
     });
     $$('[data-go]').forEach((button) => {
+      button.disabled = state.mustChangePassword;
+    });
+    elements.createModeButtons.forEach((button) => {
       button.disabled = state.mustChangePassword;
     });
 
@@ -1165,6 +1265,7 @@
       elements.keyState.textContent = "Locked";
       elements.maskedKey.textContent = "Change password first";
     }
+    renderConnectionState();
   }
 
   function resetVaultRestoreState() {
@@ -1226,6 +1327,8 @@
     state.projectRecoveryPromise = null;
     setButtonBusy(elements.generate, false);
     setButtonBusy(elements.randomPrompt, false);
+    setButtonBusy($("button[type='submit']", elements.apiKeyForm), false);
+    elements.apiKey.value = "";
     stopJobEventStream(true);
     invalidateProjectRawTraceRequests();
     closeYouTubeComposer(false);
@@ -1238,6 +1341,13 @@
     clearGenerationDisplay();
     clearProjectDisplay();
     state.authenticated = false;
+    state.openRouterConfigured = null;
+    state.modelsLoading = false;
+    state.modelLoadError = "";
+    state.modelCredentialsMissing = false;
+    state.modelRequestID++;
+    elements.creatorProviderHelp.hidden = true;
+    renderConnectionState();
     state.vaultConfigured = false;
     state.currentGenerationID = "";
     state.currentProjectID = "";
@@ -1247,6 +1357,12 @@
     state.projects = [];
     state.stats = null;
     state.historyHasMore = false;
+    state.historyLoading = false;
+    elements.refreshHistory.disabled = false;
+    state.historyCards.clear();
+    state.historyChrome.clear();
+    state.recentRows.clear();
+    state.recentEmpty = null;
     state.historyNextOffset = 0;
     state.historyNextCursor = "";
     state.historyCursorParam = "before";
@@ -1531,11 +1647,45 @@
 
   function updateGenerateAvailability() {
     const model = selectedModel();
-    elements.generate.disabled = state.submissionPending || !model
-      || (state.mode === "project" && !supportsProject(model));
+    elements.generate.disabled = state.submissionPending || state.modelsLoading || !model
+      || (state.videoProvider === "modal" && !selectedModalAccountID())
+      || (state.mode === "project" && (!supportsProject(model) || state.openRouterConfigured === false));
     if (!state.submissionPending) {
-      elements.generate.textContent = state.mode === "project" ? "Generate 30-second project" : "Generate video";
+      updateCreatorActionLabels();
     }
+    renderCreatorProviderHelp();
+  }
+
+  function renderCreatorProviderHelp() {
+    let message = "";
+    let settingsNeeded = false;
+    if (state.authenticated && !state.mustChangePassword) {
+      if (state.modelsLoading) {
+        message = "Loading available video models…";
+      } else if (state.videoProvider === "modal" && !selectedModalAccountID()) {
+        message = state.modalAccounts.length
+          ? "Choose a production account to load its video models. Manage production accounts in Settings."
+          : "Add a Modal production account in Settings to load its video models.";
+        settingsNeeded = true;
+      } else if (!state.models.length) {
+        message = state.modelCredentialsMissing
+          ? `Configure ${videoProviderName()} credentials in Settings to load video models.`
+          : state.modelLoadError
+            ? `Video models could not be loaded. ${state.modelLoadError} Review the provider in Settings and try again.`
+            : "No video models are available. Review your provider in Settings and try again.";
+        settingsNeeded = true;
+      } else if (state.mode === "project" && state.openRouterConfigured === false) {
+        message = "Add an OpenRouter API key in Settings for story planning. Stories require it with every video provider.";
+        settingsNeeded = true;
+      }
+      if (message && !state.modelsLoading && state.mode === "project" && state.openRouterConfigured === false
+        && !message.includes("story planning")) {
+        message += " Add an OpenRouter API key there for story planning as well.";
+      }
+    }
+    elements.creatorProviderHelp.hidden = !message;
+    elements.creatorProviderMessage.textContent = message;
+    elements.creatorOpenSettings.hidden = !settingsNeeded;
   }
 
   function fillSelect(select, values, formatter, fallbackLabel) {
@@ -1610,14 +1760,20 @@
 
   async function loadModels(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
+    const authGeneration = state.authGeneration;
     const requestID = ++state.modelRequestID;
     const requestedProvider = state.videoProvider;
     const requestedMode = state.mode;
     const modalAccountID = requestedProvider === "modal" ? selectedModalAccountID() : "";
-    const isCurrentRequest = () => requestID === state.modelRequestID
+    const isCurrentRequest = () => state.authenticated && !state.mustChangePassword && state.authGeneration === authGeneration
+      && requestID === state.modelRequestID
       && requestedProvider === state.videoProvider
-      && requestedMode === state.mode
+      && (requestedProvider !== "modal" || requestedMode === state.mode)
       && (requestedProvider !== "modal" || modalAccountID === selectedModalAccountID());
+    state.modelsLoading = true;
+    state.modelLoadError = "";
+    state.modelCredentialsMissing = false;
+    renderCreatorProviderHelp();
     elements.model.disabled = true;
     elements.modelTrigger.disabled = true;
     closeModelMenu();
@@ -1630,6 +1786,7 @@
     try {
       if (requestedProvider === "modal" && !modalAccountID) {
         if (!isCurrentRequest()) return;
+        state.modelsLoading = false;
         state.models = [];
         elements.model.replaceChildren(make("option", { text: "Choose a Modal account first" }));
         elements.model.options[0].value = "";
@@ -1645,6 +1802,7 @@
         : `/models?provider=${encodeURIComponent(requestedProvider)}`;
       const payload = await request(modelPath);
       if (!isCurrentRequest()) return;
+      state.modelsLoading = false;
       state.models = Array.isArray(payload && payload.models) ? payload.models : [];
       elements.model.replaceChildren();
       if (!state.models.length) {
@@ -1666,7 +1824,7 @@
       });
       const requestedModel = payload && payload.selected_model;
       const savedModel = state.models.find((model) => model.id === requestedModel);
-      const selected = (savedModel && (state.mode !== "project" || supportsProject(savedModel)))
+      const selected = (savedModel && (state.mode !== "project" || supportsProject(savedModel)) ? savedModel : null)
         || (state.mode === "project" ? state.models.find(supportsProject) : null)
         || savedModel
         || state.models[0];
@@ -1682,6 +1840,9 @@
       renderRecent();
     } catch (error) {
       if (!isCurrentRequest()) return;
+      state.modelsLoading = false;
+      state.modelLoadError = error.message;
+      state.modelCredentialsMissing = error.status === 422;
       state.models = [];
       elements.model.replaceChildren();
       const option = make("option", { text: error.status === 422 ? "Configure provider credentials in Settings" : "Models unavailable" });
@@ -1845,41 +2006,80 @@
     };
   }
 
-  function emptyState(message, actionLabel = "") {
+  function emptyState(message, actionLabel = "", onAction = () => navigate("generate")) {
     const empty = make("div", { className: "empty" });
     empty.append(make("p", { text: message }));
     if (actionLabel) {
       const action = make("button", { className: "button secondary empty-action", type: "button", text: actionLabel });
-      action.addEventListener("click", () => navigate("generate"));
+      action.addEventListener("click", onAction);
       empty.append(action);
     }
     return empty;
   }
   function renderRecent() {
-    elements.recentList.replaceChildren();
-    const recent = state.generations.slice(0, 5);
+    const recent = [
+      ...state.projects.map((record) => ({ kind: "project", record })),
+      ...state.generations.map((record) => ({ kind: "single", record }))
+    ].sort((left, right) => numericStat(projectValue(right.record, "created_at", "createdAt"))
+      - numericStat(projectValue(left.record, "created_at", "createdAt"))).slice(0, 5);
+    const keys = new Set(recent.map(({ kind, record }) => `${kind}:${kind === "project" ? projectID(record) : String(record.id || "")}`));
+    state.recentRows.forEach((_value, key) => { if (!keys.has(key)) state.recentRows.delete(key); });
     if (!recent.length) {
-      elements.recentList.append(emptyState("No generations yet."));
+      if (!state.recentEmpty) state.recentEmpty = emptyState("Your projects and clips will appear here.", "Create a video");
+      reconcileChildren(elements.recentList, [state.recentEmpty]);
       return;
     }
-    recent.forEach((record) => {
-      const row = make("div", { className: "recent-item" });
-      const main = make("div", { className: "recent-main" });
-      main.append(
-        make("strong", { text: record.prompt || "Untitled generation" }),
-        make("span", { text: friendlyModel(record.model) })
-      );
-      if (String(record.status || "").toLowerCase() === "completed" && record.video_ready) {
+    const rows = [];
+    recent.forEach(({ kind, record }) => {
+      const project = kind === "project";
+      const id = project ? projectID(record) : String(record.id || "");
+      const key = `${kind}:${id}`;
+      let entry = state.recentRows.get(key);
+      if (!entry) {
+        const row = make("div", { className: "recent-item" });
+        row.dataset.kind = kind;
+        row.dataset.id = id;
+        const main = make("div", { className: "recent-main" });
+        const open = make("button", { className: "text-button recent-open", type: "button" });
+        const model = make("span");
         const upload = make("button", { className: "button text-button recent-upload", type: "button", text: "Upload to YouTube" });
-        upload.addEventListener("click", () => openYouTubeUpload(generationYouTubeSource(record)));
-        main.append(upload);
+        const latestRecord = () => project ? state.projects.find((item) => projectID(item) === id)
+          : state.generations.find((item) => String(item.id) === id);
+        open.addEventListener("click", () => {
+          const latest = latestRecord();
+          if (!latest || !state.authenticated || state.mustChangePassword) return;
+          openCreator(kind);
+          if (project) renderProject(latest);
+          else setStatusRecord(latest);
+        });
+        upload.addEventListener("click", () => {
+          const latest = latestRecord();
+          if (latest) void openYouTubeUpload(project ? projectYouTubeSource(latest) : generationYouTubeSource(latest));
+        });
+        main.append(open, model, upload);
+        const date = make("span", { className: "meta" });
+        const badge = statusBadge("queued");
+        const cost = make("strong");
+        row.append(main, date, badge, cost);
+        entry = { row, open, model, upload, date, badge, cost, record: null };
+        state.recentRows.set(key, entry);
       }
-      const date = make("span", { className: "meta", text: formatDate(record.created_at) });
-      const badge = statusBadge(record.status);
-      const cost = make("strong", { text: recordCost(record).value });
-      row.append(main, date, badge, cost);
-      elements.recentList.append(row);
+      if (entry.record !== record) {
+        const title = String(projectValue(record, project ? "topic" : "prompt") || (project ? "Untitled project" : "Untitled clip"));
+        const status = String(projectValue(record, "status") || "queued").toLowerCase();
+        entry.open.textContent = title;
+        entry.open.setAttribute("aria-label", `Open ${project ? "30-second project" : "single clip"}: ${title}`);
+        entry.model.textContent = `${project ? "30-second project" : "Single clip"} · ${friendlyModel(projectValue(record, "model"))}`;
+        entry.upload.hidden = status !== "completed" || !Boolean(projectValue(record, project ? "final_video_ready" : "video_ready"));
+        entry.date.textContent = formatDate(projectValue(record, "created_at", "createdAt"));
+        entry.badge.className = "badge " + statusClass(status);
+        entry.badge.textContent = status.replaceAll("_", " ");
+        entry.cost.textContent = project ? projectRecordedCost(record) : recordCost(record).value;
+        entry.record = record;
+      }
+      rows.push(entry.row);
     });
+    reconcileChildren(elements.recentList, rows);
   }
 
   function metadataItem(label, value) {
@@ -1941,96 +2141,266 @@
     body.append(details);
   }
 
+  function reconcileChildren(parent, children) {
+    const wanted = new Set(children);
+    Array.from(parent.children).forEach((child) => {
+      if (!wanted.has(child)) child.remove();
+    });
+    children.forEach((child, index) => {
+      if (parent.children[index] !== child) parent.insertBefore(child, parent.children[index] || null);
+    });
+  }
+
+  function retainedNode(cache, key, revision, create) {
+    const previous = cache.get(key);
+    if (previous && previous.revision === revision) return previous.node;
+    const node = create();
+    cache.set(key, { revision, node });
+    return node;
+  }
+
+  function historyHeading(key, title, count, className = "history-section-heading") {
+    return retainedNode(state.historyChrome, key, count, () => {
+      const heading = make("div", { className });
+      heading.append(make("h3", { text: title }), make("span", { className: "history-count", text: String(count) }));
+      return heading;
+    });
+  }
+
+  function historyFilters() {
+    return {
+      query: elements.historySearch.value.trim().toLowerCase(),
+      status: elements.historyStatus.value || "all",
+      format: elements.historyFormat.value || "all"
+    };
+  }
+
+  function hasHistoryFilters(filters) {
+    return Boolean(filters.query || filters.status !== "all" || filters.format !== "all");
+  }
+
+  function historyMatches(record, kind, filters) {
+    if (filters.format !== "all" && filters.format !== kind) return false;
+    const status = String(projectValue(record, "status") || "queued").toLowerCase();
+    if (filters.status === "active" && isTerminalJobStatus(status)) return false;
+    if (filters.status === "completed" && !["completed", "complete"].includes(status)) return false;
+    if (filters.status === "failed" && !["failed", "error"].includes(status)) return false;
+    if (!filters.query) return true;
+    const searchable = ["topic", "prompt", "model", "category", "id"]
+      .map((key) => String(projectValue(record, key) || "")).join(" ").toLowerCase();
+    return searchable.includes(filters.query);
+  }
+
+  function clearHistoryFilters() {
+    elements.historySearch.value = "";
+    elements.historyStatus.value = "all";
+    elements.historyFormat.value = "all";
+    renderHistory();
+    elements.historySearch.focus({ preventScroll: true });
+  }
+
+  function retryFailedHistoryPreviews() {
+    state.historyCards.forEach((entry, key) => {
+      if (entry.node.dataset.previewFailed === "true") state.historyCards.delete(key);
+    });
+  }
+
+  function renderProjectHistory(projects) {
+    const children = [];
+    if (projects.length) {
+      children.push(historyHeading("project-heading", "30-second projects", projects.length));
+      const list = retainedNode(state.historyChrome, "project-list", true, () => make("div", { className: "project-history-list" }));
+      const cards = [];
+      projects.forEach((project, index) => {
+        const key = `project:${projectID(project) || index}`;
+        const item = retainedNode(state.historyCards, key, project, () => {
+          const id = projectID(project);
+          const status = String(projectValue(project, "status") || "queued");
+          const videoReady = String(status).toLowerCase() === "completed" && Boolean(projectValue(project, "final_video_ready"));
+          const videoURL = id ? `/api/projects/${encodeURIComponent(id)}/video` : "";
+          const item = make("article", { className: "history-card" });
+          let download;
+          const topic = String(projectValue(project, "topic") || "30-second project").slice(0, 120);
+          const preview = historyPreview(videoReady, videoURL, status, () => {
+            if (videoReady && videoURL) item.dataset.previewFailed = "true";
+            download?.remove();
+          }, "Project video: " + topic);
+          const body = make("div", { className: "history-body" });
+          historyPrompt(body, "topic", projectValue(project, "topic"));
+          const metadata = make("div", { className: "history-meta" });
+          metadata.append(
+            metadataItem("Recorded video cost", projectRecordedCost(project)),
+            metadataItem("Status", status.replaceAll("_", " ")),
+            metadataItem("Created", formatDate(projectValue(project, "created_at", "createdAt"))),
+            metadataItem("Model", friendlyModel(projectValue(project, "model"))),
+            metadataItem("File size", formatBytes(projectValue(project, "final_size_bytes")))
+          );
+          body.append(metadata);
+          const projectError = projectValue(project, "error", "message");
+          if (projectError) body.append(make("div", { className: "alert error history-error", text: projectError }));
+          body.append(historyTerminal(
+            projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"),
+            `project:${id || projectValue(project, "created_at", "createdAt") || index}`,
+            status
+          ));
+          const actions = make("div", { className: "history-actions" });
+          if (videoReady && videoURL) {
+            download = make("a", { className: "button secondary", text: "Download" });
+            download.href = videoURL;
+            download.download = `project-${id}.mp4`;
+            actions.append(download);
+          }
+          if (videoReady && videoURL) {
+            const upload = make("button", { className: "button secondary", type: "button", text: "Upload to YouTube" });
+            upload.addEventListener("click", () => openYouTubeUpload(projectYouTubeSource(project)));
+            actions.append(upload);
+          }
+          if (status === "completed" && videoReady) {
+            const move = make("button", { className: "button secondary vault-move-button", type: "button", text: "Move to Vault" });
+            move.addEventListener("click", () => moveHistoryItem("project", id, move));
+            actions.append(move);
+          }
+          const open = make("button", { className: "button secondary", type: "button", text: "Open" });
+          open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); });
+          actions.append(open);
+          if (isTerminalJobStatus(status)) {
+            const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
+            remove.addEventListener("click", () => deleteProject(project));
+            actions.append(remove);
+          }
+          body.append(actions);
+          item.append(preview, body);
+          return item;
+        });
+        cards.push(item);
+      });
+      reconcileChildren(list, cards);
+      children.push(list);
+    }
+    reconcileChildren(elements.projectHistory, children);
+    elements.projectHistory.hidden = !projects.length;
+  }
+
   function renderHistory() {
-    elements.historyGrid.replaceChildren();
-    if (!state.generations.length && !state.projects.length) {
-      elements.historyGrid.append(emptyState("No generations yet.", "Create a video"));
-      return;
+    const keys = new Set([
+      ...state.projects.map((record, index) => `project:${projectID(record) || index}`),
+      ...state.generations.map((record, index) => `single:${String(record.id || index)}`)
+    ]);
+    state.historyCards.forEach((_value, key) => { if (!keys.has(key)) state.historyCards.delete(key); });
+    const filters = historyFilters();
+    const filtered = hasHistoryFilters(filters);
+    const projects = state.projects.filter((record) => historyMatches(record, "project", filters));
+    const generations = state.generations.filter((record) => historyMatches(record, "single", filters));
+    const loaded = state.projects.length + state.generations.length;
+    const matched = projects.length + generations.length;
+    elements.historyResultsSummary.textContent = `Showing ${matched} of ${loaded} loaded ${loaded === 1 ? "item" : "items"}: ${projects.length} ${projects.length === 1 ? "project" : "projects"}, ${generations.length} ${generations.length === 1 ? "clip" : "clips"}.`
+      + (state.historyHasMore ? " Load more to include older clips." : "");
+    elements.historyClearFilters.disabled = !filtered;
+    renderProjectHistory(projects);
+    const children = [];
+    elements.historyGrid.hidden = filters.format === "project" && projects.length > 0;
+    if (!matched) {
+      elements.historyGrid.hidden = false;
+      children.push(retainedNode(state.historyChrome, "history-empty", filtered, () => filtered
+        ? emptyState("No loaded items match these filters.", "Clear filters", clearHistoryFilters)
+        : emptyState("Your projects and clips will appear here.", "Create a video")));
     }
 
-    if (state.generations.length || state.projects.length) {
-      const heading = make("div", { className: "history-section-heading history-generation-heading" });
-      heading.append(
-        make("h3", { text: "Video generations" }),
-        make("span", { className: "history-count", text: String(state.generations.length) })
-      );
-      elements.historyGrid.append(heading);
+    if (generations.length) {
+      children.push(historyHeading("single-heading", "Single clips", generations.length, "history-section-heading history-generation-heading"));
     }
 
-    if (!state.generations.length && state.projects.length) {
-      elements.historyGrid.append(make("div", {
+    if (!generations.length && projects.length && filters.format !== "project" && state.historyHasMore) {
+      children.push(retainedNode(state.historyChrome, "history-clips-empty", true, () => make("div", {
         className: "empty history-generation-empty",
-        text: "No individual video generations yet."
-      }));
-      return;
+        text: "No loaded clips match. Load more to include older clips."
+      })));
     }
 
-    state.generations.forEach((record, index) => {
-      const card = make("article", { className: "history-card" });
-      const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
-      const videoReady = String(record.status || "").toLowerCase() === "completed" && Boolean(record.video_ready);
-      let download;
-      const previewLabel = record.prompt
-        ? "Generated video: " + record.prompt.slice(0, 120)
-        : "Generated video";
-      const preview = historyPreview(videoReady, videoURL, record.status, () => download?.remove(), previewLabel);
+    generations.forEach((record, index) => {
+      const key = `single:${String(record.id || index)}`;
+      const card = retainedNode(state.historyCards, key, record, () => {
+        const card = make("article", { className: "history-card" });
+        const videoURL = `/video?id=${encodeURIComponent(record.id)}`;
+        const videoReady = String(record.status || "").toLowerCase() === "completed" && Boolean(record.video_ready);
+        let download;
+        const previewLabel = record.prompt
+          ? "Generated video: " + record.prompt.slice(0, 120)
+          : "Generated video";
+        const preview = historyPreview(videoReady, videoURL, record.status, () => {
+          if (videoReady) card.dataset.previewFailed = "true";
+          download?.remove();
+        }, previewLabel);
 
-      const body = make("div", { className: "history-body" });
-      historyPrompt(body, "prompt", record.prompt);
-      const metadata = make("div", { className: "history-meta" });
-      const cost = recordCost(record);
-      metadata.append(
-        metadataItem("Model", friendlyModel(record.model)),
-        metadataItem("Created", formatDate(record.created_at)),
-        metadataItem("Duration", record.duration ? `${record.duration} sec` : "Provider default"),
-        metadataItem(cost.label, cost.value),
-        metadataItem("Aspect ratio", record.aspect_ratio || "Provider default"),
-        metadataItem("File size", formatBytes(record.size_bytes))
-      );
-      body.append(metadata);
-      if (record.error) body.append(make("div", { className: "alert error history-error", text: record.error }));
-      body.append(historyTerminal(
-        record.events || record.pipeline_events || record.logs,
-        `generation:${record.id || record.created_at || index}`,
-        record.status
-      ));
+        const body = make("div", { className: "history-body" });
+        historyPrompt(body, "prompt", record.prompt);
+        const metadata = make("div", { className: "history-meta" });
+        const cost = recordCost(record);
+        metadata.append(
+          metadataItem("Model", friendlyModel(record.model)),
+          metadataItem("Created", formatDate(record.created_at)),
+          metadataItem("Duration", record.duration ? `${record.duration} sec` : "Provider default"),
+          metadataItem(cost.label, cost.value),
+          metadataItem("Aspect ratio", record.aspect_ratio || "Provider default"),
+          metadataItem("File size", formatBytes(record.size_bytes))
+        );
+        body.append(metadata);
+        if (record.error) body.append(make("div", { className: "alert error history-error", text: record.error }));
+        body.append(historyTerminal(
+          record.events || record.pipeline_events || record.logs,
+          `generation:${record.id || record.created_at || index}`,
+          record.status
+        ));
 
-      const actions = make("div", { className: "history-actions" });
-      if (videoReady) {
-        download = make("a", { className: "button secondary", text: "Download" });
-        download.href = videoURL;
-        download.download = `generation-${record.id}.mp4`;
-        actions.append(download);
-      }
-      if (videoReady) {
-        const upload = make("button", { className: "button secondary", text: "Upload to YouTube", type: "button" });
-        upload.addEventListener("click", () => openYouTubeUpload(generationYouTubeSource(record)));
-        actions.append(upload);
-      }
-      if (videoReady) {
-        const move = make("button", { className: "button secondary vault-move-button", text: "Move to Vault", type: "button" });
-        move.addEventListener("click", () => moveHistoryItem("generation", record.id, move));
-        actions.append(move);
-      }
-      const remove = make("button", { className: "button secondary danger-button", text: "Delete", type: "button" });
-      remove.addEventListener("click", () => deleteGeneration(record));
-      actions.append(remove);
-      body.append(actions);
-      card.append(preview, body);
-      elements.historyGrid.append(card);
+        const actions = make("div", { className: "history-actions" });
+        if (videoReady) {
+          download = make("a", { className: "button secondary", text: "Download" });
+          download.href = videoURL;
+          download.download = `generation-${record.id}.mp4`;
+          actions.append(download);
+        }
+        if (videoReady) {
+          const upload = make("button", { className: "button secondary", text: "Upload to YouTube", type: "button" });
+          upload.addEventListener("click", () => openYouTubeUpload(generationYouTubeSource(record)));
+          actions.append(upload);
+        }
+        if (videoReady) {
+          const move = make("button", { className: "button secondary vault-move-button", text: "Move to Vault", type: "button" });
+          move.addEventListener("click", () => moveHistoryItem("generation", record.id, move));
+          actions.append(move);
+        }
+        const remove = make("button", { className: "button secondary danger-button", text: "Delete", type: "button" });
+        remove.addEventListener("click", () => deleteGeneration(record));
+        actions.append(remove);
+        body.append(actions);
+        card.append(preview, body);
+        return card;
+      });
+      children.push(card);
     });
 
-    if (state.historyHasMore) {
-      const more = make("div", { className: "empty" });
-      const button = make("button", { className: "button secondary", text: "Load more", type: "button" });
-      button.addEventListener("click", () => loadHistory(true, true));
-      more.append(button);
-      elements.historyGrid.append(more);
+    if (state.historyHasMore && filters.format !== "project") {
+      const more = retainedNode(state.historyChrome, "history-more", true, () => {
+        const container = make("div", { className: "empty" });
+        const button = make("button", { className: "button secondary", text: "Load more", type: "button" });
+        button.addEventListener("click", async () => {
+          setButtonBusy(button, true, "Loading older clips…");
+          await loadHistory(true, true);
+          setButtonBusy(button, false);
+        });
+        container.append(button);
+        return container;
+      });
+      setButtonBusy(more.children[0], state.historyLoading, "Loading older clips…");
+      children.push(more);
     }
+    reconcileChildren(elements.historyGrid, children);
   }
+
 
   async function loadHistory(notify = true, append = false) {
     if (!state.authenticated || state.mustChangePassword || state.historyLoading) return;
+    const authGeneration = state.authGeneration;
     state.historyLoading = true;
     elements.refreshHistory.disabled = true;
     try {
@@ -2045,6 +2415,7 @@
         query.set("offset", String(offset));
       }
       const payload = await request(`/api/generations?${query.toString()}`);
+      if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration) return;
       const records = preserveNewerSnapshots(
         Array.isArray(payload && payload.generations) ? payload.generations : [],
         state.generations,
@@ -2098,12 +2469,14 @@
       );
       renderStats();
       renderRecent();
-      renderHistory();
     } catch (error) {
-      if (notify && error.status !== 401) toast(error.message, true);
+      if (notify && state.authenticated && state.authGeneration === authGeneration && error.status !== 401) toast(error.message, true);
     } finally {
-      state.historyLoading = false;
-      elements.refreshHistory.disabled = false;
+      if (state.authGeneration === authGeneration) {
+        state.historyLoading = false;
+        elements.refreshHistory.disabled = false;
+        renderHistory();
+      }
     }
   }
 
@@ -2181,6 +2554,7 @@
     elements.projectDownload.removeAttribute("download");
     elements.projectYouTubeUpload.hidden = true;
     elements.projectStory.replaceChildren();
+    state.projectStoryRevision = null;
     elements.projectStory.hidden = true;
     elements.projectScenes.replaceChildren();
     elements.projectPipelineList.replaceChildren();
@@ -2485,6 +2859,7 @@
 
   function renderProjectPipeline(project, scenes, status) {
     const events = projectPipelineEvents(project, scenes, status);
+    elements.projectPipeline.hidden = !events.length;
     elements.projectPipelineList.replaceChildren();
     events.forEach((event) => {
       const item = make("li", { className: `pipeline-item pipeline-${event.status}` });
@@ -2591,9 +2966,35 @@
     elements.projectTrace.hidden = false;
   }
 
+  function renderProjectStory(project) {
+    const value = projectValue(project, "story", "story_text", "storyText");
+    const story = typeof value === "string" ? value.trim() : "";
+    const id = projectID(project);
+    if (state.projectStoryRevision?.id === id && state.projectStoryRevision.story === story) return;
+    state.projectStoryRevision = { id, story };
+    elements.projectStory.replaceChildren();
+    elements.projectStory.hidden = !story;
+    if (!story) return;
+    elements.projectStory.append(make("strong", { text: "Story" }));
+    const characters = Array.from(story);
+    if (characters.length <= 600) {
+      elements.projectStory.append(make("p", { text: story }));
+    } else {
+      elements.projectStory.append(make("p", { text: characters.slice(0, 300).join("") + "…" }));
+      const details = make("details");
+      details.append(make("summary", { text: "Read story" }), make("p", { text: story }));
+      elements.projectStory.append(details);
+    }
+  }
+
   function renderProject(project, authoritative = false) {
     if (!project) return;
     const incomingID = projectID(project);
+    const previousScenePrompts = incomingID === state.displayedProjectID
+      ? $$(".scene-prompt-details", elements.projectScenes) : [];
+    const openScenePrompts = new Map(previousScenePrompts.filter((details) => details.open).map((details) => [details.dataset.scene, details.children[1].textContent]));
+    const focusedScenePrompt = previousScenePrompts.find((details) => details.children[0] === document.activeElement);
+    let sceneFocusTarget = null;
     const displayedPrevious = state.currentProjectRecord && projectID(state.currentProjectRecord) === incomingID ? state.currentProjectRecord : null;
     if (state.displayedProjectID && state.displayedProjectID !== incomingID) invalidateProjectRawTraceRequests();
     const previous = state.projects.find((item) => projectID(item) === incomingID) || displayedPrevious;
@@ -2642,8 +3043,7 @@
     renderJobTerminal(elements.projectTerminal, projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"));
     renderProjectTrace(project, scenes, status);
 
-    elements.projectStory.hidden = true;
-    elements.projectStory.replaceChildren();
+    renderProjectStory(project);
 
     elements.projectScenes.replaceChildren();
     scenes.forEach((scene, index) => {
@@ -2664,7 +3064,17 @@
       const sceneScript = projectValue(scene, "script", "scene_script", "description");
       const prompt = projectValue(scene, "prompt", "video_prompt", "generation_prompt");
       if (sceneScript) card.append(make("p", { className: "scene-copy", text: sceneScript }));
-      if (prompt) card.append(make("p", { className: "scene-prompt", text: prompt }));
+      if (prompt) {
+        const details = make("details", { className: "scene-prompt-details" });
+        details.dataset.scene = String(number);
+        details.open = openScenePrompts.get(String(number)) === String(prompt);
+        const summary = make("summary", { text: "Scene prompt" });
+        if (focusedScenePrompt?.dataset.scene === String(number) && focusedScenePrompt.children[1].textContent === String(prompt)) {
+          sceneFocusTarget = summary;
+        }
+        details.append(summary, make("p", { className: "scene-prompt", text: prompt }));
+        card.append(details);
+      }
       const sceneError = projectValue(scene, "error", "message");
       if (sceneError) card.append(make("div", { className: "alert error", text: sceneError }));
       if (["failed", "error"].includes(sceneStatus)) {
@@ -2695,6 +3105,7 @@
       elements.projectYouTubeUpload.hidden = true;
     }
     syncGenerationModeDisplay();
+    if (sceneFocusTarget) sceneFocusTarget.focus({ preventScroll: true });
   }
 
   async function retryProjectScene(id, number, button) {
@@ -2737,13 +3148,14 @@
     project = mergeProjectRawTrace(existing, project);
     if (!existing) state.projects.unshift(project);
     else state.projects = state.projects.map((item) => projectID(item) === projectIDValue ? project : item);
+    const formEdited = state.pendingProjectFormEdited;
     clearPendingProjectSubmission(id);
     state.projectSubmissionPending = false;
     state.projectSubmissionFailed = false;
-    if (elements.projectTopic.value.trim() === String(pending.body.topic || "").trim()) {
+    if (!formEdited && elements.projectTopic.value.trim() === String(pending.body.topic || "").trim()) {
       elements.projectTopic.value = "";
+      elements.projectTopicError.textContent = "";
     }
-    elements.projectTopicError.textContent = "";
     renderProject(project, true);
     toast("Project submission restored after a connection interruption.");
     return { status: "recovered", project };
@@ -2869,81 +3281,12 @@
       const selectedProject = state.projects.find((project) => projectID(project) === state.currentProjectID);
       if (selectedProject) state.currentProjectRecord = selectedProject;
       setGenerationMode(state.mode);
-      elements.projectHistory.replaceChildren();
-      if (state.projects.length) {
-        const heading = make("div", { className: "history-section-heading" });
-        heading.append(
-          make("h3", { text: "30-second projects" }),
-          make("span", { className: "history-count", text: String(state.projects.length) })
-        );
-        elements.projectHistory.append(heading);
-        const list = make("div", { className: "project-history-list" });
-        state.projects.forEach((project, index) => {
-          const id = projectID(project);
-          const status = String(projectValue(project, "status") || "queued");
-          const videoReady = String(status).toLowerCase() === "completed" && Boolean(projectValue(project, "final_video_ready"));
-          const videoURL = id ? `/api/projects/${encodeURIComponent(id)}/video` : "";
-          const item = make("article", { className: "history-card" });
-          let download;
-          const topic = String(projectValue(project, "topic") || "30-second project").slice(0, 120);
-          const preview = historyPreview(videoReady, videoURL, status, () => download?.remove(), "Project video: " + topic);
-          const body = make("div", { className: "history-body" });
-          historyPrompt(body, "topic", projectValue(project, "topic"));
-          const metadata = make("div", { className: "history-meta" });
-          metadata.append(
-            metadataItem("Recorded video cost", projectRecordedCost(project)),
-            metadataItem("Status", status.replaceAll("_", " ")),
-            metadataItem("Created", formatDate(projectValue(project, "created_at", "createdAt"))),
-            metadataItem("Model", friendlyModel(projectValue(project, "model"))),
-            metadataItem("File size", formatBytes(projectValue(project, "final_size_bytes")))
-          );
-          body.append(metadata);
-          const projectError = projectValue(project, "error", "message");
-          if (projectError) body.append(make("div", { className: "alert error history-error", text: projectError }));
-          body.append(historyTerminal(
-            projectValue(project, "pipeline_events", "pipelineEvents", "events", "logs"),
-            `project:${id || projectValue(project, "created_at", "createdAt") || index}`,
-            status
-          ));
-          const actions = make("div", { className: "history-actions" });
-          if (videoReady && videoURL) {
-            download = make("a", { className: "button secondary", text: "Download" });
-            download.href = videoURL;
-            download.download = `project-${id}.mp4`;
-            actions.append(download);
-          }
-          if (videoReady && videoURL) {
-            const upload = make("button", { className: "button secondary", type: "button", text: "Upload to YouTube" });
-            upload.addEventListener("click", () => openYouTubeUpload(projectYouTubeSource(project)));
-            actions.append(upload);
-          }
-          if (status === "completed" && videoReady) {
-            const move = make("button", { className: "button secondary vault-move-button", type: "button", text: "Move to Vault" });
-            move.addEventListener("click", () => moveHistoryItem("project", id, move));
-            actions.append(move);
-          }
-          const open = make("button", { className: "button secondary", type: "button", text: "Open" });
-          open.addEventListener("click", () => { setGenerationMode("project"); navigate("generate"); renderProject(project); });
-          actions.append(open);
-          if (isTerminalJobStatus(status)) {
-            const remove = make("button", { className: "button secondary danger-button", type: "button", text: "Delete" });
-            remove.addEventListener("click", () => deleteProject(project));
-            actions.append(remove);
-          }
-          body.append(actions);
-          item.append(preview, body);
-          list.append(item);
-        });
-        elements.projectHistory.append(list);
-        if (state.currentProjectID && state.mode === "project") {
-          const active = state.projects.find((project) => projectID(project) === state.currentProjectID);
-          if (active) {
-            setGenerationMode("project");
-            renderProject(active);
-          }
-        }
+      if (state.currentProjectID && state.mode === "project") {
+        const active = state.projects.find((project) => projectID(project) === state.currentProjectID);
+        if (active) renderProject(active);
       }
       renderHistory();
+      renderRecent();
       if (restoreSelection && !state.submissionPending && state.pendingProjectSubmission) {
         await recoverPendingProjectSubmission({ notifyUncertain: true });
       }
@@ -2956,8 +3299,19 @@
   }
 
   async function submitProject() {
-    if (state.submissionPending) return;
-    const topic = elements.projectTopic.value.trim();
+    if (state.submissionPending || state.modelsLoading || !state.authenticated) return;
+    if (state.mustChangePassword) {
+      navigate("settings");
+      return;
+    }
+    if (state.openRouterConfigured === false) {
+      renderCreatorProviderHelp();
+      elements.creatorOpenSettings.focus({ preventScroll: true });
+      return;
+    }
+    const submittedValue = elements.projectTopic.value;
+    const submittedRevision = state.promptEditRevisions.project;
+    const topic = submittedValue.trim();
     const topicLength = Array.from(topic).length;
     elements.projectTopicError.textContent = "";
     if (!topic || topicLength > 4000) {
@@ -3021,8 +3375,10 @@
       state.projectSubmissionPending = false;
       state.projectSubmissionFailed = false;
       renderProject(project, true);
-      elements.projectTopic.value = "";
-      elements.projectTopicError.textContent = "";
+      if (elements.projectTopic.value === submittedValue && state.promptEditRevisions.project === submittedRevision) {
+        elements.projectTopic.value = "";
+        elements.projectTopicError.textContent = "";
+      }
       toast("Project submitted. Script generation has started.");
       loadProjects(false);
     } catch (error) {
@@ -3062,7 +3418,7 @@
 
   async function submitGeneration(event) {
     event.preventDefault();
-    if (state.submissionPending) return;
+    if (state.submissionPending || state.modelsLoading || !state.authenticated) return;
     if (state.mode === "project") {
       await submitProject();
       return;
@@ -3071,7 +3427,10 @@
       navigate("settings");
       return;
     }
-    const prompt = elements.prompt.value.trim();
+    const submittedValue = elements.prompt.value;
+    const submittedRevision = state.promptEditRevisions.single;
+    const authGeneration = state.authGeneration;
+    const prompt = submittedValue.trim();
     const promptLength = Array.from(prompt).length;
     elements.promptError.textContent = "";
     if (!prompt || promptLength > 4000) {
@@ -3118,16 +3477,20 @@
 
     try {
       const record = await request("/generate", { method: "POST", body: JSON.stringify(requestBody) });
+      if (!state.authenticated || state.authGeneration !== authGeneration) return;
       state.singleSubmissionPending = false;
       state.singleSubmissionFailed = false;
       setStatusRecord(record);
-      elements.prompt.value = "";
-      elements.promptCount.textContent = "0 / 4000";
-      elements.promptError.textContent = "";
+      if (elements.prompt.value === submittedValue && state.promptEditRevisions.single === submittedRevision) {
+        elements.prompt.value = "";
+        elements.promptCount.textContent = "0 / 4000";
+        elements.promptError.textContent = "";
+      }
       updateModelOptions();
       toast("Generation submitted.");
       loadHistory(false);
     } catch (error) {
+      if (!state.authenticated || state.authGeneration !== authGeneration) return;
       state.singleSubmissionPending = false;
       state.singleSubmissionFailed = true;
       elements.statusBadge.className = "badge failed";
@@ -3139,14 +3502,16 @@
       syncGenerationModeDisplay();
       if (error.status !== 401) toast(error.message, true);
     } finally {
-      state.submissionPending = false;
-      setButtonBusy(elements.generate, false);
-      updateGenerateAvailability();
-      syncGenerationModeDisplay();
+      if (state.authGeneration === authGeneration) {
+        state.submissionPending = false;
+        setButtonBusy(elements.generate, false);
+        updateGenerateAvailability();
+        syncGenerationModeDisplay();
+      }
     }
   }
 
-  function renderProviderSettings(settings) {
+  function renderProviderSettings(settings, preserveOpenRouterConfiguration = false) {
     state.videoProvider = settings.video_provider === "modal" ? "modal" : "openrouter";
     elements.videoProvider.value = state.videoProvider;
     elements.modalSettings.hidden = false;
@@ -3154,7 +3519,10 @@
     elements.videoProviderState.className = "badge completed";
     elements.videoProviderState.textContent = `Active: ${videoProviderName()}`;
     elements.modalBaseURL.value = settings.modal_video_base_url || "";
-    const openRouterConfigured = Boolean(settings.openrouter_api_key_configured);
+    if (!preserveOpenRouterConfiguration) {
+      state.openRouterConfigured = typeof settings.openrouter_api_key_configured === "boolean" ? settings.openrouter_api_key_configured : null;
+    }
+    const openRouterConfigured = state.openRouterConfigured === true;
     elements.keyState.className = `badge ${openRouterConfigured ? "completed" : "neutral"}`;
     elements.keyState.textContent = openRouterConfigured ? "Configured" : "Not configured";
     elements.maskedKey.textContent = openRouterConfigured ? "Configured" : "Not configured";
@@ -3165,6 +3533,7 @@
       ? "A key is saved securely. Leave this field blank to keep it while changing the URL."
       : "A key is required for the first save. The saved key is never returned to the browser.";
     renderVaultCodeSettings(Boolean(settings.vault_code_configured));
+    updateGenerateAvailability();
   }
 
   function renderVaultCodeSettings(configured) {
@@ -3181,11 +3550,16 @@
 
   async function loadSettings(notify = true) {
     if (!state.authenticated || state.mustChangePassword) return;
+    const authGeneration = state.authGeneration;
+    const openRouterConfigurationRevision = state.openRouterConfigurationRevision;
     try {
       const settings = await request("/api/settings");
-      renderProviderSettings(settings || {});
+      if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration) return;
+      // Keep a verified key save newer than this read; unrelated settings still apply.
+      renderProviderSettings(settings || {}, state.openRouterConfigurationRevision !== openRouterConfigurationRevision);
       await Promise.all([loadModalAccounts(notify), loadYouTubeStatus(notify)]);
     } catch (error) {
+      if (!state.authenticated || state.mustChangePassword || state.authGeneration !== authGeneration) return;
       elements.keyState.className = "badge failed";
       elements.keyState.textContent = "Unavailable";
       if (notify && error.status !== 401) toast(error.message, true);
@@ -3343,17 +3717,21 @@
   }
 
   async function loadYouTubeStatus(notify = false, controller = null, dialogEpoch = 0) {
+    if (!state.authenticated || state.mustChangePassword) return null;
+    const authGeneration = state.authGeneration;
     const requestID = ++state.youtubeStatusRequestID;
+    const isCurrentRequest = () => state.authenticated && !state.mustChangePassword && state.authGeneration === authGeneration
+      && requestID === state.youtubeStatusRequestID;
     try {
       const options = controller ? { signal: controller.signal } : {};
       const status = await request("/api/youtube/status", options);
-      if (requestID !== state.youtubeStatusRequestID) return null;
+      if (!isCurrentRequest()) return null;
       if (dialogEpoch && !isCurrentYouTubeDialog(dialogEpoch)) return null;
       state.youtubeStatus = status || { configured: false, connected: false };
       renderYouTubeSettings(state.youtubeStatus);
       return state.youtubeStatus;
     } catch (error) {
-      if (error.name === "AbortError" || error.status === 401) return null;
+      if (!isCurrentRequest() || error.name === "AbortError" || error.status === 401) return null;
       if (notify) toast(error.message, true);
       if (!dialogEpoch) {
         elements.youtubeChannelState.className = "badge failed";
@@ -3542,6 +3920,8 @@
     if (wasOpen) elements.youtubeDialog.close();
     if (restoreFocus && focusTarget && focusTarget.isConnected !== false && typeof focusTarget.focus === "function") {
       focusTarget.focus({ preventScroll: true });
+    } else if (restoreFocus && state.authenticated && !state.mustChangePassword) {
+      focusPageTitle();
     }
   }
 
@@ -4488,6 +4868,7 @@
 
   async function saveAPIKey(event) {
     event.preventDefault();
+    if (!state.authenticated) return;
     if (state.mustChangePassword) {
       navigate("settings");
       return;
@@ -4499,22 +4880,28 @@
       return;
     }
     const button = $("button[type='submit']", elements.apiKeyForm);
+    const authGeneration = state.authGeneration;
     setButtonBusy(button, true, "Testing key…");
     try {
       await request("/api/settings/api-key", {
         method: "PUT",
         body: JSON.stringify({ api_key: key })
       });
+      if (!state.authenticated || state.authGeneration !== authGeneration) return;
+      state.openRouterConfigurationRevision += 1;
+      state.openRouterConfigured = true;
       elements.apiKey.value = "";
       elements.keyState.className = "badge completed";
       elements.keyState.textContent = "Configured";
       elements.maskedKey.textContent = "Configured";
+      updateGenerateAvailability();
       toast("API key tested and saved.");
       if (state.videoProvider === "openrouter") await loadModels(false);
     } catch (error) {
+      if (!state.authenticated || state.authGeneration !== authGeneration) return;
       if (error.status !== 401) toast(error.message, true);
     } finally {
-      setButtonBusy(button, false);
+      if (state.authGeneration === authGeneration) setButtonBusy(button, false);
     }
   }
 
@@ -4709,6 +5096,7 @@
 
   function bindEvents() {
     syncNavigationAccessibility();
+    renderConnectionState();
     elements.loginForm.addEventListener("submit", submitLogin);
     elements.recoveryForm.addEventListener("submit", submitRecovery);
     elements.showRecovery.addEventListener("click", showRecoveryView);
@@ -4721,9 +5109,13 @@
     elements.generatorForm.addEventListener("submit", submitGeneration);
     elements.promptCategory.addEventListener("input", () => {
       markPendingProjectFormEdited();
+      state.categoryEditRevision++;
       updatePromptCategory();
     });
-    elements.projectTopic.addEventListener("input", markPendingProjectFormEdited);
+    elements.projectTopic.addEventListener("input", () => {
+      markPendingProjectFormEdited();
+      state.promptEditRevisions.project++;
+    });
     elements.randomPrompt.addEventListener("click", generateRandomPrompt);
     elements.retryProject.addEventListener("click", retryCurrentProject);
     elements.modeOptions.forEach((button) => {
@@ -4732,6 +5124,9 @@
         if (state.videoProvider === "modal") void loadModels(false);
       });
       button.addEventListener("keydown", moveGenerationMode);
+    });
+    elements.createModeButtons.forEach((button) => {
+      button.addEventListener("click", () => openCreator(button.dataset.createMode));
     });
     elements.apiKeyForm.addEventListener("submit", saveAPIKey);
     elements.vaultCodeForm.addEventListener("submit", saveVaultCode);
@@ -4789,7 +5184,15 @@
     elements.videoProvider.addEventListener("change", changeVideoProvider);
     elements.testVideoProvider.addEventListener("click", testVideoProvider);
     elements.passwordForm.addEventListener("submit", updatePassword);
-    elements.refreshHistory.addEventListener("click", () => { loadHistory(true); loadProjects(true); });
+    elements.refreshHistory.addEventListener("click", () => {
+      retryFailedHistoryPreviews();
+      startJobEventStream();
+      loadHistory(true);
+      loadProjects(true);
+    });
+    elements.historySearch.addEventListener("input", renderHistory);
+    [elements.historyStatus, elements.historyFormat].forEach((select) => select.addEventListener("change", renderHistory));
+    elements.historyClearFilters.addEventListener("click", clearHistoryFilters);
     elements.model.addEventListener("change", () => {
       markPendingProjectFormEdited();
       updateModelOptions();
@@ -4826,6 +5229,7 @@
     elements.duration.addEventListener("change", updateEstimate);
     elements.resolution.addEventListener("change", updateEstimate);
     elements.prompt.addEventListener("input", () => {
+      state.promptEditRevisions.single++;
       const count = Array.from(elements.prompt.value).length;
       elements.promptCount.textContent = `${count.toLocaleString()} / 4000`;
       elements.promptError.textContent = count > 4000 ? "Prompt must be 4,000 characters or fewer." : "";
@@ -4865,6 +5269,8 @@
       }
     });
     window.addEventListener("resize", syncNavigationAccessibility);
+    window.addEventListener("offline", renderConnectionState);
+    window.addEventListener("online", startJobEventStream);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && state.authenticated && !state.mustChangePassword) void refreshJobState();
     });
