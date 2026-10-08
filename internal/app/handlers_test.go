@@ -193,6 +193,40 @@ func TestStaticAssets(t *testing.T) {
 	}
 }
 
+func TestLogoAssetIsPubliclyServedByBothHandlers(t *testing.T) {
+	store := newTestStore(t)
+	handlers := []struct {
+		name    string
+		handler http.Handler
+	}{
+		{name: "local", handler: testHandler(&mockProvider{})},
+		{name: "dashboard", handler: NewDashboardHandler(store, nil, nil)},
+	}
+	pngSignature := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	for _, test := range handlers {
+		t.Run(test.name, func(t *testing.T) {
+			response := request(test.handler, http.MethodGet, "/static/logo.png", "")
+			if response.Code != http.StatusOK {
+				t.Fatalf("GET /static/logo.png = %d: %s", response.Code, response.Body.String())
+			}
+			if got := response.Header().Get("Content-Type"); got != "image/png" {
+				t.Fatalf("Content-Type = %q, want image/png", got)
+			}
+			if got := response.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("Cache-Control = %q, want no-store", got)
+			}
+			if !bytes.HasPrefix(response.Body.Bytes(), pngSignature) {
+				t.Fatal("response does not contain a PNG image")
+			}
+		})
+	}
+
+	page := request(handlers[1].handler, http.MethodGet, "/", "")
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `rel="icon" type="image/png" sizes="256x256" href="/static/logo.png"`) {
+		t.Fatalf("dashboard index does not reference the logo favicon: status=%d", page.Code)
+	}
+}
+
 func TestCrossOriginGenerateRejected(t *testing.T) {
 	provider := &mockProvider{models: validModels()}
 	handler := testHandler(provider)

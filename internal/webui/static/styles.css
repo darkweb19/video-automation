@@ -76,10 +76,8 @@ video { display: block; width: 100%; max-height: 560px; margin: 20px 0 12px; bor
 .login-screen { display: grid; min-height: 100dvh; place-items: center; padding: 40px 20px; background: var(--cloud); }
 .login-panel { width: min(100%, 460px); padding: 42px; border: 1px solid var(--rule); border-radius: 18px; background: var(--white); }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 48px; font-size: 19px; font-weight: 600; letter-spacing: -.04em; }
-.brand-mark { display: grid; width: 42px; height: 42px; place-items: center; flex: 0 0 42px; border-radius: 10px; background: var(--ink); color: var(--white); }
-.brand-mark svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; }
+.brand-mark { display: block; width: 42px; height: 42px; flex: 0 0 42px; border: 1px solid var(--rule); border-radius: 10px; background: var(--white); object-fit: contain; }
 .brand-mark.small { width: 34px; height: 34px; flex-basis: 34px; border-radius: 8px; }
-.brand-mark.small svg { width: 24px; height: 24px; }
 .login-panel h1 { margin-bottom: 10px; font-size: clamp(30px, 7vw, 36px); }
 .login-panel > div > .subtle { margin-bottom: 30px; }
 .login-panel .field { margin-bottom: 16px; }
