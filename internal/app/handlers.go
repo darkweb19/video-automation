@@ -29,6 +29,7 @@ func NewHandler(provider VideoProvider, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", h.index)
 	mux.HandleFunc("GET /static/app.js", h.static("static/app.js", "application/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /static/logo.png", h.static("static/logo.png", "image/png"))
 	mux.HandleFunc("GET /static/styles.css", h.static("static/styles.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/model-picker.css", h.static("static/model-picker.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/project.css", h.static("static/project.css", "text/css; charset=utf-8"))
