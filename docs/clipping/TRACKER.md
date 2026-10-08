@@ -91,6 +91,14 @@ Only the lead edits this tracker. Agent conclusions do not automatically constit
 
 ## Evidence and decisions
 
+### 2026-10-08 — Local Compose startup follow-up
+
+- User's local test build succeeded but `volume-init` exited 1. Assigned `m2_integration` the isolated `docker-compose.yml` fix; the lead owns verification and documentation. Existing M2 correction/publication authorization applies; no deployment or volume deletion is requested.
+- Reproduced the configuration defect with `docker compose --env-file /dev/null config --format json`, selecting only initializer entrypoint/command: the block string became separate `mkdir`, `-p`, directory and `chown` arguments. With `/bin/sh -ec`, only `mkdir` is executed as the script. Replaying that argument vector returned `mkdir: missing operand`, exit 1, without changing `/data`.
+- Fixed `volume-init.command` to a one-item YAML block list, preserving both initialization commands as one shell argument. Only Compose command representation changed. Author `m2_integration` and independent read-only reviewer `m2_review` used their existing `gpt-6-luna` / `max` assignments; review approved without findings.
+- Verification passed: rendered Compose configuration has exactly one script argument; shell syntax validation; isolated shell execution with temporary command stubs confirms both commands run in order without `/data` writes; author also verified directory creation using a temporary-directory adaptation; `git diff --check`. Docker daemon access is unavailable in this environment, so no container startup is claimed. Application code is unchanged; prior M2 runtime checks remain applicable.
+- At checkpoint authoring, this correction and handoff are local/uncommitted; commit/push to `feat/clipper-ai` follows under the existing publication authorization. User recovery: pull the branch and run `docker compose up -d --force-recreate`, retaining the named data volume.
+
 ### 2026-10-08 — C2.1–C2.3 M2 implementation checkpoint
 
 - User authorized M2 with remaining M1 feasibility skipped, then authorized committing/pushing to `feat/clipper-ai`. Preserved remote M1 commit `84b0844`, based on planning commit `430751e`. No paid provider calls, live imports, deployment, merge or M3–M6 work occurred.

@@ -8,9 +8,10 @@ services:
       dockerfile: Dockerfile
     user: "0:0"
     entrypoint: ["/bin/sh", "-ec"]
-    command: |
-      mkdir -p /data/videos /data/projects
-      chown -R app:app /data
+    command:
+      - |
+        mkdir -p /data/videos /data/projects
+        chown -R app:app /data
     volumes:
       - video_automation_data:/data
     restart: "no"
