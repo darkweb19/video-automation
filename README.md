@@ -297,3 +297,9 @@ docker compose exec video-automation wget -q -O - http://127.0.0.1:8080/health
 `docker compose ps` should show the service as healthy. Open the dashboard in a browser, sign in, change the initial password, save and test the OpenRouter key, choose a video provider, and test its connection. Add a Modal account before selecting one for a submission. OpenRouter video calls may be paid; Modal infrastructure usage is billed separately, and model availability/pricing can change.
 
 For non-Docker development, set `DATA_DIR` to a writable directory and run `go run ./cmd/video-automation`; the server listens on `0.0.0.0:8080`. The Go server has no port override.
+
+## Clipping sources and batches (M2)
+
+The Clipping tab accepts resumable video uploads and public Drive/Dropbox video links after you confirm permission to process the footage. YouTube references return an original-file upload fallback. Select ready sources to queue jobs or a batch with explicit per-job and total budgets; cancellation and source retention controls are included.
+
+Analysis is awaiting worker/provider configuration: M2 does not yet produce selected clips, captions or exports, and submitting sources does not start paid analysis. Source limits are 20 GiB and four hours, with a 100 GiB aggregate reservation bound and physical disk checks. Live provider acquisition and cost/quality feasibility remain unverified. See [M2 implementation and operations](docs/clipping/M2-IMPLEMENTATION.md) and the [tracker](docs/clipping/TRACKER.md) for protocols, recovery, verification and authorization.

@@ -25,7 +25,7 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger, callbackBaseURL: configuredCallbackBaseURL(), videoCallbackBaseURL: configuredVideoCallbackBaseURL()}
+	app := &dashboardApp{store: store, security: security, logger: logger, clippingAcquisition: NewClippingAcquisition(store, security), callbackBaseURL: configuredCallbackBaseURL(), videoCallbackBaseURL: configuredVideoCallbackBaseURL()}
 	if security != nil {
 		if err := store.GarbageCollectProviderConfigs(); err != nil {
 			logger.Error("provider configuration garbage collection failed", "error", err)
@@ -39,6 +39,9 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 }
 
 func (p *Processor) Run(ctx context.Context) {
+	go p.runClippingImportWorker(ctx)
+	go p.runClippingRetentionCleanup(ctx)
+	go p.runClippingStageRecovery(ctx)
 	p.process(ctx)
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
@@ -49,6 +52,127 @@ func (p *Processor) Run(ctx context.Context) {
 		case <-ticker.C:
 			p.process(ctx)
 		}
+	}
+}
+
+// runClippingStageRecovery is a sparse durable timeout recovery. It marks
+// expired worker leases uncertain and keeps their budget reserved; it never
+// redispatches paid work or polls a remote worker.
+func (p *Processor) runClippingStageRecovery(ctx context.Context) {
+	if err := p.recoverClippingStages(); err != nil && ctx.Err() == nil {
+		p.logger.Warn("clipping stage recovery failed")
+	}
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := p.recoverClippingStages(); err != nil && ctx.Err() == nil {
+				p.logger.Warn("clipping stage recovery failed")
+			}
+		}
+	}
+}
+
+func (p *Processor) recoverClippingStages() error {
+	now := time.Now().Unix()
+	expired, err := p.app.store.ExpiredClippingStages(now, 100)
+	if err != nil || len(expired) == 0 {
+		return err
+	}
+	if err := p.app.store.RecoverExpiredClippingStages(now); err != nil {
+		return err
+	}
+	seenJobs := make(map[string]struct{}, len(expired))
+	seenBatches := make(map[string]struct{}, len(expired))
+	for _, stage := range expired {
+		if _, seen := seenJobs[stage.JobID]; seen {
+			continue
+		}
+		seenJobs[stage.JobID] = struct{}{}
+		job, err := p.app.store.ClippingJob(stage.JobID)
+		if err != nil {
+			continue
+		}
+		p.app.store.PublishClippingJob(job.ID)
+		if _, seen := seenBatches[job.BatchID]; !seen {
+			seenBatches[job.BatchID] = struct{}{}
+			p.app.publishClippingBatch(job.BatchID)
+		}
+	}
+	return nil
+}
+
+// runClippingImportWorker drains the durable import queue outside the cheap
+// five-second project/generation scan. A single bounded worker is intentional:
+// imports can run for hours and contend for persistent disk/network capacity.
+func (p *Processor) runClippingImportWorker(ctx context.Context) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		worked, err := p.app.clippingAcquisition.ProcessNextImport(ctx)
+		if err != nil && ctx.Err() == nil {
+			// Import errors may include remote URLs or filesystem details. The
+			// source row contains a sanitized user-facing failure message.
+			p.logger.Warn("clipping source import failed")
+		}
+		if err != nil && ctx.Err() == nil {
+			if !waitProcessor(ctx, 5*time.Second) {
+				return
+			}
+		} else if !worked {
+			// ProcessNextImport also reconciles exhausted crash-recovery rows;
+			// call it before sleeping even when no ordinary import is queued.
+			if !waitProcessor(ctx, 30*time.Second) {
+				return
+			}
+		}
+	}
+}
+
+func (p *Processor) runClippingRetentionCleanup(ctx context.Context) {
+	if err := p.cleanupClippingSources(ctx); err != nil && ctx.Err() == nil {
+		p.logger.Warn("clipping source cleanup failed")
+	}
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := p.cleanupClippingSources(ctx); err != nil && ctx.Err() == nil {
+				p.logger.Warn("clipping source cleanup failed")
+			}
+		}
+	}
+}
+
+func (p *Processor) cleanupClippingSources(ctx context.Context) error {
+	before, err := p.app.store.ExpiredClippingSources(time.Now().Unix(), 100)
+	if err != nil {
+		return err
+	}
+	if _, err := p.app.clippingAcquisition.CleanupExpiredSources(ctx, time.Now()); err != nil {
+		return err
+	}
+	for _, source := range before {
+		p.app.store.PublishClippingSource(source.ID)
+	}
+	return nil
+}
+
+func waitProcessor(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

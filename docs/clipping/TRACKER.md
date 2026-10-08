@@ -4,12 +4,12 @@ Last updated: 2026-10-08. This file is the authoritative status and authorizatio
 
 ## Current checkpoint
 
-- Phase: M1 approved; C1.1/C1.2 offline drafts integrated and locally checked, final independent review pending. Actual acquisition and benchmark evidence remain outstanding. Later milestones and paid runs are not authorized.
-- Next action: finish independent review when a requested agent is available; collect actual permitted samples and approval of the concrete US$20 cap in EVALUATION.md before C1.3 paid work. YouTube-first acquisition remains unresolved.
-- Code deployment: none for clipping. Live verification: none. No production clipping feature code added; only offline tools and fixtures.
+- Phase: M2 complete, independently approved and locally verified; remaining M1 feasibility explicitly waived. Existing M1 offline artifacts are preserved, without claiming completed feasibility.
+- Next implementation: obtain M3 scope authorization and record provider/spending decisions before paid dispatch. M2 commit/push to `feat/clipper-ai` is authorized; Git history and remote head record the resulting publication.
+- Code deployment: none for clipping. Live verification: none. This checkpoint was authored before the authorized commit/push; publication is verified separately against the remote branch.
 - Requested lead: GPT-6.1 SOL / High. Implementers: TERRA / Max and LUNA / Max. Actual execution must be recorded per assignment; this file does not select models.
-- Availability observed: TERRA is not exposed. Three LUNA (`gpt-6-luna`) Max agents authored/reviewed this session but hit their usage limit before final review/handoffs. Requested lead model/effort are not exposed by this interface. Recheck availability before resuming; no model substitution occurred.
-- M1 scope is approved; the product-budget interpretation and ADR-004 acceptance remain pending evidence/decisions.
+- M2 availability: TERRA is not exposed; implementation uses requested `gpt-6-luna` / `max`. Lead model/effort are not exposed. Earlier M1 agent quota interruption is historical evidence.
+- M2 applies Go/SQLite/local-volume and worker protocol architecture. Product budget interpretation, paid provider choice and measured feasibility remain unvalidated; explicit integer microUSD limits do not authorize automatic spending.
 
 ## Authorization log
 
@@ -20,6 +20,8 @@ Last updated: 2026-10-08. This file is the authoritative status and authorizatio
 | 2026-10-08 | Commit and push these planning changes to `main` | Authorized this documentation publication; feature implementation, paid benchmarks, and deployment remain unapproved |
 | 2026-10-08 | Approve M1; start C1.1 and C1.2; propose benchmark inputs and spending limit before paid runs; use agents | M1 feasibility work authorized; no paid-run approval, no later milestones, publication, or deployment authorization |
 | 2026-10-08 | Push the feasibility work to `feat/clipper-ai`, forked after `430751ee169fbae0d1b7c267c5ff1c077ab13a0a` | Commit and branch push authorized from that exact baseline; no merge, paid runs, later milestones, live video publication, or deployment authorized |
+| 2026-10-08 | “Can you implement M2, we are skipping feasibility” | Authorizes M2/C2.1–C2.3 and necessary local verification/review; waives remaining M1 dependency. No paid provider/benchmark or deployment authorization. |
+| 2026-10-08 | “commit and push the changes to feat/clipper-ai braanch after completing in github” | Authorizes commit and push of completed M2 to https://github.com/darkweb19/video-automation.git on `feat/clipper-ai`; preserve its existing M1 commit. No merge or deployment authorization. |
 
 Record later approvals here with the milestone/task range, spending limit where applicable, and any external action scope. Do not translate a product per-video budget into permission to spend engineering funds. Do not require new permission at every session if the existing approval already covers the work.
 
@@ -28,31 +30,31 @@ Record later approvals here with the milestone/task range, spending limit where 
 | Milestone | State | Completion evidence |
 | --- | --- | --- |
 | M0 Planning and execution workflow | done | C0.1 checkpoint below; documentation checks and LUNA Max review complete |
-| M1 Feasibility | in_progress | User approval recorded below; measurements remain pending |
-| M2 Sources, jobs, batches | planned | — |
+| M1 Feasibility | skipped | User explicitly waived remaining feasibility; offline artifacts preserved, no measured results |
+| M2 Sources, jobs, batches | done | C2.1–C2.3 checkpoint below; final normal/race/regression checks and independent review passed |
 | M3 Understanding and selection | planned | — |
 | M4 Editor and exports | planned | — |
 | M5 YouTube and schedules | planned | — |
 | M6 Verification and rollout | planned | Code readiness, deployment, and live checks tracked separately |
 
-States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `done`. Dependencies and authorization must be satisfied before `ready`. A milestone is `done` only when its PLAN.md exit criteria have evidence, not merely because its code was written.
+States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `done`. Dependencies and authorization must be satisfied before `ready`. A milestone is `done` only when its PLAN.md exit criteria have evidence, not merely because its code was written.
 
 ## Task board
 
 | ID | Task | Depends on | State | Owner / evidence |
 | --- | --- | --- | --- | --- |
 | C0.1 | Scope, ADR, tracker, agent workflow, session handoff | — | done | Lead; C0.1 checkpoint below |
-| C1.1 | Acquisition contract and source feasibility | Scope approval | in_review | Offline draft/checks integrated; C1.1b remains blocked |
-| C1.1a | Source contract, official route review, adversarial offline simulation | Scope approval | in_review | ACQUISITION.md; 20 local tests; final independent review pending |
-| C1.1b | Controlled live acquisition on permitted sample inputs | C1.1a; actual inputs and allowed access | blocked | No user media supplied; YouTube permitted automated route unresolved |
-| C1.2 | Evaluation fixtures, metrics, targets, transcript/candidate contracts | Scope approval | in_review | Draft protocol, schemas, synthetic fixtures; actual corpus pending |
-| C1.2a | Evaluation protocol/contracts and synthetic fixture checks | Scope approval | in_review | EVALUATION.md; 2 synthetic bundles and 12 rejection checks; final review pending |
-| C1.2b | Freeze actual corpus and blinded reference labels | C1.2a; permitted sample inputs and human labelers | blocked | Eight 15-minute slots plus genuine four-hour source proposed; no acquired media or labels |
-| C1.3 | Provider and complete-pipeline cost/quality benchmark | C1.1, C1.2; sample inputs and paid-run authorization | blocked | Proposed US$20 ceiling; actual authorized spend US$0; providers/rates/licenses pending |
-| C1.4 | Record provider, budget, language, and architecture decisions | C1.3 | planned | Lead |
-| C2.1 | Schema/migrations, source lifecycle, job/budget state machine | M1 | planned | Unassigned |
-| C2.2 | Upload and public-link adapters | C2.1 contracts | planned | Unassigned |
-| C2.3 | Worker protocol, retries/cancellation, batch queue, progress | C2.1 contracts | planned | Unassigned |
+| C1.1 | Acquisition contract and source feasibility | Scope approval | skipped | Offline draft/checks preserved; remaining feasibility waived |
+| C1.1a | Source contract, official route review, adversarial offline simulation | Scope approval | skipped | ACQUISITION.md; 20 local tests; final M1 review waived |
+| C1.1b | Controlled live acquisition on permitted sample inputs | C1.1a; actual inputs and allowed access | skipped | No user media supplied; YouTube permitted automated route unresolved |
+| C1.2 | Evaluation fixtures, metrics, targets, transcript/candidate contracts | Scope approval | skipped | Draft protocol, schemas, synthetic fixtures; actual corpus not established |
+| C1.2a | Evaluation protocol/contracts and synthetic fixture checks | Scope approval | skipped | EVALUATION.md; 2 synthetic bundles and 12 rejection checks; final M1 review waived |
+| C1.2b | Freeze actual corpus and blinded reference labels | C1.2a; permitted sample inputs and human labelers | skipped | Eight 15-minute slots plus genuine four-hour source proposed; no acquired media or labels |
+| C1.3 | Provider and complete-pipeline cost/quality benchmark | C1.1, C1.2; sample inputs and paid-run authorization | skipped | Proposed US$20 ceiling; actual authorized spend US$0; providers/rates/licenses undecided |
+| C1.4 | Record provider, budget, language, and architecture decisions | C1.3 | skipped | M2 foundation accepted; paid-provider and feasibility decisions remain open |
+| C2.1 | Schema/migrations, source lifecycle, job/budget state machine | M1 waived; M2 approval | done | m2_storage / LUNA Max; checkpoint below |
+| C2.2 | Upload and public-link adapters | C2.1 contracts | done | m2_acquisition / LUNA Max; checkpoint below |
+| C2.3 | Worker protocol, retries/cancellation, batch queue, progress | C2.1 contracts | done | m2_integration + m2_ui / LUNA Max; checkpoint below |
 | C3.1 | ASR, alignment, audio/visual events, global context | M2 | planned | Unassigned |
 | C3.2 | Content-specific selection, scores, boundaries, deduplication, hooks | C3.1 | planned | Unassigned |
 | C4.1 | Caption/framing/edit contracts and audio-preserving renderer | M3 | planned | Unassigned |
@@ -67,7 +69,7 @@ Dependencies marked “contracts” allow parallel implementation only after the
 
 ## Active assignments
 
-TERRA is not exposed in this session; use the requested available LUNA Max for the two disjoint assignments. The lead model/effort are not exposed to the agent interface; no lead-model claim is made.
+TERRA is not exposed in this session; M2 implementation and independent review use the requested available LUNA Max. The lead model/effort are not exposed to the agent interface; no lead-model claim is made. M1 assignments below are historical.
 
 | Task ID | Agent / actual model / effort | Exclusive write paths | Contract/dependency | Required checks | State |
 | --- | --- | --- | --- | --- | --- |
@@ -75,9 +77,31 @@ TERRA is not exposed in this session; use the requested available LUNA Max for t
 | C1.2 | evaluation / gpt-6-luna / max | docs/clipping/EVALUATION.md; docs/clipping/contracts/; docs/clipping/fixtures/; tools/clipping/evaluation* | Approved M1; source-time milliseconds; corpus/spending proposed only | 2 fixture bundles and 12 rejection checks passed | interrupted by agent quota; lead integrated |
 | C1.1/C1.2 review | review_m1 / gpt-6-luna / max | Read-only | Independent reviewer did not author artifacts | Preliminary doc review and 16 acquisition tests; final review interrupted by agent quota | pending final review |
 
+M2 active assignments:
+
+| Task ID | Agent / actual model / effort | Exclusive write paths | Contract/dependency | Required checks | State |
+| --- | --- | --- | --- | --- | --- |
+| C2.1 | m2_storage / gpt-6-luna / max | clipping_models.go, clipping_storage.go/tests, storage.go migration/mutex | source/job/budget contracts | Migration, concurrency, idempotency, cancellation, source-time tests | done |
+| C2.2 | m2_acquisition / gpt-6-luna / max | clipping_acquisition.go/tests, clipping_files_unix.go, clipping_files_windows.go | C2.1 source APIs | SSRF, bounded streaming, interruption, media validation, cross-builds | done |
+| C2.3 | m2_integration / gpt-6-luna / max | clipping_jobs.go/tests, dashboard_clipping.go/tests, dashboard.go, processor.go, Python clipping protocol/tests, callback regression harness; regression guard in processor_downloads.go/tests | C2.1/C2.2 contracts | Auth, protocol, expiry, duplicates, restart, progress | done |
+| C2.3 UI | m2_ui / gpt-6-luna / max | clipping.js/css, index.html/app.js hooks, clipping-ui.test.cjs | HTTP contract | Node UI regression/syntax | done |
+| C2.1–C2.3 review | m2_review / gpt-6-luna / max | Read-only | Separate from implementation authors | Independent review of integrated changes and fixes | done |
+
 Only the lead edits this tracker. Agent conclusions do not automatically constitute acceptance. Reconcile shared-worktree changes and verify integrated behavior.
 
 ## Evidence and decisions
+
+### 2026-10-08 — C2.1–C2.3 M2 implementation checkpoint
+
+- User authorized M2 with remaining M1 feasibility skipped, then authorized committing/pushing to `feat/clipper-ai`. Preserved remote M1 commit `84b0844`, based on planning commit `430751e`. No paid provider calls, live imports, deployment, merge or M3–M6 work occurred.
+- Actual implementers: `m2_storage`, `m2_acquisition`, `m2_integration`, `m2_ui`, all `gpt-6-luna` / `max`. Independent read-only reviewer: `m2_review`, same actual model/effort, separate from the authors. TERRA was unavailable; lead model/effort are not exposed. The linked CTO browser skill was unavailable; repository instructions governed execution.
+- Changed paths: root AGENTS/CLAUDE/README/SESSION, PLAN/TRACKER/ADR-004 and new [M2-IMPLEMENTATION.md](M2-IMPLEMENTATION.md); `internal/app/clipping_{models,storage,acquisition,jobs}.go` and tests, OS-specific clipping file helpers, `dashboard_clipping.go` and tests, additive `storage.go` migration, dashboard/processor wiring; embedded clipping JS/CSS, dashboard HTML/app hooks and embed map; `tests/clipping-ui.test.cjs`; provider-neutral Python clipping protocol/tests. Existing callback regression harness received only its missing `typing.Any` import/extraction binding. M1 artifacts and existing model/provider pins are preserved.
+- Acceptance evidence covers durable upload offsets/crash-tail truncation, import lease heartbeat/restart/final-attempt cleanup, actual local media probing, bounded streaming and disk reservations, SSRF/DNS/provider-family redirect rejection, encrypted import/callback capabilities, auth/CSRF, batch idempotency, concurrent integer budget reservations, actual-spend overrun, uncertain lease recovery, cancellation and late one-time settlement, source retention/tombstone recovery, strict artifact bounds/source timestamps, and a Go→Python→Go production-preparation protocol fixture. Worker-ledger restarts never re-execute uncertain paid work. No runtime provider is selected; queued jobs await configuration.
+- Review found and authors fixed unsafe destination/redirect cases, capability/error disclosure, cancellation races, uncertain budget release, late callback accounting, envelope size parity, and import crash/lease cleanup. Final callback regression verifies worker-supplied signed URLs/tokens cannot reach Store records, API detail or job/batch SSE. The independent reviewer approved the integrated M2 code and the final safe-error fix, with no unresolved actionable finding.
+- Required cross-workflow checks exposed a pre-existing stale scene snapshot race: a completed scene could be downloaded again after its task key was released (six requests for five scenes). Integration added a durable status/generation/attempt check before the fetch in `processor_downloads.go`, plus `processor_downloads_test.go` reproducing a stale completed snapshot without timing dependence. Independent review approved the bounded guard; retry scheduling, provider pins, output quality and authentication remain unchanged. Initial full normal/race runs failed this regression; those failures were not counted as passes.
+- Final verification: `go test ./... -count=1` passed (app 32.857s); `go test -race ./... -count=1` passed (157.742s); the earlier focused M2 race run passed (24.330s); `go vet ./...` passed. Tests used Go 1.22.12 with isolated caches and permitted loopback listeners. Node dashboard tests passed 87/87 and clipping tests 11/11; both JS syntax checks passed. `PYTHONDONTWRITEBYTECODE=1 python3 workers/modal/test_clipping_protocol.py` passed 8 tests; `workers/modal/callback_delivery_test.py` passed. Preserved M1 offline acquisition checks passed 20 tests; evaluation accepted 2 synthetic bundles and rejected 12 invalid mutations. Final Windows amd64 and Darwin arm64 cross-builds passed; neither platform was executed. Local Markdown link/whitespace/newline checks and `git diff --check` passed.
+- Limits are explicit and unmeasured: 20 GiB/source, 100 GiB logical reservations, four hours, 100 jobs/batch, 4 GiB physical headroom, 16 MiB upload chunks and 4 MiB artifact envelopes. Upload resume matches name/size, not original file content; the UI states that limitation. Native Windows clipping source operations fail closed and direct users to Docker/Linux. YouTube has an original-file fallback; live Drive/Dropbox behavior, rendered-browser layout, true four-hour resource use, paid cost/quality and deployment remain unverified. Transcription, candidate selection and exports are later milestones.
+- At this evidence-writing checkpoint, verified changes are local/uncommitted on `feat/clipper-ai`; authorized publication follows. Git history records the resulting commit, and the remote head is checked separately after push. Next implementation requires M3 authorization and a recorded provider/spending decision before any paid dispatch.
 
 ### 2026-10-08 — C1.1/C1.2 local feasibility checkpoint
 
@@ -111,7 +135,7 @@ Use a new dated checkpoint for future sessions with task IDs, actual author/revi
 
 ## Known dependencies and open decisions
 
-- M1 is approved; later milestone implementation and the minimum-US$1 product-budget interpretation remain separate pending decisions. Final independent review of C1.1/C1.2 is pending after agent quota interruption.
+- M2 is approved; remaining M1 feasibility is waived. The automatic minimum-US$1 product-budget interpretation remains unvalidated. M3–M6 are not authorized by M2 approval.
 - Representative permitted video inputs and an engineering benchmark spending limit.
 - YouTube acquisition feasibility; public Drive/Dropbox download behavior.
 - Exact additional Indian languages, measurable quality targets, and provider choices from M1.

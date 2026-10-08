@@ -1,6 +1,6 @@
 # ADR-004: Integrated AI clipping with Go and a Modal worker
 
-**Status:** Proposed; M1 feasibility authorized on 2026-10-08, architecture acceptance pending M1 evidence.
+**Status:** Accepted for the M2 foundation on 2026-10-08. Remaining M1 feasibility explicitly waived; paid providers, measured budget/quality, languages and render-placement decisions remain open.
 
 **Date:** 2026-10-08
 
@@ -21,6 +21,12 @@ FrameVault already owns authenticated UI/API access, SQLite state, local media, 
 7. Reuse immutable exports in the existing YouTube publishing flow. Extending the source-kind constraint requires a tested migration, source-path validation, deletion/in-flight-upload protection, and existing authorization/Vault behavior. Choose the scheduling mechanism in a follow-up decision.
 8. Treat runtime clipping providers as separate adapters/capabilities from developer-agent model assignments and current story generation pins. Benchmark provider support for the target languages and budget before selecting any paid clipping model. Do not alter existing free-only YouTube metadata behavior incidentally.
 
+## M2 implementation bounds
+
+With feasibility waived, M2 uses explicit unmeasured limits: 20 GiB/source, 100 GiB aggregate source reservations, four hours, 100 jobs/batch, and a 4 GiB physical free-space floor checked against pending source reservations. These supersede the provisional M1 16 GiB source-admission proposal for the M2 lifecycle; frozen M1 evaluation schemas remain unchanged. M2 has no derived renders, so the proposed 8 GiB render/scratch allowance is not yet implemented or validated. Actual analysis/render capacity must be decided before later milestones.
+
+Sources default to 30-day retention (configurable 1–365 days). Deletion/retention removes source-derived artifacts and media while preserving job/stage/budget audit. Import URLs and worker capabilities use the existing encrypted security storage; workers receive scoped headers, not application volume mounts. Expired uncertain stages retain their reservations; cancellation revokes media but permits bounded authenticated cost settlement without advancing the job. These are implementation decisions, not a paid-provider quote or cost guarantee.
+
 ## Alternatives and tradeoffs
 
 | Option | Assessment |
@@ -34,6 +40,8 @@ Local persistent storage and a single owner limit horizontal scaling. Source ret
 
 ## Approval and evolution
 
-This ADR records the recommended design, not deployed behavior. After plan approval, record its acceptance date and scope here and in TRACKER.md. Append or supersede decisions with evidence when M1 resolves providers/render placement or later requirements change. Do not silently rewrite accepted architecture during an agent task.
+On 2026-10-08 the user authorized M2 and explicitly skipped remaining feasibility. Apply Go/SQLite/local-volume and a separate worker protocol to the M2 foundation; this does not establish measured feasibility or select a paid provider. M2 does not implement ASR, candidate selection or rendering. Provider work remains inactive until configured.
+
+This ADR records the accepted M2 design, not deployed behavior. Append or supersede decisions with evidence when subsequent evaluation resolves providers/render placement or later requirements change. Do not silently rewrite accepted architecture during an agent task.
 
 Related: [ADR-001](001-go-service-layout.md), [ADR-003](003-railway-persistence.md), [implementation plan](../clipping/PLAN.md), [tracker](../clipping/TRACKER.md).

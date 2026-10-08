@@ -209,6 +209,7 @@
     overview: { title: "Workspace", kicker: "Studio" },
     generate: { title: "Create", kicker: "Production" },
     history: { title: "History", kicker: "Library" },
+    clipping: { title: "Clipping", kicker: "Sources and analysis" },
     vault: { title: "Vault", kicker: "Private library" },
     settings: { title: "Settings", kicker: "Workspace" }
   };
@@ -612,6 +613,7 @@
       if (response.status === 401 && !allowUnauthorized) showLoggedOut();
       if (response.status === 428 && payload && payload.must_change_password && state.authenticated) {
         stopJobEventStream();
+        window.ClippingUI?.stop(true);
         applyPasswordGate(true);
         navigate("settings");
       }
@@ -1043,9 +1045,13 @@
       // successful open so a transition in that small gap is authoritative.
       // The ready event stays informational and does not duplicate this read.
       void refreshJobState();
+      window.ClippingUI?.refresh();
     });
     source.addEventListener("generation", (event) => handleJobSnapshot("generation", event));
     source.addEventListener("project", (event) => handleJobSnapshot("project", event));
+    source.addEventListener("clipping_source", (event) => window.ClippingUI?.handleEvent("clipping_source", event));
+    source.addEventListener("clipping_job", (event) => window.ClippingUI?.handleEvent("clipping_job", event));
+    source.addEventListener("clipping_batch", (event) => window.ClippingUI?.handleEvent("clipping_batch", event));
     source.addEventListener("ready", () => {});
     source.addEventListener("ping", () => {});
     source.addEventListener("error", () => {
@@ -1330,6 +1336,7 @@
     setButtonBusy($("button[type='submit']", elements.apiKeyForm), false);
     elements.apiKey.value = "";
     stopJobEventStream(true);
+    window.ClippingUI?.stop(true);
     invalidateProjectRawTraceRequests();
     closeYouTubeComposer(false);
     state.youtubeStatus = null;
@@ -1444,6 +1451,7 @@
       loadHistory(false);
       loadProjects(false);
     }
+    if (view === "clipping" && !state.mustChangePassword) window.ClippingUI?.refresh();
   }
 
   function formatPriceNumber(value, minimum = 2) {
@@ -5007,6 +5015,7 @@
         navigate("overview");
         await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false), loadSettings(false)]);
         startJobEventStream();
+        window.ClippingUI?.start();
       }
     } catch (error) {
       toast(error.message, true);
@@ -5034,6 +5043,7 @@
         await loadSettings(false);
         await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false)]);
         startJobEventStream();
+        window.ClippingUI?.start();
         consumeYouTubeReturn();
       }
     } catch (error) {
@@ -5302,11 +5312,13 @@
         await loadSettings(false);
         await Promise.allSettled([loadHistory(false, false), loadProjects(false), loadModels(false)]);
         startJobEventStream();
+        window.ClippingUI?.start();
       }
     } catch (error) {
       showLoggedOut();
     }
   }
 
+  window.ClippingUI?.configure({ request });
   bootstrap();
 })();

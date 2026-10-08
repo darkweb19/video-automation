@@ -30,6 +30,9 @@ The executable entrypoint is under `cmd/`; the private backend package and Go te
 | `internal/app/processor_downloads.go` | Streaming scene and generation downloads, atomic file storage, and retry handling. |
 | `internal/app/processor_tasks.go` | Bounded background task coordination for project work and FFmpeg assembly. |
 | `internal/app/storage.go`, `internal/app/project_storage.go` | SQLite schema, additive migrations, settings, state transitions, worker reads, paths, retries, and pipeline events. |
+| `internal/app/clipping_models.go`, `clipping_storage.go` | Separate source/job/batch/stage/artifact persistence and budget accounting. |
+| `internal/app/clipping_acquisition.go`, `dashboard_clipping.go`, `clipping_jobs.go` | Streamed upload/import validation, authenticated clipping APIs/capabilities/events, processor recovery and cleanup. |
+| `internal/webui/static/clipping.js`, `clipping.css`, `workers/modal/clipping_protocol.py` | Clipping dashboard and provider-neutral worker protocol; no selected analysis provider. |
 | `internal/app/combiner.go` | FFmpeg command construction and file-based final assembly. |
 | `internal/app/events.go` | Authenticated server-sent events for job and project updates. |
 | `internal/app/security.go`, `internal/app/vault.go`, `internal/app/modal_callback.go` | Encrypted settings and sessions, Vault authorization, and authenticated Modal callbacks. |

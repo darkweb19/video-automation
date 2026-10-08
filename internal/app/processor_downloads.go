@@ -6,12 +6,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func (p *Processor) startSceneDownload(ctx context.Context, provider VideoService, scene ProjectScene) {
 	key := fmt.Sprintf("%s:download:%d", scene.ProjectID, scene.Number)
 	p.startProjectTask(ctx, key, func(taskCtx context.Context) {
 		defer p.app.store.PublishProject(scene.ProjectID)
+		if !p.sceneDownloadStillCurrent(taskCtx, scene) {
+			return
+		}
 		_ = p.app.store.AppendPipelineEvent(scene.ProjectID, "scene_download", "started", "Downloading completed scene video.", scene.Number, scene.DownloadAttempts)
 		downloadCtx, cancel := context.WithTimeout(taskCtx, p.downloadTimeout)
 		defer cancel()
@@ -52,6 +56,37 @@ func (p *Processor) startSceneDownload(ctx context.Context, provider VideoServic
 			_ = os.Remove(finalPath)
 		}
 	})
+}
+
+// sceneDownloadStillCurrent rechecks durable state inside the keyed task,
+// immediately before making a provider request. The caller's project snapshot
+// can become stale while the task waits for a project worker slot.
+func (p *Processor) sceneDownloadStillCurrent(ctx context.Context, expected ProjectScene) bool {
+	if expected.ProjectID == "" || expected.Number < 1 || expected.ProviderGenerationID == "" ||
+		(expected.Status != "downloading" && expected.Status != "download_failed") {
+		return false
+	}
+	project, err := p.app.store.projectForWorker(ctx, expected.ProjectID)
+	if err != nil || project.Status != "generating" {
+		return false
+	}
+	for _, current := range project.Scenes {
+		if current.Number != expected.Number {
+			continue
+		}
+		if current.ProviderGenerationID != expected.ProviderGenerationID || current.Attempts != expected.Attempts || current.DownloadAttempts != expected.DownloadAttempts {
+			return false
+		}
+		switch current.Status {
+		case "downloading":
+			return true
+		case "download_failed":
+			return current.NextAttemptAt <= time.Now().Unix()
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (p *Processor) startDownload(ctx context.Context, provider VideoService, record GenerationRecord) {

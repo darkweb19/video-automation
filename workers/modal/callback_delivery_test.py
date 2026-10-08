@@ -10,6 +10,7 @@ import json
 import re
 from email.message import Message
 from pathlib import Path
+from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -94,6 +95,7 @@ def callback_namespace():
     logs = []
     fake_time = FakeTime()
     namespace = {
+        "Any": Any,
         "json": json,
         "re": re,
         "asyncio": asyncio,

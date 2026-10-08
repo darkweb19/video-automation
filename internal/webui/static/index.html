@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/static/project.css?v=20261007-studio">
   <link rel="stylesheet" href="/static/history-settings.css?v=20261007-studio">
   <link rel="stylesheet" href="/static/youtube.css?v=20261007-studio">
+  <link rel="stylesheet" href="/static/clipping.css?v=20261008-clipping">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -53,6 +54,7 @@
         <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="2.5" width="5" height="5" rx="1"></rect><rect x="2.5" y="10.5" width="5" height="5" rx="1"></rect><rect x="10.5" y="10.5" width="5" height="5" rx="1"></rect></svg></span>Workspace</button>
         <button class="nav-item" data-view="generate"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M9 3v12M3 9h12"></path></svg></span>Create</button>
         <button class="nav-item" data-view="history"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="M9 5.5V9l2.5 1.5"></path></svg></span>History</button>
+        <button class="nav-item" data-view="clipping"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="2.5" y="3.5" width="13" height="11" rx="1.5"></rect><path d="M7 6.5v5l4-2.5z"></path></svg></span>Clipping</button>
         <button class="nav-item" data-view="vault"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><rect x="3" y="7.5" width="12" height="8" rx="1.5"></rect><path d="M5.5 7.5V5a3.5 3.5 0 0 1 7 0v2.5"></path></svg></span>Vault</button>
         <button class="nav-item" data-view="settings"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"></path><circle cx="6" cy="5" r="1.5"></circle><circle cx="11" cy="9" r="1.5"></circle><circle cx="7" cy="13" r="1.5"></circle></svg></span>Settings</button>
       </nav>
@@ -201,6 +203,74 @@
             <div id="project-history" class="project-history"></div>
             <div id="history-grid" class="history-grid"><div class="empty">Your saved work will appear here.</div></div>
           </div>
+        </section>
+
+        <section class="view clipping-view" data-page="clipping" aria-labelledby="clipping-heading">
+          <div class="clipping-page-head">
+            <div><p class="eyebrow">Sources and analysis</p><h2 id="clipping-heading">Clipping workspace</h2><p>Bring in footage you have permission to use, then queue it for analysis.</p></div>
+            <button id="clipping-refresh" class="button secondary" type="button">Refresh</button>
+          </div>
+          <div id="clipping-worker-note" class="clipping-notice" role="status" aria-live="polite" hidden></div>
+          <div class="clipping-intake-grid">
+            <section class="panel clipping-panel" aria-labelledby="clipping-upload-heading">
+              <div class="panel-head"><div><h3 id="clipping-upload-heading">Upload a video</h3><p>Large uploads can resume from the last saved point if interrupted.</p></div></div>
+              <form id="clipping-upload-form" class="clipping-form">
+                <div class="field"><label for="clipping-file">Video file</label><input id="clipping-file" name="file" type="file" accept="video/*,audio/*" required><small>Uploads can resume from the last saved point if your connection is interrupted.</small></div>
+                <label class="clipping-check"><input id="clipping-upload-permission" type="checkbox" required><span>I own this video or have permission to reuse it and have it processed.</span></label>
+                <p id="clipping-upload-error" class="form-error" role="alert" aria-live="polite"></p>
+                <button id="clipping-upload-submit" class="button primary" type="submit">Upload source</button>
+              </form>
+              <div id="clipping-upload-progress" class="clipping-upload-progress" role="status" aria-live="polite" hidden>
+                <div class="clipping-progress-heading"><strong id="clipping-upload-label">Uploading source</strong><span id="clipping-upload-percent">0%</span></div>
+                <div class="clipping-progress-track"><div id="clipping-upload-bar" class="clipping-progress-bar" role="progressbar" aria-label="Source upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div>
+                <p id="clipping-upload-detail" class="subtle"></p>
+                <button id="clipping-upload-cancel" class="button secondary" type="button">Pause upload</button>
+              </div>
+              <input id="clipping-resume-file" class="visually-hidden" type="file" accept="video/*,audio/*" tabindex="-1" aria-label="Choose the original file to resume uploading">
+            </section>
+            <section class="panel clipping-panel" aria-labelledby="clipping-link-heading">
+              <div class="panel-head"><div><h3 id="clipping-link-heading">Import a public link</h3><p>Google Drive and Dropbox links must be publicly accessible.</p></div></div>
+              <form id="clipping-link-form" class="clipping-form">
+                <div class="field"><label for="clipping-link">Public video link</label><input id="clipping-link" name="url" type="url" inputmode="url" placeholder="https://drive.google.com/..." autocomplete="url" required><small>Google Drive and Dropbox links must be publicly accessible.</small></div>
+                <label id="clipping-link-permission" class="clipping-check"><input id="clipping-link-permission-check" type="checkbox"><span id="clipping-link-permission-copy">I have permission to reuse this video and have it processed.</span></label>
+                <p id="clipping-link-help" class="clipping-help" hidden>YouTube import is not available here yet. If you have permission, download the footage and upload the file instead.</p>
+                <p id="clipping-link-error" class="form-error" role="alert" aria-live="polite"></p>
+                <button id="clipping-link-submit" class="button secondary" type="submit">Import link</button>
+              </form>
+            </section>
+          </div>
+          <div class="clipping-work-grid">
+            <section class="panel clipping-panel" aria-labelledby="clipping-sources-heading">
+              <div class="clipping-section-head"><div><h3 id="clipping-sources-heading">Sources</h3><p id="clipping-source-summary">Your uploaded and imported footage.</p></div><div class="field clipping-job-budget"><label for="clipping-job-budget">Maximum per job (USD)</label><input id="clipping-job-budget" type="number" min="0.01" max="4" step="0.01" value="1.00" inputmode="decimal"><small>Analysis waits until it is available. Importing media never starts paid analysis.</small></div></div>
+              <p id="clipping-sources-error" class="form-error" role="alert" aria-live="polite"></p>
+              <div id="clipping-sources" class="clipping-list"><p class="empty">Sources will appear here after you add footage.</p></div>
+            </section>
+            <section class="panel clipping-panel" aria-labelledby="clipping-batches-heading">
+              <div class="clipping-section-head"><div><h3 id="clipping-batches-heading">Batch and jobs</h3><p>Choose ready sources to queue together.</p></div></div>
+              <div class="clipping-batch-budget">
+                <div class="field"><label for="clipping-batch-job-budget">Maximum for each source (USD)</label><input id="clipping-batch-job-budget" type="number" min="0.01" max="4" step="0.01" value="1.00" inputmode="decimal"></div>
+                <div class="field"><label for="clipping-batch-budget">Maximum for this batch (USD)</label><input id="clipping-batch-budget" type="number" min="0.01" max="400" step="0.01" value="5.00" inputmode="decimal"></div>
+                <p id="clipping-batch-budget-note" class="clipping-help" aria-live="polite">Select ready sources. The combined job limits must fit within the batch limit.</p>
+                <button id="clipping-create-batch" class="button primary" type="button" disabled>Queue selected sources</button>
+                <p id="clipping-batch-error" class="form-error" role="alert" aria-live="polite"></p>
+              </div>
+              <div class="clipping-list-heading"><h4>Analysis jobs</h4><span id="clipping-job-count" class="history-count">0</span></div>
+              <p id="clipping-jobs-error" class="form-error" role="alert" aria-live="polite"></p>
+              <div id="clipping-jobs" class="clipping-list"><p class="empty">No analysis jobs yet.</p></div>
+              <div class="clipping-list-heading"><h4>Batches</h4><span id="clipping-batch-count" class="history-count">0</span></div>
+              <p id="clipping-batches-error" class="form-error" role="alert" aria-live="polite"></p>
+              <div id="clipping-batches" class="clipping-list"><p class="empty">No batches yet.</p></div>
+            </section>
+          </div>
+          <section class="panel clipping-retention" aria-labelledby="clipping-retention-heading">
+            <div class="panel-head"><div><h3 id="clipping-retention-heading">Storage and retention</h3><p>Remove sources you no longer need. The current default retention period is shown below.</p></div></div>
+            <form id="clipping-retention-form" class="clipping-retention-form">
+              <div class="field"><label for="clipping-retention-days">Keep sources for (days)</label><input id="clipping-retention-days" type="number" min="1" max="365" step="1" value="30"><small>Applies to new and existing sources.</small></div>
+              <button id="clipping-retention-save" class="button secondary" type="submit" disabled>Save retention</button>
+              <p id="clipping-retention-error" class="form-error" role="alert" aria-live="polite"></p>
+              <p id="clipping-retention-note" class="clipping-help" role="status" aria-live="polite">Source retention settings are loading.</p>
+            </form>
+          </section>
         </section>
 
         <section class="view" data-page="vault">
@@ -395,6 +465,7 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/app.js?v=20261007-studio" defer></script>
+  <script src="/static/clipping.js?v=20261008-clipping" defer></script>
+  <script src="/static/app.js?v=20261008-clipping" defer></script>
 </body>
 </html>

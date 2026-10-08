@@ -23,6 +23,7 @@ type Store struct {
 	dataDir     string
 	videoDir    string
 	projectDir  string
+	clippingDir string
 	events      *eventHub
 	promptState randomPromptState
 	// youtubeMu is shared by dashboard handlers and the background processor
@@ -30,6 +31,10 @@ type Store struct {
 	// OAuth token refreshes with connection changes and source enqueue/deletion.
 	youtubeMu        sync.Mutex
 	youtubeRefreshMu sync.Mutex
+	// clippingMu serializes source upload, import, and cleanup filesystem
+	// mutations across the acquisition service and cleanup worker.
+	clippingMu         sync.Mutex
+	clippingOperations *clippingOperationRegistry
 }
 
 type GenerationRecord struct {
@@ -273,12 +278,19 @@ func OpenStore(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create project directory: %w", err)
 	}
+	clippingDir := filepath.Join(dataDir, "clipping")
+	if err := os.MkdirAll(clippingDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create clipping directory: %w", err)
+	}
 	db, err := sql.Open("sqlite", filepath.Join(dataDir, "app.db"))
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, dataDir: dataDir, videoDir: videoDir, projectDir: projectDir, events: newEventHub()}
+	store := &Store{
+		db: db, dataDir: dataDir, videoDir: videoDir, projectDir: projectDir, clippingDir: clippingDir, events: newEventHub(),
+		clippingOperations: &clippingOperationRegistry{operations: map[string]clippingActiveOperation{}},
+	}
 	if err := store.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -511,7 +523,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateCallbackJobs(); err != nil {
 		return err
 	}
-	return s.migrateYouTube()
+	if err := s.migrateYouTube(); err != nil {
+		return err
+	}
+	return s.migrateClipping()
 }
 
 func (s *Store) addColumnIfMissing(table, column, definition string) error {
@@ -649,6 +664,11 @@ func (s *Store) Setting(key string) (string, error) {
 
 func (s *Store) SetSetting(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, value, time.Now().Unix())
+	return err
+}
+
+func (s *Store) DeleteSetting(key string) error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key=?`, key)
 	return err
 }
 

@@ -12,6 +12,8 @@ type dashboardApp struct {
 	security                  *Security
 	logger                    *slog.Logger
 	vault                     *vaultRuntime
+	clippingAcquisition       *ClippingAcquisition
+	clippingRetentionDays     int
 	baseURL                   string
 	callbackBaseURL           string
 	videoCallbackBaseURL      string
@@ -27,7 +29,31 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	app := &dashboardApp{store: store, security: security, logger: logger, vault: newVaultRuntime(), callbackBaseURL: configuredCallbackBaseURL(), videoCallbackBaseURL: configuredVideoCallbackBaseURL(), limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
+	app := &dashboardApp{store: store, security: security, logger: logger, vault: newVaultRuntime(), clippingAcquisition: NewClippingAcquisition(store, security), clippingRetentionDays: defaultClippingRetentionDays, callbackBaseURL: configuredCallbackBaseURL(), videoCallbackBaseURL: configuredVideoCallbackBaseURL(), limiter: newLoginThrottle(), recoveryLimiter: newLoginThrottle()}
+	return newDashboardHandler(app)
+}
+
+func newDashboardHandler(app *dashboardApp) http.Handler {
+	store, security, logger := app.store, app.security, app.logger
+	if logger == nil {
+		logger = slog.Default()
+		app.logger = logger
+	}
+	if app.vault == nil {
+		app.vault = newVaultRuntime()
+	}
+	if app.clippingAcquisition == nil {
+		app.clippingAcquisition = NewClippingAcquisition(store, security)
+	}
+	if app.clippingRetentionDays == 0 {
+		app.clippingRetentionDays = defaultClippingRetentionDays
+	}
+	if app.limiter == nil {
+		app.limiter = newLoginThrottle()
+	}
+	if app.recoveryLimiter == nil {
+		app.recoveryLimiter = newLoginThrottle()
+	}
 	if err := store.RecoverInterruptedProjectDeletes(); err != nil {
 		logger.Error("recover interrupted project deletions failed")
 	}
@@ -55,6 +81,28 @@ func NewDashboardHandler(store *Store, security *Security, logger *slog.Logger) 
 	mux.Handle("GET /status", app.requirePasswordChanged(http.HandlerFunc(app.status)))
 	mux.Handle("GET /api/generations", app.requirePasswordChanged(http.HandlerFunc(app.history)))
 	mux.Handle("GET /api/events", app.requirePasswordChanged(http.HandlerFunc(app.events)))
+	mux.Handle("GET /api/clipping/config", app.requirePasswordChanged(http.HandlerFunc(app.clippingConfig)))
+	mux.Handle("PUT /api/clipping/config/retention", app.requirePasswordChanged(http.HandlerFunc(app.updateClippingRetention)))
+	mux.Handle("GET /api/clipping/sources", app.requirePasswordChanged(http.HandlerFunc(app.clippingSources)))
+	mux.Handle("POST /api/clipping/sources/upload", app.requirePasswordChanged(http.HandlerFunc(app.createClippingUpload)))
+	mux.Handle("POST /api/clipping/sources/import", app.requirePasswordChanged(http.HandlerFunc(app.createClippingImport)))
+	mux.Handle("GET /api/clipping/sources/{id}", app.requirePasswordChanged(http.HandlerFunc(app.clippingSource)))
+	mux.Handle("PUT /api/clipping/sources/{id}/upload", app.requirePasswordChanged(http.HandlerFunc(app.uploadClippingChunk)))
+	mux.Handle("POST /api/clipping/sources/{id}/finalize", app.requirePasswordChanged(http.HandlerFunc(app.finalizeClippingUpload)))
+	mux.Handle("GET /api/clipping/sources/{id}/media", app.requirePasswordChanged(http.HandlerFunc(app.clippingSourceMedia)))
+	mux.Handle("DELETE /api/clipping/sources/{id}", app.requirePasswordChanged(http.HandlerFunc(app.deleteClippingSource)))
+	mux.Handle("GET /api/clipping/jobs", app.requirePasswordChanged(http.HandlerFunc(app.clippingJobs)))
+	mux.Handle("POST /api/clipping/jobs", app.requirePasswordChanged(http.HandlerFunc(app.createClippingJob)))
+	mux.Handle("GET /api/clipping/jobs/{id}", app.requirePasswordChanged(http.HandlerFunc(app.clippingJob)))
+	mux.Handle("POST /api/clipping/jobs/{id}/cancel", app.requirePasswordChanged(http.HandlerFunc(app.cancelClippingJob)))
+	mux.Handle("POST /api/clipping/jobs/{id}/retry", app.requirePasswordChanged(http.HandlerFunc(app.retryClippingJob)))
+	mux.Handle("GET /api/clipping/batches", app.requirePasswordChanged(http.HandlerFunc(app.clippingBatches)))
+	mux.Handle("POST /api/clipping/batches", app.requirePasswordChanged(http.HandlerFunc(app.createClippingBatch)))
+	mux.Handle("GET /api/clipping/batches/{id}", app.requirePasswordChanged(http.HandlerFunc(app.clippingBatch)))
+	mux.Handle("POST /api/clipping/batches/{id}/cancel", app.requirePasswordChanged(http.HandlerFunc(app.cancelClippingBatch)))
+	// Worker capabilities are scoped bearer credentials instead of browser sessions.
+	mux.HandleFunc("GET /api/clipping/worker-media/{jobID}/{attemptID}", app.clippingWorkerMedia)
+	mux.HandleFunc("POST /api/clipping/worker-callbacks/{jobID}/{attemptID}", app.clippingWorkerCallback)
 	mux.Handle("GET /api/vault/status", app.requirePasswordChanged(http.HandlerFunc(app.vaultStatus)))
 	mux.Handle("POST /api/vault/unlock", app.requirePasswordChanged(http.HandlerFunc(app.unlockVault)))
 	mux.Handle("POST /api/vault/lock", app.requirePasswordChanged(http.HandlerFunc(app.lockVault)))
