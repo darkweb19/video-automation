@@ -66,6 +66,8 @@ func newDashboardHandler(app *dashboardApp) http.Handler {
 	mux.HandleFunc("GET /static/project.css", app.static("static/project.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/history-settings.css", app.static("static/history-settings.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /static/youtube.css", app.static("static/youtube.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /static/clipping.js", app.static("static/clipping.js", "application/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /static/clipping.css", app.static("static/clipping.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /health", app.health)
 	// Modal is an external worker and does not have a browser session. Its
 	// callback is authenticated by a per-job capability token instead.
