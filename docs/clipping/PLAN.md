@@ -2,6 +2,8 @@
 
 Planning baseline: 2026-10-08. Repository: https://github.com/darkweb19/video-automation.
 
+On 2026-10-09 (America/Toronto), the user authorized M3/C3.1+C3.2 implementation, local verification and independent review, ten meaningful commits, and publication only to `feat/clipper-ai`. This does not authorize a live paid inference run or deployment. The implemented Modal worker is opt-in after operator configuration. Because M1's corpus and benchmark work was waived, implementation evidence must not be described as meeting measured quality, language, or cost targets; M3's evaluation-dependent exit criteria remain unmeasured.
+
 M2 implementation was approved on 2026-10-08 with remaining M1 feasibility explicitly skipped. Commit/push of completed M2 to `feat/clipper-ai` was subsequently authorized; preserve that branch's prior M1 artifacts. This does not authorize paid provider calls, benchmarks, later milestones or deployment. See [TRACKER.md](TRACKER.md) for the current authorization and task states, [ADR-004](../architecture/004-ai-clipping.md) for the proposed architecture, and [AGENTS.md](../../AGENTS.md) for the execution workflow.
 
 ## Product requirements
@@ -26,6 +28,8 @@ The user selected US$1 for a one-hour source and said the budget can scale with 
 This is a spending target, not measured performance or a provider quote. Reserve expected stage and retry costs, reconcile actual usage, and pause before starting work that is expected to exceed the remaining allowance. Provider settlement and metering precision must be reflected honestly. Product budget preferences do not authorize paid engineering benchmark calls.
 
 Benchmark CPU/GPU time, provider tokens, media transfers, retries, cold starts, and all initial renders. Record source duration, resolution, language, content type, and clip count with each result. Cache analysis; a title edit must not rerun ASR. If the budget cannot deliver the agreed quality, report the evidence and propose a tradeoff instead of silently reducing analysis coverage or output quality.
+
+For the initial opt-in M3 worker, the operator-declared rate and bounded compute ceiling produce a reservation estimate, not a Modal quote or settled charge. Keep the reservation outstanding until an operator records an invoice amount and reconciliation reference (including an explicit zero). Unknown/late outcomes block retry. The initial transcript/context/event extraction and candidate scores are deterministic engineering heuristics; score components and signal evidence explain ranking inputs but are not calibrated probabilities, semantic model judgments, or guarantees of engagement.
 
 ## Milestones and acceptance criteria
 
@@ -58,7 +62,7 @@ Transcribe once with timestamps and optional speaker labels. Combine overlapping
 
 Content rules: preserve comedy setup/punchline/reaction and pauses; podcast context and payoff; gameplay action with commentary/facecam; movie scene/dialogue continuity. An expensive finalist pass must not substitute for timeline-wide coverage.
 
-**Exit:** the evaluation set meets M1 targets; late-video and non-speech moments receive consideration; timestamps stay within the source; boundaries preserve meaning; weak sources can return fewer than seven candidates; saved analysis is reused across edits.
+**Exit:** the evaluation set meets M1 targets; late-video and non-speech moments receive consideration; timestamps stay within the source; boundaries preserve meaning; weak sources can return fewer than seven candidates; saved analysis is reused across edits. When M1 remains waived and its real-media corpus is unavailable, report implementation and deterministic regression evidence separately; do not mark this exit complete or claim target quality from synthetic fixtures alone.
 
 ### M4 — Captions, framing, preview, and export
 

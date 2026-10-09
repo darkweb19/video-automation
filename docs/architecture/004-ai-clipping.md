@@ -48,6 +48,12 @@ Local persistent storage and a single owner limit horizontal scaling. Source ret
 
 On 2026-10-08 the user authorized M2 and explicitly skipped remaining feasibility. Apply Go/SQLite/local-volume and a separate worker protocol to the M2 foundation; this does not establish measured feasibility or select a paid provider. M2 does not implement ASR, candidate selection or rendering. Provider work remains inactive until configured.
 
+### M3 implementation extension — 2026-10-09
+
+The user authorized C3.1/C3.2 implementation, local review/checks, ten meaningful commits, and publication to the existing `feat/clipper-ai` branch. M3 adds an opt-in separate Modal faster-whisper/FFmpeg worker, authenticated source-scoped media/callback transfer, a versioned source-analysis artifact, heuristic candidate selection and editing over a persisted core. The worker is not deployed or live-tested. Before any deployment, an operator must use an immutable 40-character Hugging Face model commit, set a shared `FRAMEVAULT_PIPELINE_REVISION` in both Modal and FrameVault Settings, configure the callback origin and worker bearer, and review the exact model snapshot license. A new pipeline revision invalidates old source-analysis reuse. The model and runtime hashes in an artifact describe the run; unmeasured M1 quality, language and cost targets remain open.
+
+Reservations use a bounded operator-declared per-second estimate, not a Modal quote. Only an explicit invoice amount and reference (including zero) settles the hold. Unknown completion is not automatically retried. Worker capabilities are attempt-scoped, HTTPS-only and retention-bound; source SHA-256 is checked before analysis. The complete operational contract and limitations are in [M3-IMPLEMENTATION.md](../clipping/M3-IMPLEMENTATION.md).
+
 This ADR records the accepted M2 design, not deployed behavior. Append or supersede decisions with evidence when subsequent evaluation resolves providers/render placement or later requirements change. Do not silently rewrite accepted architecture during an agent task.
 
 Related: [ADR-001](001-go-service-layout.md), [ADR-003](003-railway-persistence.md), [implementation plan](../clipping/PLAN.md), [tracker](../clipping/TRACKER.md).
