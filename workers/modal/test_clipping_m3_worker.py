@@ -962,6 +962,12 @@ class ClippingM3WorkerTests(unittest.TestCase):
             self.assertIsInstance(handler_options["max_containers"], ast.Constant)
             self.assertEqual(handler_options["max_containers"].value, expected_limit)
 
+        analysis_options = function_options["clipping_analysis_task"]
+        self.assertIsInstance(analysis_options["ephemeral_disk"], ast.Constant)
+        self.assertEqual(analysis_options["ephemeral_disk"].value, 524_288)
+        self.assertGreaterEqual(analysis_options["ephemeral_disk"].value, 524_288)
+        self.assertLessEqual(analysis_options["ephemeral_disk"].value, 3_145_728)
+
         ledger_writers = []
         for name, options in function_options.items():
             volumes = options.get("volumes")

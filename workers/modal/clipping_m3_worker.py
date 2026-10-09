@@ -1424,7 +1424,7 @@ def _install_modal_app() -> Any:
         image=gpu_image,
         gpu="L4",
         timeout=MAX_COMPUTE_SECONDS + 300,
-        ephemeral_disk=50_000,
+        ephemeral_disk=524_288,
         volumes={MODEL_CACHE_DIR: _MODAL_MODEL_VOLUME},
         secrets=[runtime_secret],
         max_containers=1,

@@ -30,6 +30,8 @@ When the editor opens for `FRAMEVAULT_CLIPPING_WORKER_SHARED_SECRET`, enter the 
 
 Before enabling dispatch, separately authorize deployment and then run the CPU-only model prewarm once for the configured immutable model commit. This downloads model weights and can consume provider resources, so review the exact model license before authorizing that operation:
 
+The Modal analysis function requests 524,288 MiB (512 GiB) of ephemeral disk, the minimum accepted by Modal's current 524,288–3,145,728 MiB range. This platform resource request is separate from the worker's 20 GiB source-file limit; it does not represent measured per-job scratch use or a quoted charge.
+
 ```sh
 modal deploy workers/modal/clipping_m3_worker.py
 modal run workers/modal/clipping_m3_worker.py::app.clipping_model_prewarm_task
