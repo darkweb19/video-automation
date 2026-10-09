@@ -52,6 +52,20 @@ func TestClippingImportURLPolicyAndErrorRedaction(t *testing.T) {
 	if _, _, err := normalizeClippingImportURL("https://www.dropbox.com/home/file.mp4?dl=1"); err == nil {
 		t.Fatal("Dropbox URL outside the approved shared-link forms was accepted")
 	}
+	for _, test := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: "https://www.youtube.com/watch?v=abcdefghijk&si=tracking&feature=share", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "https://m.youtube.com/shorts/abcdefghijk?t=42&feature=share", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "https://www.youtube-nocookie.com/embed/abcdefghijk?start=12", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "https://youtu.be/abcdefghijk?si=tracking", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+	} {
+		normalized, sourceKind, normalizeErr := normalizeClippingImportURL(test.raw)
+		if normalizeErr != nil || sourceKind != ClippingSourceYouTube || normalized.String() != test.want {
+			t.Errorf("YouTube reference normalization for %q: URL=%v kind=%q error=%v", test.raw, normalized, sourceKind, normalizeErr)
+		}
+	}
 
 	for _, raw := range []string{
 		"http://drive.google.com/file/d/id/view",
@@ -63,6 +77,11 @@ func TestClippingImportURLPolicyAndErrorRedaction(t *testing.T) {
 		"https://drive.google.com/file/d/id/view#fragment",
 		"https://example.test/movie.mp4",
 		"https://drive.google.com/file/d/id/view\n",
+		"https://www.youtube.com/watch?v=abcdefghijk&list=PL123",
+		"https://www.youtube.com/watch?v=abcdefghijk&v=abcdefghijk",
+		"https://www.youtube.com/live/abcdefghijk",
+		"https://www.youtube.com/shorts/abcdefghijk/extra",
+		"https://www.youtu.be/abcdefghijk",
 	} {
 		if _, _, err := normalizeClippingImportURL(raw); err == nil {
 			t.Errorf("unsafe or unsupported URL accepted: %q", raw)
@@ -75,12 +94,15 @@ func TestClippingImportURLPolicyAndErrorRedaction(t *testing.T) {
 	if !errors.As(err, &outcome) || outcome.Status != "authorization_needed" {
 		t.Fatalf("missing rights attestation error=%v", err)
 	}
-	_, err = acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
-	if !errors.As(err, &outcome) || outcome.Status != "original_file_required" {
-		t.Fatalf("YouTube fallback error=%v", err)
+	youtubeSource, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk&si=tracking&feature=share", 0)
+	if err != nil || youtubeSource.Kind != ClippingSourceYouTube || !youtubeSource.RightsAttested || youtubeSource.OriginalName != "youtube-abcdefghijk.media" {
+		t.Fatalf("attested YouTube source=%+v error=%v", youtubeSource, err)
 	}
-	if sources, err := acquisition.store.ClippingSources(); err != nil || len(sources) != 0 {
-		t.Fatalf("unsupported link attempts must not create a source: sources=%d error=%v", len(sources), err)
+	if canonical, err := acquisition.security.DecryptSetting(clippingSourceURLSetting, youtubeSource.SourceURL); err != nil || canonical != "https://www.youtube.com/watch?v=abcdefghijk" {
+		t.Fatalf("canonical encrypted YouTube URL=%q error=%v", canonical, err)
+	}
+	if sources, err := acquisition.store.ClippingSources(); err != nil || len(sources) != 1 {
+		t.Fatalf("only the attested YouTube link should create a source: sources=%d error=%v", len(sources), err)
 	}
 
 	secret := "resourcekey=private-token"
