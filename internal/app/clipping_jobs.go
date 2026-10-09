@@ -17,17 +17,25 @@ type clippingPreparedDispatch struct {
 // configured worker. The media and callback capabilities are persisted
 // encrypted first and delivered separately as bearer headers.
 type clippingStageDispatch struct {
-	ProtocolVersion  string `json:"protocol_version"`
-	JobID            string `json:"job_id"`
-	BatchID          string `json:"batch_id"`
-	SourceID         string `json:"source_id"`
-	Stage            string `json:"stage"`
-	DispatchID       string `json:"dispatch_id"`
-	AttemptID        string `json:"attempt_id"`
-	MediaURL         string `json:"media_url"`
-	CallbackURL      string `json:"callback_url"`
-	SourceDurationMS int64  `json:"source_duration_ms"`
-	ExpiresAt        int64  `json:"expires_at"`
+	ProtocolVersion   string `json:"protocol_version"`
+	JobID             string `json:"job_id"`
+	BatchID           string `json:"batch_id"`
+	SourceID          string `json:"source_id"`
+	Stage             string `json:"stage"`
+	DispatchID        string `json:"dispatch_id"`
+	AttemptID         string `json:"attempt_id"`
+	MediaURL          string `json:"media_url"`
+	CallbackURL       string `json:"callback_url"`
+	SourceDurationMS  int64  `json:"source_duration_ms"`
+	ExpiresAt         int64  `json:"expires_at"`
+	CallbackExpiresAt int64  `json:"callback_expires_at"`
+	SourceSHA256      string `json:"source_sha256"`
+	ContentType       string `json:"content_type"`
+	Model             string `json:"model"`
+	PipelineRevision  string `json:"pipeline_revision"`
+	MinClipSeconds    int    `json:"min_clip_seconds"`
+	MaxClipSeconds    int    `json:"max_clip_seconds"`
+	CandidateLimit    int    `json:"candidate_limit"`
 }
 
 // buildClippingStageDispatch binds the immutable job/source/attempt snapshot
@@ -49,12 +57,23 @@ func buildClippingStageDispatch(job ClippingJob, stage ClippingStage, source Cli
 	if err != nil {
 		return clippingStageDispatch{}, err
 	}
+	callbackExpiresAt := stage.LeaseExpiresAt + int64(clippingCallbackAccountingGrace.Seconds())
+	if source.RetainUntil > 0 && source.RetainUntil < callbackExpiresAt {
+		callbackExpiresAt = source.RetainUntil
+	}
+	if callbackExpiresAt <= now.Unix() {
+		return clippingStageDispatch{}, errors.New("clipping source retention leaves no worker callback window")
+	}
 	return clippingStageDispatch{
 		ProtocolVersion: clippingProtocolVersion,
 		JobID:           job.ID, BatchID: job.BatchID, SourceID: source.ID, Stage: stage.Name,
 		DispatchID: stage.IdempotencyKey, AttemptID: stage.AttemptID,
 		MediaURL: mediaURL, CallbackURL: callbackURL,
-		SourceDurationMS: source.DurationMS, ExpiresAt: stage.LeaseExpiresAt,
+		SourceDurationMS: source.DurationMS, ExpiresAt: stage.LeaseExpiresAt, CallbackExpiresAt: callbackExpiresAt,
+		SourceSHA256: source.SHA256, ContentType: job.ContentType,
+		Model:          clippingWorkerModel,
+		MinClipSeconds: job.MinClipSeconds, MaxClipSeconds: job.MaxClipSeconds,
+		CandidateLimit: job.CandidateLimit,
 	}, nil
 }
 
@@ -75,17 +94,9 @@ func (a *dashboardApp) prepareClippingStageDispatch(jobID string, reserveMicroUS
 		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker job snapshot could not be loaded", false, 0)
 		return clippingPreparedDispatch{}, false, errors.New("clipping worker job snapshot could not be loaded")
 	}
-	mediaBearer, callbackBearer, err := a.persistClippingDispatchCapabilities(stage)
-	if err != nil {
-		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker capability persistence failed", false, 0)
-		a.store.PublishClippingJob(jobID)
-		a.publishClippingBatch(job.BatchID)
-		return clippingPreparedDispatch{}, false, errors.New("clipping worker capabilities could not be persisted")
-	}
 	source, err := a.store.ClippingSource(job.SourceID)
 	if err != nil {
 		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker source snapshot could not be loaded", false, 0)
-		a.deleteClippingCapabilitiesForAttempt(jobID, stage.AttemptID)
 		a.store.PublishClippingJob(jobID)
 		a.publishClippingBatch(job.BatchID)
 		return clippingPreparedDispatch{}, false, errors.New("clipping worker source snapshot could not be loaded")
@@ -93,10 +104,16 @@ func (a *dashboardApp) prepareClippingStageDispatch(jobID string, reserveMicroUS
 	payload, err := buildClippingStageDispatch(job, stage, source, workerOrigin, time.Now())
 	if err != nil {
 		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker dispatch envelope could not be built", false, 0)
-		a.deleteClippingCapabilitiesForAttempt(jobID, stage.AttemptID)
 		a.store.PublishClippingJob(jobID)
 		a.publishClippingBatch(job.BatchID)
 		return clippingPreparedDispatch{}, false, err
+	}
+	mediaBearer, callbackBearer, err := a.persistClippingDispatchCapabilitiesUntil(stage, payload.CallbackExpiresAt)
+	if err != nil {
+		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker capability persistence failed", false, 0)
+		a.store.PublishClippingJob(jobID)
+		a.publishClippingBatch(job.BatchID)
+		return clippingPreparedDispatch{}, false, errors.New("clipping worker capabilities could not be persisted")
 	}
 	a.store.PublishClippingJob(jobID)
 	a.publishClippingBatch(job.BatchID)

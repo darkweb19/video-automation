@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 )
@@ -42,6 +44,7 @@ func (p *Processor) Run(ctx context.Context) {
 	go p.runClippingImportWorker(ctx)
 	go p.runClippingRetentionCleanup(ctx)
 	go p.runClippingStageRecovery(ctx)
+	go p.runClippingAnalysisWorker(ctx)
 	p.process(ctx)
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
@@ -55,10 +58,140 @@ func (p *Processor) Run(ctx context.Context) {
 	}
 }
 
+// runClippingAnalysisWorker dispatches one configured full-source analysis at
+// a time. Uncertain network outcomes retain both their budget hold and the
+// per-source single-flight claim; this loop never retries them automatically.
+func (p *Processor) runClippingAnalysisWorker(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		worked, err := p.processNextClippingAnalysis(ctx)
+		if err != nil && ctx.Err() == nil {
+			p.logger.Warn("clipping analysis queue could not be processed")
+		}
+		if err != nil || !worked {
+			if !waitProcessor(ctx, 5*time.Second) {
+				return
+			}
+		}
+	}
+}
+
+func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, error) {
+	config, configured, err := loadClippingWorkerConfig(p.app.store, p.app.security)
+	if err != nil || !configured || !config.Enabled {
+		return false, err
+	}
+	jobs, err := p.app.store.PendingClippingJobs(20)
+	if err != nil {
+		return false, err
+	}
+	for _, job := range jobs {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		cached, err := p.app.store.TryCompleteClippingJobFromAnalysisCache(job.ID)
+		if err != nil {
+			p.logger.Warn("clipping source cache could not be applied", "job_id", job.ID)
+			continue
+		}
+		if cached {
+			p.app.store.PublishClippingJob(job.ID)
+			p.app.publishClippingBatch(job.BatchID)
+			return true, nil
+		}
+		claimedSource, err := p.app.store.ClaimClippingAnalysisSource(job.ID)
+		if err != nil {
+			p.logger.Warn("clipping source analysis could not be claimed", "job_id", job.ID)
+			continue
+		}
+		if !claimedSource {
+			continue
+		}
+		budget, err := p.app.store.ClippingDispatchBudget(job.ID)
+		if err != nil {
+			_ = p.app.store.ReleaseClippingAnalysisSourceClaim(job.ID)
+			continue
+		}
+		maxComputeSeconds, err := clippingWorkerComputeSecondsForReservation(budget, config.RateMicroUSDPerSecond)
+		if err != nil || config.RateMicroUSDPerSecond > math.MaxInt64/maxComputeSeconds {
+			_ = p.app.store.ReleaseClippingAnalysisSourceClaim(job.ID)
+			continue
+		}
+		reserveMicroUSD := config.RateMicroUSDPerSecond * maxComputeSeconds
+		prepared, claimed, err := p.app.prepareClippingStageDispatch(job.ID, reserveMicroUSD, p.app.callbackBaseURL)
+		if err != nil || !claimed {
+			_ = p.app.store.ReleaseClippingAnalysisSourceClaim(job.ID)
+			if err != nil {
+				p.logger.Warn("clipping analysis dispatch could not be prepared", "job_id", job.ID)
+			}
+			continue
+		}
+		if err := p.app.store.SetClippingAnalysisClaimAttempt(job.ID, prepared.Payload.AttemptID); err != nil {
+			leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
+			if leaseErr == nil {
+				_, _ = p.app.store.FailClippingStage(job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken, "Analysis source claim could not be saved", false, 0)
+				_ = p.app.store.ReleaseClippingAnalysisSourceClaim(job.ID)
+			}
+			p.app.store.PublishClippingJob(job.ID)
+			p.app.publishClippingBatch(job.BatchID)
+			continue
+		}
+		if ctx.Err() != nil {
+			// No network call has started, so this attempt is known not to have
+			// incurred a provider charge.
+			leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
+			if leaseErr == nil {
+				_, failErr := p.app.store.FailClippingStageBeforeSubmit(job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken, "Analysis dispatch canceled before submission")
+				if failErr == nil || errors.Is(failErr, ErrClippingJobTerminal) {
+					_ = p.app.store.ReleaseClippingAnalysisSourceClaimBeforeSubmit(job.ID, prepared.Payload.AttemptID)
+				}
+			}
+			return false, ctx.Err()
+		}
+		if err := p.app.dispatchPreparedClippingStage(ctx, prepared, maxComputeSeconds); err != nil {
+			if clippingWorkerDispatchDefinitelyNotSubmitted(err) {
+				leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
+				if leaseErr == nil {
+					_, failErr := p.app.store.FailClippingStageBeforeSubmit(
+						job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken,
+						"Analysis dispatch ended before worker submission",
+					)
+					if failErr == nil || errors.Is(failErr, ErrClippingJobTerminal) {
+						if releaseErr := p.app.store.ReleaseClippingAnalysisSourceClaimBeforeSubmit(job.ID, prepared.Payload.AttemptID); releaseErr != nil {
+							p.logger.Warn("known-zero analysis source claim could not be released", "job_id", job.ID)
+						}
+						p.app.store.PublishClippingJob(job.ID)
+						p.app.publishClippingBatch(job.BatchID)
+					} else {
+						p.logger.Warn("known-zero analysis dispatch could not be recorded", "job_id", job.ID)
+					}
+				} else {
+					p.logger.Warn("known-zero analysis lease could not be loaded", "job_id", job.ID)
+				}
+			} else {
+				// Once http.Client.Do starts, any failure can hide a worker
+				// acceptance. Keep its hold and source claim until a callback or
+				// explicit invoice reconciliation establishes the outcome.
+				p.logger.Warn("clipping analysis dispatch outcome is pending", "job_id", job.ID)
+			}
+		} else {
+			p.app.store.PublishClippingJob(job.ID)
+			p.app.publishClippingBatch(job.BatchID)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // runClippingStageRecovery is a sparse durable timeout recovery. It marks
 // expired worker leases uncertain and keeps their budget reserved; it never
 // redispatches paid work or polls a remote worker.
 func (p *Processor) runClippingStageRecovery(ctx context.Context) {
+	if _, err := p.app.cleanupExpiredClippingCapabilities(time.Now().Unix(), maxClippingCapabilityCleanupBatch); err != nil && ctx.Err() == nil {
+		p.logger.Warn("clipping worker capability cleanup failed")
+	}
 	if err := p.recoverClippingStages(); err != nil && ctx.Err() == nil {
 		p.logger.Warn("clipping stage recovery failed")
 	}
@@ -69,6 +202,9 @@ func (p *Processor) runClippingStageRecovery(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if _, err := p.app.cleanupExpiredClippingCapabilities(time.Now().Unix(), maxClippingCapabilityCleanupBatch); err != nil && ctx.Err() == nil {
+				p.logger.Warn("clipping worker capability cleanup failed")
+			}
 			if err := p.recoverClippingStages(); err != nil && ctx.Err() == nil {
 				p.logger.Warn("clipping stage recovery failed")
 			}
@@ -152,6 +288,9 @@ func (p *Processor) runClippingRetentionCleanup(ctx context.Context) {
 }
 
 func (p *Processor) cleanupClippingSources(ctx context.Context) error {
+	if _, err := p.app.cleanupExpiredClippingCapabilities(time.Now().Unix(), maxClippingCapabilityCleanupBatch); err != nil {
+		return err
+	}
 	before, err := p.app.store.ExpiredClippingSources(time.Now().Unix(), 100)
 	if err != nil {
 		return err
