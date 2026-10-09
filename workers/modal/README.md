@@ -1,13 +1,27 @@
 # Modal video workers
 
-FrameVault supports two separately deployed Modal video providers:
+FrameVault supplies two separately deployed Modal video-generation providers and an opt-in Modal worker for AI clipping analysis. The video providers are:
 
 | Worker | Source | Modal app | Endpoint base | Persistent volumes |
 | --- | --- | --- | --- | --- |
 | Wan 2.2 Lightning T2V | `video.py` | `video-generation` | `/api/v1` | `wan22-model-cache`, `video-generation-jobs` |
 | SkyReels V2 T2V 14B | `skyreels.py` | `skyreels-v2-video-generation` | `/api/v1` | `skyreels-v2-model-cache`, `skyreels-v2-video-generation-jobs` |
 
-Each worker has its own Modal app, model cache, and job volume. Both use the Modal secret `video-api-secret` with `MODAL_VIDEO_API_KEY`. SkyReels adapts [`darkweb19/skyreel-modal`](https://github.com/darkweb19/skyreel-modal), source file `skyreel-model.py` at commit `a7676dc46a7f4084552cdbe80bc93de6c02a9add`; that upstream source is unchanged.
+Each video provider has its own Modal app, model cache, and job volume. Both use the Modal secret `video-api-secret` with `MODAL_VIDEO_API_KEY`. SkyReels adapts [`darkweb19/skyreel-modal`](https://github.com/darkweb19/skyreel-modal), source file `skyreel-model.py` at commit `a7676dc46a7f4084552cdbe80bc93de6c02a9add`; that upstream source is unchanged.
+
+## Python module inventory
+
+These are the non-test Python modules in this directory:
+
+| File | Role |
+| --- | --- |
+| `video.py` | Deployable Wan 2.2 Lightning text-to-video Modal app. |
+| `skyreels.py` | Deployable SkyReels V2 text-to-video Modal app. |
+| `clipping_m3_worker.py` | Deployable, opt-in M3 clipping Modal app. It handles versioned dispatch, scoped source download, analysis execution, and callback delivery/replay. |
+| `clipping_analysis.py` | Analysis library used by the M3 worker. It transcribes audio with faster-whisper and derives audio/visual events and profile-aware regions for denser inspection; Go performs persisted candidate selection and ranking. |
+| `clipping_protocol.py` | Provider-neutral v2 dispatch validation, idempotency ledger, and callback primitives used by the M3 worker; it performs no model inference and is not a separate Modal app. |
+
+The M3 clipping worker uses a pinned faster-whisper ASR model plus deterministic media analysis. It does not call an LLM; OpenRouter story and script generation is a separate application workflow. For the clipping architecture and operating limits, see [ADR-004](../../docs/architecture/004-ai-clipping.md), [M2 implementation](../../docs/clipping/M2-IMPLEMENTATION.md), [M3 setup and limitations](../../docs/clipping/M3-IMPLEMENTATION.md), and [YouTube source import](../../docs/clipping/YOUTUBE-IMPORT.md).
 
 ## Deploy
 
@@ -37,6 +51,12 @@ Both workers implement authenticated `GET /videos/models`, `POST /videos`, `GET 
 
 Both providers support five six-second 480p 9:16 scenes for the default 30-second project workflow. Wan advertises durations from 1 to 15 seconds; SkyReels advertises 1 to 6 seconds, 480p/720p, and 9:16/16:9, with no generated audio. Neither Modal worker publishes a catalog `pricing_skus`; do not present a fabricated pre-generation estimate. Modal account billing is separate from measured per-job GPU runtime telemetry.
 
+## AI clipping worker (M3)
+
+The M3 app in `clipping_m3_worker.py` is separate from the two video-generation apps above. It is an opt-in analysis worker and is not needed to generate videos. Follow [M3 operator setup](../../docs/clipping/M3-IMPLEMENTATION.md) for its dedicated Modal secrets, immutable Hugging Face model revision, matching `FRAMEVAULT_PIPELINE_REVISION`, model-cache setup and signed-in **Clipping > Worker settings** configuration. The operator must prewarm the pinned model snapshot before analysis; prewarming downloads model weights. The analysis worker loads the prewarmed local snapshot and does not fetch model files during a job.
+
+Transcription, event detection, and candidate inspection are heuristic inputs to the Go selection flow. They do not provide semantic video understanding or an LLM-generated clip judgment. The M3 tests use local fixtures and mocks; they do not deploy the app, download model weights, or make hosted inference calls.
+
 ## Offline checks
 
 Run these from the repository root. They do not deploy an app, load model weights, or submit a paid generation:
@@ -44,6 +64,7 @@ Run these from the repository root. They do not deploy an app, load model weight
 ```bash
 python -B workers/modal/callback_delivery_test.py
 python -B -m unittest discover -s workers/modal -p "test_skyreels.py"
+python -B -m unittest discover -s workers/modal -p "test_clipping_*.py"
 ```
 
-The dependency-free callback delivery check uses the Python standard library. The SkyReels ASGI suite additionally uses the local Modal SDK, FastAPI, and HTTPX.
+The dependency-free callback delivery check uses the Python standard library. The SkyReels ASGI suite additionally uses the local Modal SDK, FastAPI, and HTTPX. The M3 suites use the worker dependencies in [`requirements-clipping.txt`](requirements-clipping.txt); FFmpeg/ffprobe fixture checks are skipped when those binaries are unavailable.
