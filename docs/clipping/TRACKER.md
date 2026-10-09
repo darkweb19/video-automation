@@ -1,11 +1,11 @@
 # AI clipping tracker
 
-Last updated: 2026-10-08. This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
+Last updated: 2026-10-08 (client local date; 2026-10-09 UTC). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
 
 ## Current checkpoint
 
-- Phase: M2 complete, independently approved and locally verified; remaining M1 feasibility explicitly waived. Existing M1 offline artifacts are preserved, without claiming completed feasibility.
-- Next implementation: obtain M3 scope authorization and record provider/spending decisions before paid dispatch. M2 commit/push to `feat/clipper-ai` is authorized; Git history and remote head record the resulting publication.
+- Phase: M2 base complete, independently approved and locally verified; remaining M1 feasibility explicitly waived. Existing M1 offline artifacts are preserved, without claiming completed feasibility. C2.4 public YouTube import is authorized and in progress as an M2 acquisition extension.
+- Next implementation: complete C2.4, including independent review, local verification, and authorized publication to `feat/clipper-ai`. M3 analysis/provider/spending decisions remain separate and unapproved.
 - Code deployment: none for clipping. Live verification: none. This checkpoint was authored before the authorized commit/push; publication is verified separately against the remote branch.
 - Requested lead: GPT-6.1 SOL / High. Implementers: TERRA / Max and LUNA / Max. Actual execution must be recorded per assignment; this file does not select models.
 - M2 availability: TERRA is not exposed; implementation uses requested `gpt-6-luna` / `max`. Lead model/effort are not exposed. Earlier M1 agent quota interruption is historical evidence.
@@ -22,6 +22,7 @@ Last updated: 2026-10-08. This file is the authoritative status and authorizatio
 | 2026-10-08 | Push the feasibility work to `feat/clipper-ai`, forked after `430751ee169fbae0d1b7c267c5ff1c077ab13a0a` | Commit and branch push authorized from that exact baseline; no merge, paid runs, later milestones, live video publication, or deployment authorized |
 | 2026-10-08 | “Can you implement M2, we are skipping feasibility” | Authorizes M2/C2.1–C2.3 and necessary local verification/review; waives remaining M1 dependency. No paid provider/benchmark or deployment authorization. |
 | 2026-10-08 | “commit and push the changes to feat/clipper-ai braanch after completing in github” | Authorizes commit and push of completed M2 to https://github.com/darkweb19/video-automation.git on `feat/clipper-ai`; preserve its existing M1 commit. No merge or deployment authorization. |
+| 2026-10-08 (client local; 2026-10-09 UTC) | “First implement the youtube import using the link, please use agents and make sure to commit it with at least 5 commit messages not a single commit. And the changes to the branch. USE LUNA MAX and nothing to on the main. thread” | Authorizes a bounded public single-video YouTube-link import, agent-assisted work using `gpt-6-luna` / `max`, at least five meaningful non-empty commits, and publication only to `feat/clipper-ai`. This supersedes the YouTube-upload-fallback-only route for C2.4. No cookies, login/private/age-gate/DRM bypass, M3/ASR, paid providers, deployment, merge, squash, or force-push. |
 
 Record later approvals here with the milestone/task range, spending limit where applicable, and any external action scope. Do not translate a product per-video budget into permission to spend engineering funds. Do not require new permission at every session if the existing approval already covers the work.
 
@@ -31,7 +32,7 @@ Record later approvals here with the milestone/task range, spending limit where 
 | --- | --- | --- |
 | M0 Planning and execution workflow | done | C0.1 checkpoint below; documentation checks and LUNA Max review complete |
 | M1 Feasibility | skipped | User explicitly waived remaining feasibility; offline artifacts preserved, no measured results |
-| M2 Sources, jobs, batches | done | C2.1–C2.3 checkpoint below; final normal/race/regression checks and independent review passed |
+| M2 Sources, jobs, batches | in_progress | C2.1–C2.3 base checkpoint passed; authorized C2.4 YouTube import extension is in progress |
 | M3 Understanding and selection | planned | — |
 | M4 Editor and exports | planned | — |
 | M5 YouTube and schedules | planned | — |
@@ -55,6 +56,7 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 | C2.1 | Schema/migrations, source lifecycle, job/budget state machine | M1 waived; M2 approval | done | m2_storage / LUNA Max; checkpoint below |
 | C2.2 | Upload and public-link adapters | C2.1 contracts | done | m2_acquisition / LUNA Max; checkpoint below |
 | C2.3 | Worker protocol, retries/cancellation, batch queue, progress | C2.1 contracts | done | m2_integration + m2_ui / LUNA Max; checkpoint below |
+| C2.4 | Bounded public YouTube single-video link import | C2.1/C2.2 | in_progress | Pinned extractor behind a DNS-pinned YouTube host allowlist; muxed audio/video streamed through the existing bounded importer and actual media probe |
 | C3.1 | ASR, alignment, audio/visual events, global context | M2 | planned | Unassigned |
 | C3.2 | Content-specific selection, scores, boundaries, deduplication, hooks | C3.1 | planned | Unassigned |
 | C4.1 | Caption/framing/edit contracts and audio-preserving renderer | M3 | planned | Unassigned |
@@ -87,7 +89,24 @@ M2 active assignments:
 | C2.3 UI | m2_ui / gpt-6-luna / max | clipping.js/css, index.html/app.js hooks, clipping-ui.test.cjs | HTTP contract | Node UI regression/syntax | done |
 | C2.1–C2.3 review | m2_review / gpt-6-luna / max | Read-only | Separate from implementation authors | Independent review of integrated changes and fixes | done |
 
+C2.4 assignments:
+
+| Task ID | Agent / actual model / effort | Exclusive write paths | Contract/dependency | Required checks | State |
+| --- | --- | --- | --- | --- | --- |
+| C2.4 backend/importer | yt_backend / gpt-6-luna / max | internal/app/clipping_acquisition.go; internal/app/clipping_acquisition_test.go; new internal/app/clipping_youtube_*.go and tests | [YOUTUBE-IMPORT.md](YOUTUBE-IMPORT.md); no dashboard/UI or Docker edits | URL normalization; fake extractor/proxy/DNS/media cases; subprocess bounds/cancel; Go tests | in_progress |
+| C2.4 API/UI | yt_ui / gpt-6-luna / max | internal/app/dashboard_clipping.go; internal/app/dashboard_clipping_test.go; internal/webui/static/clipping.js; internal/webui/static/index.html; tests/clipping-ui.test.cjs | [YOUTUBE-IMPORT.md](YOUTUBE-IMPORT.md); reuse import API and rights attestation | Auth/CSRF/API errors/config; Node regressions and JS syntax | in_progress |
+| C2.4 runtime | yt_runtime / gpt-6-luna / max | Dockerfile; new pinned runtime dependency manifest or check script if needed | [YOUTUBE-IMPORT.md](YOUTUBE-IMPORT.md); verify upstream/package metadata and compatible JS challenge runtime | Image/dependency configuration checks; no credentials/provider access | in_progress |
+| C2.4 independent review | yt_review / gpt-6-luna / max | Read-only | Separate from implementation authors; review after integration | Threat review, cancellation/cleanup, support limits, verification evidence | pending |
+
 Only the lead edits this tracker. Agent conclusions do not automatically constitute acceptance. Reconcile shared-worktree changes and verify integrated behavior.
+
+### 2026-10-08 (client local; 2026-10-09 UTC) — C2.4 YouTube link import authorization
+
+- The user authorized a bounded public YouTube single-video import by link, agent-assisted using LUNA Max only, at least five meaningful commits, and publication only to `feat/clipper-ai`. This is an explicit M2 acquisition extension; the existing YouTube upload fallback describes the pre-authorization state.
+- Keep M1 feasibility artifacts, including `ACQUISITION.md`, frozen. Deterministic tests use fake extractor, proxy, DNS, and local media responses; no arbitrary real-user video is needed. Do not claim universal availability or successful live-provider behavior.
+- Accept standard watch, shorts, embed, and youtu.be single-video references with an 11-character ID. Strip tracking/query noise, reject playlist/multi-video and live/upcoming references, and require the existing rights attestation. No browser cookies, credentials, account login, private/age-gate/DRM bypass, caller extractor options, or arbitrary host fetches.
+- Pin and bundle the maintained extractor, its JavaScript challenge package, and a supported runtime in the container. Route all extractor metadata/API/player requests through an HTTPS CONNECT proxy with explicit YouTube/API/CDN host families, public A/AAAA validation and pinned socket addresses. The Go importer streams one muxed audio/video format through the existing bounds, import lease/cancel lifecycle, ffprobe validation, hashing, and cleanup. Missing safe muxed formats or unsupported/unavailable videos produce a sanitized upload fallback.
+- Record verified dependency versions and source, URL forms, sanitized errors, duration/size enforcement, and test evidence in [YOUTUBE-IMPORT.md](YOUTUBE-IMPORT.md) and the final checkpoint. M3/ASR, paid calls, deployment, and merge remain out of scope.
 
 ## Evidence and decisions
 

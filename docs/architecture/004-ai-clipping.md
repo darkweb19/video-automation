@@ -27,6 +27,12 @@ With feasibility waived, M2 uses explicit unmeasured limits: 20 GiB/source, 100 
 
 Sources default to 30-day retention (configurable 1–365 days). Deletion/retention removes source-derived artifacts and media while preserving job/stage/budget audit. Import URLs and worker capabilities use the existing encrypted security storage; workers receive scoped headers, not application volume mounts. Expired uncertain stages retain their reservations; cancellation revokes media but permits bounded authenticated cost settlement without advancing the job. These are implementation decisions, not a paid-provider quote or cost guarantee.
 
+### C2.4 public YouTube import extension — 2026-10-08 (client local; 2026-10-09 UTC)
+
+The user authorized one public single-video import route by YouTube link. Use a version-pinned maintained extractor with its pinned JavaScript challenge package/runtime. Every extractor metadata, player, and API request must pass through a controlled HTTPS CONNECT proxy that accepts only the documented YouTube/API/CDN host families, validates all DNS answers as global unicast, and pins the connection address. The Go importer separately validates and streams only a selected muxed audio/video media URL through the same public-DNS and redirect rules, then applies the existing actual-media probe, source size/duration limits, hash, lease, cancellation, and cleanup lifecycle. Keep signed media URLs ephemeral and out of records, errors, logs, dashboard views, and events.
+
+Accept only canonical standard watch, shorts, embed, and youtu.be links for one 11-character video ID. Strip query noise; reject playlist selection, live/upcoming media, credentials, non-HTTPS/non-443 endpoints, and unsupported formats. Do not use browser cookies, login/private/age-gate/DRM bypass, or caller-controlled extractor configuration. Provide an upload fallback when a public video cannot be fetched without restricted access or lacks a safe muxed format. This does not establish broad or live-provider availability. Full acceptance and deterministic verification are in [YOUTUBE-IMPORT.md](../clipping/YOUTUBE-IMPORT.md); M1 feasibility artifacts remain historical and unchanged.
+
 ## Alternatives and tradeoffs
 
 | Option | Assessment |

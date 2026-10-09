@@ -48,6 +48,8 @@ Capture the user requirements, proposed architecture, milestone/task dependencie
 
 Add source assets, import/upload adapters, durable stage records, canonical analysis artifacts, batch membership, budget reservations, progress events, cancellation, and cleanup/retention controls. Keep media streamed to the existing persistent volume. Validate actual media, block unsafe fetch destinations including redirects, and treat media/transcripts as untrusted input.
 
+The user later authorized C2.4 as an acquisition extension: import one publicly accessible YouTube video by canonical link using a pinned, maintained extractor, a DNS-pinned allowlisted HTTPS proxy for all extractor traffic, and the existing bounded Go stream/probe lifecycle. Require the existing rights attestation; preserve source audio with a single muxed audio/video format. Do not use cookies, credentials, login/private/age-gate/DRM bypass, playlists, live/upcoming streams, caller extractor options, or arbitrary hosts. See [YOUTUBE-IMPORT.md](YOUTUBE-IMPORT.md). This extension does not claim universal YouTube availability or complete the waived M1 feasibility work.
+
 **Exit:** interrupted upload/import and stage execution recover predictably; duplicate callbacks/submissions cannot repeat completed paid work; batches enforce per-job and aggregate limits; canceled jobs cannot advance; authorization and storage bounds are tested. Four-hour inputs do not require whole-file buffering.
 
 ### M3 — Full-video understanding and candidate selection

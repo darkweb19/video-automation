@@ -1,4 +1,15 @@
-# Session handoff — 2026-10-08
+# Session handoff — 2026-10-08 (client local; 2026-10-09 UTC)
+
+## Current focus — C2.4 public YouTube link import
+
+- The user authorized a bounded public single-video YouTube import by link, agent-assisted using `gpt-6-luna` / `max` only, at least five meaningful non-empty commits, and publication only to `feat/clipper-ai`. Do not touch `main`, merge, squash, force-push, deploy, or expand into M3/ASR, paid providers, or live video publication.
+- Work is on `/workspace/video-automation`, `feat/clipper-ai`, initially clean at `e340c389373d309e5bb4ab2e349fa5bac977b79a`. Root confirmed `origin/main` remains at `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`; preserve it. Existing M1 and M2 history/artifacts stay intact.
+- C2.4 extends M2 import to canonical public single-video YouTube links; it does not undo M1's waived feasibility or claim universal provider availability. See `docs/clipping/YOUTUBE-IMPORT.md`. `docs/clipping/ACQUISITION.md` and other M1 frozen artifacts remain unchanged.
+- Initial contract: standard watch/shorts/embed/youtu.be reference with one 11-character ID; strip query tracking, reject playlist/live/upcoming links and restricted formats; require rights attestation; no credentials, cookies, login/private/age-gate/DRM bypass, caller options or arbitrary hosts. Use a maintained pinned extractor plus pinned JS challenge package/runtime through an authenticated local HTTPS CONNECT proxy with a strict YouTube/API/CDN host allowlist and pinned public DNS. Stream one muxed audio/video format through the existing Go acquisition lifecycle and actual probe, retaining current 20 GiB source, four-hour, 100 GiB logical reservation and four GiB disk-floor bounds.
+- Assignment owners: `yt_backend` writes acquisition backend/tests; `yt_ui` writes authenticated API and embedded dashboard/test paths; `yt_runtime` writes Dockerfile/pinned dependency files. All actual implementers/reviewer must be `gpt-6-luna` / `max`; the lead model is not exposed. Root owns coordinator docs, integration, review orchestration, checks, commits/push, and final report. Do not perform Git actions in implementation agents.
+- Required completion: independent read-only review, integrated local checks, at least five substantive commits on `feat/clipper-ai`, push without force/squash, fresh remote-head verification, and an accurate tracker/handoff. No deployment or live provider smoke is authorized or required.
+
+# Historical session handoff — 2026-10-08
 
 ## Current focus — AI clipping M2 complete
 
