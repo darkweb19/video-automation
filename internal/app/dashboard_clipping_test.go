@@ -14,6 +14,14 @@ import (
 )
 
 func clippingDashboardFixture(t *testing.T, allowLowDisk ...bool) (*Store, *Security, http.Handler, *http.Cookie) {
+	availableBytes := int64(0)
+	if len(allowLowDisk) > 0 && allowLowDisk[0] {
+		availableBytes = 8 << 30
+	}
+	return clippingDashboardFixtureWithAvailableBytes(t, availableBytes)
+}
+
+func clippingDashboardFixtureWithAvailableBytes(t *testing.T, availableBytes int64) (*Store, *Security, http.Handler, *http.Cookie) {
 	t.Helper()
 	store := newTestStore(t)
 	provisionTestUser(t, store)
@@ -22,8 +30,8 @@ func clippingDashboardFixture(t *testing.T, allowLowDisk ...bool) (*Store, *Secu
 		t.Fatal(err)
 	}
 	acquisition := NewClippingAcquisition(store, security)
-	if len(allowLowDisk) > 0 && allowLowDisk[0] {
-		acquisition.diskAvailable = func(string) (int64, error) { return 8 << 30, nil }
+	if availableBytes > 0 {
+		acquisition.diskAvailable = func(string) (int64, error) { return availableBytes, nil }
 	}
 	handler := newDashboardHandler(&dashboardApp{store: store, security: security, clippingAcquisition: acquisition})
 	login := httptest.NewRecorder()
@@ -157,6 +165,77 @@ func TestClippingDashboardAuthRightsRetentionAndWorkerAvailability(t *testing.T)
 	stored, err := store.Setting(clippingRetentionSetting)
 	if err != nil || stored != "45" {
 		t.Fatalf("retention setting=%q error=%v", stored, err)
+	}
+}
+
+func TestClippingDashboardYouTubeImportCapabilitiesAndRightsAttestation(t *testing.T) {
+	store, _, handler, cookie := clippingDashboardFixtureWithAvailableBytes(t, 1<<40)
+	config := clippingDashboardRequest(handler, http.MethodGet, "/api/clipping/config", "", cookie, "")
+	if config.Code != http.StatusOK {
+		t.Fatalf("clipping config=%d %s", config.Code, config.Body.String())
+	}
+	var configResponse struct {
+		AllowedImportKinds []ClippingSourceKind `json:"allowed_import_kinds"`
+	}
+	if err := json.Unmarshal(config.Body.Bytes(), &configResponse); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []ClippingSourceKind{ClippingSourceGoogleDrive, ClippingSourceDropbox, ClippingSourceYouTube} {
+		found := false
+		for _, allowed := range configResponse.AllowedImportKinds {
+			if allowed == kind {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("allowed_import_kinds=%v does not include %q", configResponse.AllowedImportKinds, kind)
+		}
+	}
+
+	const watchURL = "https://www.youtube.com/watch?v=abcdefghijk"
+	unauthorized := clippingDashboardRequest(handler, http.MethodPost, "/api/clipping/sources/import", `{"url":"`+watchURL+`","rights_attested":true}`, nil, "")
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated YouTube import=%d %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	missingAttestation := clippingDashboardRequest(handler, http.MethodPost, "/api/clipping/sources/import", `{"url":"`+watchURL+`","rights_attested":false}`, cookie, "")
+	if missingAttestation.Code != http.StatusUnprocessableEntity || !strings.Contains(missingAttestation.Body.String(), "permission to reuse") {
+		t.Fatalf("YouTube import without rights=%d %s", missingAttestation.Code, missingAttestation.Body.String())
+	}
+	if sources, err := store.ClippingSources(); err != nil || len(sources) != 0 {
+		t.Fatalf("unattested import created a source: sources=%d error=%v", len(sources), err)
+	}
+
+	crossOrigin := httptest.NewRequest(http.MethodPost, "/api/clipping/sources/import", strings.NewReader(`{"url":"`+watchURL+`","rights_attested":true}`))
+	crossOrigin.Header.Set("Content-Type", "application/json")
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	crossOrigin.AddCookie(cookie)
+	crossOriginRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(crossOriginRecorder, crossOrigin)
+	if crossOriginRecorder.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin YouTube import=%d %s", crossOriginRecorder.Code, crossOriginRecorder.Body.String())
+	}
+
+	unsupported := clippingDashboardRequest(handler, http.MethodPost, "/api/clipping/sources/import", `{"url":"https://www.youtube.com/playlist?list=PL1234567890","rights_attested":true}`, cookie, "")
+	if unsupported.Code != http.StatusBadRequest || !strings.Contains(unsupported.Body.String(), "supported YouTube video reference") {
+		t.Fatalf("unsupported YouTube link did not preserve the backend's actionable message: %d %s", unsupported.Code, unsupported.Body.String())
+	}
+	if sources, err := store.ClippingSources(); err != nil || len(sources) != 0 {
+		t.Fatalf("unsupported YouTube link created a source: sources=%d error=%v", len(sources), err)
+	}
+
+	created := clippingDashboardRequest(handler, http.MethodPost, "/api/clipping/sources/import", `{"url":"`+watchURL+`","rights_attested":true}`, cookie, "")
+	if created.Code != http.StatusAccepted {
+		t.Fatalf("attested public YouTube import=%d %s", created.Code, created.Body.String())
+	}
+	var response struct {
+		Source clippingSourceView `json:"source"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Source.Kind != ClippingSourceYouTube || response.Source.Status != ClippingSourceImporting || !response.Source.RightsAttested {
+		t.Fatalf("YouTube import response lost source kind, lifecycle or attestation: %+v", response.Source)
 	}
 }
 

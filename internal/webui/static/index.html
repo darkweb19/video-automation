@@ -229,11 +229,11 @@
               <input id="clipping-resume-file" class="visually-hidden" type="file" accept="video/*,audio/*" tabindex="-1" aria-label="Choose the original file to resume uploading">
             </section>
             <section class="panel clipping-panel" aria-labelledby="clipping-link-heading">
-              <div class="panel-head"><div><h3 id="clipping-link-heading">Import a public link</h3><p>Google Drive and Dropbox links must be publicly accessible.</p></div></div>
+              <div class="panel-head"><div><h3 id="clipping-link-heading">Import a public link</h3><p>Drive and Dropbox links must be public. YouTube supports one public watch, shorts, embed, or youtu.be video link.</p></div></div>
               <form id="clipping-link-form" class="clipping-form">
-                <div class="field"><label for="clipping-link">Public video link</label><input id="clipping-link" name="url" type="url" inputmode="url" placeholder="https://drive.google.com/..." autocomplete="url" required><small>Google Drive and Dropbox links must be publicly accessible.</small></div>
+                <div class="field"><label for="clipping-link">Public video link</label><input id="clipping-link" name="url" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="url" required><small>Drive and Dropbox links must be publicly accessible. YouTube accepts a single video reference.</small></div>
                 <label id="clipping-link-permission" class="clipping-check"><input id="clipping-link-permission-check" type="checkbox"><span id="clipping-link-permission-copy">I have permission to reuse this video and have it processed.</span></label>
-                <p id="clipping-link-help" class="clipping-help" hidden>YouTube import is not available here yet. If you have permission, download the footage and upload the file instead.</p>
+                <p id="clipping-link-help" class="clipping-help" hidden>Public YouTube import supports one HTTPS watch, shorts, embed, or youtu.be video that is available without sign-in. Playlists, live or upcoming streams, restricted videos, and unsupported formats require an original-file upload you are permitted to reuse.</p>
                 <p id="clipping-link-error" class="form-error" role="alert" aria-live="polite"></p>
                 <button id="clipping-link-submit" class="button secondary" type="submit">Import link</button>
               </form>
@@ -465,7 +465,7 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/clipping.js?v=20261008-clipping" defer></script>
+  <script src="/static/clipping.js?v=20261009-youtube-import" defer></script>
   <script src="/static/app.js?v=20261008-clipping" defer></script>
 </body>
 </html>

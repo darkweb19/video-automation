@@ -319,6 +319,42 @@ test('source names and errors render as inert text', async () => {
   assert.equal(treeTags(app.elements.get('clipping-sources')).includes('script'), false);
 });
 
+test('failed YouTube sources turn durable reason codes into actionable original-file fallbacks', async () => {
+  const failures = [
+    'youtube_import_unavailable',
+    'youtube_video_unavailable',
+    'youtube_format_unavailable',
+    'youtube_duration_limit_exceeded',
+    'youtube_size_limit_exceeded',
+    'youtube_media_invalid'
+  ];
+  const recoveryFailure = 'Import attempt limit reached';
+  const app = createUI(async (route) => {
+    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
+    if (route === '/api/clipping/sources') return [...failures, recoveryFailure].map((error, index) => ({
+      id: `src_youtube_failed_${index}`,
+      kind: 'youtube_original_file',
+      status: 'failed',
+      original_name: 'YouTube video',
+      error
+    }));
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  const rendered = treeText(app.elements.get('clipping-sources'));
+  assert.match(rendered, /This YouTube import could not be completed by the available public importer/);
+  assert.match(rendered, /This YouTube video could not be fetched through its public link; it may require sign-in or be restricted/);
+  assert.match(rendered, /No supported audio and video format is available/);
+  assert.match(rendered, /exceeds the four-hour limit/);
+  assert.match(rendered, /exceeds the 20 GiB limit/);
+  assert.match(rendered, /This source is not a supported video/);
+  assert.match(rendered, /This public YouTube import could not be completed/);
+  assert.equal((rendered.match(/Upload an original video file you have permission to reuse/g) || []).length, failures.length + 1);
+  assert.doesNotMatch(rendered, /Import attempt limit reached/);
+  for (const failure of failures) assert.doesNotMatch(rendered, new RegExp(failure));
+});
+
 test('a late source-list response cannot repopulate the clipping view after logout', async () => {
   let resolveSources;
   let sourceSignal;
@@ -389,7 +425,7 @@ test('the authenticated dashboard opens Clipping from navigation and refreshes i
   assert.deepEqual(app.clipping.events.map((event) => event.kind), ['clipping_source', 'clipping_job']);
 });
 
-test('public imports require consent and send the permission attestation to the authenticated API', async () => {
+test('Drive and Dropbox public imports require consent and send the permission attestation to the authenticated API', async () => {
   const requests = [];
   const app = createUI(async (route, options = {}) => {
     requests.push({ route, options });
@@ -397,7 +433,6 @@ test('public imports require consent and send the permission attestation to the 
     if (route === '/api/clipping/sources') return [];
     if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
     if (route === '/api/clipping/sources/import') {
-      if (JSON.parse(options.body).url.includes('youtube.com')) throw new Error('The selected source route is unavailable.');
       return { id: 'src_import', status: 'importing' };
     }
     throw new Error(`Unexpected request: ${route}`);
@@ -424,17 +459,88 @@ test('public imports require consent and send the permission attestation to the 
   await app.elements.get('clipping-link-form').emit('submit')[0];
   assert.match(app.elements.get('clipping-link-error').textContent, /Use a public Google Drive or Dropbox/);
   assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/import').length, 1, 'unsupported direct links never reach the API');
+});
 
-  link.value = 'https://www.youtube.com/watch?v=example';
+test('YouTube imports accept supported single-video links, require rights attestation, and show safe backend fallbacks', async () => {
+  const requests = [];
+  const fallback = 'This public YouTube video is unavailable without sign-in. Upload an original file you have permission to reuse.';
+  const app = createUI(async (route, options = {}) => {
+    requests.push({ route, options });
+    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
+    if (route === '/api/clipping/sources') return [];
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/sources/import') {
+      const payload = JSON.parse(options.body);
+      if (payload.url.includes('/watch?')) throw new Error(fallback);
+      return { source: { id: 'src_youtube', status: 'importing', kind: 'youtube_original_file', rights_attested: true } };
+    }
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  const link = app.elements.get('clipping-link');
+  const permission = app.elements.get('clipping-link-permission-check');
+  const submit = app.elements.get('clipping-link-submit');
+  const supportedLinks = [
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=tracking',
+    'https://m.youtube.com/shorts/abcdefghijk',
+    'https://www.youtube-nocookie.com/embed/abcdefghijk',
+    'https://youtu.be/abcdefghijk?feature=share'
+  ];
+
+  link.value = supportedLinks[0];
   link.emit('input');
-  assert.equal(permission.checked, false, 'changing the link requires a fresh confirmation');
+  assert.equal(permission.checked, false, 'changing a YouTube URL requires a fresh permission confirmation');
   assert.match(app.elements.get('clipping-link-permission-copy').textContent, /permission to reuse this YouTube footage/);
   assert.equal(app.elements.get('clipping-link-help').hidden, false);
+  assert.match(app.elements.get('clipping-link-help').textContent, /one HTTPS watch, shorts, embed, or youtu\.be video/);
+  assert.match(app.elements.get('clipping-link-help').textContent, /without sign-in/);
+  assert.match(app.elements.get('clipping-link-help').textContent, /original-file upload/);
+  await app.elements.get('clipping-link-form').emit('submit')[0];
+  assert.match(app.elements.get('clipping-link-error').textContent, /Confirm that you have permission/);
+  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/import').length, 0, 'an unattested YouTube import never reaches the API');
   permission.checked = true;
   permission.emit('change');
   await app.elements.get('clipping-link-form').emit('submit')[0];
-  assert.match(app.elements.get('clipping-link-error').textContent, /YouTube import is not available here yet/);
-  assert.equal(JSON.parse(requests.at(-1).options.body).rights_attested, true);
+  assert.equal(app.elements.get('clipping-link-error').textContent, fallback, 'the UI preserves the API’s sanitized upload fallback');
+
+  for (const supported of supportedLinks.slice(1)) {
+    link.value = supported;
+    link.emit('input');
+    assert.equal(permission.checked, false, 'changing a YouTube URL requires a fresh permission confirmation');
+    assert.match(app.elements.get('clipping-link-help').textContent, /restricted videos, and unsupported formats require an original-file upload/);
+    permission.checked = true;
+    permission.emit('change');
+    await app.elements.get('clipping-link-form').emit('submit')[0];
+  }
+
+  const imports = requests.filter((entry) => entry.route === '/api/clipping/sources/import');
+  assert.equal(imports.length, supportedLinks.length);
+  for (let index = 0; index < imports.length; index++) {
+    assert.deepEqual(JSON.parse(imports[index].options.body), { url: supportedLinks[index], rights_attested: true });
+  }
+
+  const invalidLinks = [
+    'https://www.youtube.com/playlist?list=PL1234567890',
+    'https://www.youtube.com/watch?v=abcdefghijk&PlAyLiSt=PL1234567890',
+    'https://www.youtube.com/watch?v=abcdefghijk&playlist=PL1234567890',
+    'https://www.youtube.com/watch?v=abcdefghijk&playlist_id=PL1234567890',
+    'https://www.youtube.com/watch?v=abcdefghijk&video_ids=abcdefghijk,12345678901',
+    'https://www.youtube.com/watch?v=abcdefghijk&start_radio=1',
+    'https://www.youtube.com/watch?v=abcdefghijk&INDEX=2',
+    'https://www.youtube.com/live/abcdefghijk',
+    'https://youtu.be/abcdefghijk/extra'
+  ];
+  for (const invalid of invalidLinks) {
+    link.value = invalid;
+    link.emit('input');
+    permission.checked = true;
+    permission.emit('change');
+    await app.elements.get('clipping-link-form').emit('submit')[0];
+    assert.match(app.elements.get('clipping-link-error').textContent, /one HTTPS public YouTube|Playlists and live/);
+  }
+  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/import').length, supportedLinks.length, 'playlist, live, and malformed YouTube links never reach the API');
+  assert.match(markup, /Public YouTube import supports one HTTPS watch, shorts, embed, or youtu\.be video/);
+  assert.match(markup, /restricted videos, and unsupported formats require an original-file upload/);
 });
 
 test('individual and batch submissions send exact microUSD limits and stable idempotency keys', async () => {

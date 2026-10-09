@@ -218,7 +218,7 @@ func (a *dashboardApp) clippingConfig(w http.ResponseWriter, _ *http.Request) {
 		"default_retention_days": defaultClippingRetentionDays,
 		"retention_days":         days,
 		"retention_configurable": true,
-		"allowed_import_kinds":   []ClippingSourceKind{ClippingSourceGoogleDrive, ClippingSourceDropbox},
+		"allowed_import_kinds":   []ClippingSourceKind{ClippingSourceGoogleDrive, ClippingSourceDropbox, ClippingSourceYouTube},
 	})
 }
 
@@ -397,11 +397,7 @@ func (a *dashboardApp) createClippingImport(w http.ResponseWriter, r *http.Reque
 	}
 	source, err := a.clippingAcquisition.CreatePublicImport(r.Context(), input.RightsAttested, input.URL, a.retentionDeadline(time.Now()))
 	if err != nil {
-		message := safeClippingClientError(err, "this source cannot be imported from its public link")
-		if strings.Contains(strings.ToLower(err.Error()), "youtube") {
-			message = "YouTube source import is not available yet; upload an original video file you have permission to reuse."
-		}
-		writeError(w, clippingErrorStatus(err), message)
+		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "this source cannot be imported from its public link"))
 		return
 	}
 	a.store.PublishClippingSource(source.ID)

@@ -131,6 +131,14 @@
     failed: "Could not prepare this source",
     deleted: "Removed"
   };
+  const youtubeSourceFailureCopy = {
+    youtube_import_unavailable: "This YouTube import could not be completed by the available public importer. Upload an original video file you have permission to reuse.",
+    youtube_video_unavailable: "This YouTube video could not be fetched through its public link; it may require sign-in or be restricted. Upload an original video file you have permission to reuse.",
+    youtube_format_unavailable: "No supported audio and video format is available for this YouTube video. Upload an original video file you have permission to reuse.",
+    youtube_duration_limit_exceeded: "This YouTube video exceeds the four-hour limit. Upload an original video file you have permission to reuse.",
+    youtube_size_limit_exceeded: "This YouTube video exceeds the 20 GiB limit. Upload an original video file you have permission to reuse.",
+    youtube_media_invalid: "This source is not a supported video. Upload an original video file you have permission to reuse."
+  };
   const jobStatusCopy = {
     queued: "Queued for analysis",
     running: "Analysis in progress",
@@ -167,6 +175,16 @@
     const progress = Number(value);
     if (!Number.isFinite(progress)) return 0;
     return Math.max(0, Math.min(100, progress <= 1 ? progress * 100 : progress));
+  }
+
+  function sourceFailureCopy(source) {
+    const failure = String(source && source.error || "");
+    if (!failure) return "";
+    if (source && source.kind === "youtube_original_file") {
+      return youtubeSourceFailureCopy[failure]
+        || "This public YouTube import could not be completed. The video may be unavailable, restricted, or missing a supported format. Upload an original video file you have permission to reuse.";
+    }
+    return failure;
   }
 
   function sourceName(source) {
@@ -302,7 +320,8 @@
         progress.append(track, element("span", "", `${percent}% ready`));
         details.append(progress);
       }
-      if (source.error) details.append(element("p", "clipping-row-error", source.error));
+      const failureCopy = sourceFailureCopy(source);
+      if (failureCopy) details.append(element("p", "clipping-row-error", failureCopy));
       const actions = element("div", "clipping-row-actions");
       if (status === "ready") {
         const checkLabel = element("label", "clipping-check clipping-select");
@@ -486,16 +505,50 @@
   }
 
   function friendlyError(error, kind) {
-    if (kind === "youtube") return "YouTube import is not available here yet. If you have permission to reuse the footage, download it and upload the video file.";
-    return error && error.message ? error.message : "The request could not be completed.";
+    if (error && error.message) return error.message;
+    if (kind === "youtube" || kind === "youtube_invalid") {
+      return "This public YouTube video could not be imported. It may require sign-in or lack a supported audio/video format. Upload an original file you have permission to reuse.";
+    }
+    return "The request could not be completed.";
+  }
+
+  function classifyYouTubeLink(url, raw) {
+    const host = url.hostname.toLowerCase();
+    const videoHosts = new Set([
+      "youtube.com", "www.youtube.com", "m.youtube.com",
+      "youtube-nocookie.com", "www.youtube-nocookie.com"
+    ]);
+    const shortHosts = new Set(["youtu.be"]);
+    if (!videoHosts.has(host) && !shortHosts.has(host)) return null;
+    if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || raw.includes("#")) return "youtube_invalid";
+    const playlistSelectors = new Set(["list", "playlist", "playlist_id", "video_ids", "start_radio", "index"]);
+    for (const key of url.searchParams.keys()) {
+      if (playlistSelectors.has(key.toLowerCase())) return "youtube_invalid";
+    }
+
+    const videoIDPattern = /^[A-Za-z0-9_-]{11}$/;
+    let videoID = "";
+    if (shortHosts.has(host)) {
+      const match = /^\/([A-Za-z0-9_-]{11})$/.exec(url.pathname);
+      if (match) videoID = match[1];
+    } else if (url.pathname === "/watch") {
+      const ids = url.searchParams.getAll("v");
+      if (ids.length === 1) videoID = ids[0];
+    } else {
+      const match = /^\/(?:shorts|embed)\/([A-Za-z0-9_-]{11})$/.exec(url.pathname);
+      if (match) videoID = match[1];
+    }
+    return videoIDPattern.test(videoID) ? "youtube" : "youtube_invalid";
   }
 
   function classifyLink(value) {
+    const raw = String(value || "").trim();
     let url;
-    try { url = new URL(String(value || "").trim()); } catch (_error) { return "invalid"; }
+    try { url = new URL(raw); } catch (_error) { return "invalid"; }
+    const youtubeKind = classifyYouTubeLink(url, raw);
+    if (youtubeKind) return youtubeKind;
     if (url.protocol !== "https:") return "invalid";
     const host = url.hostname.toLowerCase().replace(/^www\./, "");
-    if (host === "youtube.com" || host === "m.youtube.com" || host === "youtu.be" || host === "youtube-nocookie.com") return "youtube";
     if (host === "drive.google.com" || host === "docs.google.com") return "google_drive";
     if (host === "dropbox.com" || host.endsWith(".dropboxusercontent.com")) return "dropbox";
     return "unsupported";
@@ -508,16 +561,21 @@
       state.linkConsentValue = currentURL;
       ui.linkPermissionCheck.checked = false;
     }
-    const youtube = kind === "youtube";
+    const youtube = kind === "youtube" || kind === "youtube_invalid";
     ui.linkHelp.hidden = !youtube;
+    if (youtube) {
+      ui.linkHelp.textContent = "Public YouTube import supports one HTTPS watch, shorts, embed, or youtu.be video that is available without sign-in. Playlists, live or upcoming streams, restricted videos, and unsupported formats require an original-file upload you are permitted to reuse.";
+    }
     ui.linkPermissionCopy.textContent = youtube
       ? "I have permission to reuse this YouTube footage and have it processed."
       : "I have permission to reuse this video and have it processed.";
     ui.linkSubmit.disabled = !ui.linkPermissionCheck.checked;
     const note = ui.linkForm.querySelector(".field small");
-    if (note) note.textContent = kind === "unsupported"
-      ? "Only public Google Drive and Dropbox links can be imported."
-      : "Google Drive and Dropbox links must be publicly accessible.";
+    if (note) note.textContent = youtube
+      ? "Use one HTTPS public YouTube watch?v=, /shorts/, /embed/, or youtu.be/{id} link. Access and supported formats can vary."
+      : kind === "unsupported"
+        ? "Use a public Google Drive or Dropbox link, or a supported single-video YouTube link."
+        : "Google Drive and Dropbox links must be publicly accessible.";
   }
 
   async function submitImport(event) {
@@ -526,14 +584,16 @@
     if (!current(lifecycle)) return;
     ui.linkError.textContent = "";
     const kind = classifyLink(ui.link.value);
-    if (kind === "invalid" || kind === "unsupported") {
+    if (kind === "invalid" || kind === "unsupported" || kind === "youtube_invalid") {
       ui.linkError.textContent = kind === "invalid"
         ? "Enter a valid HTTPS link."
-        : "Use a public Google Drive or Dropbox link. For YouTube, confirm permission and review the upload fallback.";
+        : kind === "youtube_invalid"
+          ? "Use one HTTPS public YouTube watch, shorts, embed, or youtu.be video link. Playlists and live or upcoming streams are not supported; restricted videos or unsupported formats need an original-file upload you are permitted to reuse."
+          : "Use a public Google Drive or Dropbox link, or a supported single-video YouTube link.";
       return;
     }
     if (!ui.linkPermissionCheck.checked) {
-      ui.linkError.textContent = kind === "youtube"
+      ui.linkError.textContent = kind === "youtube" || kind === "youtube_invalid"
         ? "Confirm that you have permission to reuse and process this YouTube footage."
         : "Confirm that you have permission to reuse this video and have it processed.";
       return;
