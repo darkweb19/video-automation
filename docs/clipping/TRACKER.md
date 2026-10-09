@@ -1,14 +1,13 @@
 # AI clipping tracker
 
-Last updated: 2026-10-08 (client local date; 2026-10-09 UTC). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
+Last updated: 2026-10-09 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
 
 ## Current checkpoint
 
-- Phase: M2 complete, including C2.4 public YouTube source import; independently reviewed and locally verified. Remaining M1 feasibility is explicitly waived, and its offline artifacts are preserved without claiming feasibility results.
-- Next implementation: M3 analysis/provider/spending decisions require separate authorization. C2.4 is committed and published on the authorized `feat/clipper-ai` branch.
-- Code deployment: none for clipping. Live YouTube verification: none. The image build could not run because the Docker daemon socket is unavailable; this is recorded as an outstanding environment check, not a passed build.
-- Requested lead: GPT-6.1 SOL / High. Implementers: TERRA / Max and LUNA / Max. Actual execution must be recorded per assignment; this file does not select models.
-- M2 availability: TERRA is not exposed; implementation uses requested `gpt-6-luna` / `max`. Lead model/effort are not exposed. Earlier M1 agent quota interruption is historical evidence.
+- Phase: M2 complete, including C2.4 public YouTube source import. C3.1/C3.2 code, deterministic regressions, final review, and local verification are complete. M3 remains `in_progress` because M1's real-media quality, language, and cost exit criteria were waived/unmeasured; this implementation does not claim those criteria passed.
+- Current implementation: opt-in Modal faster-whisper/FFmpeg full-source analysis, deterministic source-time candidate selection, persisted option-sensitive artifacts, encrypted Settings, scoped callback/media access, and explicit invoice reconciliation. The user authorized ten meaningful commits and push only to the existing `feat/clipper-ai` branch. No live paid inference, deployment, merge, force-push, or main-branch change is authorized.
+- Code deployment and live inference: none. Live YouTube verification: none. Docker image build was not run because the Docker daemon socket is unavailable; this is an outstanding environment check, not a passed build.
+- Actual M3 assignments use `gpt-6-luna` / `max`; the read-only final reviewer is separate from implementation authors. Lead model/effort are not exposed. Earlier M1 agent quota interruption is historical evidence.
 - M2 applies Go/SQLite/local-volume and worker protocol architecture. Product budget interpretation, paid provider choice and measured feasibility remain unvalidated; explicit integer microUSD limits do not authorize automatic spending.
 
 ## Authorization log
@@ -23,6 +22,7 @@ Last updated: 2026-10-08 (client local date; 2026-10-09 UTC). This file is the a
 | 2026-10-08 | “Can you implement M2, we are skipping feasibility” | Authorizes M2/C2.1–C2.3 and necessary local verification/review; waives remaining M1 dependency. No paid provider/benchmark or deployment authorization. |
 | 2026-10-08 | “commit and push the changes to feat/clipper-ai braanch after completing in github” | Authorizes commit and push of completed M2 to https://github.com/darkweb19/video-automation.git on `feat/clipper-ai`; preserve its existing M1 commit. No merge or deployment authorization. |
 | 2026-10-08 (client local; 2026-10-09 UTC) | “First implement the youtube import using the link, please use agents and make sure to commit it with at least 5 commit messages not a single commit. And the changes to the branch. USE LUNA MAX and nothing to on the main. thread” | Authorizes a bounded public single-video YouTube-link import, agent-assisted work using `gpt-6-luna` / `max`, at least five meaningful non-empty commits, and publication only to `feat/clipper-ai`. This supersedes the YouTube-upload-fallback-only route for C2.4. No cookies, login/private/age-gate/DRM bypass, M3/ASR, paid providers, deployment, merge, squash, or force-push. |
+| 2026-10-09 (America/Toronto) | “implement next, 10 commits and push to the branch” | Authorizes implementation of M3/C3.1+C3.2, local checks and independent review, ten meaningful non-empty commits, and publication only to existing `feat/clipper-ai`. Use `gpt-6-luna` / `max` for agents. This supersedes the earlier M3-not-authorized note only for this scope. It does not authorize live paid inference, deployment, merge, force-push, or changes to `main`. Keep unmeasured M1 quality and language limits explicit. |
 
 Record later approvals here with the milestone/task range, spending limit where applicable, and any external action scope. Do not translate a product per-video budget into permission to spend engineering funds. Do not require new permission at every session if the existing approval already covers the work.
 
@@ -33,7 +33,7 @@ Record later approvals here with the milestone/task range, spending limit where 
 | M0 Planning and execution workflow | done | C0.1 checkpoint below; documentation checks and LUNA Max review complete |
 | M1 Feasibility | skipped | User explicitly waived remaining feasibility; offline artifacts preserved, no measured results |
 | M2 Sources, jobs, batches | done | C2.1–C2.3 base checkpoint and C2.4 YouTube import checkpoint below; deployment/live checks remain separate |
-| M3 Understanding and selection | planned | — |
+| M3 Understanding and selection | in_progress | C3.1/C3.2 code, deterministic regressions, local checks, and independent review are complete; real-media quality/cost targets remain unmeasured because M1 was waived |
 | M4 Editor and exports | planned | — |
 | M5 YouTube and schedules | planned | — |
 | M6 Verification and rollout | planned | Code readiness, deployment, and live checks tracked separately |
@@ -57,8 +57,8 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 | C2.2 | Upload and public-link adapters | C2.1 contracts | done | m2_acquisition / LUNA Max; checkpoint below |
 | C2.3 | Worker protocol, retries/cancellation, batch queue, progress | C2.1 contracts | done | m2_integration + m2_ui / LUNA Max; checkpoint below |
 | C2.4 | Bounded public YouTube single-video link import | C2.1/C2.2 | done | Pinned extractor behind an authenticated DNS-pinned HTTPS proxy; one muxed audio/video stream uses existing bounded import lifecycle and actual media probe; offline/runtime and full regression checks passed |
-| C3.1 | ASR, alignment, audio/visual events, global context | M2 | planned | Unassigned |
-| C3.2 | Content-specific selection, scores, boundaries, deduplication, hooks | C3.1 | planned | Unassigned |
+| C3.1 | Full-source ASR, original-script segments, audio/visual event scan, global context, finalist sequence inspections, worker provenance | M2 | done | `m3_worker` / `gpt-6-luna` / max; implementation and deterministic offline checks complete; no live inference/deployment; M3 evaluation exit remains open |
+| C3.2 | Content-specific candidate selection, scores/evidence/confidence, boundary refinement, deduplication, title/hooks, cache reuse and UI | C3.1 | done | Lead integration + `m3_ui`, `m3_runtime`, `m3_tests` / `gpt-6-luna` / max; implementation and deterministic regressions complete; fixtures are not M1 quality measurements |
 | C4.1 | Caption/framing/edit contracts and audio-preserving renderer | M3 | planned | Unassigned |
 | C4.2 | Preview/editor, overrides, translations, export lifecycle | C4.1 contracts | planned | Unassigned |
 | C5.1 | Clip export integration with YouTube storage and uploads | M4 | planned | Unassigned |
@@ -89,6 +89,17 @@ M2 active assignments:
 | C2.3 UI | m2_ui / gpt-6-luna / max | clipping.js/css, index.html/app.js hooks, clipping-ui.test.cjs | HTTP contract | Node UI regression/syntax | done |
 | C2.1–C2.3 review | m2_review / gpt-6-luna / max | Read-only | Separate from implementation authors | Independent review of integrated changes and fixes | done |
 
+M3 assignments (exclusive paths are the current working ownership boundaries):
+
+| Task ID | Agent / actual model / effort | Exclusive write paths | Contract/dependency | Required checks | State |
+| --- | --- | --- | --- | --- | --- |
+| C3.1 worker pipeline/protocol | m3_worker / gpt-6-luna / max | `workers/modal/clipping_protocol.py`, `workers/modal/test_clipping_protocol.py`, `workers/modal/clipping_analysis.py`, `workers/modal/clipping_m3_worker.py`, `workers/modal/test_clipping_analysis.py`, `workers/modal/test_clipping_m3_worker.py`, `workers/modal/requirements-clipping.txt` | Versioned full-source source-core JSON; bounded Modal dispatch, callback and media capabilities; exact configured callback origin; no LLM/editorial-quality claims | Python offline contract/pipeline/worker tests, mocked ASR, real local FFmpeg fixture, full-source/late/non-speech/cancel/replay/hash/size checks | done; offline checks passed |
+| C3.1 runtime/provider | m3_runtime / gpt-6-luna / max | `internal/app/clipping_runtime.go`, `internal/app/clipping_runtime_test.go` | Encrypted same-origin config, HTTPS Modal endpoint validation/DNS pinning, exact v2 dispatch acknowledgement and operator-rate estimate | Config, readiness, capability, redirect/DNS, request/response bounds, and estimate tests | done; integration checks passed |
+| C3.2 dashboard | m3_ui / gpt-6-luna / max | `internal/webui/static/clipping.js`, `internal/webui/static/clipping.css`, clipping section in `internal/webui/static/index.html`, `tests/clipping-ui.test.cjs` | Actual persisted transcript/events/context/candidates, selection edits over cached core, settlement form; no secret/capability echo | Node syntax and clipping UI suite | done; 18/18 clipping and 87/87 dashboard tests passed |
+| C3.2 Go models/storage/API/processor/integration | lead / model not exposed | `internal/app/clipping_analysis.go`, `internal/app/clipping_analysis_storage.go`, `internal/app/clipping_models.go`, `internal/app/clipping_storage.go`, `internal/app/clipping_jobs.go`, `internal/app/dashboard.go`, `internal/app/dashboard_clipping.go`, `internal/app/processor.go` | v1 active callback compatibility; v2 strict core validation, estimate/actual separation, revision-specific cache, option-sensitive reselection, cross-revision unresolved-attempt guard | Full Go suite, focused race, vet, and Windows/Darwin cross-builds | done; checks passed |
+| C3.2 deterministic regression tests | m3_tests / gpt-6-luna / max | `internal/app/clipping_m3_test.go`; review regressions and migration/revision test files | Preserve old M2 callback behavior and prove crash recovery, claim idempotence, cancellation and retention semantics | Full-timeline late/non-speech, Python-wire-to-Go callback, close/reopen claim recovery, cross-revision accounting, cache restart/reselection, M2 upgrade | done; checks passed |
+| M3 final independent review | m3_final_review / gpt-6-luna / max | Read-only | Reviewer did not author implementation | Security, migrations, cache/provenance, callback v1/v2, budget settlement, worker operation, test and documentation evidence | done; three findings fixed and reviewer approved with no remaining blocker |
+
 C2.4 assignments:
 
 | Task ID | Agent / actual model / effort | Exclusive write paths | Contract/dependency | Required checks | State |
@@ -99,6 +110,18 @@ C2.4 assignments:
 | C2.4 independent review | yt_review / gpt-6-luna / max | Read-only | Separate from implementation authors; review after integration | Threat review, cancellation/cleanup, support limits, verification evidence | done; no remaining blocker |
 
 Only the lead edits this tracker. Agent conclusions do not automatically constitute acceptance. Reconcile shared-worktree changes and verify integrated behavior.
+
+## Evidence and decisions
+
+### 2026-10-09 — M3 C3.1/C3.2 implementation and final integration
+
+- The user authorized C3.1/C3.2 implementation, local review/checks, ten meaningful non-empty commits, and publication only to `feat/clipper-ai`. The series starts at `a485e8c8e9a2d8944fc8d2d02e505854193c7043`; the cached `origin/main` reference was `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`. M3 stays `in_progress` under PLAN.md because its real-media evaluation exit criteria remain unmeasured after the M1 waiver.
+- The implementation adds full-source analysis, transcript/context/event/candidate persistence and reselection, encrypted worker settings, scoped capabilities, bounded accounting, and an editable dashboard. A Python-produced video-only wire fixture is validated through Go's v2 decoder and callback path. SQLite close/reopen before attempt binding recovers the empty claim idempotently; unresolved attempts block a new pipeline revision until invoiced and the callback window expires. Pipeline-key cache invalidation remains revision-sensitive.
+- Independent read-only review (`m3_final_review`, `gpt-6-luna` / `max`) found three issues: video-only provenance parity, crash recovery before attempt binding, and cross-revision unresolved-attempt protection. The fixes and added regressions were reviewed; reviewer approved with no remaining blocker.
+- Verification: `go test ./... -count=1` passed (app package 30.656 s); focused race `go test -race ./internal/app -run 'Clipping|Callback|Budget|Retry|Reconcile|Estimate|VideoOnly|PipelineRevision' -count=1` passed (app 81.684 s); `go vet ./...` passed; Windows amd64 and Darwin arm64 cross-builds passed. The keepalive and YouTube cancellation tests passed isolated with the local-listener network grant; an earlier listener startup failure without that grant was sandbox permission denial, not a code failure. Python suites passed 14 protocol, 17 analysis, and 28 worker tests; Node suites passed 18 clipping and 87 dashboard tests. M1 offline acquisition passed 20 tests; evaluation accepted 2 synthetic bundles and rejected 12 invalid mutations. The pinned yt-dlp CLI contract passed offline.
+- No model weights, real media, live inference, paid call, deployment, or Docker build/run occurred. Hindi/Hinglish/Nepali and real-media quality/cost remain unmeasured. Docker daemon access was unavailable. See [M3-IMPLEMENTATION.md](M3-IMPLEMENTATION.md) for operator requirements and limitations.
+- Changed paths in this ten-commit series: `AGENTS.md`; `SESSION.md`; `docs/architecture/004-ai-clipping.md`; `docs/clipping/M2-IMPLEMENTATION.md`; `docs/clipping/M3-IMPLEMENTATION.md`; `docs/clipping/PLAN.md`; `docs/clipping/TRACKER.md`; `internal/app/clipping_analysis.go`; `internal/app/clipping_analysis_storage.go`; `internal/app/clipping_jobs.go`; `internal/app/clipping_m2_migration_test.go`; `internal/app/clipping_m3_review_regressions_test.go`; `internal/app/clipping_m3_test.go`; `internal/app/clipping_models.go`; `internal/app/clipping_pipeline_revision_dispatch_test.go`; `internal/app/clipping_runtime.go`; `internal/app/clipping_runtime_test.go`; `internal/app/clipping_storage.go`; `internal/app/clipping_storage_test.go`; `internal/app/dashboard.go`; `internal/app/dashboard_clipping.go`; `internal/app/dashboard_clipping_test.go`; `internal/app/processor.go`; `internal/webui/static/clipping.css`; `internal/webui/static/clipping.js`; `internal/webui/static/index.html`; `tests/clipping-ui.test.cjs`; `workers/modal/clipping_analysis.py`; `workers/modal/clipping_m3_worker.py`; `workers/modal/clipping_protocol.py`; `workers/modal/requirements-clipping.txt`; `workers/modal/test_clipping_analysis.py`; `workers/modal/test_clipping_m3_worker.py`; `workers/modal/test_clipping_protocol.py`; `workers/modal/testdata/video_only_source_core.v2.json`.
+- Publication: the ten non-empty commits were pushed by fast-forward to the existing `feat/clipper-ai` branch from baseline `a485e8c8e9a2d8944fc8d2d02e505854193c7043`; a post-push feature-ref check matched the remote branch to local `HEAD`. No main ref was written or checked out; the cached `origin/main` remains `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`. No merge, force-push, deployment, or live inference occurred. The feature branch ref resolves to the final commit; no future SHA is asserted here.
 
 ### 2026-10-08 (client local; 2026-10-09 UTC) — C2.4 YouTube link import authorization
 

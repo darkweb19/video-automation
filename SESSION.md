@@ -1,6 +1,18 @@
-# Session handoff — 2026-10-08 (client local; 2026-10-09 UTC)
+# Session handoff — 2026-10-09 (America/Toronto)
 
-## Current focus — C2.4 public YouTube link import
+## Current focus — M3 C3.1/C3.2 implementation complete; milestone remains in progress
+
+- The user authorized M3 full-source analysis and candidate selection, local review/checks, ten meaningful non-empty commits, and push only to the existing `feat/clipper-ai` branch. The series baseline is `a485e8c8e9a2d8944fc8d2d02e505854193c7043`; the cached `origin/main` reference is `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`. Do not deploy, make paid/live calls, merge, force-push, or alter `main`.
+- M3 adds an opt-in Modal faster-whisper/FFmpeg worker, encrypted same-origin Settings, scoped source/callback capabilities, immutable Hugging Face model commit and runtime provenance, cached source analysis and selection, content-profile continuity cues, and explicit invoice reconciliation. It is disabled until the operator deploys the worker and matches the same `FRAMEVAULT_PIPELINE_REVISION` in Modal and FrameVault. See `docs/clipping/M3-IMPLEMENTATION.md` for setup and limitations.
+- C3.1/C3.2 deterministic implementation, independent read-only review, and local verification are complete. M3 itself remains `in_progress`: M1 real-media quality, multilingual performance, and cost criteria were waived/unmeasured, so synthetic fixtures do not satisfy the evaluation-dependent exit criteria. Hindi/Hinglish/Nepali remain unbenchmarked; M4 rendering/editor work is outside scope.
+- The reviewer found three blockers: video-only provenance mismatch, a claim stranded by a crash before attempt binding, and a cross-revision claim bypass. The Python-produced video-only fixture now passes Go validation and callback persistence; a close/reopen claim-recovery regression and cross-revision accounting regression pass. Reviewer approved the final fixes with no remaining blocker.
+- Verification passed: full `go test ./... -count=1` (app 30.656s), focused Go race suite for clipping/callback/budget/retry/reconciliation/estimate/video-only/revision paths (81.684s), `go vet ./...`, Windows amd64 and Darwin arm64 cross-builds; Python protocol/analysis/worker suites (14/17/28); Node clipping/dashboard suites (18/87); M1 acquisition contract (20); and offline evaluation (2 synthetic bundles accepted, 12 invalid mutations rejected). See `docs/clipping/TRACKER.md` for the exact checkpoint.
+- No model download, paid inference, live request, deployment, or Docker build/run occurred. The Docker daemon is unavailable. Modal SDK registration/import checks used the pinned SDK in `/tmp` with outbound sockets blocked; no remote invocation occurred. The pinned `yt-dlp` CLI contract was checked offline.
+- The final read-only reviewer used `gpt-6-luna` / max and did not author implementation. M3 implementation agents use `gpt-6-luna` / max; lead model/effort are not exposed. The ten non-empty commits were pushed by fast-forward to `feat/clipper-ai` from the recorded baseline; the remote feature ref was checked against local `HEAD`. No main checkout, local main-ref update, or main commit occurred; the cached `origin/main` remains `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`. The tracker records publication without repeating the self-referential final commit SHA.
+
+## Historical session handoff — C2.4 public YouTube link import
+
+### C2.4 current focus at that historical checkpoint
 
 - The user authorized a bounded public single-video YouTube import by link, agent-assisted using `gpt-6-luna` / `max` only, at least five meaningful non-empty commits, and publication only to `feat/clipper-ai`. Do not touch `main`, merge, squash, force-push, deploy, or expand into M3/ASR, paid providers, or live video publication.
 - Work is on `/workspace/video-automation`, `feat/clipper-ai`, initially clean at `e340c389373d309e5bb4ab2e349fa5bac977b79a`. Root confirmed `origin/main` remains at `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`; preserve it. Existing M1 and M2 history/artifacts stay intact.
