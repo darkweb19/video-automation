@@ -5,6 +5,23 @@
 .clipping-intake-grid, .clipping-work-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 20px; }
 .clipping-work-grid { margin-top: 20px; }
 .clipping-panel { padding: 22px; }
+.clipping-worker-panel { margin-bottom: 20px; }
+.clipping-worker-panel .panel-head { margin-bottom: 10px; }
+.clipping-worker-status { margin: 0 0 10px; color: var(--graphite); font-size: 12px; font-weight: 600; }
+.clipping-worker-fields { margin: 0 0 10px; }
+.clipping-worker-capabilities { margin: 0 0 14px; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.clipping-modal-instructions { margin: 14px 0; }
+.clipping-modal-instructions ol { padding-left: 22px; color: var(--graphite); font-size: 12px; line-height: 1.6; }
+.clipping-modal-instructions li + li { margin-top: 7px; }
+.clipping-modal-instructions code { overflow-wrap: anywhere; }
+.clipping-worker-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; gap: 12px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.clipping-worker-form .field { margin: 0; }
+.clipping-worker-form label, .clipping-job-options label, .clipping-selection-field { margin-bottom: 5px; font-size: 11px; }
+.clipping-worker-form input, .clipping-job-options input, .clipping-job-options select, .clipping-selection-field input, .clipping-selection-field select, .clipping-content-type select { min-height: 38px; padding: 8px 10px; font-size: 12px; }
+.clipping-worker-form small { margin-top: 5px; font-size: 10px; line-height: 1.4; }
+.clipping-worker-enable { align-self: center; margin: 0; }
+.clipping-worker-form > .form-error, .clipping-worker-form > .clipping-help { grid-column: 1 / -1; margin: 0; }
+.clipping-worker-form > .button { justify-self: start; }
 .clipping-panel .panel-head { margin-bottom: 18px; }
 .clipping-panel .panel-head h3, .clipping-section-head h3 { margin: 0 0 4px; font-size: 17px; }
 .clipping-panel .panel-head p, .clipping-section-head > div > p { color: var(--muted); font-size: 12px; line-height: 1.55; }
@@ -29,6 +46,9 @@
 .clipping-job-budget label, .clipping-batch-budget label, .clipping-retention-form label { margin-bottom: 5px; font-size: 11px; }
 .clipping-job-budget input, .clipping-batch-budget input, .clipping-retention-form input { min-height: 39px; padding: 8px 10px; font-size: 12px; }
 .clipping-job-budget small { margin-top: 5px; font-size: 10px; line-height: 1.4; }
+.clipping-job-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 12px; margin: 0 0 14px; padding: 12px; border: 1px solid var(--rule); border-radius: var(--radius-control); background: var(--cloud); }
+.clipping-options-title { grid-column: 1 / -1; margin-bottom: 8px; color: var(--graphite); font-size: 11px; font-weight: 600; }
+.clipping-job-options .field { margin: 0; }
 .clipping-list { display: grid; min-width: 0; }
 .clipping-row { display: flex; min-width: 0; justify-content: space-between; gap: 16px; padding: 16px 0; border-top: 1px solid var(--rule); }
 .clipping-row-main { min-width: 0; flex: 1 1 auto; }
@@ -40,6 +60,8 @@
 .clipping-action { min-height: 34px; padding: 7px 10px; font-size: 11px; }
 .clipping-remove { min-height: 32px; color: var(--muted); font-size: 11px; }
 .clipping-select { margin: 0; white-space: nowrap; }
+.clipping-content-type { display: grid; gap: 3px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.clipping-content-type select { max-width: 120px; min-height: 32px; padding: 5px 7px; font-size: 10px; }
 .clipping-source-link { font-size: 11px; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
 .clipping-inline-progress { display: flex; align-items: center; gap: 8px; margin-top: 9px; color: var(--muted); font-size: 10px; }
 .clipping-inline-progress .clipping-progress-track { max-width: 170px; height: 4px; }
@@ -56,6 +78,35 @@
 .clipping-status { max-width: 60%; flex: 0 0 auto; font-size: 10px; text-align: right; }
 .clipping-record-footer { align-items: center; }
 .clipping-record-footer .button { color: var(--ink); }
+.clipping-job-details { display: grid; gap: 12px; padding: 4px 0 8px; }
+.clipping-stage-section { gap: 10px; }
+.clipping-stage-card { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--rule); border-radius: var(--radius-control); background: var(--cloud); }
+.clipping-cost-reconciliation { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 8px 10px; padding-top: 9px; border-top: 1px solid var(--rule); }
+.clipping-cost-reconciliation h6, .clipping-cost-reconciliation > p, .clipping-cost-reconciliation > .form-error { grid-column: 1 / -1; }
+.clipping-cost-reconciliation h6 { margin: 0; color: var(--ink); font-size: 11px; }
+.clipping-cost-reconciliation .clipping-cost-field { display: grid; gap: 4px; margin: 0; color: var(--muted); font-size: 10px; }
+.clipping-cost-field input { min-height: 36px; padding: 7px 9px; font-size: 11px; }
+.clipping-cost-reconciliation > .button { justify-self: start; }
+.clipping-artifact { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--rule); border-radius: var(--radius-control); background: var(--cloud); }
+.clipping-artifact h4, .clipping-artifact-section h5, .clipping-selection-form h5 { margin: 0; color: var(--ink); font-size: 12px; }
+.clipping-artifact-section { display: grid; gap: 7px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.clipping-artifact-section h6 { margin: 4px 0 -3px; font-size: 11px; }
+.clipping-artifact-copy { margin: 0; color: var(--graphite); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.clipping-artifact-note { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.clipping-artifact-metadata { display: grid; grid-template-columns: minmax(100px, 180px) minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 10px; }
+.clipping-artifact-metadata dt { color: var(--muted); overflow-wrap: anywhere; }
+.clipping-artifact-metadata dd { margin: 0; color: var(--graphite); overflow-wrap: anywhere; }
+.clipping-artifact-list { display: grid; gap: 4px; margin: 0; padding-left: 18px; color: var(--graphite); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.clipping-transcript-list { display: grid; gap: 5px; max-height: 360px; overflow: auto; margin: 0; padding-left: 26px; }
+.clipping-transcript-line { padding-left: 3px; color: var(--graphite); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.clipping-artifact-time { display: inline-block; min-width: 92px; margin-right: 7px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.clipping-transcript-text { color: var(--ink); }
+.clipping-candidate { display: grid; gap: 5px; padding-top: 8px; border-top: 1px solid var(--rule); }
+.clipping-candidate > strong { font-size: 11px; overflow-wrap: anywhere; }
+.clipping-selection-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--rule); border-radius: var(--radius-control); }
+.clipping-selection-form h5, .clipping-selection-form > p, .clipping-selection-form > .form-error { grid-column: 1 / -1; }
+.clipping-selection-form .clipping-selection-field { display: grid; gap: 4px; margin: 0; color: var(--muted); }
+.clipping-selection-form > .button { justify-self: start; }
 .clipping-retention { margin-top: 20px; padding: 22px; }
 .clipping-retention .panel-head { margin-bottom: 14px; }
 .clipping-retention-form { display: grid; grid-template-columns: minmax(180px, 260px) auto minmax(0, 1fr); align-items: center; gap: 14px; }
@@ -74,6 +125,7 @@
   .clipping-panel, .clipping-retention { padding: 18px; }
   .clipping-section-head { display: grid; }
   .clipping-job-budget { width: 100%; }
+  .clipping-worker-form, .clipping-selection-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .clipping-retention-form { grid-template-columns: minmax(0, 1fr) auto; }
   .clipping-retention-form > .form-error, .clipping-retention-form > .clipping-help { grid-column: 1 / -1; }
 }
@@ -84,6 +136,8 @@
   .clipping-row { display: grid; gap: 10px; }
   .clipping-row-actions { justify-content: flex-start; }
   .clipping-batch-budget { grid-template-columns: minmax(0, 1fr); }
+  .clipping-worker-form, .clipping-job-options, .clipping-selection-form { grid-template-columns: minmax(0, 1fr); }
+  .clipping-options-title, .clipping-selection-form h5, .clipping-selection-form > p, .clipping-selection-form > .form-error { grid-column: auto; }
   .clipping-batch-budget .clipping-help, .clipping-batch-budget > button, .clipping-batch-budget > .form-error { grid-column: auto; }
   .clipping-retention-form { grid-template-columns: minmax(0, 1fr); }
   .clipping-retention-form > .button { justify-self: start; }

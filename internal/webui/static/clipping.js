@@ -5,6 +5,14 @@
   const MAX_SAFE_MICRO_USD = Number.MAX_SAFE_INTEGER;
   const MAX_JOB_BUDGET_MICRO_USD = 4_000_000;
   const MAX_BATCH_BUDGET_MICRO_USD = 400_000_000;
+  const CONTENT_TYPES = ["general", "podcast", "comedy", "gaming", "movie"];
+  const WORKER_CAPABILITY_LABELS = {
+    full_timeline_asr: "Full-timeline ASR",
+    original_script: "Original-script transcript",
+    audio_events: "Audio events",
+    scene_motion_events: "Scene and motion events",
+    candidate_selection: "Candidate selection"
+  };
 
   function parseUSDToMicroUSD(value) {
     const text = String(value ?? "").trim();
@@ -14,6 +22,20 @@
     const fraction = (match[2] || "").padEnd(6, "0");
     const amount = whole * 1_000_000 + Number(fraction || 0);
     return Number.isSafeInteger(amount) && amount > 0 && amount <= MAX_SAFE_MICRO_USD ? amount : null;
+  }
+
+  function parseActualCostUSDToMicroUSD(value) {
+    const text = String(value ?? "").trim();
+    const match = /^(\d{1,9})(?:\.(\d{1,6}))?$/.exec(text);
+    if (!match) return null;
+    const whole = Number(match[1]);
+    const fraction = (match[2] || "").padEnd(6, "0");
+    const amount = whole * 1_000_000 + Number(fraction || 0);
+    return Number.isSafeInteger(amount) && amount >= 0 && amount <= MAX_SAFE_MICRO_USD ? amount : null;
+  }
+
+  function utf8ByteLength(value) {
+    return new TextEncoder().encode(String(value)).length;
   }
 
   function parseBudgetUSD(value, maximum) {
@@ -64,6 +86,18 @@
   const ui = {
     refresh: $("clipping-refresh"),
     workerNote: $("clipping-worker-note"),
+    workerForm: $("clipping-worker-form"),
+    workerEndpoint: $("clipping-worker-endpoint"),
+    workerToken: $("clipping-worker-token"),
+    workerPipelineRevision: $("clipping-worker-pipeline-revision"),
+    workerRate: $("clipping-worker-rate"),
+    workerEnabled: $("clipping-worker-enabled"),
+    workerSave: $("clipping-worker-save"),
+    workerStatus: $("clipping-worker-status"),
+    workerMetadata: $("clipping-worker-metadata"),
+    callbackOrigin: $("clipping-callback-origin"),
+    workerError: $("clipping-worker-error"),
+    workerSaveNote: $("clipping-worker-save-note"),
     uploadForm: $("clipping-upload-form"),
     uploadFile: $("clipping-file"),
     uploadSubmit: $("clipping-upload-submit"),
@@ -84,11 +118,18 @@
     linkError: $("clipping-link-error"),
     linkSubmit: $("clipping-link-submit"),
     jobBudget: $("clipping-job-budget"),
+    jobMinSeconds: $("clipping-job-min-seconds"),
+    jobMaxSeconds: $("clipping-job-max-seconds"),
+    jobCandidateLimit: $("clipping-job-candidate-limit"),
     sourcesError: $("clipping-sources-error"),
     sourceSummary: $("clipping-source-summary"),
     sources: $("clipping-sources"),
     batchJobBudget: $("clipping-batch-job-budget"),
     batchBudget: $("clipping-batch-budget"),
+    batchContentType: $("clipping-batch-content-type"),
+    batchMinSeconds: $("clipping-batch-min-seconds"),
+    batchMaxSeconds: $("clipping-batch-max-seconds"),
+    batchCandidateLimit: $("clipping-batch-candidate-limit"),
     batchBudgetNote: $("clipping-batch-budget-note"),
     createBatch: $("clipping-create-batch"),
     batchError: $("clipping-batch-error"),
@@ -108,12 +149,18 @@
   const state = {
     active: false,
     lifecycle: 0,
-    requestSequence: { config: 0, sources: 0, jobs: 0, batches: 0 },
+    requestSequence: { config: 0, workerConfig: 0, sources: 0, jobs: 0, batches: 0 },
     requestImpl: null,
     controllers: new Set(),
     sources: [],
     jobs: [],
     batches: [],
+    workerConfig: null,
+    sourceContentTypes: new Map(),
+    expandedJobIDs: new Set(),
+    jobDetails: new Map(),
+    jobDetailErrors: new Map(),
+    loadingJobDetails: new Set(),
     selectedSourceIDs: new Set(),
     pendingJobKeys: new Map(),
     pendingBatchKeys: new Map(),
@@ -169,6 +216,525 @@
   function safeID(value) {
     const id = String(value ?? "").trim();
     return /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : "";
+  }
+
+  function contentType(value) {
+    const normalized = String(value || "general").trim().toLowerCase();
+    return CONTENT_TYPES.includes(normalized) ? normalized : "general";
+  }
+
+  function safeWorkerConfig(value) {
+    const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const config = {
+      configured: input.configured === true,
+      enabled: input.enabled === true,
+      rate_micro_usd_per_second: Number.isSafeInteger(input.rate_micro_usd_per_second) && input.rate_micro_usd_per_second >= 0
+        ? input.rate_micro_usd_per_second : null
+    };
+    for (const key of ["endpoint_host", "provider", "model", "pipeline_revision", "readiness", "billing_basis"]) {
+      if (typeof input[key] === "string") config[key] = input[key].slice(0, 1000);
+    }
+    if (input.capabilities && typeof input.capabilities === "object" && !Array.isArray(input.capabilities)) {
+      config.capabilities = Object.entries(WORKER_CAPABILITY_LABELS)
+        .filter(([key]) => input.capabilities[key] === true)
+        .map(([, label]) => label);
+    }
+    return config;
+  }
+
+  function workerIsEnabled() {
+    if (state.workerConfig) return state.workerConfig.configured === true && state.workerConfig.enabled === true;
+    return state.config?.worker_available === true;
+  }
+
+  function rateInputValue(microUSD) {
+    if (!Number.isSafeInteger(microUSD) || microUSD <= 0) return "";
+    return (microUSD / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
+  function shortValue(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+    try { return JSON.stringify(value); } catch (_error) { return ""; }
+  }
+
+  function sourceTime(start, end) {
+    const from = Number(start);
+    const to = Number(end);
+    if (!Number.isSafeInteger(from) || from < 0) return "Source time unavailable";
+    const timestamp = (milliseconds) => {
+      const base = formatDuration(milliseconds);
+      const clock = milliseconds < 3_600_000 ? base.padStart(5, "0") : base;
+      return `${clock}.${String(milliseconds % 1000).padStart(3, "0")}`;
+    };
+    const left = timestamp(from);
+    return Number.isSafeInteger(to) && to > from ? `${left}–${timestamp(to)}` : left;
+  }
+
+  function renderMetadataMap(parent, title, value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const entries = Object.entries(value).filter(([key, item]) => key && item !== null && item !== undefined).slice(0, 40);
+    if (!entries.length) return;
+    const section = element("section", "clipping-artifact-section");
+    section.append(element("h5", "", title));
+    const list = element("dl", "clipping-artifact-metadata");
+    for (const [key, item] of entries) {
+      list.append(element("dt", "", key), element("dd", "", shortValue(item).slice(0, 1000)));
+    }
+    section.append(list);
+    parent.append(section);
+  }
+
+  function renderEvidenceList(parent, evidence) {
+    if (!Array.isArray(evidence) || evidence.length === 0) return;
+    const list = element("ul", "clipping-artifact-list");
+    for (const item of evidence.slice(0, 100)) {
+      if (typeof item === "string") {
+        list.append(element("li", "", item));
+        continue;
+      }
+      if (!item || typeof item !== "object") continue;
+      const details = [item.kind, sourceTime(item.start_ms, item.end_ms), item.text, item.detail]
+        .filter((part) => part !== null && part !== undefined && String(part).trim() !== "");
+      if (details.length) list.append(element("li", "", details.join(" · ")));
+    }
+    if (list.children.length) parent.append(list);
+  }
+
+  function renderTranscript(parent, payload) {
+    const transcript = payload && typeof payload.transcript === "object" && payload.transcript ? payload.transcript : payload;
+    const segments = Array.isArray(transcript && transcript.segments) ? transcript.segments : [];
+    const transcriptHasStatus = transcript && (typeof transcript.available === "boolean" || typeof transcript.status === "string");
+    const audioStatus = typeof payload?.audio_analysis_status === "string" ? payload.audio_analysis_status : "";
+    if (!segments.length && !transcriptHasStatus && !audioStatus) return;
+    const section = element("section", "clipping-artifact-section");
+    section.append(element("h5", "", segments.length ? "Original-script transcript" : "Transcript availability"));
+    if (transcriptHasStatus || audioStatus) {
+      const noAudioStream = transcript.available === false
+        && transcript.status === "unavailable_no_audio_stream"
+        && audioStatus === "skipped_no_audio_stream";
+      if (noAudioStream) {
+        section.append(element("p", "clipping-artifact-note", "No audio stream; audio analysis and transcription were skipped."));
+      } else {
+        const statuses = [];
+        if (typeof transcript.available === "boolean") statuses.push(`Transcript availability: ${transcript.available ? "available" : "unavailable"}`);
+        if (typeof transcript.status === "string" && transcript.status) statuses.push(`Transcript status: ${transcript.status}`);
+        if (audioStatus) statuses.push(`Audio analysis status: ${audioStatus}`);
+        if (statuses.length) section.append(element("p", "clipping-artifact-note", statuses.join(" · ")));
+      }
+    }
+    if (!segments.length) {
+      parent.append(section);
+      return;
+    }
+    const note = transcript.original_script === true || transcript.original_script_preserved === true || payload.original_script_preserved === true
+      ? "Original script preserved; source timestamps shown."
+      : "Transcript text is shown as stored with source timestamps.";
+    section.append(element("p", "clipping-artifact-note", note));
+    const list = element("ol", "clipping-transcript-list");
+    for (const segment of segments.slice(0, 5000)) {
+      if (!segment || typeof segment !== "object") continue;
+      const line = element("li", "clipping-transcript-line");
+      line.append(element("time", "clipping-artifact-time", sourceTime(segment.start_ms, segment.end_ms)));
+      const text = element("span", "clipping-transcript-text", segment.text || "");
+      const speaker = typeof segment.speaker_id === "string" && segment.speaker_id ? ` · ${segment.speaker_id}` : "";
+      const confidence = Number(segment.confidence);
+      const confidenceText = Number.isFinite(confidence) ? ` · confidence ${confidence} (uncalibrated)` : "";
+      const meta = element("span", "clipping-artifact-note", `${speaker}${confidenceText}`);
+      line.append(text);
+      if (speaker || confidenceText) line.append(meta);
+      list.append(line);
+    }
+    section.append(list);
+    parent.append(section);
+  }
+
+  function renderContext(parent, context) {
+    if (!context || typeof context !== "object") return;
+    const section = element("section", "clipping-artifact-section");
+    section.append(element("h5", "", "Global context"));
+    let hasContent = false;
+    if (typeof context.summary === "string" && context.summary) {
+      section.append(element("p", "clipping-artifact-copy", context.summary));
+      hasContent = true;
+    }
+    for (const [key, title] of [["topics", "Topics"], ["timeline", "Timeline"]]) {
+      if (!Array.isArray(context[key]) || !context[key].length) continue;
+      const list = element("ul", "clipping-artifact-list");
+      for (const entry of context[key].slice(0, 500)) {
+        if (!entry || typeof entry !== "object") continue;
+        const parts = [sourceTime(entry.start_ms, entry.end_ms), entry.label, entry.summary];
+        if (Array.isArray(entry.keywords)) parts.push(entry.keywords.filter((word) => typeof word === "string").join(", "));
+        const line = parts.filter((part) => part !== null && part !== undefined && String(part).trim() !== "").join(" · ");
+        if (line) list.append(element("li", "", line));
+      }
+      if (list.children.length) {
+        section.append(element("h6", "", title), list);
+        hasContent = true;
+      }
+    }
+    if (hasContent) parent.append(section);
+  }
+
+  function renderEvents(parent, title, events) {
+    if (!Array.isArray(events) || !events.length) return;
+    const section = element("section", "clipping-artifact-section");
+    section.append(element("h5", "", title));
+    const list = element("ul", "clipping-artifact-list");
+    for (const event of events.slice(0, 1000)) {
+      if (!event || typeof event !== "object") continue;
+      const details = [sourceTime(event.start_ms, event.end_ms), event.kind, event.evidence, event.text, event.detail, event.description];
+      if (event.score !== null && event.score !== undefined) details.push(`score ${shortValue(event.score)}`);
+      const line = details.filter((part) => part !== null && part !== undefined && String(part).trim() !== "").join(" · ");
+      if (line) list.append(element("li", "", line));
+    }
+    if (list.children.length) {
+      section.append(list);
+      parent.append(section);
+    }
+  }
+
+  function renderCandidates(parent, candidates, title = "Clip candidates") {
+    if (!Array.isArray(candidates) || !candidates.length) return;
+    const section = element("section", "clipping-artifact-section");
+    section.append(element("h5", "", title));
+    section.append(element("p", "clipping-artifact-note", "Scores are heuristic editorial rankings, not virality predictions. Confidence values are uncalibrated."));
+    for (const candidate of candidates.slice(0, 100)) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const item = element("article", "clipping-candidate");
+      const rank = Number.isSafeInteger(candidate.rank) ? `#${candidate.rank} · ` : "";
+      const title = typeof candidate.title === "string" && candidate.title ? candidate.title : `Candidate ${shortValue(candidate.id || "")}`;
+      item.append(element("strong", "", `${rank}${title}`));
+      item.append(element("p", "clipping-artifact-note", `${sourceTime(candidate.start_ms, candidate.end_ms)}${candidate.duration_ms ? ` · ${formatDuration(candidate.duration_ms)}` : ""}`));
+      if (typeof candidate.hook === "string" && candidate.hook) item.append(element("p", "clipping-artifact-copy", `Hook: ${candidate.hook}`));
+      if (Array.isArray(candidate.title_variants) && candidate.title_variants.length) {
+        const variants = element("ul", "clipping-artifact-list");
+        for (const variant of candidate.title_variants.slice(0, 20)) {
+          const text = typeof variant === "string" ? variant : variant && (variant.title || variant.text);
+          if (text) variants.append(element("li", "", `Title: ${text}`));
+        }
+        if (variants.children.length) {
+          item.append(element("h6", "", "Title options"), variants);
+        }
+      }
+      if (candidate.editorial_score !== undefined && (typeof candidate.editorial_score === "string" || typeof candidate.editorial_score === "number")) {
+        item.append(element("p", "clipping-artifact-note", `Editorial score: ${shortValue(candidate.editorial_score)}`));
+      } else if (candidate.editorial_score && typeof candidate.editorial_score === "object" && candidate.editorial_score.total !== undefined) {
+        item.append(element("p", "clipping-artifact-note", `Editorial score: ${shortValue(candidate.editorial_score.total)}`));
+      }
+      const scores = candidate.scores || candidate.editorial_score?.components;
+      renderMetadataMap(item, "Score components", scores);
+      if (candidate.confidence !== undefined || candidate.confidence_label) {
+        const confidence = candidate.confidence === undefined ? "" : ` ${shortValue(candidate.confidence)}`;
+        const label = candidate.confidence_label ? ` (${candidate.confidence_label})` : "";
+        item.append(element("p", "clipping-artifact-note", `Confidence${confidence}${label} · uncalibrated`));
+      }
+      if (Array.isArray(candidate.evidence_refs) && candidate.evidence_refs.length) {
+        item.append(element("p", "clipping-artifact-note", `Evidence references: ${candidate.evidence_refs.join(", ")}`));
+      }
+      renderEvidenceList(item, candidate.evidence);
+      section.append(item);
+    }
+    if (section.children.length > 2) parent.append(section);
+  }
+
+  function renderArtifact(parent, artifact) {
+    const section = element("section", "clipping-artifact");
+    const label = [artifact.type, artifact.schema_version, artifact.version ? `v${artifact.version}` : ""]
+      .filter(Boolean).join(" · ") || "Saved analysis artifact";
+    section.append(element("h4", "", label));
+    let payload;
+    try {
+      payload = JSON.parse(String(artifact.payload_json || ""));
+    } catch (_error) {
+      section.append(element("p", "clipping-row-error", "This saved artifact could not be displayed."));
+      parent.append(section);
+      return;
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      section.append(element("p", "clipping-artifact-note", "The saved artifact has no displayable analysis fields."));
+      parent.append(section);
+      return;
+    }
+    const data = payload.payload && typeof payload.payload === "object" && !Array.isArray(payload.payload) ? payload.payload : payload;
+    if (data.analysis_version) section.append(element("p", "clipping-artifact-note", `Analysis version: ${shortValue(data.analysis_version)}`));
+    if (data.content_type) section.append(element("p", "clipping-artifact-note", `Content type: ${shortValue(data.content_type)}`));
+    if (data.language && typeof data.language === "object") {
+      const language = [data.language.code, data.language.script, data.language.probability !== undefined ? `probability ${shortValue(data.language.probability)} (uncalibrated)` : ""]
+        .filter((part) => part !== null && part !== undefined && String(part).trim() !== "").join(" · ");
+      if (language) section.append(element("p", "clipping-artifact-note", `Language: ${language}`));
+    }
+    const estimatedCost = Number(data.cost_estimate_micro_usd);
+    if (Number.isSafeInteger(estimatedCost) || data.cost_basis || data.compute_seconds !== undefined) {
+      const estimate = element("section", "clipping-artifact-section");
+      estimate.append(element("h5", "", "Worker cost estimate"));
+      estimate.append(element("p", "clipping-artifact-note", "Operator estimate from the configured rate, not a provider quote. Modal invoice totals are not reconciled automatically and require manual settlement."));
+      if (Number.isSafeInteger(estimatedCost) && estimatedCost >= 0) estimate.append(element("p", "clipping-artifact-copy", `Estimated cost: ${formatUSD(estimatedCost)}`));
+      if (data.cost_basis) estimate.append(element("p", "clipping-artifact-note", `Basis: ${shortValue(data.cost_basis)}`));
+      if (data.rate_micro_usd_per_second !== undefined) estimate.append(element("p", "clipping-artifact-note", `Rate: ${formatUSD(Number(data.rate_micro_usd_per_second))} per second`));
+      if (Number.isFinite(Number(data.compute_seconds))) estimate.append(element("p", "clipping-artifact-note", `Compute time: ${shortValue(data.compute_seconds)} seconds`));
+      section.append(estimate);
+    }
+    renderMetadataMap(section, "Model and algorithm versions", { ...(data.model_versions || {}), ...(data.algorithm_versions || {}) });
+    renderMetadataMap(section, "Prompt versions", data.prompt_versions);
+    renderTranscript(section, data);
+    renderContext(section, data.context);
+    renderEvents(section, "Audio events", data.audio_events);
+    renderEvents(section, "Visual events", data.visual_events);
+    if (Array.isArray(data.evidence_events)) renderEvents(section, "Detected events", data.evidence_events);
+    renderCandidates(section, data.candidates, "Selected clip candidates");
+    if (data.candidate_pools && typeof data.candidate_pools === "object" && !Array.isArray(data.candidate_pools)) {
+      for (const [profile, candidates] of Object.entries(data.candidate_pools).slice(0, 5)) {
+        renderCandidates(section, candidates, `Saved candidate pool: ${contentType(profile)}`);
+      }
+    }
+    parent.append(section);
+  }
+
+  function renderJobArtifacts(job, jobID) {
+    const detail = state.jobDetails.get(jobID);
+    const artifacts = detail && Array.isArray(detail.artifacts) ? detail.artifacts : Array.isArray(job.artifacts) ? job.artifacts : [];
+    const panel = element("div", "clipping-job-details");
+    const error = state.jobDetailErrors.get(jobID);
+    if (error) panel.append(element("p", "clipping-row-error", error));
+    renderJobStages(panel, detail || job, jobID);
+    if (!artifacts.length && !error) {
+      const message = state.loadingJobDetails.has(jobID)
+        ? "Loading saved analysis details…"
+        : "No saved analysis artifacts are available for this job.";
+      panel.append(element("p", "clipping-artifact-note", message));
+    }
+    for (const artifact of artifacts) {
+      if (artifact && typeof artifact === "object") renderArtifact(panel, artifact);
+    }
+    return panel;
+  }
+
+  function renderJobStages(parent, job, jobID) {
+    const stages = Array.isArray(job && job.stages) ? job.stages : [];
+    if (!stages.length) return;
+    const section = element("section", "clipping-artifact-section clipping-stage-section");
+    section.append(element("h5", "", "Analysis stages and cost"));
+    for (const stage of stages) {
+      if (!stage || typeof stage !== "object") continue;
+      const card = element("article", "clipping-stage-card");
+      card.append(element("strong", "", `${shortValue(stage.name || "Analysis")} · ${shortValue(stage.status || "Status unavailable")}`));
+      const summary = element("dl", "clipping-artifact-metadata");
+      const estimate = Number(stage.estimated_micro_usd);
+      const actual = Number(stage.actual_micro_usd);
+      const reserved = Number(stage.reserved_micro_usd);
+      const reconciled = stage.cost_reconciled === true;
+      const actualIsValid = Number.isSafeInteger(actual) && actual >= 0;
+      const remaining = Number.isSafeInteger(reserved) && reserved >= 0
+        ? !reconciled ? reserved : actualIsValid ? Math.max(0, reserved - actual) : null
+        : null;
+      const fields = [
+        ["Estimate", Number.isSafeInteger(estimate) && estimate >= 0 ? formatUSD(estimate) : "Estimate unavailable"],
+        ["Recorded actual", !reconciled ? "Not recorded" : actualIsValid ? formatUSD(actual) : "Actual unavailable"],
+        ["Reserved", Number.isSafeInteger(reserved) && reserved >= 0 ? formatUSD(reserved) : "Reservation unavailable"],
+        ["Remaining reserved hold", remaining === null ? "Unavailable" : formatUSD(remaining)],
+        ["Cost reconciliation", reconciled ? "Reconciled" : "Not reconciled"]
+      ];
+      for (const [label, value] of fields) summary.append(element("dt", "", label), element("dd", "", value));
+      card.append(summary);
+      const attemptID = safeID(stage.attempt_id);
+      if (stage.cost_reconciled === false && attemptID) {
+        card.append(renderCostReconciliationForm(jobID, attemptID));
+      }
+      section.append(card);
+    }
+    if (section.children.length > 1) parent.append(section);
+  }
+
+  function renderCostReconciliationForm(jobID, attemptID) {
+    const form = element("form", "clipping-cost-reconciliation");
+    form.append(element("h6", "", "Reconcile from the Modal invoice"));
+    form.append(element("p", "clipping-artifact-note", "Enter the actual invoice amount for this attempt. This records the amount in FrameVault; it does not change or settle the Modal invoice."));
+    const amountLabel = element("label", "clipping-cost-field", "Entered invoice actual cost (USD)");
+    const amount = element("input");
+    amount.type = "number";
+    amount.min = "0";
+    amount.step = "0.000001";
+    amount.inputMode = "decimal";
+    amount.required = true;
+    amount.setAttribute("aria-label", `Entered invoice actual cost for attempt ${attemptID}`);
+    amountLabel.append(amount);
+    const referenceLabel = element("label", "clipping-cost-field", "Reconciliation reference");
+    const reference = element("input");
+    reference.type = "text";
+    reference.maxLength = 256;
+    reference.required = true;
+    reference.setAttribute("aria-label", `Reconciliation reference for attempt ${attemptID}`);
+    referenceLabel.append(reference, element("small", "clipping-help", "Required; maximum 256 UTF-8 bytes."));
+    const error = element("p", "form-error");
+    error.setAttribute("role", "alert");
+    const submit = (event) => {
+      event?.preventDefault?.();
+      const actualCost = parseActualCostUSDToMicroUSD(amount.value);
+      const reconciliationReference = String(reference.value || "").trim();
+      if (actualCost === null) {
+        error.textContent = "Enter a nonnegative invoice amount in USD with up to six decimal places.";
+        amount.focus();
+        return;
+      }
+      if (!reconciliationReference || utf8ByteLength(reconciliationReference) > 256) {
+        error.textContent = "Enter a reconciliation reference of at most 256 UTF-8 bytes.";
+        reference.focus();
+        return;
+      }
+      void saveCostReconciliation(jobID, attemptID, actualCost, reconciliationReference, error, saveButton);
+    };
+    form.addEventListener("submit", submit);
+    const saveButton = button("Record invoice actual", "button secondary clipping-action", () => submit());
+    form.append(amountLabel, referenceLabel, error, saveButton);
+    return form;
+  }
+
+  function renderSelectionEditor(job, jobID) {
+    const editor = element("form", "clipping-selection-form");
+    editor.append(element("h5", "", "Selection options"));
+    editor.append(element("p", "clipping-artifact-note", "Changing these options selects from the saved full-timeline analysis; it does not rerun transcription."));
+    const typeLabel = element("label", "clipping-selection-field", "Selection profile");
+    const typeSelect = makeContentTypeSelect(job.content_type, `Selection profile for job ${jobID}`);
+    typeLabel.append(typeSelect);
+    const minLabel = element("label", "clipping-selection-field", "Minimum clip seconds");
+    const minInput = element("input");
+    minInput.type = "number";
+    minInput.min = "15";
+    minInput.max = "180";
+    minInput.step = "1";
+    minInput.value = String(Number.isInteger(Number(job.min_clip_seconds)) ? job.min_clip_seconds : 15);
+    minLabel.append(minInput);
+    const maxLabel = element("label", "clipping-selection-field", "Maximum clip seconds");
+    const maxInput = element("input");
+    maxInput.type = "number";
+    maxInput.min = "15";
+    maxInput.max = "180";
+    maxInput.step = "1";
+    maxInput.value = String(Number.isInteger(Number(job.max_clip_seconds)) ? job.max_clip_seconds : 180);
+    maxLabel.append(maxInput);
+    const limitLabel = element("label", "clipping-selection-field", "Maximum candidates");
+    const limitInput = element("input");
+    limitInput.type = "number";
+    limitInput.min = "7";
+    limitInput.max = "10";
+    limitInput.step = "1";
+    limitInput.value = String(Number.isInteger(Number(job.candidate_limit)) ? job.candidate_limit : 10);
+    limitLabel.append(limitInput);
+    const error = element("p", "form-error");
+    error.setAttribute("role", "alert");
+    const submitSelection = (event) => {
+      event?.preventDefault?.();
+      const options = selectionOptions(minInput.value, maxInput.value, limitInput.value);
+      if (!options) {
+        error.textContent = "Use clip lengths from 15 to 180 seconds, with minimum no greater than maximum, and choose 7 to 10 candidates.";
+        return;
+      }
+      void saveJobSelection(jobID, contentType(typeSelect.value), options, error, save);
+    };
+    editor.addEventListener("submit", submitSelection);
+    const save = button("Update selection", "button secondary clipping-action", () => submitSelection());
+    editor.append(typeLabel, minLabel, maxLabel, limitLabel, error, save);
+    return editor;
+  }
+
+  async function loadJobDetails(jobID, force = false) {
+    const id = safeID(jobID);
+    if (!id || !current(state.lifecycle)) return;
+    if (!force && state.jobDetails.has(id)) {
+      state.expandedJobIDs.add(id);
+      renderJobs();
+      return;
+    }
+    if (state.loadingJobDetails.has(id)) return;
+    const lifecycle = state.lifecycle;
+    state.loadingJobDetails.add(id);
+    state.jobDetailErrors.delete(id);
+    renderJobs();
+    try {
+      const response = await api(`/api/clipping/jobs/${encodeURIComponent(id)}`);
+      if (!current(lifecycle)) return;
+      const detail = response && response.job && typeof response.job === "object" ? response.job : response;
+      if (!detail || (detail.id && safeID(detail.id) !== id)) throw new Error("Saved job details did not match this job.");
+      state.jobDetails.set(id, detail);
+      state.expandedJobIDs.add(id);
+    } catch (error) {
+      if (current(lifecycle) && error.name !== "AbortError") state.jobDetailErrors.set(id, error.message || "Saved analysis details could not be loaded.");
+    } finally {
+      state.loadingJobDetails.delete(id);
+      if (current(lifecycle)) renderJobs();
+    }
+  }
+
+  async function saveJobSelection(jobID, profile, options, errorElement, buttonElement) {
+    const id = safeID(jobID);
+    if (!id || !current(state.lifecycle)) return;
+    const lifecycle = state.lifecycle;
+    errorElement.textContent = "";
+    buttonElement.disabled = true;
+    try {
+      await api(`/api/clipping/jobs/${encodeURIComponent(id)}/selection`, {
+        method: "POST",
+        body: JSON.stringify({ content_type: contentType(profile), ...options })
+      });
+      if (!current(lifecycle)) return;
+      state.jobDetails.delete(id);
+      await Promise.allSettled([
+        loadJobDetails(id, true),
+        load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError)
+      ]);
+    } catch (error) {
+      if (current(lifecycle)) errorElement.textContent = error.message || "Selection could not be updated.";
+    } finally {
+      if (current(lifecycle)) buttonElement.disabled = false;
+    }
+  }
+
+  async function saveCostReconciliation(jobID, attemptID, actualCostMicroUSD, reconciliationReference, errorElement, buttonElement) {
+    const id = safeID(jobID);
+    const attempt = safeID(attemptID);
+    if (!id || !attempt || !current(state.lifecycle)) return;
+    const lifecycle = state.lifecycle;
+    errorElement.textContent = "";
+    buttonElement.disabled = true;
+    try {
+      await api(`/api/clipping/jobs/${encodeURIComponent(id)}/reconcile-cost`, {
+        method: "POST",
+        body: JSON.stringify({
+          attempt_id: attempt,
+          actual_cost_micro_usd: actualCostMicroUSD,
+          reconciliation_reference: reconciliationReference
+        })
+      });
+      if (!current(lifecycle)) return;
+      state.jobDetails.delete(id);
+      await Promise.allSettled([
+        loadJobDetails(id, true),
+        load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError),
+        load("batches", "/api/clipping/batches", renderBatches, ui.batchesError)
+      ]);
+    } catch (error) {
+      if (current(lifecycle)) errorElement.textContent = error.message || "Invoice cost could not be recorded.";
+    } finally {
+      if (current(lifecycle)) buttonElement.disabled = false;
+    }
+  }
+
+  function toggleJobDetails(jobID) {
+    const id = safeID(jobID);
+    if (!id) return;
+    if (state.expandedJobIDs.has(id)) {
+      state.expandedJobIDs.delete(id);
+      renderJobs();
+      return;
+    }
+    if (state.jobDetails.has(id)) {
+      state.expandedJobIDs.add(id);
+      renderJobs();
+      return;
+    }
+    state.expandedJobIDs.add(id);
+    void loadJobDetails(id);
   }
 
   function safeProgress(value) {
@@ -238,14 +804,154 @@
     });
   }
 
+  function makeContentTypeSelect(value, label) {
+    const select = element("select", "clipping-content-type-select");
+    select.setAttribute("aria-label", label);
+    for (const type of CONTENT_TYPES) {
+      const option = element("option", "", type[0].toUpperCase() + type.slice(1));
+      option.value = type;
+      select.append(option);
+    }
+    select.value = contentType(value);
+    return select;
+  }
+
+  function selectionOptions(minValue, maxValue, limitValue) {
+    const min = Number(minValue);
+    const max = Number(maxValue);
+    const limit = Number(limitValue);
+    if (!Number.isInteger(min) || min < 15 || min > 180
+      || !Number.isInteger(max) || max < 15 || max > 180 || min > max
+      || !Number.isInteger(limit) || limit < 7 || limit > 10) return null;
+    return { min_clip_seconds: min, max_clip_seconds: max, candidate_limit: limit };
+  }
+
   function renderWorkerNote() {
     const config = state.config || {};
-    const available = config.worker_available === true;
+    const available = workerIsEnabled();
     const note = available
-      ? "Sources are ready for analysis. Adding or uploading a source does not start analysis."
-      : "You can prepare sources and queue analysis jobs. They will wait until analysis is ready to run. Adding media does not start paid analysis.";
+      ? "The analysis worker is configured and enabled. Its connection has not been live checked; adding or uploading a source does not start analysis."
+      : "You can prepare sources and queue analysis jobs. The worker is disabled or not configured, so queued jobs wait. Adding media does not start paid analysis.";
     ui.workerNote.textContent = note;
     ui.workerNote.hidden = false;
+  }
+
+  function renderWorkerMetadata() {
+    const config = state.workerConfig;
+    const fragment = document.createDocumentFragment();
+    if (!config) {
+      ui.workerMetadata.replaceChildren(fragment);
+      return;
+    }
+    const status = config.configured
+      ? `${config.enabled ? "Enabled" : "Disabled"} · configured, not live checked`
+      : "Not configured · worker disabled by default";
+    ui.workerStatus.textContent = status;
+    const fields = [
+      ["Endpoint host", config.endpoint_host],
+      ["Provider", config.provider],
+      ["Model", config.model],
+      ["Pipeline revision", config.pipeline_revision],
+      ["Operator rate", config.rate_micro_usd_per_second === null ? "" : `${formatUSD(config.rate_micro_usd_per_second)} per second`],
+      ["Readiness", config.configured ? "Configured, not live checked" : config.readiness],
+      ["Billing basis", config.billing_basis]
+    ].filter(([, value]) => value !== null && value !== undefined && value !== "");
+    const list = element("dl", "clipping-artifact-metadata clipping-worker-fields");
+    for (const [label, value] of fields) list.append(element("dt", "", label), element("dd", "", String(value)));
+    if (list.children.length) fragment.append(list);
+    if (Array.isArray(config.capabilities) && config.capabilities.length) {
+      const capabilities = element("p", "clipping-worker-capabilities", `Supported capabilities: ${config.capabilities.join(", ")}`);
+      fragment.append(capabilities);
+    }
+    ui.workerMetadata.replaceChildren(fragment);
+  }
+
+  async function loadWorkerConfig() {
+    const lifecycle = state.lifecycle;
+    const sequence = ++state.requestSequence.workerConfig;
+    ui.workerError.textContent = "";
+    try {
+      const response = await api("/api/clipping/config/worker");
+      if (!current(lifecycle) || sequence !== state.requestSequence.workerConfig) return;
+      const payload = response && response.worker ? response.worker : response;
+      state.workerConfig = safeWorkerConfig(payload);
+      ui.workerEnabled.checked = state.workerConfig.enabled;
+      ui.workerPipelineRevision.value = state.workerConfig.pipeline_revision || "";
+      if (state.workerConfig.rate_micro_usd_per_second !== null && state.workerConfig.rate_micro_usd_per_second > 0) {
+        ui.workerRate.value = rateInputValue(state.workerConfig.rate_micro_usd_per_second);
+      }
+      ui.workerToken.value = "";
+      renderWorkerMetadata();
+      renderWorkerNote();
+    } catch (error) {
+      if (!current(lifecycle) || sequence !== state.requestSequence.workerConfig || error.name === "AbortError") return;
+      state.workerConfig = null;
+      ui.workerStatus.textContent = "Worker configuration could not be loaded.";
+      ui.workerMetadata.replaceChildren();
+      ui.workerError.textContent = error.message || "Could not load worker settings.";
+      ui.workerSaveNote.textContent = "Configuration status is unavailable. No worker connection test was attempted.";
+      renderWorkerNote();
+    }
+  }
+
+  async function saveWorkerConfig(event) {
+    event.preventDefault();
+    const lifecycle = state.lifecycle;
+    if (!current(lifecycle)) return;
+    ui.workerError.textContent = "";
+    const endpoint = String(ui.workerEndpoint.value || "").trim();
+    const bearerToken = String(ui.workerToken.value || "");
+    const pipelineRevision = String(ui.workerPipelineRevision.value || "").trim();
+    const rate = parseUSDToMicroUSD(ui.workerRate.value);
+    let parsedEndpoint;
+    try { parsedEndpoint = new URL(endpoint); } catch (_error) { parsedEndpoint = null; }
+    if (!parsedEndpoint || parsedEndpoint.protocol !== "https:" || !parsedEndpoint.hostname
+      || parsedEndpoint.username || parsedEndpoint.password || parsedEndpoint.search || parsedEndpoint.hash) {
+      ui.workerError.textContent = "Enter the full HTTPS Modal worker endpoint without credentials.";
+      ui.workerEndpoint.focus();
+      return;
+    }
+    if (rate === null) {
+      ui.workerError.textContent = "Enter a positive operator-estimated rate in USD per second with up to six decimal places.";
+      ui.workerRate.focus();
+      return;
+    }
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(pipelineRevision)) {
+      ui.workerError.textContent = "Enter a pipeline revision of 1–64 letters, digits, dots, underscores, or hyphens that matches the Modal secret.";
+      ui.workerPipelineRevision.focus();
+      return;
+    }
+    if (bearerToken && !/^[0-9a-f]{64}$/.test(bearerToken)) {
+      ui.workerError.textContent = "Enter a worker bearer token with exactly 64 lowercase hexadecimal characters.";
+      ui.workerToken.focus();
+      return;
+    }
+    if (state.workerConfig?.configured !== true && !bearerToken) {
+      ui.workerError.textContent = "A worker bearer token is required for initial setup.";
+      ui.workerToken.focus();
+      return;
+    }
+    ui.workerSave.disabled = true;
+    try {
+      await api("/api/clipping/config/worker", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: ui.workerEnabled.checked,
+          endpoint,
+          bearer_token: bearerToken,
+          rate_micro_usd_per_second: rate,
+          pipeline_revision: pipelineRevision
+        })
+      });
+      if (!current(lifecycle)) return;
+      ui.workerToken.value = "";
+      ui.workerSaveNote.textContent = "Worker settings saved. The endpoint was not live checked; this status reports configuration only.";
+      await Promise.allSettled([loadWorkerConfig(), loadConfig()]);
+    } catch (error) {
+      if (current(lifecycle)) ui.workerError.textContent = error.message || "Worker settings could not be saved.";
+    } finally {
+      if (current(lifecycle)) ui.workerSave.disabled = false;
+    }
   }
 
   function updateUploadProgress(upload, offset, message) {
@@ -324,6 +1030,7 @@
       if (failureCopy) details.append(element("p", "clipping-row-error", failureCopy));
       const actions = element("div", "clipping-row-actions");
       if (status === "ready") {
+        if (!state.sourceContentTypes.has(id)) state.sourceContentTypes.set(id, "general");
         const checkLabel = element("label", "clipping-check clipping-select");
         const check = element("input");
         check.type = "checkbox";
@@ -336,6 +1043,11 @@
         });
         checkLabel.append(check, element("span", "", "Batch"));
         actions.append(checkLabel);
+        const typeLabel = element("label", "clipping-content-type", "Content type");
+        const typeSelect = makeContentTypeSelect(state.sourceContentTypes.get(id), `Content type for ${sourceName(source)}`);
+        typeSelect.addEventListener("change", () => state.sourceContentTypes.set(id, contentType(typeSelect.value)));
+        typeLabel.append(typeSelect);
+        actions.append(typeLabel);
         actions.append(button("Start analysis", "button secondary clipping-action", () => { void createJob(id); }));
       } else if (status === "uploading") {
         actions.append(button("Resume upload", "button secondary clipping-action", () => chooseResumeFile(id)));
@@ -358,7 +1070,7 @@
       && job.stages.some((stage) => String(stage && stage.status || "").toLowerCase() === "uncertain");
     const statusText = hasUncertainStage
       ? "Waiting for the previous attempt to be resolved"
-      : status === "queued" && state.config?.worker_available === false
+      : status === "queued" && !workerIsEnabled()
         ? "Waiting for analysis to be configured"
         : statusCopy(status, jobStatusCopy);
     header.append(element("span", "badge clipping-status", statusText));
@@ -377,6 +1089,7 @@
     const budget = Number(job.budget_micro_usd);
     const spendLabel = Number.isSafeInteger(budget) ? `${formatUSD(spent)} of ${formatUSD(budget)}` : "Budget recorded";
     footer.append(element("span", "", spendLabel));
+    if (job.content_type) footer.append(element("span", "", `Profile: ${contentType(job.content_type)}`));
     const actions = element("div", "clipping-row-actions");
     if (["queued", "running", "paused_budget"].includes(status)) {
       actions.append(button("Cancel job", "button secondary clipping-action", () => { void cancelJob(job.id); }));
@@ -384,6 +1097,27 @@
     row.append(header, track, footer);
     const errorCopy = jobErrorCopy(job);
     if (errorCopy) row.append(element("p", "clipping-row-error", errorCopy));
+    const id = safeID(job.id);
+    const hasArtifacts = Array.isArray(job.artifacts) && job.artifacts.length > 0;
+    const hasCostStageDetails = Array.isArray(job.stages)
+      && job.stages.some((stage) => stage
+        && (stage.cost_reconciled === false || stage.cost_reconciled === true)
+        && safeID(stage.attempt_id));
+    if (id && (status === "completed" || hasArtifacts || hasCostStageDetails)) {
+      const expanded = state.expandedJobIDs.has(id);
+      const detailsButton = button(
+        state.loadingJobDetails.has(id) ? "Loading job details…" : expanded ? "Hide job details" : status === "completed" || hasArtifacts ? "View saved analysis" : "View job details",
+        "button secondary clipping-action",
+        () => toggleJobDetails(id)
+      );
+      detailsButton.disabled = state.loadingJobDetails.has(id);
+      actions.append(detailsButton);
+      if (expanded) {
+        row.append(renderJobArtifacts(job, id));
+        const detail = state.jobDetails.get(id);
+        if (status === "completed" && detail) row.append(renderSelectionEditor(detail, id));
+      }
+    }
     if (actions.children.length) row.append(actions);
     return row;
   }
@@ -408,7 +1142,7 @@
       const count = Array.isArray(batch.job_ids) ? batch.job_ids.length : Array.isArray(batch.source_ids) ? batch.source_ids.length : 0;
       header.append(element("strong", "", `${count} ${count === 1 ? "source" : "sources"}`));
       const status = String(batch.status || "").toLowerCase();
-      const statusText = status === "queued" && state.config?.worker_available === false
+      const statusText = status === "queued" && !workerIsEnabled()
         ? "Waiting for analysis to be configured"
         : statusCopy(status, jobStatusCopy);
       header.append(element("span", "badge clipping-status", statusText));
@@ -440,10 +1174,12 @@
     const count = state.selectedSourceIDs.size;
     const perJob = parseBudgetUSD(ui.batchJobBudget.value, MAX_JOB_BUDGET_MICRO_USD);
     const aggregate = parseBudgetUSD(ui.batchBudget.value, MAX_BATCH_BUDGET_MICRO_USD);
+    const options = selectionOptions(ui.batchMinSeconds.value, ui.batchMaxSeconds.value, ui.batchCandidateLimit.value);
     const required = perJob === null ? null : perJob * count;
-    const fits = count > 0 && perJob !== null && aggregate !== null && Number.isSafeInteger(required) && required <= aggregate;
+    const fits = count > 0 && perJob !== null && aggregate !== null && options !== null && Number.isSafeInteger(required) && required <= aggregate;
     ui.createBatch.disabled = !fits;
     if (count === 0) ui.batchBudgetNote.textContent = "Select ready sources. The combined job limits must fit within the batch limit.";
+    else if (!options) ui.batchBudgetNote.textContent = "Use clip lengths from 15 to 180 seconds, with minimum no greater than maximum, and choose 7 to 10 candidates.";
     else if (perJob === null || aggregate === null) ui.batchBudgetNote.textContent = "Enter positive budget amounts in US dollars.";
     else if (!fits) ui.batchBudgetNote.textContent = `${count} selected ${count === 1 ? "source needs" : "sources need"} at least ${formatUSD(required)} in aggregate budget.`;
     else ui.batchBudgetNote.textContent = `${count} selected ${count === 1 ? "source" : "sources"} · at least ${formatUSD(required)} reserved within a ${formatUSD(aggregate)} batch limit.`;
@@ -498,6 +1234,7 @@
     if (!state.active) return Promise.resolve();
     return Promise.allSettled([
       loadConfig(),
+      loadWorkerConfig(),
       load("sources", "/api/clipping/sources", renderSources, ui.sourcesError),
       load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError),
       load("batches", "/api/clipping/batches", renderBatches, ui.batchesError)
@@ -758,17 +1495,24 @@
       ui.jobBudget.focus();
       return;
     }
+    const options = selectionOptions(ui.jobMinSeconds.value, ui.jobMaxSeconds.value, ui.jobCandidateLimit.value);
+    if (!options) {
+      ui.sourcesError.textContent = "Use clip lengths from 15 to 180 seconds, with minimum no greater than maximum, and choose 7 to 10 candidates.";
+      ui.jobMinSeconds.focus();
+      return;
+    }
+    const profile = contentType(state.sourceContentTypes.get(safeID(sourceID)));
     ui.sourcesError.textContent = "";
     const buttonNode = Array.from(ui.sources.querySelectorAll("button")).find((node) => node.textContent === "Start analysis" && node.closest("article")?.dataset.sourceId === sourceID);
     if (buttonNode) buttonNode.disabled = true;
-    const fingerprint = `${sourceID}:${budget}`;
+    const fingerprint = `${sourceID}:${budget}:${profile}:${options.min_clip_seconds}:${options.max_clip_seconds}:${options.candidate_limit}`;
     const idempotencyKey = state.pendingJobKeys.get(fingerprint) || newIdempotencyKey();
     state.pendingJobKeys.set(fingerprint, idempotencyKey);
     try {
       await api("/api/clipping/jobs", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({ source_id: sourceID, budget_micro_usd: budget })
+        body: JSON.stringify({ source_id: sourceID, budget_micro_usd: budget, content_type: profile, ...options })
       });
       if (!current(lifecycle)) return;
       state.pendingJobKeys.delete(fingerprint);
@@ -787,20 +1531,22 @@
     ids.sort();
     const perJob = parseBudgetUSD(ui.batchJobBudget.value, MAX_JOB_BUDGET_MICRO_USD);
     const aggregate = parseBudgetUSD(ui.batchBudget.value, MAX_BATCH_BUDGET_MICRO_USD);
-    if (!ids.length || perJob === null || aggregate === null || !Number.isSafeInteger(perJob * ids.length) || perJob * ids.length > aggregate) {
+    const options = selectionOptions(ui.batchMinSeconds.value, ui.batchMaxSeconds.value, ui.batchCandidateLimit.value);
+    const profile = contentType(ui.batchContentType.value);
+    if (!ids.length || perJob === null || aggregate === null || !options || !Number.isSafeInteger(perJob * ids.length) || perJob * ids.length > aggregate) {
       renderBatchReadiness();
       return;
     }
     ui.batchError.textContent = "";
     ui.createBatch.disabled = true;
-    const fingerprint = `${ids.join(",")}:${perJob}:${aggregate}`;
+    const fingerprint = `${ids.join(",")}:${perJob}:${aggregate}:${profile}:${options.min_clip_seconds}:${options.max_clip_seconds}:${options.candidate_limit}`;
     const idempotencyKey = state.pendingBatchKeys.get(fingerprint) || newIdempotencyKey();
     state.pendingBatchKeys.set(fingerprint, idempotencyKey);
     try {
       await api("/api/clipping/batches", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({ source_ids: ids, per_job_budget_micro_usd: perJob, budget_micro_usd: aggregate })
+        body: JSON.stringify({ source_ids: ids, per_job_budget_micro_usd: perJob, budget_micro_usd: aggregate, content_type: profile, ...options })
       });
       if (!current(lifecycle)) return;
       state.pendingBatchKeys.delete(fingerprint);
@@ -863,6 +1609,7 @@
       await api(`/api/clipping/sources/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!current(lifecycle)) return;
       state.selectedSourceIDs.delete(id);
+      state.sourceContentTypes.delete(id);
       await refresh();
     } catch (error) {
       if (current(lifecycle)) ui.sourcesError.textContent = error.message || "The source could not be removed.";
@@ -900,7 +1647,9 @@
   }
 
   function bind() {
+    if (ui.callbackOrigin) ui.callbackOrigin.textContent = String(root.location?.origin || "Dashboard origin unavailable");
     ui.refresh.addEventListener("click", () => { void refresh(); });
+    ui.workerForm.addEventListener("submit", (event) => saveWorkerConfig(event));
     ui.uploadForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const file = ui.uploadFile.files && ui.uploadFile.files[0];
@@ -939,7 +1688,9 @@
     ui.link.addEventListener("change", updateLinkDisclosure);
     ui.linkPermissionCheck.addEventListener("change", updateLinkDisclosure);
     ui.linkForm.addEventListener("submit", submitImport);
-    [ui.batchJobBudget, ui.batchBudget].forEach((input) => input.addEventListener("input", renderBatchReadiness));
+    [ui.batchJobBudget, ui.batchBudget, ui.batchMinSeconds, ui.batchMaxSeconds, ui.batchCandidateLimit]
+      .forEach((input) => input.addEventListener("input", renderBatchReadiness));
+    ui.batchContentType.addEventListener("change", renderBatchReadiness);
     ui.createBatch.addEventListener("click", () => { void createBatch(); });
     ui.retentionForm.addEventListener("submit", saveRetention);
     updateLinkDisclosure();
@@ -972,12 +1723,27 @@
       state.sources = [];
       state.jobs = [];
       state.batches = [];
+      state.workerConfig = null;
+      state.sourceContentTypes.clear();
+      state.expandedJobIDs.clear();
+      state.jobDetails.clear();
+      state.jobDetailErrors.clear();
+      state.loadingJobDetails.clear();
       state.selectedSourceIDs.clear();
       state.config = null;
       ui.sources.replaceChildren(element("p", "empty", "Sources will appear here after you add footage."));
       ui.jobs.replaceChildren(element("p", "empty", "No analysis jobs yet."));
       ui.batches.replaceChildren(element("p", "empty", "No batches yet."));
       ui.workerNote.hidden = true;
+      ui.workerStatus.textContent = "Worker configuration has not been loaded.";
+      ui.workerMetadata.replaceChildren();
+      ui.workerError.textContent = "";
+      ui.workerSaveNote.textContent = "The worker starts disabled. Configuration status is not a live connection check.";
+      ui.workerEndpoint.value = "";
+      ui.workerToken.value = "";
+      ui.workerPipelineRevision.value = "";
+      ui.workerRate.value = "0.000001";
+      ui.workerEnabled.checked = false;
       ui.uploadProgress.hidden = true;
       ui.uploadError.textContent = "";
       ui.uploadFile.value = "";
@@ -998,15 +1764,22 @@
     if (!state.active) return;
     const key = kind === "clipping_source" ? "sources" : kind === "clipping_job" ? "jobs" : kind === "clipping_batch" ? "batches" : "";
     if (!key) return;
+    let changedJobID = "";
     try {
       const payload = JSON.parse(event.data);
       const id = safeID(payload && payload.id);
       if (!id) return;
+      if (kind === "clipping_job") {
+        changedJobID = id;
+        state.jobDetails.delete(id);
+        state.jobDetailErrors.delete(id);
+      }
     } catch (_error) {
       return;
     }
     if (key === "sources") void load("sources", "/api/clipping/sources", renderSources, ui.sourcesError);
-    if (key === "jobs") void Promise.allSettled([load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError), load("batches", "/api/clipping/batches", renderBatches, ui.batchesError)]);
+    if (key === "jobs") void Promise.allSettled([load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError), load("batches", "/api/clipping/batches", renderBatches, ui.batchesError)])
+      .then(() => { if (changedJobID && state.expandedJobIDs.has(changedJobID)) void loadJobDetails(changedJobID, true); });
     if (key === "batches") void Promise.allSettled([load("batches", "/api/clipping/batches", renderBatches, ui.batchesError), load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError)]);
   }
 

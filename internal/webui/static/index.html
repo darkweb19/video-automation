@@ -211,6 +211,30 @@
             <button id="clipping-refresh" class="button secondary" type="button">Refresh</button>
           </div>
           <div id="clipping-worker-note" class="clipping-notice" role="status" aria-live="polite" hidden></div>
+          <section class="panel clipping-panel clipping-worker-panel" aria-labelledby="clipping-worker-heading">
+            <div class="panel-head"><div><h3 id="clipping-worker-heading">Analysis worker</h3><p>Configure the separately deployed Modal worker. Saving settings never checks the connection.</p></div></div>
+            <div id="clipping-worker-status" class="clipping-worker-status" role="status" aria-live="polite">Worker configuration has not been loaded.</div>
+            <div id="clipping-worker-metadata" class="clipping-worker-metadata"></div>
+            <details class="technical-disclosure clipping-modal-instructions">
+              <summary><span class="disclosure-title">Modal worker setup</span><span class="disclosure-note">Operator steps</span></summary>
+              <ol>
+                <li>Choose an immutable 40-character lowercase Hugging Face commit for <code>Systran/faster-whisper-large-v3</code>, and review that exact snapshot's license. Follow the Operator setup section in <code>docs/clipping/M3-IMPLEMENTATION.md</code> to create three separate least-privilege Modal secrets. Only the dispatch API secret contains the worker bearer; enter it in Modal's editor with <code>FRAMEVAULT_CLIPPING_WORKER_SHARED_SECRET=-</code>. Never put the bearer in a command, shell history, or URL. Set <code>FRAMEVAULT_CALLBACK_ORIGIN</code> to this exact FrameVault origin: <code id="clipping-callback-origin">Loading dashboard origin…</code>; the worker rejects media or callback transfer URLs outside it. Set <code>FRAMEVAULT_PIPELINE_REVISION</code> to the same nonsecret revision entered below and <code>FRAMEVAULT_WHISPER_MODEL_REVISION</code> to the immutable commit. Change the pipeline revision whenever the model commit, worker, runtime, or analysis algorithm changes.</li>
+                <li>After separately authorized deployment, run <code>modal run workers/modal/clipping_m3_worker.py::app.clipping_model_prewarm_task</code> once to download the pinned model into its isolated CPU-managed cache. Copy the deployed worker URL ending in <code>/dispatch</code> and enter the endpoint, pipeline revision, and bearer below. Set an operator cost estimate, save the worker disabled, and enable it only when ready for queued jobs and provider charges.</li>
+                <li>Review the reported provider, model, supported capabilities, and billing basis. Enable the worker only when you are ready for queued jobs to run and incur provider charges within their saved budgets. Modal invoice totals are not reconciled automatically and require manual settlement.</li>
+              </ol>
+              <p class="clipping-help">The runtime and model-prewarm secrets omit the dispatch bearer. The dashboard does not call Modal to test a connection. It reports configuration only; deployment, endpoint reachability, model availability, and provider billing are not verified here. Model prewarm downloads weights; Modal invoice totals are not reconciled automatically. Full-source analysis uses measured audio/visual cues and deterministic editorial heuristics; the game profile does not detect faces or confirm facecam.</p>
+            </details>
+            <form id="clipping-worker-form" class="clipping-worker-form">
+              <div class="field"><label for="clipping-worker-endpoint">Modal worker HTTPS endpoint</label><input id="clipping-worker-endpoint" type="url" inputmode="url" autocomplete="url" placeholder="https://your-worker.modal.run/dispatch" required><small id="clipping-worker-endpoint-help">For an existing setup, re-enter the complete endpoint shown by Modal; only its host is shown in status.</small></div>
+              <div class="field"><label for="clipping-worker-pipeline-revision">Pipeline revision</label><input id="clipping-worker-pipeline-revision" type="text" autocomplete="off" maxlength="64" placeholder="e.g. m3-2026-10-09-v1" required><small>Must exactly match <code>FRAMEVAULT_PIPELINE_REVISION</code> in the Modal secret. Use it to track the deployed worker, model, and runtime. Changing it invalidates cached source analysis.</small></div>
+              <div class="field"><label for="clipping-worker-token">Worker bearer token</label><input id="clipping-worker-token" type="password" autocomplete="new-password" placeholder="Required for initial setup; blank keeps the saved token"></div>
+              <div class="field"><label for="clipping-worker-rate">Operator-estimated rate (USD per second)</label><input id="clipping-worker-rate" type="number" min="0.000001" step="0.000001" inputmode="decimal" value="0.000001" required><small>Each dispatch is bounded by 12 hours and a cap derived from the job budget and this rate. This is an operator estimate, not a provider quote. Modal invoice totals require manual settlement.</small></div>
+              <label class="clipping-check clipping-worker-enable"><input id="clipping-worker-enabled" type="checkbox"><span>Enable worker dispatch</span></label>
+              <p id="clipping-worker-error" class="form-error" role="alert" aria-live="polite"></p>
+              <p id="clipping-worker-save-note" class="clipping-help" aria-live="polite">The worker starts disabled. Configuration status is not a live connection check.</p>
+              <button id="clipping-worker-save" class="button secondary" type="submit">Save worker settings</button>
+            </form>
+          </section>
           <div class="clipping-intake-grid">
             <section class="panel clipping-panel" aria-labelledby="clipping-upload-heading">
               <div class="panel-head"><div><h3 id="clipping-upload-heading">Upload a video</h3><p>Large uploads can resume from the last saved point if interrupted.</p></div></div>
@@ -242,6 +266,12 @@
           <div class="clipping-work-grid">
             <section class="panel clipping-panel" aria-labelledby="clipping-sources-heading">
               <div class="clipping-section-head"><div><h3 id="clipping-sources-heading">Sources</h3><p id="clipping-source-summary">Your uploaded and imported footage.</p></div><div class="field clipping-job-budget"><label for="clipping-job-budget">Maximum per job (USD)</label><input id="clipping-job-budget" type="number" min="0.01" max="4" step="0.01" value="1.00" inputmode="decimal"><small>Analysis waits until it is available. Importing media never starts paid analysis.</small></div></div>
+              <div class="clipping-job-options" aria-label="Individual clip selection options">
+                <span class="clipping-options-title">Clip selection for individual jobs</span>
+                <div class="field"><label for="clipping-job-min-seconds">Minimum clip length (seconds)</label><input id="clipping-job-min-seconds" type="number" min="15" max="180" step="1" value="15"></div>
+                <div class="field"><label for="clipping-job-max-seconds">Maximum clip length (seconds)</label><input id="clipping-job-max-seconds" type="number" min="15" max="180" step="1" value="180"></div>
+                <div class="field"><label for="clipping-job-candidate-limit">Maximum candidates</label><input id="clipping-job-candidate-limit" type="number" min="7" max="10" step="1" value="10"></div>
+              </div>
               <p id="clipping-sources-error" class="form-error" role="alert" aria-live="polite"></p>
               <div id="clipping-sources" class="clipping-list"><p class="empty">Sources will appear here after you add footage.</p></div>
             </section>
@@ -250,6 +280,10 @@
               <div class="clipping-batch-budget">
                 <div class="field"><label for="clipping-batch-job-budget">Maximum for each source (USD)</label><input id="clipping-batch-job-budget" type="number" min="0.01" max="4" step="0.01" value="1.00" inputmode="decimal"></div>
                 <div class="field"><label for="clipping-batch-budget">Maximum for this batch (USD)</label><input id="clipping-batch-budget" type="number" min="0.01" max="400" step="0.01" value="5.00" inputmode="decimal"></div>
+                <div class="field"><label for="clipping-batch-content-type">Content type for this batch</label><select id="clipping-batch-content-type"><option value="general">General</option><option value="podcast">Podcast</option><option value="comedy">Comedy</option><option value="gaming">Gaming</option><option value="movie">Movie</option></select></div>
+                <div class="field"><label for="clipping-batch-min-seconds">Minimum clip length (seconds)</label><input id="clipping-batch-min-seconds" type="number" min="15" max="180" step="1" value="15"></div>
+                <div class="field"><label for="clipping-batch-max-seconds">Maximum clip length (seconds)</label><input id="clipping-batch-max-seconds" type="number" min="15" max="180" step="1" value="180"></div>
+                <div class="field"><label for="clipping-batch-candidate-limit">Maximum candidates per source</label><input id="clipping-batch-candidate-limit" type="number" min="7" max="10" step="1" value="10"></div>
                 <p id="clipping-batch-budget-note" class="clipping-help" aria-live="polite">Select ready sources. The combined job limits must fit within the batch limit.</p>
                 <button id="clipping-create-batch" class="button primary" type="button" disabled>Queue selected sources</button>
                 <p id="clipping-batch-error" class="form-error" role="alert" aria-live="polite"></p>

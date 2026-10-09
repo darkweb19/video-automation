@@ -106,6 +106,7 @@ function createUI(request) {
     window,
     document,
     URL,
+    TextEncoder,
     AbortController,
     module: undefined
   });
@@ -120,6 +121,15 @@ function treeText(node) {
 
 function treeTags(node) {
   return [node.tagName, ...node.children.flatMap(treeTags)];
+}
+
+function findNode(node, predicate) {
+  if (predicate(node)) return node;
+  for (const child of node.children) {
+    const found = findNode(child, predicate);
+    if (found) return found;
+  }
+  return null;
 }
 
 class StudioElement {
@@ -570,13 +580,22 @@ test('individual and batch submissions send exact microUSD limits and stable ide
   assert.match(treeText(app.elements.get('clipping-sources')), /Media ready/);
   const sourceButtons = app.elements.get('clipping-sources').querySelectorAll('button');
   const startButton = sourceButtons.find((node) => node.textContent === 'Start analysis');
+  const sourceType = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'select');
+  sourceType.value = 'podcast';
+  sourceType.emit('change');
   app.elements.get('clipping-job-budget').value = '1.25';
+  app.elements.get('clipping-job-min-seconds').value = '20';
+  app.elements.get('clipping-job-max-seconds').value = '90';
+  app.elements.get('clipping-job-candidate-limit').value = '8';
   startButton.click();
   for (let attempt = 0; attempt < 30 && submissions.length < 1; attempt++) await new Promise((resolve) => setImmediate(resolve));
   for (let attempt = 0; attempt < 30 && !app.elements.get('clipping-sources-error').textContent; attempt++) await new Promise((resolve) => setImmediate(resolve));
   startButton.click();
   for (let attempt = 0; attempt < 30 && submissions.length < 2; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(JSON.parse(submissions[0].options.body), { source_id: 'src_ready', budget_micro_usd: 1_250_000 });
+  assert.deepEqual(JSON.parse(submissions[0].options.body), {
+    source_id: 'src_ready', budget_micro_usd: 1_250_000, content_type: 'podcast',
+    min_clip_seconds: 20, max_clip_seconds: 90, candidate_limit: 8
+  });
   assert.equal(submissions[0].options.headers['Idempotency-Key'], submissions[1].options.headers['Idempotency-Key']);
 
   const batchCheck = app.elements.get('clipping-sources').children[0].children[1].children[0].children[0];
@@ -584,6 +603,10 @@ test('individual and batch submissions send exact microUSD limits and stable ide
   batchCheck.emit('change');
   app.elements.get('clipping-batch-job-budget').value = '1.25';
   app.elements.get('clipping-batch-budget').value = '1.24';
+  app.elements.get('clipping-batch-content-type').value = 'gaming';
+  app.elements.get('clipping-batch-min-seconds').value = '30';
+  app.elements.get('clipping-batch-max-seconds').value = '120';
+  app.elements.get('clipping-batch-candidate-limit').value = '9';
   app.elements.get('clipping-batch-budget').emit('input');
   assert.equal(app.elements.get('clipping-create-batch').disabled, true);
   app.elements.get('clipping-batch-budget').value = '1.25';
@@ -594,7 +617,8 @@ test('individual and batch submissions send exact microUSD limits and stable ide
   const batch = submissions[2];
   assert.equal(batch.route, '/api/clipping/batches');
   assert.deepEqual(JSON.parse(batch.options.body), {
-    source_ids: ['src_ready'], per_job_budget_micro_usd: 1_250_000, budget_micro_usd: 1_250_000
+    source_ids: ['src_ready'], per_job_budget_micro_usd: 1_250_000, budget_micro_usd: 1_250_000,
+    content_type: 'gaming', min_clip_seconds: 30, max_clip_seconds: 120, candidate_limit: 9
   });
   assert.ok(batch.options.headers['Idempotency-Key']);
 });
@@ -736,4 +760,346 @@ test('interrupted uploads resume from the saved offset and send chunks within th
   }
   assert.deepEqual(chunks.map((chunk) => chunk.size), [chunkBytes, 1, 1]);
   assert.deepEqual(chunks.map((chunk) => chunk.offset), [0, chunkBytes, chunkBytes]);
+});
+
+test('Modal worker settings require a token at setup and display only secret-free, config-only status', async () => {
+  const requests = [];
+  const secret = 'never-render-this-bearer-token';
+  const app = createUI(async (route, options = {}) => {
+    requests.push({ route, options });
+    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
+    if (route === '/api/clipping/config/worker' && !options.method) {
+      return {
+        configured: true,
+        enabled: false,
+        endpoint_host: 'clip-worker.modal.run',
+        provider: 'openai-compatible',
+        model: 'analysis-model-v2',
+        pipeline_revision: 'm3-2026-10-09-v1',
+        rate_micro_usd_per_second: 3,
+        readiness: 'configured_not_live_checked',
+        capabilities: {
+          full_timeline_asr: true,
+          original_script: true,
+          audio_events: true,
+          scene_motion_events: false,
+          candidate_selection: true
+        },
+        billing_basis: 'operator_estimate_per_compute_second',
+        bearer_token: secret
+      };
+    }
+    if (route === '/api/clipping/config/worker' && options.method === 'PUT') return { configured: true, enabled: JSON.parse(options.body).enabled };
+    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  const status = treeText(app.elements.get('clipping-worker-status')) + treeText(app.elements.get('clipping-worker-metadata'));
+  assert.match(status, /configured, not live checked/);
+  assert.match(status, /clip-worker\.modal\.run/);
+  assert.match(status, /analysis-model-v2/);
+  assert.match(status, /m3-2026-10-09-v1/);
+  assert.match(status, /Full-timeline ASR/);
+  assert.match(status, /Original-script transcript/);
+  assert.match(status, /Candidate selection/);
+  assert.doesNotMatch(status, /Scene and motion events/, 'disabled capabilities are not advertised as enabled');
+  assert.doesNotMatch(status, new RegExp(secret));
+  assert.equal(app.elements.get('clipping-worker-token').value, '', 'a secret returned by a broken server is never copied into the password field');
+  assert.equal(app.elements.get('clipping-worker-enabled').checked, false, 'a configured worker stays disabled by default');
+  assert.equal(app.elements.get('clipping-callback-origin').textContent, 'http://localhost', 'Modal callback origin matches the current dashboard origin');
+
+  const endpoint = app.elements.get('clipping-worker-endpoint');
+  const token = app.elements.get('clipping-worker-token');
+  const revision = app.elements.get('clipping-worker-pipeline-revision');
+  const rate = app.elements.get('clipping-worker-rate');
+  endpoint.value = 'https://clip-worker.modal.run/dispatch';
+  assert.equal(revision.value, 'm3-2026-10-09-v1');
+  rate.value = '0.000004';
+  app.elements.get('clipping-worker-enabled').checked = true;
+  await app.elements.get('clipping-worker-form').emit('submit')[0];
+  const update = requests.find((request) => request.route === '/api/clipping/config/worker' && request.options.method === 'PUT');
+  assert.ok(update, 'worker settings use the authenticated same-origin configuration route');
+  assert.deepEqual(JSON.parse(update.options.body), {
+    enabled: true,
+    endpoint: 'https://clip-worker.modal.run/dispatch',
+    bearer_token: '',
+    rate_micro_usd_per_second: 4,
+    pipeline_revision: 'm3-2026-10-09-v1'
+  }, 'a blank bearer preserves an existing configured secret');
+  assert.equal(token.value, '');
+  assert.ok(requests.every((request) => request.route.startsWith('/api/')), 'the browser never calls the Modal endpoint directly');
+  assert.match(markup, /FRAMEVAULT_CLIPPING_WORKER_SHARED_SECRET=-/);
+  assert.doesNotMatch(markup, /FRAMEVAULT_CLIPPING_WORKER_SHARED_SECRET=.*your-random-worker-token/);
+  assert.match(markup, /three separate least-privilege Modal secrets/);
+  assert.match(markup, /runtime and model-prewarm secrets omit the dispatch bearer/);
+  assert.match(markup, /FRAMEVAULT_CALLBACK_ORIGIN/);
+  assert.match(markup, /FRAMEVAULT_PIPELINE_REVISION/);
+  assert.match(markup, /FRAMEVAULT_WHISPER_MODEL_REVISION/);
+  assert.match(markup, /immutable 40-character lowercase Hugging Face commit/);
+  assert.match(markup, /Change the pipeline revision whenever the model commit, worker, runtime, or analysis algorithm changes/);
+  assert.match(markup, /Must exactly match/);
+  assert.match(markup, /worker rejects media or callback transfer URLs outside it/);
+  assert.match(markup, /worker rejects media or callback transfer URLs outside it/);
+  assert.match(markup, /modal run workers\/modal\/clipping_m3_worker\.py::app\.clipping_model_prewarm_task/);
+  assert.match(markup, /worker URL ending in/);
+  assert.match(markup, /provider charges/);
+});
+
+test('initial Modal worker setup requires a bearer and keeps the worker disabled by default', async () => {
+  const writes = [];
+  const app = createUI(async (route, options = {}) => {
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/config/worker' && !options.method) return { configured: false, enabled: false, readiness: 'not_configured' };
+    if (route === '/api/clipping/config/worker' && options.method === 'PUT') {
+      writes.push(JSON.parse(options.body));
+      return { configured: true, enabled: false };
+    }
+    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  assert.equal(app.elements.get('clipping-worker-enabled').checked, false);
+  app.elements.get('clipping-worker-endpoint').value = 'https://clip-worker.modal.run/dispatch';
+  app.elements.get('clipping-worker-rate').value = '0.000001';
+  await app.elements.get('clipping-worker-form').emit('submit')[0];
+  assert.equal(writes.length, 0, 'initial setup cannot be saved without a pipeline revision');
+  assert.match(app.elements.get('clipping-worker-error').textContent, /pipeline revision/);
+  app.elements.get('clipping-worker-pipeline-revision').value = 'm3 test revision';
+  await app.elements.get('clipping-worker-form').emit('submit')[0];
+  assert.equal(writes.length, 0, 'pipeline revisions reject characters outside the configured identifier alphabet');
+  assert.match(app.elements.get('clipping-worker-error').textContent, /1–64 letters/);
+  app.elements.get('clipping-worker-pipeline-revision').value = 'r'.repeat(65);
+  await app.elements.get('clipping-worker-form').emit('submit')[0];
+  assert.equal(writes.length, 0, 'pipeline revisions longer than 64 characters are rejected');
+  app.elements.get('clipping-worker-pipeline-revision').value = 'm3-test-revision';
+  await app.elements.get('clipping-worker-form').emit('submit')[0];
+  assert.equal(writes.length, 0, 'initial setup still requires a bearer token');
+  assert.match(app.elements.get('clipping-worker-error').textContent, /required for initial setup/);
+  app.elements.get('clipping-worker-token').value = 'too-short';
+  await app.elements.get('clipping-worker-form').emit('submit')[0];
+  assert.equal(writes.length, 0, 'a short bearer token is rejected before POST');
+  assert.match(app.elements.get('clipping-worker-error').textContent, /exactly 64 lowercase hexadecimal characters/);
+  app.elements.get('clipping-worker-token').value = 'a'.repeat(64);
+  await app.elements.get('clipping-worker-form').emit('submit')[0];
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].enabled, false);
+  assert.equal(writes[0].bearer_token, 'a'.repeat(64));
+  assert.equal(writes[0].pipeline_revision, 'm3-test-revision');
+  assert.equal(app.elements.get('clipping-worker-token').value, '', 'the token field clears after saving');
+});
+
+test('saved analysis artifacts render original timestamps, events, context, candidates, evidence, and versions as text', async () => {
+  const requests = [];
+  const candidate = {
+    id: 'candidate_1', rank: 1, start_ms: 1_250, end_ms: 8_500, duration_ms: 7_250,
+    title_variants: ['Alternate title', '<script>title</script>'], hook: 'A surprising reveal',
+    editorial_score: 19,
+    scores: { hook: 5, emotional_impact: 4, retention_potential: 4, shareability: 3, standalone_context: 3 },
+    confidence: 0.62, confidence_label: 'medium',
+    evidence: [{ kind: 'spoken_line', start_ms: 2_000, end_ms: 3_000, text: '<svg onload=alert(1)>', detail: 'A source-backed quote' }]
+  };
+  const savedJob = {
+    id: 'clipjob_1', source_id: 'clipsrc_1', status: 'completed', content_type: 'podcast',
+    min_clip_seconds: 15, max_clip_seconds: 60, candidate_limit: 7,
+    artifacts: [{
+      type: 'clipping.analysis', schema_version: '2', version: 1,
+      source_duration_ms: 60_000, time_ranges: [{ start_ms: 1_250, end_ms: 8_500 }],
+      payload_json: JSON.stringify({
+        analysis_version: 'analysis-v2', content_type: 'podcast',
+        model_versions: { asr: 'transcriber-v3' }, algorithm_versions: { selection: 'ranker-v2' },
+        prompt_versions: { context: 'context-prompt-v5' },
+        language: { code: 'hi', probability: 0.91, script: 'Devanagari' },
+        cost_basis: 'operator_rate', cost_estimate_micro_usd: 2_000,
+        rate_micro_usd_per_second: 4, compute_seconds: 500,
+        transcript: { original_script: true, segments: [{ start_ms: 1_250, end_ms: 3_500, text: '<img src=x onerror=alert(1)>', confidence: 0.71, speaker_id: 'speaker_1' }] },
+        context: {
+          summary: '<script>global story</script>',
+          topics: [{ start_ms: 2_000, end_ms: 5_000, label: 'The reveal', keywords: ['reveal', 'reaction'] }],
+          timeline: [{ start_ms: 5_000, end_ms: 8_500, summary: 'The point resolves', keywords: ['payoff'] }]
+        },
+        audio_events: [{ start_ms: 3_000, end_ms: 4_000, kind: 'laughter', score: 0.8, evidence: 'Audience laughter' }],
+        visual_events: [{ start_ms: 4_000, end_ms: 6_000, kind: 'scene_change', score: 0.7, evidence: 'Camera cuts to host' }],
+        candidates: [candidate]
+      })
+    }]
+  };
+  const app = createUI(async (route, options = {}) => {
+    requests.push({ route, options });
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/config/worker') return { configured: false, enabled: false };
+    if (route === '/api/clipping/sources') return [{ id: 'clipsrc_1', status: 'ready', original_name: 'episode.mp4' }];
+    if (route === '/api/clipping/jobs' && !options.method) return [savedJob];
+    if (route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/jobs/clipjob_1' && !options.method) return { job: savedJob };
+    if (route === '/api/clipping/jobs/clipjob_1/selection' && options.method === 'POST') return { job: savedJob };
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  const view = app.elements.get('clipping-jobs').querySelectorAll('button').find((node) => node.textContent === 'View saved analysis');
+  assert.ok(view);
+  view.click();
+  for (let attempt = 0; attempt < 30 && !treeText(app.elements.get('clipping-jobs')).includes('Original-script transcript'); attempt++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const rendered = treeText(app.elements.get('clipping-jobs'));
+  for (const expected of [
+    'Original-script transcript', '00:01.250–00:03.500', '<img src=x onerror=alert(1)>',
+    'Global context', '<script>global story</script>', 'Audio events', 'Audience laughter',
+    'Visual events', 'Camera cuts to host', 'Selected clip candidates', 'A surprising reveal',
+    'Alternate title', '<script>title</script>', 'Score components', 'hook', 'retention_potential',
+    'Confidence 0.62 (medium) · uncalibrated', '<svg onload=alert(1)>',
+    'transcriber-v3', 'context-prompt-v5', 'analysis-v2', 'Worker cost estimate', 'not a provider quote'
+  ]) assert.ok(rendered.includes(expected), `saved analysis should render ${expected}`);
+  const tags = treeTags(app.elements.get('clipping-jobs'));
+  assert.equal(tags.includes('img'), false, 'stored transcript text is inert');
+  assert.equal(tags.includes('script'), false, 'stored context and title text are inert');
+  assert.equal(tags.includes('svg'), false, 'stored evidence text is inert');
+  const detailsRequest = requests.find((request) => request.route === '/api/clipping/jobs/clipjob_1');
+  assert.ok(detailsRequest, 'details use a safe same-origin job ID route');
+
+  let selectionForm = findNode(app.elements.get('clipping-jobs'), (node) => node.className === 'clipping-selection-form');
+  for (let attempt = 0; attempt < 30 && !selectionForm; attempt++) {
+    await new Promise((resolve) => setImmediate(resolve));
+    selectionForm = findNode(app.elements.get('clipping-jobs'), (node) => node.className === 'clipping-selection-form');
+  }
+  assert.ok(selectionForm, 'completed jobs expose saved selection controls after loading their detail');
+  const selectionInputs = selectionForm.children.filter((node) => node.tagName === 'label').map((label) => label.children[0]);
+  selectionInputs[0].value = 'comedy';
+  selectionInputs[1].value = '15';
+  selectionInputs[2].value = '45';
+  selectionInputs[3].value = '7';
+  selectionForm.querySelectorAll('button');
+  const update = selectionForm.children.find((node) => node.tagName === 'button' && node.textContent === 'Update selection');
+  update.click();
+  const selectionRequest = requests.find((request) => request.route === '/api/clipping/jobs/clipjob_1/selection');
+  assert.ok(selectionRequest, 'saved selection updates use the authenticated same-origin API');
+  assert.deepEqual(JSON.parse(selectionRequest.options.body), {
+    content_type: 'comedy', min_clip_seconds: 15, max_clip_seconds: 45, candidate_limit: 7
+  });
+});
+
+test('video-only artifacts show persisted transcript availability without inventing transcript text', async () => {
+  const job = {
+    id: 'clipjob_video_only', source_id: 'clipsrc_video_only', status: 'completed',
+    artifacts: [{
+      type: 'clipping.analysis', schema_version: '2', version: 1,
+      payload_json: JSON.stringify({
+        transcript: { available: false, status: 'unavailable_no_audio_stream', original_script: true, segments: [] },
+        audio_analysis_status: 'skipped_no_audio_stream',
+        media_streams: { has_audio: false, has_video: true }
+      })
+    }]
+  };
+  const app = createUI(async (route, options = {}) => {
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/config/worker') return { configured: false, enabled: false };
+    if (route === '/api/clipping/sources') return [];
+    if (route === '/api/clipping/jobs' && !options.method) return [job];
+    if (route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/jobs/clipjob_video_only' && !options.method) return { job };
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  const view = app.elements.get('clipping-jobs').querySelectorAll('button').find((node) => node.textContent === 'View saved analysis');
+  assert.ok(view);
+  view.click();
+  for (let attempt = 0; attempt < 30 && !treeText(app.elements.get('clipping-jobs')).includes('Transcript availability'); attempt++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const rendered = treeText(app.elements.get('clipping-jobs'));
+  assert.match(rendered, /No audio stream; audio analysis and transcription were skipped/);
+  assert.equal(treeTags(app.elements.get('clipping-jobs')).includes('ol'), false, 'no transcript segments are fabricated when none were persisted');
+  assert.doesNotMatch(rendered, /Original-script transcript/);
+});
+
+test('uncertain worker attempts show separate estimate and hold and require a reference for zero invoice actual', async () => {
+  const requests = [];
+  const stages = [
+    {
+      name: 'analysis', status: 'uncertain', attempt_id: 'attempt_uncertain',
+      estimated_micro_usd: 0, actual_micro_usd: 0, reserved_micro_usd: 1_000_000, cost_reconciled: false
+    },
+    {
+      name: 'analysis-reconciled', status: 'completed', attempt_id: 'attempt_reconciled',
+      estimated_micro_usd: 700_000, actual_micro_usd: 500_000, reserved_micro_usd: 900_000, cost_reconciled: true
+    },
+    {
+      name: 'analysis-no-attempt', status: 'queued', estimated_micro_usd: 0,
+      actual_micro_usd: 0, reserved_micro_usd: 0, cost_reconciled: false
+    }
+  ];
+  const job = { id: 'clipjob_cost', source_id: 'clipsrc_cost', status: 'paused_budget', stages, artifacts: [] };
+  const app = createUI(async (route, options = {}) => {
+    requests.push({ route, options });
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/config/worker') return { configured: false, enabled: false };
+    if (route === '/api/clipping/sources') return [];
+    if (route === '/api/clipping/jobs' && !options.method) return [job];
+    if (route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/jobs/clipjob_cost' && !options.method) return { job };
+    if (route === '/api/clipping/jobs/clipjob_cost/reconcile-cost' && options.method === 'POST') {
+      const input = JSON.parse(options.body);
+      const stage = stages.find((candidate) => candidate.attempt_id === input.attempt_id);
+      stage.actual_micro_usd = input.actual_cost_micro_usd;
+      stage.cost_reconciled = true;
+      return { job };
+    }
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  const view = app.elements.get('clipping-jobs').querySelectorAll('button').find((node) => node.textContent === 'View job details');
+  assert.ok(view, 'uncertain attempted jobs can open details without artifacts');
+  view.click();
+  for (let attempt = 0; attempt < 30 && !treeText(app.elements.get('clipping-jobs')).includes('Entered invoice actual cost (USD)'); attempt++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const rendered = treeText(app.elements.get('clipping-jobs'));
+  assert.match(rendered, /Estimate\n\$0\.00/);
+  assert.match(rendered, /Recorded actual\nNot recorded/);
+  assert.match(rendered, /Remaining reserved hold\n\$1\.00/);
+  assert.match(rendered, /Not reconciled/);
+  assert.match(rendered, /Entered invoice actual cost \(USD\)/);
+  assert.match(rendered, /Modal invoice/);
+
+  const reconciliationForm = findNode(app.elements.get('clipping-jobs'), (node) => node.className === 'clipping-cost-reconciliation');
+  assert.ok(reconciliationForm);
+  const fields = reconciliationForm.children.filter((node) => node.tagName === 'label').map((label) => label.children[0]);
+  const amount = fields[0];
+  const reference = fields[1];
+  const submit = reconciliationForm.children.find((node) => node.tagName === 'button');
+  assert.equal(amount.min, '0');
+  assert.equal(amount.required, true);
+  assert.equal(reference.required, true);
+  assert.equal(reference.maxLength, 256);
+  assert.match(treeText(reference.parent), /maximum 256 UTF-8 bytes/);
+  submit.click();
+  assert.equal(requests.some((request) => request.route.endsWith('/reconcile-cost')), false, 'a blank amount and reference are rejected');
+  assert.match(treeText(reconciliationForm), /nonnegative invoice amount/);
+  amount.value = '0';
+  submit.click();
+  assert.equal(requests.some((request) => request.route.endsWith('/reconcile-cost')), false, 'zero actual still requires a reference');
+  assert.match(treeText(reconciliationForm), /reconciliation reference/);
+  reference.value = `${'é'.repeat(128)}a`;
+  submit.click();
+  assert.equal(requests.some((request) => request.route.endsWith('/reconcile-cost')), false, 'references over 256 UTF-8 bytes are rejected even when under 256 JS code units');
+  assert.match(treeText(reconciliationForm), /at most 256 UTF-8 bytes/);
+  reference.value = '😀'.repeat(64);
+  submit.click();
+  const request = requests.find((entry) => entry.route === '/api/clipping/jobs/clipjob_cost/reconcile-cost');
+  assert.ok(request, 'manual cost reconciliation uses the safe same-origin job route');
+  assert.deepEqual(JSON.parse(request.options.body), {
+    attempt_id: 'attempt_uncertain', actual_cost_micro_usd: 0,
+    reconciliation_reference: '😀'.repeat(64)
+  });
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const stageSection = findNode(app.elements.get('clipping-jobs'), (node) => node.className?.includes('clipping-stage-section'));
+    const cards = stageSection?.children.filter((node) => node.tagName === 'article') || [];
+    if (cards[0] && /Recorded actual\n\$0\.00/.test(treeText(cards[0]))) break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const stageSection = findNode(app.elements.get('clipping-jobs'), (node) => node.className?.includes('clipping-stage-section'));
+  assert.ok(stageSection, treeText(app.elements.get('clipping-jobs')));
+  const firstStageCard = stageSection.children.find((node) => node.tagName === 'article');
+  assert.match(treeText(firstStageCard), /Recorded actual\n\$0\.00/, 'zero is shown only after explicit operator reconciliation');
+  assert.match(treeText(firstStageCard), /Cost reconciliation\nReconciled/);
 });
