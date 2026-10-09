@@ -11,6 +11,12 @@ const source = fs.readFileSync(path.join(staticDir, 'clipping.js'), 'utf8');
 const dashboardSource = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 
 class Element {
+  get value() { return this._value || ''; }
+  set value(value) {
+    this._value = String(value ?? '');
+    if (this.type === 'file' && this._value === '') this.files = [];
+  }
+
   constructor(tag = 'div', id = '') {
     this.tagName = tag.toLowerCase();
     this.id = id;
@@ -19,6 +25,21 @@ class Element {
     this.attributes = new Map();
     this.style = {};
     this.dataset = {};
+    this.className = '';
+    this.open = false;
+    this.classList = {
+      contains: (name) => this.className.split(/\s+/).filter(Boolean).includes(name),
+      add: (name) => this.classList.toggle(name, true),
+      remove: (name) => this.classList.toggle(name, false),
+      toggle: (name, enabled) => {
+        const names = new Set(this.className.split(/\s+/).filter(Boolean));
+        enabled ??= !names.has(name);
+        if (enabled) names.add(name);
+        else names.delete(name);
+        this.className = [...names].join(' ');
+        return enabled;
+      }
+    };
     this.value = '';
     this.textContent = '';
     this.hidden = false;
@@ -90,6 +111,13 @@ function createUI(request) {
       const node = new Element(match[1], match[3]);
       const value = match[2].match(/\bvalue="([^"]*)"/);
       if (value) node.value = value[1];
+      const className = match[2].match(/\bclass="([^"]*)"/);
+      if (className) node.className = className[1];
+      node.type = match[2].match(/\btype="([^"]*)"/)?.[1] || '';
+      node.accept = match[2].match(/\baccept="([^"]*)"/)?.[1] || '';
+      node.multiple = /\bmultiple(?:\s|$)/.test(match[2]);
+      node.hidden = /\bhidden(?:\s|$)/.test(match[2]);
+      node.disabled = /\bdisabled(?:\s|$)/.test(match[2]);
       return [match[3], node];
     }));
   const document = {
@@ -309,6 +337,330 @@ test('resumable upload ranges honor the configured limit and never exceed 16 MiB
   assert.deepEqual(pure.nextUploadRange(maxChunk, maxChunk + 1, { max_upload_chunk_bytes: maxChunk }), { start: maxChunk, end: maxChunk + 1 });
   assert.equal(pure.validResumeOffset(maxChunk, maxChunk + 1), maxChunk);
   assert.equal(pure.validResumeOffset(maxChunk + 2, maxChunk + 1), null);
+});
+
+test('clipping keeps link and upload intake primary and closes operational settings by default', () => {
+  assert.match(markup, /<h2 id="clipping-heading">Add a video<\/h2>/);
+  assert.match(markup, /<h3 id="clipping-link-heading">YouTube link<\/h3>/);
+  assert.match(markup, /Drive and Dropbox links must be publicly accessible/);
+  assert.match(markup, /id="clipping-drop-zone"[^>]*role="group"/);
+
+  const picker = markup.match(/<input id="clipping-file"([^>]*)>/);
+  assert.ok(picker, 'the native video picker remains in the form');
+  assert.match(picker[1], /type="file"/);
+  assert.match(picker[1], /accept="video\/\*,audio\/\*"/);
+  assert.doesNotMatch(picker[1], /\bmultiple\b|\btabindex=/);
+  assert.doesNotMatch(picker[1], /\brequired\b/, 'drop-selected files are validated by the form handler');
+  assert.match(markup, /<label for="clipping-file">Video or audio file<\/label>/);
+  assert.match(markup, /id="clipping-upload-permission" type="checkbox" required/);
+  assert.match(markup, /id="clipping-upload-submit" class="button primary" type="submit" disabled>Upload video/);
+
+  const settings = markup.match(/<details id="clipping-settings-disclosure"([^>]*)>/);
+  assert.ok(settings);
+  assert.doesNotMatch(settings[1], /\bopen\b/);
+  const settingsStart = markup.indexOf(settings[0]);
+  const settingsEnd = markup.indexOf('</details>\n        </section>', settingsStart);
+  assert.ok(settingsEnd > settingsStart, 'More settings contains the advanced controls');
+  const advanced = markup.slice(settingsStart, settingsEnd);
+  for (const id of ['clipping-worker-form', 'clipping-job-budget', 'clipping-batch-budget', 'clipping-create-batch', 'clipping-retention-form']) {
+    assert.ok(advanced.includes(`id="${id}"`), `${id} remains available in More settings`);
+  }
+  for (const id of ['clipping-worker-disclosure', 'clipping-job-settings-disclosure', 'clipping-batch-disclosure', 'clipping-retention-disclosure']) {
+    const disclosure = advanced.match(new RegExp(`<details id="${id}"([^>]*)>`));
+    assert.ok(disclosure, `${id} is a native disclosure`);
+    assert.doesNotMatch(disclosure[1], /\bopen\b/, `${id} starts closed`);
+  }
+  assert.match(markup, /href="\/static\/clipping\.css\?v=20261009-source-intake"/);
+  assert.match(markup, /src="\/static\/clipping\.js\?v=20261009-source-intake"/);
+});
+
+test('dragged media stays a draft until rights are confirmed and Upload video is submitted', async () => {
+  const requests = [];
+  const file = {
+    name: 'sample.mp4', size: 3, type: 'video/mp4',
+    slice(start, end) { return { size: end - start }; }
+  };
+  const app = createUI(async (route, options = {}) => {
+    requests.push({ route, options });
+    if (route === '/api/clipping/config') return { max_source_bytes: 100, default_retention_days: 30 };
+    if (route === '/api/clipping/sources') return [];
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/sources/upload') return { source: { id: 'src_drop', status: 'uploading', upload_offset: 0 } };
+    if (route === '/api/clipping/sources/src_drop/upload') return { source: { upload_offset: 3 } };
+    if (route === '/api/clipping/sources/src_drop/finalize') return { source: { id: 'src_drop', status: 'ready' } };
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+
+  const zone = app.elements.get('clipping-drop-zone');
+  const nonMedia = { name: 'notes.txt', size: 12, type: 'text/plain' };
+  const drop = (files) => {
+    let prevented = false;
+    zone.emit('drop', {
+      dataTransfer: { files, types: ['Files'], dropEffect: 'move' },
+      preventDefault() { prevented = true; }
+    });
+    return prevented;
+  };
+  assert.equal(drop([file, { ...file, name: 'second.mov' }]), true, 'file drops do not trigger browser navigation');
+  assert.match(app.elements.get('clipping-upload-error').textContent, /Drop one audio or video file at a time/);
+  assert.equal(drop([nonMedia]), true);
+  assert.match(app.elements.get('clipping-upload-error').textContent, /Choose one audio or video file/);
+  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/upload'), false, 'invalid drops never start an upload');
+
+  zone.emit('dragenter', { preventDefault() {} });
+  assert.equal(zone.classList.contains('is-dragging'), true);
+  const drag = { dataTransfer: { files: [file], types: ['Files'], dropEffect: 'move' }, preventDefault() {} };
+  zone.emit('dragover', drag);
+  assert.equal(drag.dataTransfer.dropEffect, 'copy');
+  assert.equal(drop([file]), true);
+  assert.equal(zone.classList.contains('is-dragging'), false);
+  assert.equal(app.elements.get('clipping-file-name').textContent, 'Selected file: sample.mp4');
+  assert.equal(app.elements.get('clipping-upload-submit').disabled, true, 'a file alone does not enable upload');
+  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/upload'), false, 'dropping only selects a file');
+
+  app.elements.get('clipping-upload-form').emit('submit');
+  assert.match(app.elements.get('clipping-upload-error').textContent, /Confirm that you own or have permission/);
+  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/upload'), false, 'rights attestation is required');
+  const permission = app.elements.get('clipping-upload-permission');
+  permission.checked = true;
+  permission.emit('change');
+  assert.equal(app.elements.get('clipping-upload-submit').disabled, false);
+  app.elements.get('clipping-upload-form').emit('submit');
+  for (let attempt = 0; attempt < 50 && !requests.some((entry) => entry.route === '/api/clipping/sources/src_drop/finalize'); attempt++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const upload = requests.find((entry) => entry.route === '/api/clipping/sources/upload');
+  assert.ok(upload, 'the explicit submit starts the upload');
+  assert.equal(JSON.parse(upload.options.body).rights_attested, true);
+  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/src_drop/finalize'), true);
+  assert.equal(app.elements.get('clipping-file-name').textContent, 'No file selected.');
+
+  let outsideDropPrevented = false;
+  app.elements.get('clipping-view').emit('drop', {
+    dataTransfer: { files: [nonMedia], types: ['Files'] },
+    preventDefault() { outsideDropPrevented = true; }
+  });
+  assert.equal(outsideDropPrevented, true, 'dropping files elsewhere in Clipping does not navigate away');
+});
+
+test('active upload blocks a second file and stop clears the pending drop draft', async () => {
+  let resolveUploadInit;
+  let uploadSignal;
+  const requests = [];
+  const app = createUI((route, options = {}) => {
+    requests.push({ route, options });
+    if (route === '/api/clipping/config') return Promise.resolve({ max_source_bytes: 100 });
+    if (route === '/api/clipping/sources') return Promise.resolve([]);
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return Promise.resolve([]);
+    if (route === '/api/clipping/sources/upload') {
+      uploadSignal = options.signal;
+      return new Promise((resolve) => { resolveUploadInit = resolve; });
+    }
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+
+  const zone = app.elements.get('clipping-drop-zone');
+  const first = { name: 'first.mp4', size: 8, type: 'video/mp4', slice() { return { size: 8 }; } };
+  const second = { name: 'second.mov', size: 8, type: 'video/quicktime', slice() { return { size: 8 }; } };
+  const drop = (file) => zone.emit('drop', { dataTransfer: { files: [file], types: ['Files'] } });
+  drop(first);
+  const permission = app.elements.get('clipping-upload-permission');
+  permission.checked = true;
+  permission.emit('change');
+  app.elements.get('clipping-upload-form').emit('submit');
+  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/upload').length, 1);
+  assert.ok(uploadSignal);
+
+  let prevented = false;
+  zone.emit('drop', {
+    dataTransfer: { files: [second], types: ['Files'] },
+    preventDefault() { prevented = true; }
+  });
+  assert.equal(prevented, true);
+  assert.match(app.elements.get('clipping-upload-error').textContent, /An upload is already active/);
+  assert.equal(app.elements.get('clipping-file-name').textContent, 'Selected file: first.mp4');
+  app.elements.get('clipping-upload-form').emit('submit');
+  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/upload').length, 1, 'an active upload cannot be duplicated');
+
+  zone.emit('dragenter', { preventDefault() {} });
+  assert.equal(zone.classList.contains('is-dragging'), true);
+  app.api.stop(true);
+  assert.equal(uploadSignal.aborted, true, 'stopping aborts the active upload request');
+  assert.equal(zone.classList.contains('is-dragging'), false);
+  assert.equal(app.elements.get('clipping-file-name').textContent, 'No file selected.');
+  assert.equal(permission.checked, false);
+  assert.equal(app.elements.get('clipping-upload-submit').disabled, true);
+  drop(second);
+  assert.equal(app.elements.get('clipping-file-name').textContent, 'No file selected.', 'a late drop cannot restore a draft after stop');
+
+  resolveUploadInit({ source: { id: 'src_stopped', upload_offset: 0 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.some((entry) => entry.route.endsWith('/upload') && entry.route !== '/api/clipping/sources/upload'), false, 'a stopped lifecycle cannot advance to a media chunk');
+});
+
+test('resume actions stay disabled during an active transfer and return after pause', async () => {
+  let sourceListReads = 0;
+  let chunkSignal;
+  const oldSource = { id: 'src_old', status: 'uploading', original_name: 'old.mp4', declared_size_bytes: 8, upload_offset: 0 };
+  const activeSource = { id: 'src_active', status: 'uploading', original_name: 'first.mp4', declared_size_bytes: 8, upload_offset: 0 };
+  const app = createUI(async (route, options = {}) => {
+    if (route === '/api/clipping/config') return { max_source_bytes: 100 };
+    if (route === '/api/clipping/sources') {
+      sourceListReads++;
+      return sourceListReads === 1 ? [oldSource] : [oldSource, activeSource];
+    }
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/sources/upload') return { source: activeSource };
+    if (route === '/api/clipping/sources/src_active/upload') {
+      chunkSignal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('Upload paused');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+    }
+    if (route === '/api/clipping/sources/src_old/upload') throw new Error('Connection interrupted');
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  const sources = app.elements.get('clipping-sources');
+  const resumeButtons = () => sources.querySelectorAll('button').filter((button) => button.textContent === 'Resume upload');
+  assert.equal(resumeButtons().length, 1);
+  assert.equal(resumeButtons()[0].disabled, false);
+
+  const file = { name: 'first.mp4', size: 8, type: 'video/mp4', slice() { return { size: 8 }; } };
+  app.elements.get('clipping-drop-zone').emit('drop', { dataTransfer: { files: [file], types: ['Files'] } });
+  const permission = app.elements.get('clipping-upload-permission');
+  permission.checked = true;
+  permission.emit('change');
+  app.elements.get('clipping-upload-form').emit('submit');
+  for (let attempt = 0; attempt < 50 && !chunkSignal; attempt++) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(chunkSignal, 'the first upload has reached its media transfer');
+  assert.equal(resumeButtons().length, 2);
+  assert.equal(resumeButtons().every((button) => button.disabled), true, 'all saved uploads are unavailable while one transfer is active');
+
+  app.elements.get('clipping-upload-cancel').emit('click');
+  assert.equal(chunkSignal.aborted, true, 'Pause aborts the active media transfer');
+  assert.equal(resumeButtons()[0].disabled, false, 'the saved source can resume as soon as the active transfer is paused');
+  for (let attempt = 0; attempt < 50 && sourceListReads < 3; attempt++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resumeButtons().length, 2);
+  assert.equal(resumeButtons().every((button) => !button.disabled), true, 'refreshed uploading sources expose their Resume controls again');
+
+  resumeButtons()[0].click();
+  const original = { name: oldSource.original_name, size: oldSource.declared_size_bytes, type: 'video/mp4', slice() { return { size: 8 }; } };
+  app.elements.get('clipping-resume-file').files = [original];
+  app.elements.get('clipping-resume-file').emit('change');
+  for (let attempt = 0; attempt < 50 && !app.elements.get('clipping-upload-error').textContent; attempt++) await new Promise((resolve) => setImmediate(resolve));
+  assert.match(app.elements.get('clipping-upload-error').textContent, /Connection interrupted/);
+  for (let attempt = 0; attempt < 50 && sourceListReads < 4; attempt++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resumeButtons().length, 2);
+  assert.equal(resumeButtons().every((button) => !button.disabled), true, 'failed transfers also restore Resume controls for saved uploading sources');
+});
+
+test('sources and saved work appear only when present; job and batch costs stay in closed disclosures', async () => {
+  const app = createUI(async (route) => {
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/sources') return [{ id: 'src_visible', status: 'ready', original_name: 'ready.mp4', size_bytes: 128 }];
+    if (route === '/api/clipping/jobs') return [{ id: 'job_visible', source_id: 'src_visible', status: 'running', progress: 0.5, spent_micro_usd: 250_000, budget_micro_usd: 1_000_000 }];
+    if (route === '/api/clipping/batches') return [{ id: 'batch_visible', source_ids: ['src_visible'], status: 'running', spent_micro_usd: 300_000, budget_micro_usd: 1_500_000 }];
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  assert.equal(app.elements.get('clipping-work-grid').hidden, true, 'no work is shown before data exists');
+  await app.api.start();
+  assert.equal(app.elements.get('clipping-work-grid').hidden, false);
+  assert.equal(app.elements.get('clipping-sources-panel').hidden, false);
+  assert.equal(app.elements.get('clipping-jobs-section').hidden, false);
+  assert.equal(app.elements.get('clipping-batches-section').hidden, false);
+  assert.match(treeText(app.elements.get('clipping-sources')), /Start analysis/);
+  assert.match(treeText(app.elements.get('clipping-sources')), /Remove/);
+  assert.match(treeText(app.elements.get('clipping-jobs')), /Analysis in progress/);
+  assert.match(treeText(app.elements.get('clipping-batches')), /Analysis in progress/);
+
+  const jobCost = findNode(app.elements.get('clipping-jobs'), (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Cost details');
+  const batchCost = findNode(app.elements.get('clipping-batches'), (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Cost details');
+  assert.ok(jobCost && batchCost);
+  assert.equal(jobCost.open, false);
+  assert.equal(batchCost.open, false);
+  assert.match(treeText(jobCost), /\$0\.25 of \$1\.00/);
+  assert.match(treeText(batchCost), /\$0\.30 of \$1\.50/);
+
+  const sourceOptions = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Options');
+  assert.ok(sourceOptions);
+  assert.equal(sourceOptions.open, false);
+});
+
+test('source list errors remain visible when the server has no saved sources', async () => {
+  const app = createUI(async (route) => {
+    if (route === '/api/clipping/config') return {};
+    if (route === '/api/clipping/sources') throw new Error('Source list unavailable');
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  assert.equal(app.elements.get('clipping-work-grid').hidden, false);
+  assert.equal(app.elements.get('clipping-sources-panel').hidden, false);
+  assert.match(app.elements.get('clipping-sources-error').textContent, /Source list unavailable/);
+  assert.equal(app.elements.get('clipping-jobs-panel').hidden, true);
+});
+
+test('invalid advanced controls open their closed disclosures before focus moves', async () => {
+  const app = createUI(async (route) => {
+    if (route === '/api/clipping/config') return {};
+    if (route === '/api/clipping/sources') return [{ id: 'src_focus', status: 'ready', original_name: 'focus.mp4' }];
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+
+  const startAnalysis = app.elements.get('clipping-sources').querySelectorAll('button').find((button) => button.textContent === 'Start analysis');
+  const settings = app.elements.get('clipping-settings-disclosure');
+  const jobOptions = app.elements.get('clipping-job-settings-disclosure');
+  app.elements.get('clipping-job-budget').value = '0';
+  startAnalysis.click();
+  assert.equal(settings.open, true);
+  assert.equal(jobOptions.open, true);
+  assert.equal(app.elements.get('clipping-job-budget').focused, true);
+  assert.match(app.elements.get('clipping-sources-error').textContent, /per-job budget/);
+
+  settings.open = false;
+  jobOptions.open = false;
+  app.elements.get('clipping-job-budget').value = '1.00';
+  app.elements.get('clipping-job-min-seconds').value = '180';
+  app.elements.get('clipping-job-max-seconds').value = '15';
+  startAnalysis.click();
+  assert.equal(settings.open, true);
+  assert.equal(jobOptions.open, true);
+  assert.equal(app.elements.get('clipping-job-min-seconds').focused, true);
+
+  settings.open = false;
+  const batchDisclosure = app.elements.get('clipping-batch-disclosure');
+  const batchSelect = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'input' && node.type === 'checkbox');
+  batchSelect.checked = true;
+  batchSelect.emit('change');
+  app.elements.get('clipping-batch-min-seconds').value = '180';
+  app.elements.get('clipping-batch-max-seconds').value = '15';
+  app.elements.get('clipping-create-batch').click();
+  assert.equal(settings.open, true);
+  assert.equal(batchDisclosure.open, true);
+  assert.equal(app.elements.get('clipping-batch-min-seconds').focused, true);
+
+  settings.open = false;
+  batchDisclosure.open = false;
+  app.elements.get('clipping-worker-form').emit('submit');
+  assert.equal(settings.open, true);
+  assert.equal(app.elements.get('clipping-worker-disclosure').open, true);
+  assert.equal(app.elements.get('clipping-worker-endpoint').focused, true);
+
+  settings.open = false;
+  app.elements.get('clipping-retention-days').value = '0';
+  app.elements.get('clipping-retention-form').emit('submit');
+  assert.equal(settings.open, true);
+  assert.equal(app.elements.get('clipping-retention-disclosure').open, true);
+  assert.equal(app.elements.get('clipping-retention-days').focused, true);
 });
 
 test('source names and errors render as inert text', async () => {
