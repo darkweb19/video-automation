@@ -6,6 +6,10 @@
   const MAX_JOB_BUDGET_MICRO_USD = 4_000_000;
   const MAX_BATCH_BUDGET_MICRO_USD = 400_000_000;
   const CONTENT_TYPES = ["general", "podcast", "comedy", "gaming", "movie"];
+  const MEDIA_EXTENSIONS = new Set([
+    "3gp", "aac", "aif", "aiff", "avi", "flac", "m2ts", "m2v", "m4a", "m4v", "mkv", "mov", "mp3",
+    "mp4", "mpeg", "mpg", "mts", "ogg", "ogv", "opus", "ts", "wav", "webm", "wma", "wmv"
+  ]);
   const WORKER_CAPABILITY_LABELS = {
     full_timeline_asr: "Full-timeline ASR",
     original_script: "Original-script transcript",
@@ -84,7 +88,10 @@
   const document = root.document;
   const $ = (id) => document.getElementById(id);
   const ui = {
+    clippingView: $("clipping-view"),
+    settingsDisclosure: $("clipping-settings-disclosure"),
     refresh: $("clipping-refresh"),
+    workerDisclosure: $("clipping-worker-disclosure"),
     workerNote: $("clipping-worker-note"),
     workerForm: $("clipping-worker-form"),
     workerEndpoint: $("clipping-worker-endpoint"),
@@ -99,7 +106,9 @@
     workerError: $("clipping-worker-error"),
     workerSaveNote: $("clipping-worker-save-note"),
     uploadForm: $("clipping-upload-form"),
+    uploadDropZone: $("clipping-drop-zone"),
     uploadFile: $("clipping-file"),
+    uploadFileName: $("clipping-file-name"),
     uploadSubmit: $("clipping-upload-submit"),
     uploadPermission: $("clipping-upload-permission"),
     uploadError: $("clipping-upload-error"),
@@ -121,8 +130,13 @@
     jobMinSeconds: $("clipping-job-min-seconds"),
     jobMaxSeconds: $("clipping-job-max-seconds"),
     jobCandidateLimit: $("clipping-job-candidate-limit"),
+    jobSettingsDisclosure: $("clipping-job-settings-disclosure"),
+    batchDisclosure: $("clipping-batch-disclosure"),
     sourcesError: $("clipping-sources-error"),
     sourceSummary: $("clipping-source-summary"),
+    workGrid: $("clipping-work-grid"),
+    sourcesPanel: $("clipping-sources-panel"),
+    jobsPanel: $("clipping-jobs-panel"),
     sources: $("clipping-sources"),
     batchJobBudget: $("clipping-batch-job-budget"),
     batchBudget: $("clipping-batch-budget"),
@@ -135,11 +149,14 @@
     batchError: $("clipping-batch-error"),
     jobsError: $("clipping-jobs-error"),
     jobs: $("clipping-jobs"),
+    jobsSection: $("clipping-jobs-section"),
     jobCount: $("clipping-job-count"),
     batchesError: $("clipping-batches-error"),
     batches: $("clipping-batches"),
+    batchesSection: $("clipping-batches-section"),
     batchCount: $("clipping-batch-count"),
     retentionForm: $("clipping-retention-form"),
+    retentionDisclosure: $("clipping-retention-disclosure"),
     retentionDays: $("clipping-retention-days"),
     retentionSave: $("clipping-retention-save"),
     retentionError: $("clipping-retention-error"),
@@ -167,6 +184,8 @@
     linkConsentValue: "",
     config: null,
     upload: null,
+    selectedUploadFile: null,
+    dropDepth: 0,
     resumeSourceID: "",
     resumeHelp: null
   };
@@ -204,6 +223,97 @@
     if (className) node.className = className;
     if (text !== undefined && text !== null) node.textContent = String(text);
     return node;
+  }
+
+  function focusInDisclosures(disclosures, target) {
+    for (const disclosure of disclosures || []) if (disclosure) disclosure.open = true;
+    target?.focus?.();
+  }
+
+  function isMediaFile(file) {
+    if (!file || typeof file !== "object") return false;
+    const type = String(file.type || "").toLowerCase();
+    if (type.startsWith("video/") || type.startsWith("audio/")) return true;
+    const name = String(file.name || "").toLowerCase();
+    const extension = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
+    return MEDIA_EXTENSIONS.has(extension);
+  }
+
+  function isFileTransfer(event) {
+    const types = event?.dataTransfer?.types;
+    return Boolean(event?.dataTransfer?.files?.length)
+      || Boolean(types && Array.from(types).includes("Files"));
+  }
+
+  function setDropActive(active) {
+    if (!ui.uploadDropZone?.classList) return;
+    ui.uploadDropZone.classList.toggle("is-dragging", active);
+  }
+
+  function syncResumeActions() {
+    const disabled = Boolean(state.upload);
+    for (const action of ui.sources.querySelectorAll("button")) {
+      if (action.textContent === "Resume upload") action.disabled = disabled;
+    }
+  }
+
+  function selectedUploadFile() {
+    const files = Array.from(ui.uploadFile.files || []);
+    if (files.length > 1) return null;
+    return state.selectedUploadFile || files[0] || null;
+  }
+
+  function updateUploadReadiness() {
+    const file = selectedUploadFile();
+    ui.uploadFileName.textContent = file ? `Selected file: ${String(file.name || "video")}` : "No file selected.";
+    ui.uploadSubmit.disabled = Boolean(state.upload) || !file || !ui.uploadPermission.checked;
+  }
+
+  function clearSelectedUpload() {
+    state.selectedUploadFile = null;
+    ui.uploadFile.value = "";
+    ui.uploadPermission.checked = false;
+    ui.uploadError.textContent = "";
+    updateUploadReadiness();
+  }
+
+  function selectUploadFile(file) {
+    if (!state.active) return false;
+    if (state.upload) {
+      ui.uploadError.textContent = "An upload is already active. Pause it before choosing another file.";
+      return false;
+    }
+    if (!isMediaFile(file)) {
+      clearSelectedUpload();
+      ui.uploadError.textContent = "Choose one audio or video file.";
+      return false;
+    }
+    if (!Number.isSafeInteger(file.size) || file.size <= 0) {
+      clearSelectedUpload();
+      ui.uploadError.textContent = "Choose one non-empty audio or video file.";
+      return false;
+    }
+    state.selectedUploadFile = file;
+    ui.uploadFile.value = file === ui.uploadFile.files?.[0] ? ui.uploadFile.value : "";
+    ui.uploadPermission.checked = false;
+    ui.uploadError.textContent = "";
+    updateUploadReadiness();
+    return true;
+  }
+
+  function syncWorkVisibility() {
+    const hasSources = state.sources.length > 0;
+    const hasJobs = state.jobs.length > 0;
+    const hasBatches = state.batches.length > 0;
+    const hasSourcesMessage = Boolean(ui.sourcesError.textContent);
+    const hasJobsMessage = Boolean(ui.jobsError.textContent);
+    const hasBatchesMessage = Boolean(ui.batchesError.textContent);
+    const hasJobsPanel = hasJobs || hasBatches || hasJobsMessage || hasBatchesMessage;
+    ui.sourcesPanel.hidden = !hasSources && !hasSourcesMessage;
+    ui.jobsSection.hidden = !hasJobs && !hasJobsMessage;
+    ui.batchesSection.hidden = !hasBatches && !hasBatchesMessage;
+    ui.jobsPanel.hidden = !hasJobsPanel;
+    ui.workGrid.hidden = !(hasSources || hasSourcesMessage || hasJobsPanel);
   }
 
   function button(text, className, action) {
@@ -908,27 +1018,27 @@
     if (!parsedEndpoint || parsedEndpoint.protocol !== "https:" || !parsedEndpoint.hostname
       || parsedEndpoint.username || parsedEndpoint.password || parsedEndpoint.search || parsedEndpoint.hash) {
       ui.workerError.textContent = "Enter the full HTTPS Modal worker endpoint without credentials.";
-      ui.workerEndpoint.focus();
+      focusInDisclosures([ui.settingsDisclosure, ui.workerDisclosure], ui.workerEndpoint);
       return;
     }
     if (rate === null) {
       ui.workerError.textContent = "Enter a positive operator-estimated rate in USD per second with up to six decimal places.";
-      ui.workerRate.focus();
+      focusInDisclosures([ui.settingsDisclosure, ui.workerDisclosure], ui.workerRate);
       return;
     }
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(pipelineRevision)) {
       ui.workerError.textContent = "Enter a pipeline revision of 1–64 letters, digits, dots, underscores, or hyphens that matches the Modal secret.";
-      ui.workerPipelineRevision.focus();
+      focusInDisclosures([ui.settingsDisclosure, ui.workerDisclosure], ui.workerPipelineRevision);
       return;
     }
     if (bearerToken && !/^[0-9a-f]{64}$/.test(bearerToken)) {
       ui.workerError.textContent = "Enter a worker bearer token with exactly 64 lowercase hexadecimal characters.";
-      ui.workerToken.focus();
+      focusInDisclosures([ui.settingsDisclosure, ui.workerDisclosure], ui.workerToken);
       return;
     }
     if (state.workerConfig?.configured !== true && !bearerToken) {
       ui.workerError.textContent = "A worker bearer token is required for initial setup.";
-      ui.workerToken.focus();
+      focusInDisclosures([ui.settingsDisclosure, ui.workerDisclosure], ui.workerToken);
       return;
     }
     ui.workerSave.disabled = true;
@@ -965,11 +1075,54 @@
     ui.uploadDetail.textContent = message || `${sourceSize({ size_bytes: offset })} of ${sourceSize({ size_bytes: size })} sent.`;
   }
 
-  function setUploadIdle() {
+  function setUploadIdle(keepResumeActionsDisabled = false) {
     state.upload = null;
     ui.uploadSubmit.disabled = false;
     ui.uploadFile.disabled = false;
     ui.uploadCancel.disabled = false;
+    updateUploadReadiness();
+    if (!keepResumeActionsDisabled) syncResumeActions();
+  }
+
+  function handleUploadFileChange() {
+    if (!state.active) {
+      clearSelectedUpload();
+      return;
+    }
+    if (state.upload) {
+      ui.uploadError.textContent = "An upload is already active. Pause it before choosing another file.";
+      return;
+    }
+    const files = Array.from(ui.uploadFile.files || []);
+    if (files.length !== 1) {
+      clearSelectedUpload();
+      if (files.length > 1) ui.uploadError.textContent = "Choose one audio or video file at a time.";
+      return;
+    }
+    selectUploadFile(files[0]);
+  }
+
+  function handleUploadDrop(event) {
+    event.preventDefault();
+    state.dropDepth = 0;
+    setDropActive(false);
+    if (!state.active) {
+      clearSelectedUpload();
+      return;
+    }
+    if (state.upload) {
+      ui.uploadError.textContent = "An upload is already active. Pause it before choosing another file.";
+      return;
+    }
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length !== 1) {
+      clearSelectedUpload();
+      ui.uploadError.textContent = files.length > 1
+        ? "Drop one audio or video file at a time."
+        : "Drop one audio or video file here.";
+      return;
+    }
+    selectUploadFile(files[0]);
   }
 
   function renderSources() {
@@ -1043,21 +1196,34 @@
         });
         checkLabel.append(check, element("span", "", "Batch"));
         actions.append(checkLabel);
+        const options = element("details", "clipping-source-options");
+        options.append(element("summary", "", "Options"));
         const typeLabel = element("label", "clipping-content-type", "Content type");
         const typeSelect = makeContentTypeSelect(state.sourceContentTypes.get(id), `Content type for ${sourceName(source)}`);
         typeSelect.addEventListener("change", () => state.sourceContentTypes.set(id, contentType(typeSelect.value)));
         typeLabel.append(typeSelect);
-        actions.append(typeLabel);
+        options.append(typeLabel);
+        actions.append(options);
         actions.append(button("Start analysis", "button secondary clipping-action", () => { void createJob(id); }));
       } else if (status === "uploading") {
-        actions.append(button("Resume upload", "button secondary clipping-action", () => chooseResumeFile(id)));
+        const resume = button("Resume upload", "button secondary clipping-action", () => chooseResumeFile(id));
+        resume.disabled = Boolean(state.upload);
+        actions.append(resume);
       }
       actions.append(button("Remove", "text-button clipping-remove", () => { void removeSource(id); }));
       row.append(details, actions);
       fragment.append(row);
     }
     ui.sources.replaceChildren(fragment);
+    syncWorkVisibility();
     renderBatchReadiness();
+  }
+
+  function renderCostDetails(spent, budget, label = "Cost details") {
+    const details = element("details", "clipping-cost-details");
+    details.append(element("summary", "", label));
+    details.append(element("p", "clipping-cost-copy", `${formatUSD(spent)} of ${formatUSD(budget)}`));
+    return details;
   }
 
   function renderJob(job) {
@@ -1085,11 +1251,8 @@
     bar.setAttribute("aria-valuenow", String(Math.round(progress)));
     track.append(bar);
     const footer = element("div", "clipping-record-footer");
-    const spent = Number(job.spent_micro_usd);
-    const budget = Number(job.budget_micro_usd);
-    const spendLabel = Number.isSafeInteger(budget) ? `${formatUSD(spent)} of ${formatUSD(budget)}` : "Budget recorded";
-    footer.append(element("span", "", spendLabel));
     if (job.content_type) footer.append(element("span", "", `Profile: ${contentType(job.content_type)}`));
+    footer.append(renderCostDetails(job.spent_micro_usd, job.budget_micro_usd));
     const actions = element("div", "clipping-row-actions");
     if (["queued", "running", "paused_budget"].includes(status)) {
       actions.append(button("Cancel job", "button secondary clipping-action", () => { void cancelJob(job.id); }));
@@ -1129,6 +1292,7 @@
     if (!jobs.length) fragment.append(element("p", "empty", "No analysis jobs yet."));
     jobs.forEach((job) => fragment.append(renderJob(job)));
     ui.jobs.replaceChildren(fragment);
+    syncWorkVisibility();
   }
 
   function renderBatches() {
@@ -1157,7 +1321,7 @@
       bar.setAttribute("aria-valuenow", String(Math.round(progress)));
       track.append(bar);
       const footer = element("div", "clipping-record-footer");
-      footer.append(element("span", "", `${formatUSD(batch.spent_micro_usd)} of ${formatUSD(batch.budget_micro_usd)}`));
+      footer.append(renderCostDetails(batch.spent_micro_usd, batch.budget_micro_usd));
       if (["queued", "running", "paused_budget"].includes(status)) {
         footer.append(button("Cancel batch", "button secondary clipping-action", () => { void cancelBatch(batch.id); }));
       }
@@ -1166,6 +1330,7 @@
       fragment.append(row);
     }
     ui.batches.replaceChildren(fragment);
+    syncWorkVisibility();
   }
 
   function renderBatchReadiness() {
@@ -1189,6 +1354,7 @@
     const lifecycle = state.lifecycle;
     const sequence = ++state.requestSequence[kind];
     errorElement.textContent = "";
+    syncWorkVisibility();
     try {
       const payload = await api(path);
       if (!current(lifecycle) || sequence !== state.requestSequence[kind]) return;
@@ -1200,6 +1366,10 @@
     } catch (error) {
       if (!current(lifecycle) || sequence !== state.requestSequence[kind] || error.name === "AbortError") return;
       errorElement.textContent = error.message || "Could not load clipping information.";
+      if (kind === "sources" && state.sources.length === 0) ui.sources.replaceChildren();
+      if (kind === "jobs" && state.jobs.length === 0) ui.jobs.replaceChildren();
+      if (kind === "batches" && state.batches.length === 0) ui.batches.replaceChildren();
+      syncWorkVisibility();
     }
   }
 
@@ -1376,6 +1546,15 @@
   async function startUpload(file, existingSource = null) {
     const lifecycle = state.lifecycle;
     if (!file || !current(lifecycle) || state.upload) return;
+    if (!existingSource && !isMediaFile(file)) {
+      ui.uploadError.textContent = "Choose one audio or video file.";
+      return;
+    }
+    if (!existingSource && !ui.uploadPermission.checked) {
+      ui.uploadError.textContent = "Confirm that you own or have permission to reuse this video and have it processed.";
+      updateUploadReadiness();
+      return;
+    }
     setResumeHelp(Boolean(existingSource));
     if (!Number.isSafeInteger(file.size) || file.size <= 0) {
       ui.uploadError.textContent = "Choose a non-empty video file.";
@@ -1402,6 +1581,8 @@
       controller: null
     };
     state.upload = upload;
+    syncResumeActions();
+    state.selectedUploadFile = file;
     ui.uploadError.textContent = "";
     ui.uploadSubmit.disabled = true;
     ui.uploadFile.disabled = true;
@@ -1465,21 +1646,21 @@
       });
       if (!current(lifecycle) || state.upload !== upload) return;
       updateUploadProgress(upload, file.size, "Upload complete. Checking that the video can be used.");
-      setUploadIdle();
-      ui.uploadFile.value = "";
-      ui.uploadPermission.checked = false;
+      clearSelectedUpload();
+      setUploadIdle(true);
       if (existingSource) setResumeHelp(false);
       await refresh();
+      syncResumeActions();
       const prepared = finalized && (finalized.source || finalized);
       ui.uploadDetail.textContent = statusCopy(prepared && prepared.status, sourceStatusCopy);
     } catch (error) {
       if (!current(lifecycle) || state.upload !== upload || error.name === "AbortError") return;
-      ui.uploadError.textContent = error.message || "Upload paused. Use Resume upload to continue from saved progress.";
+      const message = error.message || "Upload paused. Use Resume upload to continue from saved progress.";
       ui.uploadDetail.textContent = "Progress is saved. Choose Resume upload to continue.";
       if (upload.sourceID) {
-        ui.uploadFile.value = "";
-        ui.uploadPermission.checked = false;
+        clearSelectedUpload();
       }
+      ui.uploadError.textContent = message;
       await load("sources", "/api/clipping/sources", renderSources, ui.sourcesError);
     } finally {
       if (current(lifecycle) && state.upload === upload && !upload.controller?.signal.aborted) setUploadIdle();
@@ -1492,13 +1673,13 @@
     const budget = parseBudgetUSD(ui.jobBudget.value, MAX_JOB_BUDGET_MICRO_USD);
     if (budget === null) {
       ui.sourcesError.textContent = "Enter a per-job budget from $0.01 to $4.00.";
-      ui.jobBudget.focus();
+      focusInDisclosures([ui.settingsDisclosure, ui.jobSettingsDisclosure], ui.jobBudget);
       return;
     }
     const options = selectionOptions(ui.jobMinSeconds.value, ui.jobMaxSeconds.value, ui.jobCandidateLimit.value);
     if (!options) {
       ui.sourcesError.textContent = "Use clip lengths from 15 to 180 seconds, with minimum no greater than maximum, and choose 7 to 10 candidates.";
-      ui.jobMinSeconds.focus();
+      focusInDisclosures([ui.settingsDisclosure, ui.jobSettingsDisclosure], ui.jobMinSeconds);
       return;
     }
     const profile = contentType(state.sourceContentTypes.get(safeID(sourceID)));
@@ -1533,7 +1714,12 @@
     const aggregate = parseBudgetUSD(ui.batchBudget.value, MAX_BATCH_BUDGET_MICRO_USD);
     const options = selectionOptions(ui.batchMinSeconds.value, ui.batchMaxSeconds.value, ui.batchCandidateLimit.value);
     const profile = contentType(ui.batchContentType.value);
-    if (!ids.length || perJob === null || aggregate === null || !options || !Number.isSafeInteger(perJob * ids.length) || perJob * ids.length > aggregate) {
+    const total = perJob === null ? null : perJob * ids.length;
+    if (!ids.length || perJob === null || aggregate === null || !options || !Number.isSafeInteger(total) || total > aggregate) {
+      const invalidField = perJob === null ? ui.batchJobBudget
+        : aggregate === null || !Number.isSafeInteger(total) || total > aggregate ? ui.batchBudget
+          : !options ? ui.batchMinSeconds : null;
+      if (invalidField) focusInDisclosures([ui.settingsDisclosure, ui.batchDisclosure], invalidField);
       renderBatchReadiness();
       return;
     }
@@ -1603,6 +1789,7 @@
       if (state.upload?.sourceID === id) {
         state.upload.controller?.abort();
         state.upload = null;
+        syncResumeActions();
         ui.uploadSubmit.disabled = false;
         ui.uploadFile.disabled = false;
       }
@@ -1623,6 +1810,7 @@
     const days = Number(ui.retentionDays.value);
     if (!Number.isInteger(days) || days < 1 || days > 365) {
       ui.retentionError.textContent = "Choose a retention period from 1 to 365 days.";
+      focusInDisclosures([ui.settingsDisclosure, ui.retentionDisclosure], ui.retentionDays);
       return;
     }
     ui.retentionError.textContent = "";
@@ -1652,16 +1840,60 @@
     ui.workerForm.addEventListener("submit", (event) => saveWorkerConfig(event));
     ui.uploadForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      const file = ui.uploadFile.files && ui.uploadFile.files[0];
-      if (!ui.uploadPermission.checked) {
-        ui.uploadError.textContent = "Confirm that you own or have permission to reuse this video and have it processed.";
+      if (state.upload) {
+        ui.uploadError.textContent = "An upload is already active. Pause it before starting another.";
         return;
       }
-      if (file) void startUpload(file);
-      else ui.uploadError.textContent = "Choose a video file to upload.";
+      const files = Array.from(ui.uploadFile.files || []);
+      if (files.length > 1) {
+        clearSelectedUpload();
+        ui.uploadError.textContent = "Choose one audio or video file at a time.";
+        return;
+      }
+      const file = state.selectedUploadFile || files[0] || null;
+      if (!file) {
+        ui.uploadError.textContent = "Choose one audio or video file to upload.";
+        return;
+      }
+      if (!isMediaFile(file)) {
+        clearSelectedUpload();
+        ui.uploadError.textContent = "Choose one audio or video file.";
+        return;
+      }
+      if (!ui.uploadPermission.checked) {
+        ui.uploadError.textContent = "Confirm that you own or have permission to reuse this video and have it processed.";
+        ui.uploadPermission.focus();
+        return;
+      }
+      void startUpload(file);
     });
-    ui.uploadFile.addEventListener("change", () => {
-      ui.uploadPermission.checked = false;
+    ui.uploadFile.addEventListener("change", handleUploadFileChange);
+    ui.uploadPermission.addEventListener("change", () => {
+      if (ui.uploadPermission.checked) ui.uploadError.textContent = "";
+      updateUploadReadiness();
+    });
+    ui.uploadDropZone.addEventListener("dragenter", (event) => {
+      event.preventDefault();
+      if (!state.active) return;
+      state.dropDepth++;
+      setDropActive(true);
+    });
+    ui.uploadDropZone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      if (state.active) setDropActive(true);
+    });
+    ui.uploadDropZone.addEventListener("dragleave", (event) => {
+      event.preventDefault();
+      state.dropDepth = Math.max(0, state.dropDepth - 1);
+      if (state.dropDepth === 0) setDropActive(false);
+    });
+    ui.uploadDropZone.addEventListener("drop", handleUploadDrop);
+    ui.clippingView.addEventListener("dragover", (event) => {
+      if (isFileTransfer(event)) event.preventDefault();
+    });
+    ui.clippingView.addEventListener("drop", (event) => {
+      if (isFileTransfer(event)) event.preventDefault();
     });
     ui.uploadCancel.addEventListener("click", () => {
       if (!state.upload) return;
@@ -1669,20 +1901,19 @@
       const hadSource = Boolean(state.upload.sourceID);
       if (!hadSource) setResumeHelp(false);
       state.upload = null;
-      ui.uploadSubmit.disabled = false;
       ui.uploadFile.disabled = false;
       ui.uploadDetail.textContent = "Upload paused. Progress is saved; choose Resume upload to continue.";
-      if (hadSource) {
-        ui.uploadFile.value = "";
-        ui.uploadPermission.checked = false;
-      }
+      clearSelectedUpload();
+      setUploadIdle();
       void load("sources", "/api/clipping/sources", renderSources, ui.sourcesError);
     });
     ui.resumeFile.addEventListener("change", () => {
-      const file = ui.resumeFile.files && ui.resumeFile.files[0];
+      const files = Array.from(ui.resumeFile.files || []);
+      const file = files.length === 1 ? files[0] : null;
       const source = state.sources.find((item) => String(item.id) === state.resumeSourceID);
       state.resumeSourceID = "";
-      if (file && source) void startUpload(file, source);
+      if (files.length > 1) ui.uploadError.textContent = "Choose the exact original file to resume this upload.";
+      else if (file && source) void startUpload(file, source);
     });
     ui.link.addEventListener("input", updateLinkDisclosure);
     ui.link.addEventListener("change", updateLinkDisclosure);
@@ -1693,6 +1924,7 @@
     ui.batchContentType.addEventListener("change", renderBatchReadiness);
     ui.createBatch.addEventListener("click", () => { void createBatch(); });
     ui.retentionForm.addEventListener("submit", saveRetention);
+    updateUploadReadiness();
     updateLinkDisclosure();
   }
 
@@ -1716,7 +1948,10 @@
     state.controllers.clear();
     if (state.upload) state.upload.controller?.abort();
     state.upload = null;
-    ui.uploadSubmit.disabled = false;
+    clearSelectedUpload();
+    syncResumeActions();
+    state.dropDepth = 0;
+    setDropActive(false);
     ui.uploadFile.disabled = false;
     ui.uploadCancel.disabled = false;
     if (clear) {
@@ -1731,9 +1966,14 @@
       state.loadingJobDetails.clear();
       state.selectedSourceIDs.clear();
       state.config = null;
+      ui.sourcesError.textContent = "";
+      ui.jobsError.textContent = "";
+      ui.batchesError.textContent = "";
+      ui.batchError.textContent = "";
       ui.sources.replaceChildren(element("p", "empty", "Sources will appear here after you add footage."));
       ui.jobs.replaceChildren(element("p", "empty", "No analysis jobs yet."));
       ui.batches.replaceChildren(element("p", "empty", "No batches yet."));
+      syncWorkVisibility();
       ui.workerNote.hidden = true;
       ui.workerStatus.textContent = "Worker configuration has not been loaded.";
       ui.workerMetadata.replaceChildren();
