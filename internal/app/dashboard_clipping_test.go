@@ -76,7 +76,7 @@ func clippingCallbackRequest(handler http.Handler, jobID, attemptID, token strin
 
 func clippingCallbackFixture(job ClippingJob, stage ClippingStage, source ClippingSource, payload json.RawMessage, actual int64) clippingWorkerCallback {
 	return clippingWorkerCallback{
-		ProtocolVersion: clippingProtocolVersion, JobID: job.ID, Stage: ClippingStageAnalysis,
+		ProtocolVersion: clippingProtocolVersionV1, JobID: job.ID, Stage: ClippingStageAnalysis,
 		DispatchID: stage.IdempotencyKey, AttemptID: stage.AttemptID, Status: "completed",
 		ActualCostMicroUSD: actual,
 		Artifact: clippingCallbackArtifact{
@@ -535,7 +535,11 @@ func TestClippingGoPythonProtocolFixtureRoundTrip(t *testing.T) {
 	source := makeReadyClippingSource(t, store, 60_000)
 	batch, jobs := makeClippingBatch(t, store, []string{source.ID}, 1_000_000, 1_000_000, "cross-language-protocol")
 	app := &dashboardApp{store: store, security: security}
-	prepared, claimed, err := app.prepareClippingStageDispatch(jobs[0].ID, 100_000, "https://framevault.example")
+	claimedSource, err := store.ClaimClippingAnalysisSource(jobs[0].ID)
+	if err != nil || !claimedSource {
+		t.Fatalf("claim source analysis: claimed=%v error=%v", claimedSource, err)
+	}
+	prepared, claimed, err := app.prepareClippingStageDispatch(jobs[0].ID, 100_000, "https://framevault.dev")
 	if err != nil || !claimed {
 		t.Fatalf("prepare worker dispatch=%+v claimed=%v error=%v", prepared, claimed, err)
 	}
@@ -547,7 +551,26 @@ func TestClippingGoPythonProtocolFixtureRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatchJSON, err := json.Marshal(prepared.Payload)
+	revision := clippingDefaultPipelineRevision
+	prepared.Payload.PipelineRevision = revision
+	leaseToken, err := app.clippingCapability(job.ID, stage[0].AttemptID, clippingCapabilityLease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetClippingAnalysisClaimAttempt(job.ID, stage[0].AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetClippingAttemptPipelineRevision(job.ID, stage[0].Name, stage[0].AttemptID, leaseToken, revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetClippingAttemptEstimateTerms(job.ID, stage[0].Name, stage[0].AttemptID, leaseToken, 1, 42); err != nil {
+		t.Fatal(err)
+	}
+	workerDispatch, err := buildClippingWorkerDispatchV2(prepared.Payload, 1, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatchJSON, err := json.Marshal(workerDispatch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,10 +594,31 @@ func TestClippingGoPythonProtocolFixtureRoundTrip(t *testing.T) {
 	python := `import json,sys,tempfile
 from clipping_protocol import SQLiteDispatchLedger, StageResult, execute_stage
 payload=json.load(sys.stdin)
-artifact={"type":"clipping.analysis","schema_version":"1","version":1,"source_duration_ms":payload["source_duration_ms"],"time_ranges":[{"start_ms":100,"end_ms":2000}],"payload":{"fixture":"python-result"}}
+duration=payload["source_duration_ms"]
+core={
+  "analysis_version":"framevault.analysis.source.v1",
+  "pipeline_revision":payload["pipeline_revision"],
+  "source_sha256":payload["source_sha256"],
+  "source_duration_ms":duration,
+  "model_versions":{"transcription":"faster-whisper==1.1.1/large-v3","model":"large-v3","language_mode":"auto","model_repository":"Systran/faster-whisper-large-v3","model_snapshot":"0123456789abcdef0123456789abcdef01234567","model_weights_sha256":"a"*64,"ctranslate2_version":"4.6.0"},
+  "algorithm_versions":{"audio_events":"ffmpeg-stream-energy-v1","visual_events":"ffmpeg-scene-motion-v1","context_timeline":"extractive-lexical-context-v1","candidate_inspection":"ffmpeg-dense-candidate-window-v2-profile-pool","pipeline_revision":payload["pipeline_revision"],"ffmpeg_version":"ffmpeg version fixture","ffmpeg_configuration_sha256":"b"*64,"ffmpeg_executable_sha256":"d"*64,"python_distributions_sha256":"e"*64,"python_distributions_count":"42","os_release_sha256":"f"*64,"runtime_manifest_sha256":"c"*64},
+  "runtime_versions":{"python":"3.11.9","modal":"1.1.4"},
+  "prompt_versions":{"analysis":"none-extractive-no-llm-v1"},
+  "language":{"code":None,"probability":None,"script":"unknown"},
+  "transcript":{"available":True,"status":"complete","original_script":True,"speaker_labels_available":False,"segments":[]},
+  "context":{"summary":"","topics":[],"timeline":[]},
+  "media_streams":{"has_audio":True,"has_video":True},"audio_analysis_status":"complete",
+  "audio_events":[],"visual_events":[],"candidate_inspections":[],
+  "coverage":{"audio_scanned_duration_ms":duration,"visual_scanned_duration_ms":duration},
+  "cost_basis":"operator_declared_worker_second_rate_estimate",
+  "rate_micro_usd_per_second":payload["rate_micro_usd_per_second"],
+  "compute_seconds":42,"cost_estimate_micro_usd":42,
+  "coverage":{"audio_scanned_duration_ms":duration,"visual_scanned_duration_ms":duration}
+}
+artifact={"type":"clipping.analysis","schema_version":"2","version":1,"source_duration_ms":duration,"time_ranges":[],"payload":core}
 with tempfile.TemporaryDirectory() as directory:
     ledger=SQLiteDispatchLedger(directory + "/worker.sqlite3")
-    result=execute_stage(payload, media_token="media-fixture", callback_token="callback-fixture", ledger=ledger, client=lambda dispatch, token: StageResult(artifact, 42), now=int(__import__("time").time()))
+    result=execute_stage(payload, media_token=__import__("os").environ["M3_TEST_MEDIA_TOKEN"], callback_token=__import__("os").environ["M3_TEST_CALLBACK_TOKEN"], ledger=ledger, client=lambda dispatch, token: StageResult(artifact, 42, "operator_declared_worker_second_rate_estimate"), now=int(__import__("time").time()), expected_origin="https://framevault.dev", expected_pipeline_revision=payload["pipeline_revision"])
     ledger.close()
 print(json.dumps(result,separators=(",",":")))`
 	command := exec.Command("python3", "-c", python)
@@ -583,7 +627,7 @@ print(json.dumps(result,separators=(",",":")))`
 		t.Fatal(err)
 	}
 	command.Dir = repoRoot
-	command.Env = append(command.Environ(), "PYTHONPATH="+filepath.Join(repoRoot, "workers", "modal"))
+	command.Env = append(command.Environ(), "PYTHONPATH="+filepath.Join(repoRoot, "workers", "modal"), "M3_TEST_MEDIA_TOKEN="+prepared.MediaBearer, "M3_TEST_CALLBACK_TOKEN="+prepared.CallbackBearer)
 	command.Stdin = bytes.NewReader(dispatchJSON)
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
@@ -595,7 +639,7 @@ print(json.dumps(result,separators=(",",":")))`
 	if err := json.Unmarshal(resultJSON, &callback); err != nil {
 		t.Fatalf("decode Python callback into Go contract: %v (%s)", err, resultJSON)
 	}
-	if callback.ProtocolVersion != clippingProtocolVersion || callback.JobID != jobs[0].ID || callback.AttemptID != stage[0].AttemptID || callback.DispatchID != stage[0].IdempotencyKey || callback.Artifact.SchemaVersion != "1" || callback.Artifact.SourceDurationMS != source.DurationMS || callback.ActualCostMicroUSD != 42 {
+	if callback.ProtocolVersion != clippingProtocolVersion || callback.JobID != jobs[0].ID || callback.AttemptID != stage[0].AttemptID || callback.DispatchID != stage[0].IdempotencyKey || callback.Artifact.SchemaVersion != "2" || callback.Artifact.SourceDurationMS != source.DurationMS || callback.ActualCostMicroUSD != 0 || callback.CostEstimateMicroUSD != 42 {
 		t.Fatalf("Go/Python protocol mismatch: %+v", callback)
 	}
 	completed := clippingCallbackRequest(handler, job.ID, stage[0].AttemptID, prepared.CallbackBearer, callback)
@@ -607,7 +651,7 @@ print(json.dumps(result,separators=(",",":")))`
 		t.Fatalf("Go rejected duplicate Python callback: %d %s", duplicate.Code, duplicate.Body.String())
 	}
 	storedBatch, err := store.ClippingBatch(batch.ID)
-	if err != nil || storedBatch.SpentMicroUSD != 42 || storedBatch.ReservedMicroUSD != 0 {
-		t.Fatalf("Python callback cost was not applied once: batch=%+v error=%v", storedBatch, err)
+	if err != nil || storedBatch.SpentMicroUSD != 0 || storedBatch.ReservedMicroUSD != 100_000 {
+		t.Fatalf("Python estimate was recorded as an invoice or reservation was lost: batch=%+v error=%v", storedBatch, err)
 	}
 }

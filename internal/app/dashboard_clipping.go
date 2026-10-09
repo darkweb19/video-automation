@@ -19,7 +19,8 @@ import (
 
 const (
 	clippingRetentionSetting        = "clipping_retention_days"
-	clippingProtocolVersion         = "framevault.clipping.v1"
+	clippingProtocolVersionV1       = "framevault.clipping.v1"
+	clippingProtocolVersion         = "framevault.clipping.v2"
 	defaultClippingRetentionDays    = 30
 	minClippingRetentionDays        = 1
 	maxClippingRetentionDays        = 365
@@ -53,22 +54,29 @@ type clippingSourceView struct {
 }
 
 type clippingStageView struct {
-	JobID            string              `json:"job_id"`
-	Name             string              `json:"name"`
-	Status           ClippingStageStatus `json:"status"`
-	Attempt          int                 `json:"attempt"`
-	LeaseExpiresAt   int64               `json:"lease_expires_at,omitempty"`
-	ReservedMicroUSD int64               `json:"reserved_micro_usd"`
-	ActualMicroUSD   int64               `json:"actual_micro_usd"`
-	Error            string              `json:"error,omitempty"`
-	CreatedAt        int64               `json:"created_at"`
-	UpdatedAt        int64               `json:"updated_at"`
+	JobID             string              `json:"job_id"`
+	Name              string              `json:"name"`
+	Status            ClippingStageStatus `json:"status"`
+	AttemptID         string              `json:"attempt_id,omitempty"`
+	Attempt           int                 `json:"attempt"`
+	LeaseExpiresAt    int64               `json:"lease_expires_at,omitempty"`
+	ReservedMicroUSD  int64               `json:"reserved_micro_usd"`
+	ActualMicroUSD    int64               `json:"actual_micro_usd"`
+	EstimatedMicroUSD int64               `json:"estimated_micro_usd,omitempty"`
+	CostReconciled    bool                `json:"cost_reconciled"`
+	Error             string              `json:"error,omitempty"`
+	CreatedAt         int64               `json:"created_at"`
+	UpdatedAt         int64               `json:"updated_at"`
 }
 
 type clippingJobView struct {
 	ID               string              `json:"id"`
 	BatchID          string              `json:"batch_id"`
 	SourceID         string              `json:"source_id"`
+	ContentType      string              `json:"content_type"`
+	MinClipSeconds   int                 `json:"min_clip_seconds"`
+	MaxClipSeconds   int                 `json:"max_clip_seconds"`
+	CandidateLimit   int                 `json:"candidate_limit"`
 	Status           ClippingJobStatus   `json:"status"`
 	BudgetMicroUSD   int64               `json:"budget_micro_usd"`
 	ReservedMicroUSD int64               `json:"reserved_micro_usd"`
@@ -151,14 +159,15 @@ func clippingJobSummary(job ClippingJob, stages []ClippingStage, artifacts []Cli
 	stageViews := make([]clippingStageView, 0, len(stages))
 	for _, stage := range stages {
 		stageViews = append(stageViews, clippingStageView{
-			JobID: stage.JobID, Name: stage.Name, Status: stage.Status, Attempt: stage.Attempt,
+			JobID: stage.JobID, Name: stage.Name, Status: stage.Status, AttemptID: stage.AttemptID, Attempt: stage.Attempt,
 			LeaseExpiresAt: stage.LeaseExpiresAt, ReservedMicroUSD: stage.ReservedMicroUSD,
-			ActualMicroUSD: stage.ActualMicroUSD, Error: stage.Error, CreatedAt: stage.CreatedAt,
+			ActualMicroUSD: stage.ActualMicroUSD, EstimatedMicroUSD: stage.EstimatedMicroUSD, CostReconciled: stage.CostReconciled, Error: stage.Error, CreatedAt: stage.CreatedAt,
 			UpdatedAt: stage.UpdatedAt,
 		})
 	}
 	return clippingJobView{
-		ID: job.ID, BatchID: job.BatchID, SourceID: job.SourceID, Status: job.Status,
+		ID: job.ID, BatchID: job.BatchID, SourceID: job.SourceID, ContentType: job.ContentType,
+		MinClipSeconds: job.MinClipSeconds, MaxClipSeconds: job.MaxClipSeconds, CandidateLimit: job.CandidateLimit, Status: job.Status,
 		BudgetMicroUSD: job.BudgetLimitMicroUSD, ReservedMicroUSD: job.ReservedMicroUSD,
 		SpentMicroUSD: job.SpentMicroUSD, Progress: clippingJobProgress(stages, job.Status),
 		Error: job.Error, Stages: stageViews, Artifacts: artifacts, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
@@ -487,6 +496,10 @@ func (a *dashboardApp) createClippingJob(w http.ResponseWriter, r *http.Request)
 	var input struct {
 		SourceID       string `json:"source_id"`
 		BudgetMicroUSD int64  `json:"budget_micro_usd"`
+		ContentType    string `json:"content_type"`
+		MinClipSeconds int    `json:"min_clip_seconds"`
+		MaxClipSeconds int    `json:"max_clip_seconds"`
+		CandidateLimit int    `json:"candidate_limit"`
 	}
 	if decodeJSONBody(w, r, &input) != nil {
 		return
@@ -499,9 +512,18 @@ func (a *dashboardApp) createClippingJob(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "budget_micro_usd must be between $0.000001 and $4.00")
 		return
 	}
+	selection, selectionErr := normalizeClippingSelection(ClippingJobCreate{
+		SourceID: input.SourceID, BudgetLimitMicroUSD: input.BudgetMicroUSD,
+		ContentType: input.ContentType, MinClipSeconds: input.MinClipSeconds,
+		MaxClipSeconds: input.MaxClipSeconds, CandidateLimit: input.CandidateLimit,
+	})
+	if selectionErr != nil {
+		writeError(w, http.StatusBadRequest, selectionErr.Error())
+		return
+	}
 	_, jobs, duplicate, err := a.store.CreateClippingBatch(ClippingBatchCreate{
 		IdempotencyKey: key, BudgetLimitMicroUSD: input.BudgetMicroUSD,
-		Jobs: []ClippingJobCreate{{SourceID: input.SourceID, BudgetLimitMicroUSD: input.BudgetMicroUSD}},
+		Jobs: []ClippingJobCreate{selection},
 	})
 	if err != nil {
 		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "could not queue clipping job"))
@@ -534,6 +556,10 @@ func (a *dashboardApp) createClippingBatch(w http.ResponseWriter, r *http.Reques
 		SourceIDs            []string `json:"source_ids"`
 		PerJobBudgetMicroUSD int64    `json:"per_job_budget_micro_usd"`
 		BudgetMicroUSD       int64    `json:"budget_micro_usd"`
+		ContentType          string   `json:"content_type"`
+		MinClipSeconds       int      `json:"min_clip_seconds"`
+		MaxClipSeconds       int      `json:"max_clip_seconds"`
+		CandidateLimit       int      `json:"candidate_limit"`
 	}
 	if decodeJSONBody(w, r, &input) != nil {
 		return
@@ -554,6 +580,14 @@ func (a *dashboardApp) createClippingBatch(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "aggregate budget must cover each job's budget")
 		return
 	}
+	selection, selectionErr := normalizeClippingSelection(ClippingJobCreate{
+		ContentType: input.ContentType, MinClipSeconds: input.MinClipSeconds,
+		MaxClipSeconds: input.MaxClipSeconds, CandidateLimit: input.CandidateLimit,
+	})
+	if selectionErr != nil {
+		writeError(w, http.StatusBadRequest, selectionErr.Error())
+		return
+	}
 	jobs := make([]ClippingJobCreate, 0, len(input.SourceIDs))
 	seen := make(map[string]struct{}, len(input.SourceIDs))
 	for _, sourceID := range input.SourceIDs {
@@ -566,7 +600,9 @@ func (a *dashboardApp) createClippingBatch(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		seen[sourceID] = struct{}{}
-		jobs = append(jobs, ClippingJobCreate{SourceID: sourceID, BudgetLimitMicroUSD: input.PerJobBudgetMicroUSD})
+		selection.SourceID = sourceID
+		selection.BudgetLimitMicroUSD = input.PerJobBudgetMicroUSD
+		jobs = append(jobs, selection)
 	}
 	batch, createdJobs, duplicate, err := a.store.CreateClippingBatch(ClippingBatchCreate{
 		IdempotencyKey: key, BudgetLimitMicroUSD: input.BudgetMicroUSD, Jobs: jobs,
@@ -863,8 +899,16 @@ func newClippingCapability() (string, error) {
 // persistClippingDispatchCapabilities saves every bearer capability encrypted
 // before an asynchronous worker dispatch can be attempted.
 func (a *dashboardApp) persistClippingDispatchCapabilities(stage ClippingStage) (mediaToken, callbackToken string, err error) {
+	return a.persistClippingDispatchCapabilitiesUntil(stage, stage.LeaseExpiresAt+int64(clippingCallbackAccountingGrace.Seconds()))
+}
+
+func (a *dashboardApp) persistClippingDispatchCapabilitiesUntil(stage ClippingStage, callbackExpiresAt int64) (mediaToken, callbackToken string, err error) {
 	if stage.JobID == "" || stage.AttemptID == "" || stage.LeaseToken == "" || stage.LeaseExpiresAt <= time.Now().Unix() {
 		return "", "", errors.New("invalid clipping stage lease")
+	}
+	now := time.Now().Unix()
+	if callbackExpiresAt <= now || callbackExpiresAt > stage.LeaseExpiresAt+int64(clippingCallbackAccountingGrace.Seconds()) {
+		return "", "", errors.New("invalid clipping callback expiry")
 	}
 	mediaToken, err = newClippingCapability()
 	if err != nil {
@@ -873,6 +917,9 @@ func (a *dashboardApp) persistClippingDispatchCapabilities(stage ClippingStage) 
 	callbackToken, err = newClippingCapability()
 	if err != nil {
 		return "", "", err
+	}
+	if err = a.store.SetClippingCallbackCapabilityExpiryIndex(stage.JobID, stage.AttemptID, callbackExpiresAt); err != nil {
+		return "", "", errors.New("unable to persist clipping worker callback expiry index")
 	}
 	for scope, token := range map[string]string{clippingCapabilityMedia: mediaToken, clippingCapabilityCallback: callbackToken, clippingCapabilityLease: stage.LeaseToken} {
 		if err = a.persistClippingCapability(stage.JobID, stage.AttemptID, scope, token); err != nil {
@@ -884,7 +931,7 @@ func (a *dashboardApp) persistClippingDispatchCapabilities(stage ClippingStage) 
 		a.deleteClippingCapabilitiesForAttempt(stage.JobID, stage.AttemptID)
 		return "", "", errors.New("unable to persist clipping worker capability expiry")
 	}
-	if err = a.persistClippingCapabilityExpiry(stage.JobID, stage.AttemptID, clippingCapabilityCallback, stage.LeaseExpiresAt+int64(clippingCallbackAccountingGrace.Seconds())); err != nil {
+	if err = a.persistClippingCapabilityExpiry(stage.JobID, stage.AttemptID, clippingCapabilityCallback, callbackExpiresAt); err != nil {
 		a.deleteClippingCapabilitiesForAttempt(stage.JobID, stage.AttemptID)
 		return "", "", errors.New("unable to persist clipping worker capability expiry")
 	}
@@ -892,9 +939,69 @@ func (a *dashboardApp) persistClippingDispatchCapabilities(stage ClippingStage) 
 }
 
 func (a *dashboardApp) deleteClippingCapabilitiesForAttempt(jobID, attemptID string) {
-	for _, scope := range []string{clippingCapabilityMedia, clippingCapabilityCallback, clippingCapabilityLease, clippingCapabilityMedia + "_expiry", clippingCapabilityCallback + "_expiry"} {
-		_ = a.store.DeleteSetting(clippingCapabilitySettingKey(jobID, attemptID, scope))
+	_ = a.store.DeleteClippingCapabilitiesForAttempt(jobID, attemptID)
+}
+
+func clippingCallbackExpirySettingIDs(key string) (string, string, bool) {
+	const prefix = "clipping_cap_"
+	const suffix = "_callback_expiry"
+	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
+		return "", "", false
 	}
+	body := strings.TrimSuffix(strings.TrimPrefix(key, prefix), suffix)
+	separator := strings.Index(body, "_clipatt_")
+	if separator <= 0 {
+		return "", "", false
+	}
+	jobID := body[:separator]
+	attemptID := "clipatt_" + body[separator+len("_clipatt_"):]
+	if len(jobID) != len("clipjob_")+32 || len(attemptID) != len("clipatt_")+32 ||
+		!safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || !safeID(attemptID) || !strings.HasPrefix(attemptID, "clipatt_") {
+		return "", "", false
+	}
+	return jobID, attemptID, true
+}
+
+// cleanupExpiredClippingCapabilities first rebuilds bounded missing index rows
+// from legacy encrypted expiry settings, then atomically removes due settings.
+// If a legacy value cannot be decrypted, the attempt lease plus the full
+// callback grace period is used as a conservative upper bound.
+func (a *dashboardApp) cleanupExpiredClippingCapabilities(now int64, limit int) (int, error) {
+	if a == nil || a.store == nil {
+		return 0, ErrClippingInvalidState
+	}
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	if limit <= 0 || limit > maxClippingCapabilityCleanupBatch {
+		limit = maxClippingCapabilityCleanupBatch
+	}
+	legacy, err := a.store.LegacyClippingCallbackExpirySettings(limit)
+	if err != nil {
+		return 0, err
+	}
+	for _, setting := range legacy {
+		jobID, attemptID, validKey := clippingCallbackExpirySettingIDs(setting.Key)
+		if !validKey {
+			return 0, errors.New("legacy clipping callback expiry key could not be validated")
+		}
+		expiry := int64(0)
+		if a.security != nil {
+			if plaintext, decryptErr := a.security.DecryptSetting(setting.Key, setting.Ciphertext); decryptErr == nil {
+				expiry, _ = strconv.ParseInt(strings.TrimSpace(plaintext), 10, 64)
+			}
+		}
+		if expiry <= 0 {
+			expiry, err = a.store.conservativeClippingCallbackExpiry(jobID, attemptID)
+			if err != nil || expiry <= 0 {
+				return 0, errors.New("legacy clipping callback expiry could not be safely recovered")
+			}
+		}
+		if err := a.store.SetClippingCallbackCapabilityExpiryIndex(jobID, attemptID, expiry); err != nil {
+			return 0, err
+		}
+	}
+	return a.store.CleanupExpiredClippingCapabilities(now, limit)
 }
 
 func (a *dashboardApp) revokeClippingMediaCapability(jobID, attemptID string) {
@@ -981,16 +1088,18 @@ type clippingCallbackArtifact struct {
 }
 
 type clippingWorkerCallback struct {
-	ProtocolVersion    string                   `json:"protocol_version"`
-	JobID              string                   `json:"job_id"`
-	Stage              string                   `json:"stage"`
-	DispatchID         string                   `json:"dispatch_id"`
-	AttemptID          string                   `json:"attempt_id"`
-	Status             string                   `json:"status"`
-	ActualCostMicroUSD int64                    `json:"actual_cost_micro_usd"`
-	Artifact           clippingCallbackArtifact `json:"artifact"`
-	Error              string                   `json:"error,omitempty"`
-	Retryable          bool                     `json:"retryable,omitempty"`
+	ProtocolVersion      string                   `json:"protocol_version"`
+	JobID                string                   `json:"job_id"`
+	Stage                string                   `json:"stage"`
+	DispatchID           string                   `json:"dispatch_id"`
+	AttemptID            string                   `json:"attempt_id"`
+	Status               string                   `json:"status"`
+	ActualCostMicroUSD   int64                    `json:"actual_cost_micro_usd"`
+	CostEstimateMicroUSD int64                    `json:"cost_estimate_micro_usd,omitempty"`
+	CostBasis            string                   `json:"cost_basis,omitempty"`
+	Artifact             clippingCallbackArtifact `json:"artifact"`
+	Error                string                   `json:"error,omitempty"`
+	Retryable            bool                     `json:"retryable,omitempty"`
 }
 
 func (a *dashboardApp) clippingWorkerMedia(w http.ResponseWriter, r *http.Request) {
@@ -1081,11 +1190,13 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 	if err := decodeClippingWorkerCallback(w, r, &input); err != nil {
 		return
 	}
-	if input.ProtocolVersion != clippingProtocolVersion || input.JobID != jobID || input.Stage != ClippingStageAnalysis || input.AttemptID != attemptID || input.DispatchID == "" || input.ActualCostMicroUSD < 0 {
+	versionV1 := input.ProtocolVersion == clippingProtocolVersionV1
+	versionV2 := input.ProtocolVersion == clippingProtocolVersion
+	if (!versionV1 && !versionV2) || input.JobID != jobID || input.Stage != ClippingStageAnalysis || input.AttemptID != attemptID || input.DispatchID == "" || input.ActualCostMicroUSD < 0 {
 		writeError(w, http.StatusBadRequest, "worker callback does not match the clipping protocol")
 		return
 	}
-	job, stage, _, ok := a.workerStage(jobID, attemptID)
+	job, stage, source, ok := a.workerStage(jobID, attemptID)
 	if !ok {
 		writeError(w, http.StatusConflict, "worker callback attempt is stale")
 		return
@@ -1095,7 +1206,11 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		return
 	}
 	expiry, expiryErr := a.clippingCapabilityExpiry(jobID, attemptID, clippingCapabilityCallback)
-	if expiryErr != nil || expiry <= time.Now().Unix() {
+	if expiryErr != nil {
+		writeError(w, http.StatusGone, "worker callback capability expiry could not be verified")
+		return
+	}
+	if expiry <= time.Now().Unix() {
 		a.deleteClippingCapabilitiesForAttempt(jobID, attemptID)
 		writeError(w, http.StatusGone, "worker callback capability expired")
 		return
@@ -1108,6 +1223,55 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 	switch input.Status {
 	case "completed":
 		payload := strings.TrimSpace(string(input.Artifact.Payload))
+		if versionV2 {
+			if input.ActualCostMicroUSD != 0 || input.CostEstimateMicroUSD <= 0 || input.CostBasis != clippingWorkerBillingBasis ||
+				input.Artifact.Type != clippingAnalysisArtifactType || input.Artifact.SchemaVersion != clippingAnalysisSchemaVersion || len(input.Artifact.TimeRanges) != 0 {
+				writeError(w, http.StatusBadRequest, "worker callback estimate or source analysis artifact is invalid")
+				return
+			}
+			core, coreErr := decodeClippingAnalysisCore(payload, source)
+			if coreErr != nil {
+				writeError(w, http.StatusBadRequest, "worker source analysis failed validation")
+				return
+			}
+			var cost struct {
+				Basis          string `json:"cost_basis"`
+				Rate           int64  `json:"rate_micro_usd_per_second"`
+				ComputeSeconds int64  `json:"compute_seconds"`
+				Estimate       int64  `json:"cost_estimate_micro_usd"`
+			}
+			if err := json.Unmarshal(input.Artifact.Payload, &cost); err != nil || cost.Basis != input.CostBasis || cost.Estimate != input.CostEstimateMicroUSD || cost.Rate <= 0 || cost.ComputeSeconds <= 0 {
+				writeError(w, http.StatusBadRequest, "worker callback estimate metadata is invalid")
+				return
+			}
+			_, duplicate, _, err := a.store.CompleteClippingStageEstimate(jobID, stage.Name, attemptID, leaseToken, input.CostEstimateMicroUSD, cost.ComputeSeconds, ClippingArtifact{
+				JobID: jobID, Type: input.Artifact.Type, SchemaVersion: input.Artifact.SchemaVersion,
+				Version: input.Artifact.Version, SourceDurationMS: input.Artifact.SourceDurationMS,
+				TimeRanges: input.Artifact.TimeRanges, PayloadJSON: payload,
+			}, core)
+			if err != nil {
+				if errors.Is(err, ErrClippingStaleAttempt) || errors.Is(err, ErrClippingJobTerminal) {
+					a.store.PublishClippingJob(jobID)
+					a.publishClippingBatch(job.BatchID)
+					a.revokeClippingMediaCapability(jobID, attemptID)
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "worker callback could not be applied"))
+				return
+			}
+			if !duplicate {
+				a.store.PublishClippingJob(jobID)
+				a.publishClippingBatch(job.BatchID)
+			}
+			a.revokeClippingMediaCapability(jobID, attemptID)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if versionV1 && input.CostEstimateMicroUSD != 0 {
+			writeError(w, http.StatusBadRequest, "legacy worker callback cannot contain an estimate")
+			return
+		}
 		_, duplicate, err := a.store.CompleteClippingStage(jobID, stage.Name, attemptID, leaseToken, input.ActualCostMicroUSD, ClippingArtifact{
 			JobID: jobID, Type: input.Artifact.Type, SchemaVersion: input.Artifact.SchemaVersion,
 			Version: input.Artifact.Version, SourceDurationMS: input.Artifact.SourceDurationMS,
@@ -1139,6 +1303,10 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		a.revokeClippingMediaCapability(jobID, attemptID)
 		w.WriteHeader(http.StatusNoContent)
 	case "failed":
+		if versionV2 {
+			writeError(w, http.StatusBadRequest, "v2 worker callbacks report analysis results only")
+			return
+		}
 		// Worker error details can contain signed source URLs, capability values,
 		// or other upstream secrets. Keep persisted job/stage/SSE errors fixed.
 		message := "clipping analysis stage failed"
@@ -1196,4 +1364,105 @@ func (a *dashboardApp) publishClippingEventsForBatch(batchID string) {
 		a.store.PublishClippingJob(job.ID)
 	}
 	a.publishClippingBatch(batchID)
+}
+
+func (a *dashboardApp) updateClippingSelection(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	jobID := r.PathValue("id")
+	if !safeID(jobID) || r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "invalid clipping job selection request")
+		return
+	}
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
+	type selectionRequest struct {
+		ContentType    string `json:"content_type"`
+		MinClipSeconds int    `json:"min_clip_seconds"`
+		MaxClipSeconds int    `json:"max_clip_seconds"`
+		CandidateLimit int    `json:"candidate_limit"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var input selectionRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid selection options")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "selection request must contain one JSON object")
+		return
+	}
+	job, _, err := a.store.UpdateClippingJobSelection(jobID, ClippingJobCreate{
+		ContentType: input.ContentType, MinClipSeconds: input.MinClipSeconds,
+		MaxClipSeconds: input.MaxClipSeconds, CandidateLimit: input.CandidateLimit,
+	})
+	if err != nil {
+		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "saved analysis selection could not be updated"))
+		return
+	}
+	a.store.PublishClippingJob(jobID)
+	a.publishClippingBatch(job.BatchID)
+	view, err := a.clippingJobResponse(job, true)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "selection was saved but its analysis could not be reloaded")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": view})
+}
+
+func (a *dashboardApp) reconcileClippingCost(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	jobID := r.PathValue("id")
+	if !safeID(jobID) || r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "invalid clipping cost reconciliation request")
+		return
+	}
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
+	type reconciliationRequest struct {
+		AttemptID               string `json:"attempt_id"`
+		ActualCostMicroUSD      int64  `json:"actual_cost_micro_usd"`
+		ReconciliationReference string `json:"reconciliation_reference"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var input reconciliationRequest
+	if err := decoder.Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid clipping cost reconciliation")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "reconciliation request must contain one JSON object")
+		return
+	}
+	stage, duplicate, err := a.store.ReconcileClippingStageCost(jobID, input.AttemptID, input.ActualCostMicroUSD, input.ReconciliationReference)
+	if err != nil {
+		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "clipping invoice settlement could not be recorded"))
+		return
+	}
+	job, err := a.store.ClippingJob(jobID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "invoice settlement was recorded but the job could not be reloaded")
+		return
+	}
+	if !duplicate {
+		a.store.PublishClippingJob(jobID)
+		a.publishClippingBatch(job.BatchID)
+	}
+	view, err := a.clippingJobResponse(job, true)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "invoice settlement was recorded but the job could not be reloaded")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": view, "stage": stage, "duplicate": duplicate})
 }
