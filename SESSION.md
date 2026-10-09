@@ -1,4 +1,17 @@
-# Session handoff — 2026-10-09 (America/Toronto)
+# Session handoff — 2026-10-09 (America/Toronto), Clipping UI cleanup
+
+## Current focus — C3.UI complete; M4 is next
+
+- `feat/clipper-ai` now has a clean YouTube/public-link form plus drag-and-drop/file upload intake. Existing source/job/batch actions, exact budget controls, worker settings, retention, candidate review, cost settlement, cancellation, and resumable uploads remain available through closed settings and on-demand detail views. Dropping or adding media never starts analysis automatically.
+- AGENTS.md retains the standing SOL High lead, TERRA Max/LUNA Max implementation preferences, task-specific LUNA Max selection, single-writer ownership, delegation, independent review, and cross-session rules. CLAUDE.md contains only the canonical `@AGENTS.md` import. T3 Code was used only as a reference for simplicity/performance.
+- All four participating authors/reviewer used actual `gpt-6-luna` / `max`. Independent review approved after fixing active-upload Resume controls and stale setup paths. Authenticated browser verification also caught and fixed the existing missing GET routes for embedded clipping.js/css; an integrated HTTP regression now covers them.
+- Final Go suite (35.356s), final binary build, clipping Node tests (25/25), dashboard tests (87/87), JS syntax, callback Python regressions, and diff-check pass. Authenticated isolated Chromium desktop/mobile checks pass for layout, closed/reachable settings, rights reset, dropped-file native validity, and logout cleanup. Test-only data and evidence are in `/workspace/work/`; no real media, worker/provider call, Docker run, deployment, merge, force-push, or main edit occurred.
+- The task baseline was `480b32ba72614bc58244efaf76f2dbbf7bcedbf0`. Before publication, remote `d5c8108` added an independent Modal disk-request fix; the six unpublished task commits were rebased on it without conflicts or dropping its work. UI/Go source stayed unchanged, and the affected offline worker suite passed 28/28. Five non-empty code/scope/guidance/test commits already exist and this handoff is the sixth. Publication is only to `feat/clipper-ai`, by fast-forward, with remote/local parity checked after push. See TRACKER.md for exact evidence.
+- Next: review the UI in the rebuilt local app. After the user authorizes/scopes M4, begin C4.1 captions/framing/edit contracts and audio-preserving renders, then C4.2 preview, editing, and MP4/SRT/VTT exports. M3 code is ready but actual-media multilingual quality and cost targets remain unmeasured. Do not treat this UI request as authorization for M4, spending, or deployment.
+
+---
+
+# Historical M3 session handoff — 2026-10-09 (America/Toronto)
 
 ## Current focus — M3 C3.1/C3.2 implementation complete; milestone remains in progress
 
