@@ -569,6 +569,11 @@ func TestClippingCancellationSettlesActualCostWithoutAdvancing(t *testing.T) {
 	if err != nil || canceled.Status != ClippingJobCanceled || canceled.ReservedMicroUSD != 80 {
 		t.Fatalf("cancel released unknown in-flight reserve: job=%+v error=%v", canceled, err)
 	}
+	// Cancellation allows the user to remove source bytes immediately. Keep
+	// only the soft tombstone/audit rows needed to settle a late worker cost.
+	if err := store.TombstoneClippingSource(source.ID); err != nil {
+		t.Fatal(err)
+	}
 	_, duplicate, err := store.CompleteClippingStage(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 55, clippingTestArtifact(job.ID, source.DurationMS))
 	if !errors.Is(err, ErrClippingJobTerminal) || duplicate {
 		t.Fatalf("canceled callback should settle cost without stage completion: duplicate=%v error=%v", duplicate, err)
@@ -588,9 +593,6 @@ func TestClippingCancellationSettlesActualCostWithoutAdvancing(t *testing.T) {
 	canceled, _ = store.ClippingJob(job.ID)
 	if canceled.SpentMicroUSD != 55 {
 		t.Fatalf("duplicate canceled callback charged twice: %+v", canceled)
-	}
-	if err := store.TombstoneClippingSource(source.ID); err != nil {
-		t.Fatal(err)
 	}
 	tombstone, err := store.ClippingSource(source.ID)
 	if err != nil || tombstone.Status != ClippingSourceDeleted || tombstone.SourceURL != "" || tombstone.CleanupComplete || tombstone.ReservedSizeBytes == 0 {

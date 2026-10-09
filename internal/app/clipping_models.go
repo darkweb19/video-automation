@@ -1,14 +1,22 @@
 package app
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 const (
-	MaxClippingSourceBytes      int64 = 20 << 30
-	MaxClippingSourceDurationMS int64 = 4 * 60 * 60 * 1000
-	MaxClippingStorageBytes     int64 = 100 << 30
-	MaxClippingImportAttempts         = 5
-	MaxClippingBatchJobs              = 100
-	ClippingStageAnalysis             = "analysis"
+	MaxClippingSourceBytes        int64 = 20 << 30
+	MaxClippingSourceDurationMS   int64 = 4 * 60 * 60 * 1000
+	MaxClippingStorageBytes       int64 = 100 << 30
+	MaxClippingImportAttempts           = 5
+	MaxClippingBatchJobs                = 100
+	ClippingStageAnalysis               = "analysis"
+	ClippingDefaultMinClipSeconds       = 15
+	ClippingDefaultMaxClipSeconds       = 180
+	ClippingDefaultCandidateLimit       = 10
+	ClippingMinCandidateLimit           = 7
+	ClippingMaxCandidateLimit           = 10
 )
 
 type ClippingSourceKind string
@@ -103,6 +111,10 @@ type ClippingBatchCreate struct {
 type ClippingJobCreate struct {
 	SourceID            string
 	BudgetLimitMicroUSD int64
+	ContentType         string
+	MinClipSeconds      int
+	MaxClipSeconds      int
+	CandidateLimit      int
 }
 
 type ClippingBatch struct {
@@ -120,6 +132,10 @@ type ClippingJob struct {
 	ID                  string            `json:"id"`
 	BatchID             string            `json:"batch_id"`
 	SourceID            string            `json:"source_id"`
+	ContentType         string            `json:"content_type"`
+	MinClipSeconds      int               `json:"min_clip_seconds"`
+	MaxClipSeconds      int               `json:"max_clip_seconds"`
+	CandidateLimit      int               `json:"candidate_limit"`
 	Status              ClippingJobStatus `json:"status"`
 	BudgetLimitMicroUSD int64             `json:"budget_limit_micro_usd"`
 	ReservedMicroUSD    int64             `json:"reserved_micro_usd"`
@@ -130,19 +146,21 @@ type ClippingJob struct {
 }
 
 type ClippingStage struct {
-	JobID            string              `json:"job_id"`
-	Name             string              `json:"name"`
-	Status           ClippingStageStatus `json:"status"`
-	IdempotencyKey   string              `json:"idempotency_key"`
-	AttemptID        string              `json:"attempt_id,omitempty"`
-	Attempt          int                 `json:"attempt"`
-	LeaseExpiresAt   int64               `json:"lease_expires_at,omitempty"`
-	ReservedMicroUSD int64               `json:"reserved_micro_usd"`
-	ActualMicroUSD   int64               `json:"actual_micro_usd"`
-	LeaseToken       string              `json:"-"`
-	Error            string              `json:"error,omitempty"`
-	CreatedAt        int64               `json:"created_at"`
-	UpdatedAt        int64               `json:"updated_at"`
+	JobID             string              `json:"job_id"`
+	Name              string              `json:"name"`
+	Status            ClippingStageStatus `json:"status"`
+	IdempotencyKey    string              `json:"idempotency_key"`
+	AttemptID         string              `json:"attempt_id,omitempty"`
+	Attempt           int                 `json:"attempt"`
+	LeaseExpiresAt    int64               `json:"lease_expires_at,omitempty"`
+	ReservedMicroUSD  int64               `json:"reserved_micro_usd"`
+	ActualMicroUSD    int64               `json:"actual_micro_usd"`
+	EstimatedMicroUSD int64               `json:"estimated_micro_usd"`
+	CostReconciled    bool                `json:"cost_reconciled"`
+	LeaseToken        string              `json:"-"`
+	Error             string              `json:"error,omitempty"`
+	CreatedAt         int64               `json:"created_at"`
+	UpdatedAt         int64               `json:"updated_at"`
 }
 
 // ClippingArtifact stores canonical source-time references in integer
@@ -171,6 +189,40 @@ func validClippingSourceKind(kind ClippingSourceKind) bool {
 	default:
 		return false
 	}
+}
+
+func validClippingContentType(value string) bool {
+	switch value {
+	case "general", "podcast", "comedy", "gaming", "movie":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeClippingSelection(input ClippingJobCreate) (ClippingJobCreate, error) {
+	if input.ContentType == "" {
+		input.ContentType = "general"
+	}
+	if !validClippingContentType(input.ContentType) {
+		return ClippingJobCreate{}, errors.New("content_type must be general, podcast, comedy, gaming, or movie")
+	}
+	if input.MinClipSeconds == 0 {
+		input.MinClipSeconds = ClippingDefaultMinClipSeconds
+	}
+	if input.MaxClipSeconds == 0 {
+		input.MaxClipSeconds = ClippingDefaultMaxClipSeconds
+	}
+	if input.CandidateLimit == 0 {
+		input.CandidateLimit = ClippingDefaultCandidateLimit
+	}
+	if input.MinClipSeconds < ClippingDefaultMinClipSeconds || input.MaxClipSeconds > ClippingDefaultMaxClipSeconds || input.MinClipSeconds > input.MaxClipSeconds {
+		return ClippingJobCreate{}, errors.New("clip duration bounds must be within 15–180 seconds and minimum may not exceed maximum")
+	}
+	if input.CandidateLimit < ClippingMinCandidateLimit || input.CandidateLimit > ClippingMaxCandidateLimit {
+		return ClippingJobCreate{}, errors.New("candidate_limit must be between 7 and 10")
+	}
+	return input, nil
 }
 
 func clippingSourceInitialStatus(kind ClippingSourceKind) ClippingSourceStatus {

@@ -81,6 +81,10 @@ func (s *Store) migrateClipping() error {
 			id TEXT PRIMARY KEY,
 			batch_id TEXT NOT NULL REFERENCES clipping_batches(id) ON DELETE RESTRICT,
 			source_id TEXT NOT NULL REFERENCES clipping_sources(id) ON DELETE RESTRICT,
+			content_type TEXT NOT NULL DEFAULT 'general' CHECK(content_type IN ('general','podcast','comedy','gaming','movie')),
+			min_clip_seconds INTEGER NOT NULL DEFAULT 15 CHECK(min_clip_seconds BETWEEN 15 AND 180),
+			max_clip_seconds INTEGER NOT NULL DEFAULT 180 CHECK(max_clip_seconds BETWEEN 15 AND 180),
+			candidate_limit INTEGER NOT NULL DEFAULT 10 CHECK(candidate_limit BETWEEN 7 AND 10),
 			status TEXT NOT NULL CHECK(status IN ('queued','running','paused_budget','completed','failed','canceled')),
 			budget_limit_micro_usd INTEGER NOT NULL CHECK(budget_limit_micro_usd > 0),
 			reserved_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK(reserved_micro_usd >= 0),
@@ -101,6 +105,8 @@ func (s *Store) migrateClipping() error {
 			lease_expires_at INTEGER NOT NULL DEFAULT 0,
 			reserved_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK(reserved_micro_usd >= 0),
 			actual_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK(actual_micro_usd >= 0),
+			estimated_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK(estimated_micro_usd >= 0),
+			cost_reconciled INTEGER NOT NULL DEFAULT 1 CHECK(cost_reconciled IN (0,1)),
 			error TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
@@ -119,6 +125,14 @@ func (s *Store) migrateClipping() error {
 			lease_expires_at INTEGER NOT NULL,
 			reserved_micro_usd INTEGER NOT NULL CHECK(reserved_micro_usd >= 0),
 			actual_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK(actual_micro_usd >= 0),
+			estimated_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK(estimated_micro_usd >= 0),
+			cost_reconciled INTEGER NOT NULL DEFAULT 1 CHECK(cost_reconciled IN (0,1)),
+			operator_rate_micro_usd_per_second INTEGER NOT NULL DEFAULT 0 CHECK(operator_rate_micro_usd_per_second >= 0),
+			max_compute_seconds INTEGER NOT NULL DEFAULT 0 CHECK(max_compute_seconds >= 0),
+			pipeline_revision TEXT NOT NULL DEFAULT '',
+			reconciliation_reference TEXT NOT NULL DEFAULT '',
+			callback_received_at INTEGER NOT NULL DEFAULT 0,
+			callback_digest TEXT NOT NULL DEFAULT '',
 			started_at INTEGER NOT NULL,
 			settled_at INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
@@ -138,11 +152,266 @@ func (s *Store) migrateClipping() error {
 			PRIMARY KEY(job_id,artifact_type,version)
 		);
 		CREATE INDEX IF NOT EXISTS clipping_artifacts_job ON clipping_artifacts(job_id,artifact_type,version);
+		CREATE TABLE IF NOT EXISTS clipping_analysis_cache (
+			source_id TEXT NOT NULL REFERENCES clipping_sources(id) ON DELETE RESTRICT,
+			source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+			pipeline_key TEXT NOT NULL,
+			pipeline_revision TEXT NOT NULL DEFAULT 'framevault-m3-v1',
+			source_duration_ms INTEGER NOT NULL CHECK(source_duration_ms BETWEEN 1 AND 14400000),
+			payload_json TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY(source_id,pipeline_key)
+		);
+		CREATE TABLE IF NOT EXISTS clipping_analysis_claims (
+			source_id TEXT NOT NULL REFERENCES clipping_sources(id) ON DELETE RESTRICT,
+			source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+			pipeline_key TEXT NOT NULL,
+			job_id TEXT NOT NULL REFERENCES clipping_jobs(id) ON DELETE RESTRICT,
+			attempt_id TEXT NOT NULL DEFAULT '',
+			claimed_at INTEGER NOT NULL,
+			PRIMARY KEY(source_id,pipeline_key)
+		);
+		CREATE TABLE IF NOT EXISTS clipping_capability_expiry_index (
+			job_id TEXT NOT NULL,
+			attempt_id TEXT NOT NULL,
+			expires_at INTEGER NOT NULL CHECK(expires_at > 0),
+			PRIMARY KEY(job_id,attempt_id)
+		);
+		CREATE INDEX IF NOT EXISTS clipping_capability_expiry_due ON clipping_capability_expiry_index(expires_at,job_id,attempt_id);
 	`)
 	if err != nil {
 		return fmt.Errorf("initialize clipping storage: %w", err)
 	}
+	// Keep already-installed M2 databases forward compatible. SQLite does not
+	// support ADD COLUMN IF NOT EXISTS on every version used by the app, so
+	// inspect fixed table names and issue only missing additive columns.
+	for table, columns := range map[string]map[string]string{
+		"clipping_jobs": {
+			"content_type":     "TEXT NOT NULL DEFAULT 'general' CHECK(content_type IN ('general','podcast','comedy','gaming','movie'))",
+			"min_clip_seconds": "INTEGER NOT NULL DEFAULT 15 CHECK(min_clip_seconds BETWEEN 15 AND 180)",
+			"max_clip_seconds": "INTEGER NOT NULL DEFAULT 180 CHECK(max_clip_seconds BETWEEN 15 AND 180)",
+			"candidate_limit":  "INTEGER NOT NULL DEFAULT 10 CHECK(candidate_limit BETWEEN 7 AND 10)",
+		},
+		"clipping_stages": {
+			"estimated_micro_usd": "INTEGER NOT NULL DEFAULT 0 CHECK(estimated_micro_usd >= 0)",
+			"cost_reconciled":     "INTEGER NOT NULL DEFAULT 1 CHECK(cost_reconciled IN (0,1))",
+		},
+		"clipping_stage_attempts": {
+			"estimated_micro_usd":                "INTEGER NOT NULL DEFAULT 0 CHECK(estimated_micro_usd >= 0)",
+			"cost_reconciled":                    "INTEGER NOT NULL DEFAULT 1 CHECK(cost_reconciled IN (0,1))",
+			"operator_rate_micro_usd_per_second": "INTEGER NOT NULL DEFAULT 0 CHECK(operator_rate_micro_usd_per_second >= 0)",
+			"max_compute_seconds":                "INTEGER NOT NULL DEFAULT 0 CHECK(max_compute_seconds >= 0)",
+			"pipeline_revision":                  "TEXT NOT NULL DEFAULT ''",
+			"reconciliation_reference":           "TEXT NOT NULL DEFAULT ''",
+			"callback_received_at":               "INTEGER NOT NULL DEFAULT 0",
+			"callback_digest":                    "TEXT NOT NULL DEFAULT ''",
+		},
+		"clipping_analysis_cache": {
+			"pipeline_revision": "TEXT NOT NULL DEFAULT 'framevault-m3-v1'",
+		},
+	} {
+		for column, declaration := range columns {
+			if err := ensureClippingColumn(s.db, table, column, declaration); err != nil {
+				return fmt.Errorf("migrate clipping %s.%s: %w", table, column, err)
+			}
+		}
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS clipping_analysis_cache_revision ON clipping_analysis_cache(source_id,pipeline_revision,created_at DESC)`); err != nil {
+		return fmt.Errorf("index clipping analysis cache revision: %w", err)
+	}
 	return nil
+}
+
+func ensureClippingColumn(db *sql.DB, table, name, declaration string) error {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if columnName == name {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` ` + declaration)
+	return err
+}
+
+const maxClippingCapabilityCleanupBatch = 100
+
+type clippingLegacyCallbackExpirySetting struct {
+	Key        string
+	Ciphertext string
+}
+
+// SetClippingCallbackCapabilityExpiryIndex stores only public identifiers and
+// the absolute callback expiry. The bearer capabilities remain encrypted in
+// the settings table under their own stable keys.
+func (s *Store) SetClippingCallbackCapabilityExpiryIndex(jobID, attemptID string, expiresAt int64) error {
+	if s == nil || s.db == nil || !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") ||
+		!safeID(attemptID) || !strings.HasPrefix(attemptID, "clipatt_") || expiresAt <= 0 {
+		return ErrClippingInvalidState
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var existing int64
+	err = tx.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, jobID, attemptID).Scan(&existing)
+	if err == nil {
+		if existing != expiresAt {
+			return ErrClippingInvalidState
+		}
+		return tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO clipping_capability_expiry_index(job_id,attempt_id,expires_at) VALUES(?,?,?)`, jobID, attemptID, expiresAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// LegacyClippingCallbackExpirySettings returns a bounded page of old encrypted
+// callback-expiry settings that predate the durable index.
+func (s *Store) LegacyClippingCallbackExpirySettings(limit int) ([]clippingLegacyCallbackExpirySetting, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrClippingInvalidState
+	}
+	if limit <= 0 || limit > maxClippingCapabilityCleanupBatch {
+		limit = maxClippingCapabilityCleanupBatch
+	}
+	const prefix = "clipping_cap_"
+	const suffix = "_callback_expiry"
+	keyLength := len(prefix) + len("clipjob_") + 32 + 1 + len("clipatt_") + 32 + len(suffix)
+	rows, err := s.db.Query(`SELECT setting.key,setting.value FROM settings AS setting
+		WHERE substr(setting.key,1,?)=? AND length(setting.key)=? AND substr(setting.key,length(setting.key)-?+1)=?
+		AND NOT EXISTS (
+			SELECT 1 FROM clipping_capability_expiry_index AS expiry
+			WHERE setting.key=? || expiry.job_id || '_' || expiry.attempt_id || ?
+		)
+		ORDER BY setting.updated_at,setting.key LIMIT ?`, len(prefix), prefix, keyLength, len(suffix), suffix, prefix, suffix, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	settings := make([]clippingLegacyCallbackExpirySetting, 0)
+	for rows.Next() {
+		var setting clippingLegacyCallbackExpirySetting
+		if err := rows.Scan(&setting.Key, &setting.Ciphertext); err != nil {
+			return nil, err
+		}
+		settings = append(settings, setting)
+	}
+	return settings, rows.Err()
+}
+
+// DeleteClippingCapabilitiesForAttempt removes the five encrypted settings and
+// their nonsecret expiry index in one transaction. It is used for failed
+// pre-dispatch persistence and after expiry validation has established that
+// the callback window is closed.
+func (s *Store) DeleteClippingCapabilitiesForAttempt(jobID, attemptID string) error {
+	if s == nil || s.db == nil || !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") ||
+		!safeID(attemptID) || !strings.HasPrefix(attemptID, "clipatt_") {
+		return ErrClippingInvalidState
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM settings WHERE key IN (?,?,?,?,?)`,
+		clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityMedia),
+		clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityCallback),
+		clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityLease),
+		clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityMedia+"_expiry"),
+		clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityCallback+"_expiry")); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, jobID, attemptID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CleanupExpiredClippingCapabilities removes a bounded page of expired
+// capability settings atomically with their expiry-index rows. Repeated calls
+// are safe, including after a process restart or partial prior cleanup.
+func (s *Store) CleanupExpiredClippingCapabilities(now int64, limit int) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, ErrClippingInvalidState
+	}
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	if limit <= 0 || limit > maxClippingCapabilityCleanupBatch {
+		limit = maxClippingCapabilityCleanupBatch
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT job_id,attempt_id FROM clipping_capability_expiry_index WHERE expires_at<=? ORDER BY expires_at,job_id,attempt_id LIMIT ?`, now, limit)
+	if err != nil {
+		return 0, err
+	}
+	type expiredCapability struct{ jobID, attemptID string }
+	expired := make([]expiredCapability, 0)
+	for rows.Next() {
+		var item expiredCapability
+		if err := rows.Scan(&item.jobID, &item.attemptID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		expired = append(expired, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	cleaned := 0
+	for _, item := range expired {
+		result, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=? AND expires_at<=?`, item.jobID, item.attemptID, now)
+		if err != nil {
+			return 0, err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if changed == 0 {
+			continue
+		}
+		if _, err := tx.Exec(`DELETE FROM settings WHERE key IN (?,?,?,?,?)`,
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityMedia),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityLease),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityMedia+"_expiry"),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback+"_expiry")); err != nil {
+			return 0, err
+		}
+		cleaned++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return cleaned, nil
 }
 
 func newClippingStorageID(prefix string) (string, error) {
@@ -641,6 +910,119 @@ func (s *Store) ApplyClippingRetention(retainUntil int64) error {
 	return err
 }
 
+func clippingConservativeCallbackExpiry(attempt clippingAttemptRecord, source ClippingSource) int64 {
+	// The persisted expiry index is authoritative. For old attempts without an
+	// index, lease+the full callback grace is a safe upper bound even if the
+	// source retention value was shortened after the callback capability was
+	// issued. Keep the source-capped calculation in the maximum for consistency
+	// with the capability's source retention policy.
+	graceSeconds := int64(clippingCallbackAccountingGrace.Seconds())
+	if attempt.LeaseExpiresAt <= 0 || attempt.LeaseExpiresAt > math.MaxInt64-graceSeconds {
+		return 0
+	}
+	expiry := attempt.LeaseExpiresAt + graceSeconds
+	if calculated := clippingAnalysisCallbackExpiry(attempt, source); calculated > expiry {
+		expiry = calculated
+	}
+	return expiry
+}
+
+func (s *Store) conservativeClippingCallbackExpiry(jobID, attemptID string) (int64, error) {
+	if s == nil || s.db == nil || !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") ||
+		!safeID(attemptID) || !strings.HasPrefix(attemptID, "clipatt_") {
+		return 0, ErrClippingInvalidState
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var stageName string
+	if err := tx.QueryRow(`SELECT stage_name FROM clipping_stage_attempts WHERE job_id=? AND attempt_id=?`, jobID, attemptID).Scan(&stageName); err != nil {
+		return 0, err
+	}
+	attempt, err := readClippingAttempt(tx, jobID, stageName, attemptID)
+	if err != nil {
+		return 0, err
+	}
+	var sourceID string
+	if err := tx.QueryRow(`SELECT source_id FROM clipping_jobs WHERE id=?`, jobID).Scan(&sourceID); err != nil {
+		return 0, err
+	}
+	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, sourceID))
+	if err != nil {
+		return 0, err
+	}
+	expiresAt := clippingConservativeCallbackExpiry(attempt, source)
+	if expiresAt <= 0 {
+		return 0, ErrClippingInvalidState
+	}
+	return expiresAt, tx.Commit()
+}
+
+func clippingSourceHasActiveCallbackWindowTx(tx *sql.Tx, source ClippingSource, now int64) (bool, error) {
+	rows, err := tx.Query(`SELECT attempt.job_id,attempt.stage_name,attempt.attempt_id,job.status
+		FROM clipping_stage_attempts AS attempt
+		JOIN clipping_jobs AS job ON job.id=attempt.job_id
+		WHERE job.source_id=? ORDER BY attempt.started_at,attempt.attempt_id`, source.ID)
+	if err != nil {
+		return false, err
+	}
+	type attemptKey struct {
+		jobID, stageName, attemptID string
+		jobStatus                   ClippingJobStatus
+	}
+	keys := make([]attemptKey, 0)
+	for rows.Next() {
+		var key attemptKey
+		if err := rows.Scan(&key.jobID, &key.stageName, &key.attemptID, &key.jobStatus); err != nil {
+			rows.Close()
+			return false, err
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	for _, key := range keys {
+		if key.jobStatus == ClippingJobCompleted || key.jobStatus == ClippingJobFailed || key.jobStatus == ClippingJobCanceled {
+			continue
+		}
+		attempt, err := readClippingAttempt(tx, key.jobID, key.stageName, key.attemptID)
+		if err != nil {
+			return false, err
+		}
+		if attempt.ReconciliationReference == "known_no_submission" {
+			continue
+		}
+		if attempt.Status == "running" && attempt.LeaseExpiresAt > now {
+			return true, nil
+		}
+		var indexedExpiry int64
+		err = tx.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, key.jobID, key.attemptID).Scan(&indexedExpiry)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+		expiry := int64(0)
+		if err == nil {
+			expiry = indexedExpiry
+			if calculated := clippingAnalysisCallbackExpiry(attempt, source); calculated > expiry {
+				expiry = calculated
+			}
+		} else {
+			expiry = clippingConservativeCallbackExpiry(attempt, source)
+		}
+		if expiry <= 0 || expiry > now {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) TombstoneClippingSource(id string) error {
 	return s.tombstoneClippingSource(id, time.Now().Unix(), false)
 }
@@ -670,6 +1052,9 @@ func (s *Store) tombstoneClippingSource(id string, now int64, automatic bool) er
 		return err
 	}
 	if status == ClippingSourceDeleted {
+		if _, err := tx.Exec(`DELETE FROM clipping_analysis_claims WHERE source_id=?`, id); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	if automatic && (retainUntil <= 0 || retainUntil > now) {
@@ -682,15 +1067,32 @@ func (s *Store) tombstoneClippingSource(id string, now int64, automatic bool) er
 		return errors.New("clipping source is protected by an active media lease")
 	}
 	var active int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM clipping_jobs WHERE source_id=? AND status IN ('queued','running','paused_budget')`, id).Scan(&active); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM clipping_jobs WHERE source_id=? AND status IN ('queued','running')`, id).Scan(&active); err != nil {
 		return err
 	}
 	if active != 0 {
 		return errors.New("clipping source is referenced by an active job")
 	}
+	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, id))
+	if err != nil {
+		return err
+	}
+	callbackActive, err := clippingSourceHasActiveCallbackWindowTx(tx, source, now)
+	if err != nil {
+		return err
+	}
+	if callbackActive {
+		return errors.New("clipping source is protected until every worker callback window expires")
+	}
 	// Source-derived artifacts can contain transcripts and analysis content;
 	// erase them with the media while keeping job, stage, and cost audit rows.
+	if _, err := tx.Exec(`DELETE FROM clipping_analysis_claims WHERE source_id=?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM clipping_artifacts WHERE job_id IN (SELECT id FROM clipping_jobs WHERE source_id=?)`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, id); err != nil {
 		return err
 	}
 	_, err = tx.Exec(`UPDATE clipping_sources SET status='deleted',source_url='',deleted_at=?,updated_at=?,cleanup_complete=0,next_import_at=0,import_lease_until=0,media_lease_until=0 WHERE id=?`, now, now, id)
@@ -725,24 +1127,58 @@ func (s *Store) ExpiredClippingSources(now int64, limit int) ([]ClippingSource, 
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	scanLimit := limit * 5
+	if scanLimit > 500 {
+		scanLimit = 500
+	}
 	rows, err := s.db.Query(`SELECT `+clippingSourceColumns()+` FROM clipping_sources AS src WHERE
 		(src.status='deleted' AND src.cleanup_complete=0) OR
 		(src.status<>'deleted' AND src.retain_until>0 AND src.retain_until<=? AND src.media_lease_until<=? AND src.import_lease_until<=? AND NOT EXISTS (
-			SELECT 1 FROM clipping_jobs AS job WHERE job.source_id=src.id AND job.status IN ('queued','running','paused_budget')
-		)) ORDER BY CASE WHEN src.status='deleted' THEN 0 ELSE 1 END,src.retain_until,src.created_at LIMIT ?`, now, now, now, limit)
+			SELECT 1 FROM clipping_jobs AS job WHERE job.source_id=src.id AND job.status IN ('queued','running')
+		)) ORDER BY CASE WHEN src.status='deleted' THEN 0 ELSE 1 END,src.retain_until,src.created_at LIMIT ?`, now, now, now, scanLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	sources := make([]ClippingSource, 0)
+	candidates := make([]ClippingSource, 0, scanLimit)
 	for rows.Next() {
 		source, err := scanClippingSource(rows)
 		if err != nil {
 			return nil, err
 		}
-		sources = append(sources, source)
+		candidates = append(candidates, source)
 	}
-	return sources, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	sources := make([]ClippingSource, 0, limit)
+	for _, source := range candidates {
+		if source.Status != ClippingSourceDeleted {
+			tx, err := s.db.Begin()
+			if err != nil {
+				return nil, err
+			}
+			blocked, checkErr := clippingSourceHasActiveCallbackWindowTx(tx, source, now)
+			rollbackErr := tx.Rollback()
+			if checkErr != nil {
+				return nil, checkErr
+			}
+			if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				return nil, rollbackErr
+			}
+			if blocked {
+				continue
+			}
+		}
+		sources = append(sources, source)
+		if len(sources) >= limit {
+			break
+		}
+	}
+	return sources, nil
 }
 
 func cleanClippingError(value string) string {
@@ -763,7 +1199,7 @@ func clippingBatchColumns() string {
 }
 
 func clippingJobColumns() string {
-	return `id,batch_id,source_id,status,budget_limit_micro_usd,reserved_micro_usd,spent_micro_usd,error,created_at,updated_at`
+	return `id,batch_id,source_id,content_type,min_clip_seconds,max_clip_seconds,candidate_limit,status,budget_limit_micro_usd,reserved_micro_usd,spent_micro_usd,error,created_at,updated_at`
 }
 
 func scanClippingBatch(row clippingRowScanner) (ClippingBatch, error) {
@@ -774,7 +1210,7 @@ func scanClippingBatch(row clippingRowScanner) (ClippingBatch, error) {
 
 func scanClippingJob(row clippingRowScanner) (ClippingJob, error) {
 	var job ClippingJob
-	err := row.Scan(&job.ID, &job.BatchID, &job.SourceID, &job.Status, &job.BudgetLimitMicroUSD, &job.ReservedMicroUSD, &job.SpentMicroUSD, &job.Error, &job.CreatedAt, &job.UpdatedAt)
+	err := row.Scan(&job.ID, &job.BatchID, &job.SourceID, &job.ContentType, &job.MinClipSeconds, &job.MaxClipSeconds, &job.CandidateLimit, &job.Status, &job.BudgetLimitMicroUSD, &job.ReservedMicroUSD, &job.SpentMicroUSD, &job.Error, &job.CreatedAt, &job.UpdatedAt)
 	return job, err
 }
 
@@ -782,13 +1218,36 @@ func clippingRequestHash(input ClippingBatchCreate) (string, error) {
 	type requestJob struct {
 		SourceID            string `json:"source_id"`
 		BudgetLimitMicroUSD int64  `json:"budget_limit_micro_usd"`
+		ContentType         string `json:"content_type,omitempty"`
+		MinClipSeconds      int    `json:"min_clip_seconds,omitempty"`
+		MaxClipSeconds      int    `json:"max_clip_seconds,omitempty"`
+		CandidateLimit      int    `json:"candidate_limit,omitempty"`
 	}
 	canonical := struct {
 		BudgetLimitMicroUSD int64        `json:"budget_limit_micro_usd"`
 		Jobs                []requestJob `json:"jobs"`
 	}{BudgetLimitMicroUSD: input.BudgetLimitMicroUSD, Jobs: make([]requestJob, len(input.Jobs))}
 	for i, job := range input.Jobs {
-		canonical.Jobs[i] = requestJob{SourceID: job.SourceID, BudgetLimitMicroUSD: job.BudgetLimitMicroUSD}
+		selection := job
+		// Omit M3 defaults so the existing M2 general/default idempotency hash
+		// remains stable across this additive upgrade.
+		if selection.ContentType == "general" {
+			selection.ContentType = ""
+		}
+		if selection.MinClipSeconds == ClippingDefaultMinClipSeconds {
+			selection.MinClipSeconds = 0
+		}
+		if selection.MaxClipSeconds == ClippingDefaultMaxClipSeconds {
+			selection.MaxClipSeconds = 0
+		}
+		if selection.CandidateLimit == ClippingDefaultCandidateLimit {
+			selection.CandidateLimit = 0
+		}
+		canonical.Jobs[i] = requestJob{
+			SourceID: job.SourceID, BudgetLimitMicroUSD: job.BudgetLimitMicroUSD,
+			ContentType: selection.ContentType, MinClipSeconds: selection.MinClipSeconds,
+			MaxClipSeconds: selection.MaxClipSeconds, CandidateLimit: selection.CandidateLimit,
+		}
 	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
@@ -808,10 +1267,15 @@ func (s *Store) CreateClippingBatch(input ClippingBatchCreate) (ClippingBatch, [
 	if len(input.Jobs) == 0 || len(input.Jobs) > MaxClippingBatchJobs {
 		return ClippingBatch{}, nil, false, fmt.Errorf("clipping batch must contain between 1 and %d jobs", MaxClippingBatchJobs)
 	}
-	for _, job := range input.Jobs {
+	for index, job := range input.Jobs {
 		if !safeClippingSourceID(job.SourceID) || job.BudgetLimitMicroUSD <= 0 {
 			return ClippingBatch{}, nil, false, errors.New("each clipping job requires a valid source and positive microUSD budget")
 		}
+		normalized, normalizeErr := normalizeClippingSelection(job)
+		if normalizeErr != nil {
+			return ClippingBatch{}, nil, false, normalizeErr
+		}
+		input.Jobs[index] = normalized
 	}
 	requestHash, err := clippingRequestHash(input)
 	if err != nil {
@@ -880,7 +1344,7 @@ func (s *Store) CreateClippingBatch(input ClippingBatchCreate) (ClippingBatch, [
 	}
 	jobs := make([]ClippingJob, 0, len(pending))
 	for _, item := range pending {
-		_, err := tx.Exec(`INSERT INTO clipping_jobs(id,batch_id,source_id,status,budget_limit_micro_usd,created_at,updated_at) VALUES(?,?,?,'queued',?,?,?)`, item.id, batchID, item.spec.SourceID, item.spec.BudgetLimitMicroUSD, now, now)
+		_, err := tx.Exec(`INSERT INTO clipping_jobs(id,batch_id,source_id,content_type,min_clip_seconds,max_clip_seconds,candidate_limit,status,budget_limit_micro_usd,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'queued',?,?,?)`, item.id, batchID, item.spec.SourceID, item.spec.ContentType, item.spec.MinClipSeconds, item.spec.MaxClipSeconds, item.spec.CandidateLimit, item.spec.BudgetLimitMicroUSD, now, now)
 		if err != nil {
 			return ClippingBatch{}, nil, false, err
 		}
@@ -889,7 +1353,7 @@ func (s *Store) CreateClippingBatch(input ClippingBatchCreate) (ClippingBatch, [
 		if err != nil {
 			return ClippingBatch{}, nil, false, err
 		}
-		jobs = append(jobs, ClippingJob{ID: item.id, BatchID: batchID, SourceID: item.spec.SourceID, Status: ClippingJobQueued, BudgetLimitMicroUSD: item.spec.BudgetLimitMicroUSD, CreatedAt: now, UpdatedAt: now})
+		jobs = append(jobs, ClippingJob{ID: item.id, BatchID: batchID, SourceID: item.spec.SourceID, ContentType: item.spec.ContentType, MinClipSeconds: item.spec.MinClipSeconds, MaxClipSeconds: item.spec.MaxClipSeconds, CandidateLimit: item.spec.CandidateLimit, Status: ClippingJobQueued, BudgetLimitMicroUSD: item.spec.BudgetLimitMicroUSD, CreatedAt: now, UpdatedAt: now})
 	}
 	if err := tx.Commit(); err != nil {
 		return ClippingBatch{}, nil, false, err
@@ -968,12 +1432,14 @@ func (s *Store) ClippingJobs(batchID string) ([]ClippingJob, error) {
 }
 
 func clippingStageColumns() string {
-	return `job_id,name,status,idempotency_key,attempt_id,attempt,lease_expires_at,reserved_micro_usd,actual_micro_usd,error,created_at,updated_at`
+	return `job_id,name,status,idempotency_key,attempt_id,attempt,lease_expires_at,reserved_micro_usd,actual_micro_usd,estimated_micro_usd,cost_reconciled,error,created_at,updated_at`
 }
 
 func scanClippingStage(row clippingRowScanner) (ClippingStage, error) {
 	var stage ClippingStage
-	err := row.Scan(&stage.JobID, &stage.Name, &stage.Status, &stage.IdempotencyKey, &stage.AttemptID, &stage.Attempt, &stage.LeaseExpiresAt, &stage.ReservedMicroUSD, &stage.ActualMicroUSD, &stage.Error, &stage.CreatedAt, &stage.UpdatedAt)
+	var reconciled int
+	err := row.Scan(&stage.JobID, &stage.Name, &stage.Status, &stage.IdempotencyKey, &stage.AttemptID, &stage.Attempt, &stage.LeaseExpiresAt, &stage.ReservedMicroUSD, &stage.ActualMicroUSD, &stage.EstimatedMicroUSD, &reconciled, &stage.Error, &stage.CreatedAt, &stage.UpdatedAt)
+	stage.CostReconciled = reconciled != 0
 	return stage, err
 }
 
@@ -1464,13 +1930,29 @@ func (s *Store) RetryClippingStage(jobID, name string) (ClippingStage, error) {
 	if stage.Status != ClippingStageFailed || job.Status != ClippingJobFailed {
 		return ClippingStage{}, ErrClippingInvalidState
 	}
+	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, job.SourceID))
+	if err != nil {
+		return ClippingStage{}, err
+	}
+	if source.Status != ClippingSourceReady || source.RetainUntil > 0 && source.RetainUntil <= now {
+		return ClippingStage{}, fmt.Errorf("%w: source media is no longer retained; upload the source again before retrying", ErrClippingInvalidState)
+	}
 	if stage.AttemptID != "" {
-		var settledAt int64
-		if err := tx.QueryRow(`SELECT settled_at FROM clipping_stage_attempts WHERE attempt_id=?`, stage.AttemptID).Scan(&settledAt); err != nil {
+		attempt, err := readClippingAttempt(tx, jobID, name, stage.AttemptID)
+		if err != nil {
 			return ClippingStage{}, err
 		}
-		if settledAt == 0 {
+		if attempt.SettledAt == 0 || !attempt.CostReconciled {
 			return ClippingStage{}, errors.New("cannot retry a stage while prior dispatch cost is unresolved")
+		}
+		if attempt.PipelineRevision != "" && attempt.CallbackReceivedAt == 0 && attempt.ReconciliationReference != "known_no_submission" {
+			callbackExpiresAt := clippingAnalysisCallbackExpiry(attempt, source)
+			if callbackExpiresAt <= 0 {
+				return ClippingStage{}, fmt.Errorf("%w: prior worker callback expiry is invalid; verify source retention and the attempt lease before retrying", ErrClippingInvalidState)
+			}
+			if callbackExpiresAt > now {
+				return ClippingStage{}, fmt.Errorf("%w: prior worker callback window remains open until %s UTC; wait for it to expire before retrying", ErrClippingInvalidState, time.Unix(callbackExpiresAt, 0).UTC().Format("2006-01-02 15:04:05"))
+			}
 		}
 	}
 	if _, err := tx.Exec(`UPDATE clipping_stages SET status='queued',attempt_id='',error='',lease_expires_at=0,reserved_micro_usd=0,updated_at=? WHERE job_id=? AND name=?`, now, jobID, name); err != nil {
@@ -1484,6 +1966,7 @@ func (s *Store) RetryClippingStage(jobID, name string) (ClippingStage, error) {
 	}
 	stage.Status = ClippingStageQueued
 	stage.Error = ""
+	stage.AttemptID = ""
 	stage.LeaseExpiresAt = 0
 	stage.ReservedMicroUSD = 0
 	stage.UpdatedAt = now
@@ -1494,23 +1977,33 @@ func (s *Store) RetryClippingStage(jobID, name string) (ClippingStage, error) {
 }
 
 type clippingAttemptRecord struct {
-	AttemptID        string
-	JobID            string
-	StageName        string
-	AttemptNo        int
-	IdempotencyKey   string
-	TokenHash        string
-	Status           string
-	LeaseExpiresAt   int64
-	ReservedMicroUSD int64
-	ActualMicroUSD   int64
-	SettledAt        int64
+	AttemptID                     string
+	JobID                         string
+	StageName                     string
+	AttemptNo                     int
+	IdempotencyKey                string
+	TokenHash                     string
+	Status                        string
+	LeaseExpiresAt                int64
+	ReservedMicroUSD              int64
+	ActualMicroUSD                int64
+	EstimatedMicroUSD             int64
+	CostReconciled                bool
+	ReconciliationReference       string
+	OperatorRateMicroUSDPerSecond int64
+	MaxComputeSeconds             int64
+	PipelineRevision              string
+	CallbackReceivedAt            int64
+	CallbackDigest                string
+	SettledAt                     int64
 }
 
 func readClippingAttempt(tx *sql.Tx, jobID, stageName, attemptID string) (clippingAttemptRecord, error) {
 	var attempt clippingAttemptRecord
-	err := tx.QueryRow(`SELECT attempt_id,job_id,stage_name,attempt_no,idempotency_key,token_hash,status,lease_expires_at,reserved_micro_usd,actual_micro_usd,settled_at FROM clipping_stage_attempts WHERE attempt_id=? AND job_id=? AND stage_name=?`, attemptID, jobID, stageName).Scan(
-		&attempt.AttemptID, &attempt.JobID, &attempt.StageName, &attempt.AttemptNo, &attempt.IdempotencyKey, &attempt.TokenHash, &attempt.Status, &attempt.LeaseExpiresAt, &attempt.ReservedMicroUSD, &attempt.ActualMicroUSD, &attempt.SettledAt)
+	var reconciled int
+	err := tx.QueryRow(`SELECT attempt_id,job_id,stage_name,attempt_no,idempotency_key,token_hash,status,lease_expires_at,reserved_micro_usd,actual_micro_usd,estimated_micro_usd,cost_reconciled,reconciliation_reference,operator_rate_micro_usd_per_second,max_compute_seconds,pipeline_revision,callback_received_at,callback_digest,settled_at FROM clipping_stage_attempts WHERE attempt_id=? AND job_id=? AND stage_name=?`, attemptID, jobID, stageName).Scan(
+		&attempt.AttemptID, &attempt.JobID, &attempt.StageName, &attempt.AttemptNo, &attempt.IdempotencyKey, &attempt.TokenHash, &attempt.Status, &attempt.LeaseExpiresAt, &attempt.ReservedMicroUSD, &attempt.ActualMicroUSD, &attempt.EstimatedMicroUSD, &reconciled, &attempt.ReconciliationReference, &attempt.OperatorRateMicroUSDPerSecond, &attempt.MaxComputeSeconds, &attempt.PipelineRevision, &attempt.CallbackReceivedAt, &attempt.CallbackDigest, &attempt.SettledAt)
+	attempt.CostReconciled = reconciled != 0
 	return attempt, err
 }
 
@@ -1806,6 +2299,17 @@ func (s *Store) CompleteClippingStage(jobID, name, attemptID, leaseToken string,
 }
 
 func (s *Store) FailClippingStage(jobID, name, attemptID, leaseToken, reason string, retryable bool, actualCostMicroUSD int64) (ClippingStage, error) {
+	return s.failClippingStage(jobID, name, attemptID, leaseToken, reason, retryable, actualCostMicroUSD, false)
+}
+
+// FailClippingStageBeforeSubmit settles a prepared analysis attempt at known
+// zero cost when the dispatcher proves no HTTP submission began. This is
+// distinct from invoice reconciliation after an ambiguous request.
+func (s *Store) FailClippingStageBeforeSubmit(jobID, name, attemptID, leaseToken, reason string) (ClippingStage, error) {
+	return s.failClippingStage(jobID, name, attemptID, leaseToken, reason, false, 0, true)
+}
+
+func (s *Store) failClippingStage(jobID, name, attemptID, leaseToken, reason string, retryable bool, actualCostMicroUSD int64, knownNoSubmission bool) (ClippingStage, error) {
 	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || !validStageName(name) || attemptID == "" || leaseToken == "" || actualCostMicroUSD < 0 {
 		return ClippingStage{}, ErrClippingStaleAttempt
 	}
@@ -1867,6 +2371,14 @@ func (s *Store) FailClippingStage(jobID, name, attemptID, leaseToken, reason str
 		if _, err := tx.Exec(`UPDATE clipping_jobs SET status=?,error=?,updated_at=? WHERE id=?`, jobStatus, reason, now, jobID); err != nil {
 			return ClippingStage{}, err
 		}
+		if knownNoSubmission {
+			if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET cost_reconciled=1,reconciliation_reference='known_no_submission' WHERE attempt_id=?`, attemptID); err != nil {
+				return ClippingStage{}, err
+			}
+			if _, err := tx.Exec(`UPDATE clipping_stages SET cost_reconciled=1 WHERE job_id=? AND name=?`, jobID, name); err != nil {
+				return ClippingStage{}, err
+			}
+		}
 		if _, err := refreshClippingBatchStatus(tx, job.BatchID, now); err != nil {
 			return ClippingStage{}, err
 		}
@@ -1910,6 +2422,14 @@ func (s *Store) FailClippingStage(jobID, name, attemptID, leaseToken, reason str
 		}
 		if !canceled {
 			if _, err := refreshClippingJobStatus(tx, jobID, now); err != nil {
+				return ClippingStage{}, err
+			}
+		}
+		if knownNoSubmission {
+			if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET cost_reconciled=1,reconciliation_reference='known_no_submission' WHERE attempt_id=?`, attemptID); err != nil {
+				return ClippingStage{}, err
+			}
+			if _, err := tx.Exec(`UPDATE clipping_stages SET cost_reconciled=1 WHERE job_id=? AND name=?`, jobID, name); err != nil {
 				return ClippingStage{}, err
 			}
 		}
