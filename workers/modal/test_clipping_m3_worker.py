@@ -1131,6 +1131,30 @@ class ClippingM3WorkerTests(unittest.TestCase):
             self.assertIsInstance(configured_image, ast.Name, function_name)
             self.assertEqual(configured_image.id, image_name, function_name)
 
+    def test_analysis_image_pins_match_the_worker_requirements_file(self):
+        worker_path = Path(__file__).with_name("clipping_m3_worker.py")
+        worker_source = worker_path.read_text(encoding="utf-8")
+        tree = ast.parse(worker_source)
+        pin_assignment = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "CLIPPING_IMAGE_PACKAGES"
+        )
+        self.assertIsInstance(pin_assignment.value, ast.Tuple)
+        image_pins = tuple(item.value for item in pin_assignment.value.elts)
+        requirements_pins = tuple(
+            line.strip()
+            for line in worker_path.with_name("requirements-clipping.txt")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        self.assertEqual(image_pins, requirements_pins)
+        self.assertNotIn("pip_install_from_requirements", worker_source)
+
     @unittest.skipUnless(importlib.util.find_spec("modal"), "pinned Modal SDK is not installed")
     def test_modal_registration_mounts_worker_modules_without_network_or_rpc(self):
         worker_path = Path(__file__).with_name("clipping_m3_worker.py").resolve()
@@ -1197,6 +1221,44 @@ class ClippingM3WorkerTests(unittest.TestCase):
                         local_path,
                         (function_name, image_name, remote_path),
                     )
+        finally:
+            sys.modules.pop(module_name, None)
+
+    @unittest.skipUnless(importlib.util.find_spec("modal"), "pinned Modal SDK is not installed")
+    def test_modal_registration_survives_flat_deployed_module_path(self):
+        worker_path = Path(__file__).with_name("clipping_m3_worker.py").resolve()
+        module_name = "_framevault_clipping_m3_worker_flat_import_contract"
+        spec = importlib.util.spec_from_file_location(module_name, worker_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        worker_module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = worker_module
+
+        def reject_network(*_args, **_kwargs):
+            raise AssertionError("Modal registration must not make network or RPC calls")
+
+        try:
+            with (
+                patch("socket.create_connection", side_effect=reject_network),
+                patch("socket.socket.connect", side_effect=reject_network),
+                patch("socket.getaddrinfo", side_effect=reject_network),
+            ):
+                spec.loader.exec_module(worker_module)
+                with (
+                    patch.object(worker_module, "__file__", "/root/clipping_m3_worker.py"),
+                    patch.object(
+                        worker_module,
+                        "_add_worker_source_files",
+                        side_effect=lambda image: image,
+                    ),
+                ):
+                    deployed_app = worker_module._install_modal_app()
+
+            self.assertIsNotNone(deployed_app)
+            self.assertEqual(
+                set(worker_module._MODAL_FUNCTIONS),
+                {"model_prewarm", "ledger_owner", "callback_replay", "analysis", "dispatch_api"},
+            )
         finally:
             sys.modules.pop(module_name, None)
 

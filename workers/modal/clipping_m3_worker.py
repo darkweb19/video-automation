@@ -102,6 +102,19 @@ LEDGER_VOLUME_NAME = "framevault-clipping-worker-ledger"
 MODEL_CACHE_DIR = "/model-cache"
 LEDGER_DIR = "/worker-state"
 LEDGER_PATH = f"{LEDGER_DIR}/clipping-dispatches.sqlite3"
+# Keep the analysis image pins in sync with requirements-clipping.txt. Modal
+# imports this module inside deployed containers from /root, where the source
+# tree is intentionally flattened and repository-relative paths do not exist.
+CLIPPING_IMAGE_PACKAGES = (
+    "modal==1.1.4",
+    "fastapi==0.115.12",
+    "faster-whisper==1.1.1",
+    "ctranslate2==4.6.0",
+    "av==14.2.0",
+    "numpy==1.26.4",
+    "huggingface-hub==0.30.2",
+    "tokenizers==0.21.1",
+)
 MAX_DISPATCH_BODY_BYTES = 64 * 1024
 MAX_CALLBACK_BODY_BYTES = MAX_ARTIFACT_BYTES + MAX_CALLBACK_OVERHEAD_BYTES
 MAX_MEDIA_STREAM_START_SKEW_MS = 50
@@ -1384,12 +1397,10 @@ def _install_modal_app() -> Any:
         MODEL_PREWARM_SECRET_NAME,
         required_keys=[WORKER_MODEL_REVISION_KEY],
     )
-    project_root = Path(__file__).resolve().parents[2]
-    requirements = project_root / "workers" / "modal" / "requirements-clipping.txt"
     gpu_image = _add_worker_source_files(
         modal.Image.debian_slim(python_version="3.11")
         .apt_install("ffmpeg")
-        .pip_install_from_requirements(str(requirements))
+        .pip_install(*CLIPPING_IMAGE_PACKAGES)
         .env({"FRAMEVAULT_WHISPER_DEVICE": "cuda", "FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR})
     )
     prewarm_image = _add_worker_source_files(
