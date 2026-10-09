@@ -3,6 +3,7 @@
 import asyncio
 import ast
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -1039,6 +1040,165 @@ class ClippingM3WorkerTests(unittest.TestCase):
                 spawn_targets.add(function_reference.slice.value)
         self.assertEqual(spawn_targets, {"analysis", "callback_replay"})
         self.assertTrue(all(admission_lines[0] < node.lineno for node in spawn_calls))
+
+    def test_every_registered_modal_image_mounts_worker_sibling_modules(self):
+        worker_path = Path(__file__).with_name("clipping_m3_worker.py")
+        worker_source = worker_path.read_text(encoding="utf-8")
+        tree = ast.parse(worker_source)
+        factory = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_install_modal_app"
+        )
+        image_names = {"gpu_image", "prewarm_image", "api_image"}
+        image_assignments = {
+            node.targets[0].id: node.value
+            for node in factory.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in image_names
+        }
+        self.assertEqual(set(image_assignments), image_names)
+        for image_name, image_expression in image_assignments.items():
+            self.assertIsInstance(image_expression, ast.Call, image_name)
+            self.assertIsInstance(image_expression.func, ast.Name, image_name)
+            self.assertEqual(image_expression.func.id, "_add_worker_source_files", image_name)
+
+        helper = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_add_worker_source_files"
+        )
+        source_mounts = [
+            node
+            for node in ast.walk(helper)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_local_file"
+        ]
+        self.assertEqual(len(source_mounts), 2)
+        mounted_remote_paths = {
+            next(keyword.value.value for keyword in call.keywords if keyword.arg == "remote_path")
+            for call in source_mounts
+        }
+        self.assertEqual(
+            mounted_remote_paths,
+            {"/root/clipping_analysis.py", "/root/clipping_protocol.py"},
+        )
+        local_module_names = set()
+        for call in source_mounts:
+            local_path = call.args[0]
+            self.assertIsInstance(local_path, ast.Call)
+            self.assertIsInstance(local_path.func, ast.Name)
+            self.assertEqual(local_path.func.id, "str")
+            path_expression = local_path.args[0]
+            self.assertIsInstance(path_expression, ast.BinOp)
+            self.assertIsInstance(path_expression.left, ast.Name)
+            self.assertEqual(path_expression.left.id, "source_dir")
+            self.assertIsInstance(path_expression.right, ast.Constant)
+            local_module_names.add(path_expression.right.value)
+        self.assertEqual(local_module_names, {"clipping_analysis.py", "clipping_protocol.py"})
+
+        image_for_function = {
+            "clipping_model_prewarm_task": "prewarm_image",
+            "clipping_ledger_owner": "api_image",
+            "clipping_callback_replay_task": "api_image",
+            "clipping_analysis_task": "gpu_image",
+            "clipping_dispatch_api": "api_image",
+        }
+        registrations = {}
+        for node in ast.walk(factory):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Call):
+                continue
+            app_function = node.func
+            if not (
+                isinstance(app_function.func, ast.Attribute)
+                and app_function.func.attr == "function"
+                and isinstance(app_function.func.value, ast.Name)
+                and app_function.func.value.id == "app"
+            ):
+                continue
+            implementation = node.args[0].id
+            if implementation == "asgi_api":
+                implementation = "clipping_dispatch_api"
+            registrations[implementation] = {
+                keyword.arg: keyword.value for keyword in app_function.keywords
+            }
+        self.assertEqual(set(registrations), set(image_for_function))
+        for function_name, image_name in image_for_function.items():
+            configured_image = registrations[function_name]["image"]
+            self.assertIsInstance(configured_image, ast.Name, function_name)
+            self.assertEqual(configured_image.id, image_name, function_name)
+
+    @unittest.skipUnless(importlib.util.find_spec("modal"), "pinned Modal SDK is not installed")
+    def test_modal_registration_mounts_worker_modules_without_network_or_rpc(self):
+        worker_path = Path(__file__).with_name("clipping_m3_worker.py").resolve()
+        module_name = "_framevault_clipping_m3_worker_import_contract"
+        spec = importlib.util.spec_from_file_location(module_name, worker_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        worker_module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = worker_module
+
+        def reject_network(*_args, **_kwargs):
+            raise AssertionError("Modal registration must not make network or RPC calls")
+
+        try:
+            with (
+                patch("socket.create_connection", side_effect=reject_network),
+                patch("socket.socket.connect", side_effect=reject_network),
+                patch("socket.getaddrinfo", side_effect=reject_network),
+            ):
+                spec.loader.exec_module(worker_module)
+
+            self.assertIsNotNone(worker_module.app)
+            self.assertEqual(
+                set(worker_module._MODAL_FUNCTIONS),
+                {"model_prewarm", "ledger_owner", "callback_replay", "analysis", "dispatch_api"},
+            )
+            expected_images = {
+                "model_prewarm": "prewarm_image",
+                "ledger_owner": "api_image",
+                "callback_replay": "api_image",
+                "analysis": "gpu_image",
+                "dispatch_api": "api_image",
+            }
+            source_dir = worker_path.parent
+            expected_mounts = {
+                "/root/clipping_analysis.py": source_dir / "clipping_analysis.py",
+                "/root/clipping_protocol.py": source_dir / "clipping_protocol.py",
+            }
+            for function_name, image_name in expected_images.items():
+                function = worker_module._MODAL_FUNCTIONS[function_name]
+                image = function.spec.image
+                mount_map = {}
+                pending = [image]
+                visited = set()
+                while pending:
+                    current = pending.pop()
+                    if id(current) in visited:
+                        continue
+                    visited.add(id(current))
+                    dependencies = getattr(current, "_deps", None)
+                    if not callable(dependencies):
+                        continue
+                    for dependency in dependencies():
+                        entries = getattr(dependency, "entries", None)
+                        if entries is not None:
+                            for entry in entries:
+                                if hasattr(entry, "remote_path") and hasattr(entry, "local_file"):
+                                    mount_map[str(entry.remote_path)] = Path(entry.local_file).resolve()
+                        else:
+                            pending.append(dependency)
+                for remote_path, local_path in expected_mounts.items():
+                    self.assertEqual(
+                        mount_map.get(remote_path),
+                        local_path,
+                        (function_name, image_name, remote_path),
+                    )
+        finally:
+            sys.modules.pop(module_name, None)
 
     def test_remote_ledger_rpc_replay_and_delivery_follow_serialized_operation_order(self):
         now = int(time.time())

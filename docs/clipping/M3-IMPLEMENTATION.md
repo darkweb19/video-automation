@@ -32,6 +32,8 @@ Before enabling dispatch, separately authorize deployment and then run the CPU-o
 
 The Modal analysis function requests 524,288 MiB (512 GiB) of ephemeral disk, the minimum accepted by Modal's current 524,288–3,145,728 MiB range. This platform resource request is separate from the worker's 20 GiB source-file limit; it does not represent measured per-job scratch use or a quoted charge.
 
+Modal stages the entry script at `/root`; every registered function image also mounts the sibling `clipping_analysis.py` and `clipping_protocol.py` files at that import location. Keep those source mounts on the API, ledger, callback replay, CPU prewarm, and GPU analysis images when changing the worker's image definitions.
+
 ```sh
 modal deploy workers/modal/clipping_m3_worker.py
 modal run workers/modal/clipping_m3_worker.py::app.clipping_model_prewarm_task

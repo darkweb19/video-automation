@@ -1341,6 +1341,22 @@ def clipping_dispatch_api() -> Any:
     return api
 
 
+def _add_worker_source_files(image: Any) -> Any:
+    """Mount sibling imports into /root for every registered worker image."""
+
+    source_dir = Path(__file__).resolve().parent
+    return (
+        image.add_local_file(
+            str(source_dir / "clipping_analysis.py"),
+            remote_path="/root/clipping_analysis.py",
+        )
+        .add_local_file(
+            str(source_dir / "clipping_protocol.py"),
+            remote_path="/root/clipping_protocol.py",
+        )
+    )
+
+
 def _install_modal_app() -> Any:
     """Create Modal registrations using only module-global handlers."""
 
@@ -1370,19 +1386,23 @@ def _install_modal_app() -> Any:
     )
     project_root = Path(__file__).resolve().parents[2]
     requirements = project_root / "workers" / "modal" / "requirements-clipping.txt"
-    gpu_image = (
+    gpu_image = _add_worker_source_files(
         modal.Image.debian_slim(python_version="3.11")
         .apt_install("ffmpeg")
         .pip_install_from_requirements(str(requirements))
         .env({"FRAMEVAULT_WHISPER_DEVICE": "cuda", "FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR})
     )
-    prewarm_image = modal.Image.debian_slim(python_version="3.11").pip_install(
-        "modal==1.1.4",
-        "huggingface-hub==0.30.2",
-    ).env({"FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR})
-    api_image = modal.Image.debian_slim(python_version="3.11").pip_install(
-        "modal==1.1.4",
-        "fastapi==0.115.12",
+    prewarm_image = _add_worker_source_files(
+        modal.Image.debian_slim(python_version="3.11").pip_install(
+            "modal==1.1.4",
+            "huggingface-hub==0.30.2",
+        ).env({"FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR})
+    )
+    api_image = _add_worker_source_files(
+        modal.Image.debian_slim(python_version="3.11").pip_install(
+            "modal==1.1.4",
+            "fastapi==0.115.12",
+        )
     )
 
     # Modal 1.1.4 App.function requires globally addressable functions unless
