@@ -1,0 +1,129 @@
+{
+  "algorithm_versions": {
+    "audio_events": "not-run-no-audio-stream-v1",
+    "candidate_inspection": "ffmpeg-dense-candidate-window-v2-profile-pool",
+    "context_timeline": "extractive-lexical-context-v1",
+    "ffmpeg_configuration_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "ffmpeg_executable_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "ffmpeg_version": "ffmpeg version 7.0 fixture",
+    "os_release_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "pipeline_revision": "framevault_m3_worker_v1",
+    "python_distributions_count": "17",
+    "python_distributions_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "runtime_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "visual_events": "ffmpeg-scene-motion-v1"
+  },
+  "analysis_version": "framevault.analysis.source.v1",
+  "audio_analysis_status": "skipped_no_audio_stream",
+  "audio_events": [],
+  "candidate_inspections": [
+    {
+      "anchor_kind": "gaming_motion",
+      "anchor_ms": 76000,
+      "anchor_score": 0.7,
+      "end_ms": 91000,
+      "sample_rate_hz": 2,
+      "sampled_frames": 60,
+      "start_ms": 61000,
+      "visual_events": []
+    }
+  ],
+  "compute_seconds": 10,
+  "context": {
+    "summary": "",
+    "timeline": [
+      {
+        "end_ms": 60000,
+        "keywords": [],
+        "start_ms": 0,
+        "summary": ""
+      },
+      {
+        "end_ms": 120000,
+        "keywords": [],
+        "start_ms": 60000,
+        "summary": ""
+      },
+      {
+        "end_ms": 180000,
+        "keywords": [],
+        "start_ms": 120000,
+        "summary": ""
+      },
+      {
+        "end_ms": 240000,
+        "keywords": [],
+        "start_ms": 180000,
+        "summary": ""
+      },
+      {
+        "end_ms": 300000,
+        "keywords": [],
+        "start_ms": 240000,
+        "summary": ""
+      },
+      {
+        "end_ms": 360000,
+        "keywords": [],
+        "start_ms": 300000,
+        "summary": ""
+      }
+    ],
+    "topics": []
+  },
+  "cost_basis": "operator_declared_worker_second_rate_estimate",
+  "cost_estimate_micro_usd": 250,
+  "coverage": {
+    "audio_scanned_duration_ms": 0,
+    "visual_scanned_duration_ms": 360000
+  },
+  "language": {
+    "code": "und",
+    "probability": null,
+    "script": "unknown"
+  },
+  "media_streams": {
+    "has_audio": false,
+    "has_video": true
+  },
+  "model_versions": {
+    "ctranslate2_version": "not-used-no-audio-stream",
+    "language_mode": "auto",
+    "model": "not-used-no-audio-stream",
+    "model_repository": "Systran/faster-whisper-large-v3",
+    "model_snapshot": "0123456789abcdef0123456789abcdef01234567",
+    "model_weights_sha256": "not-used-no-audio-stream",
+    "transcription": "not-used-no-audio-stream"
+  },
+  "pipeline_revision": "framevault_m3_worker_v1",
+  "prompt_versions": {
+    "analysis": "none-extractive-no-llm-v1"
+  },
+  "rate_micro_usd_per_second": 25,
+  "runtime_versions": {
+    "modal": "1.1.4",
+    "python": "3.11.9"
+  },
+  "source_duration_ms": 360000,
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "transcript": {
+    "available": false,
+    "original_script": true,
+    "segments": [],
+    "speaker_labels_available": false,
+    "status": "unavailable_no_audio_stream"
+  },
+  "visual_events": [
+    {
+      "end_ms": 82000,
+      "evidence": {
+        "detector": "mean_absolute_gray_frame_difference",
+        "mean_absolute_difference": 204.0,
+        "visual_evidence_strength": "weak"
+      },
+      "kind": "motion_change",
+      "score": 0.8,
+      "start_ms": 70000
+    }
+  ]
+}

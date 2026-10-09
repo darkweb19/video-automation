@@ -1,0 +1,10 @@
+# Direct runtime dependencies for the isolated M3 Modal worker. Keep these
+# versions aligned with the worker image pins in clipping_m3_worker.py.
+modal==1.1.4
+fastapi==0.115.12
+faster-whisper==1.1.1
+ctranslate2==4.6.0
+av==14.2.0
+numpy==1.26.4
+huggingface-hub==0.30.2
+tokenizers==0.21.1
