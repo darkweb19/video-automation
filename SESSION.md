@@ -1,3 +1,16 @@
+# Session handoff — 2026-10-12 (America/Toronto), separate-track YouTube import repair
+
+## Current focus — C2.5 locally verified; feature publication next
+
+- User authorized the existing `feat/clipper-ai` repair, LUNA Max implementation and independent review, synthetic tests, operator docs/handoff, meaningful commits and feature-only push. TERRA is unavailable. Main authored no implementation; all code/tests/operator docs came from LUNA Max agents. Initial quota interruptions were resumed under the same scope.
+- Combined progressive MP4/WebM priority is preserved. Full metadata enables a fallback for separate direct HTTPS video and audio, with highest eligible video and Original-audio preference, including conservative treatment of Original-only manifests and mixed DRM metadata. No hard-coded format IDs, re-encoding or silent lower-quality retry.
+- Both track downloads retain rights attestation, allowlists, pinned DNS/redirects, isolated credentials, four-hour bounds and bounded streaming. Track aggregate and final source each stay within 20 GiB, with separate scratch plus final disk reservations and the 4 GiB floor. FFmpeg writes seekable Matroska under an exact kernel byte cap through fixed isolated Python 3. Probe actual A/V codecs/dimensions/FPS/durations/start skew, hash, persist final expectations, then rename atomically and mark Ready. Cancel/retry/restart cleanup and strict final-file recovery are tested.
+- Independent final review approved with no blocker. Final full Go suite passed (39.152s), final YouTube race checks passed (54.076s), earlier full race passed (228.247s) with final targeted rerun for the last predicate fix, vet/native build/Darwin cross-build pass, and author Windows cross-compile passes. Browser tests pass 32+87, both JS syntax checks, callback/acquisition/pinned extractor checks, Markdown links and diff check pass. Real local synthetic media verifies packet payload parity, exact hard cap and descendant cancellation. See TRACKER for commands, failed-first attempts and exact evidence.
+- Ten scoped commits exist through `753e3ba`; this coordination handoff follows separately. Commit/push is only to `feat/clipper-ai`, by fast-forward; no main checkout/ref update, merge, force-push, deployment, paid inference or real YouTube media download occurred. Cached `origin/main` and historical `work` remain `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`.
+- Next: publish the reviewed feature commits and verify remote/local parity. Operator guidance is in `docs/clipping/YOUTUBE-IMPORT.md`, including Python/FFmpeg prerequisites and safe console codes. Live YouTube availability and Docker image execution remain unverified; this synthetic repair does not complete waived M1 quality/cost benchmarks or authorize M4/deployment.
+
+---
+
 # Session handoff — 2026-10-12 (America/Toronto), browser pipeline tracing
 
 ## Current focus — C3.TRACE complete; Railway deployment next
