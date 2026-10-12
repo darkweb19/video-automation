@@ -1,9 +1,10 @@
 # AI clipping tracker
 
-Last updated: 2026-10-09 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
+Last updated: 2026-10-12 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
 
 ## Current checkpoint
 
+- C3.TRACE is in progress: user authorized browser-console pipeline tracing beginning at Import link, safe progress/failure diagnostics, local checks, independent review, commits and push to the working `feat/clipper-ai` branch. Baseline is `83a10f9`; working tree was clean. Lead coordinates LUNA Max backend, frontend, and independent review agents; TERRA is unavailable and disclosed. Import diagnostics must report actual observed stages, never simulated provider progress, and must exclude URLs, credentials, extractor output, media content and transcripts.
 - C3.UI is complete: clean YouTube/public-link and video drag/drop/upload intake, preserved actions through closed settings and on-demand detail views, 25 clipping and 87 dashboard tests, full Go regression suite, and independent LUNA Max approval. Baseline `480b32ba72614bc58244efaf76f2dbbf7bcedbf0` on `feat/clipper-ai`; initially clean. Next: user reviews this UI locally, then scopes M4/C4.1+C4.2. M4 is not started.
 
 - Phase: M2 complete, including C2.4 public YouTube source import. C3.1/C3.2 code, deterministic regressions, final review, and local verification are complete. M3 remains `in_progress` because M1's real-media quality, language, and cost exit criteria were waived/unmeasured; this implementation does not claim those criteria passed.
@@ -16,6 +17,7 @@ Last updated: 2026-10-09 (America/Toronto). This file is the authoritative statu
 
 | Date | User instruction / scope | Effect |
 | --- | --- | --- |
+| 2026-10-12 | Browser console logs for each pipeline step beginning on Import link; failures must be logged; implement and push working branch using LUNA/TERRA Max with lead coordination | Authorizes C3.TRACE instrumentation and necessary tests/docs, ordinary commits and fast-forward push to `feat/clipper-ai`. TERRA unavailable; use disclosed LUNA Max authors and independent reviewer. No paid test runs or deployment included. |
 | 2026-10-08 | Analyze, ask questions, plan, and wait; do not implement | Research/planning authorized; feature implementation withheld |
 | 2026-10-08 | Update AGENTS.md and implementation-plan guidelines for sessions and multiple models | Repository documentation edits and agent-assisted document review authorized |
 | 2026-10-08 | Commit and push these planning changes to `main` | Authorized this documentation publication; feature implementation, paid benchmarks, and deployment remain unapproved |
@@ -63,6 +65,7 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 | C3.1 | Full-source ASR, original-script segments, audio/visual event scan, global context, finalist sequence inspections, worker provenance | M2 | done | `m3_worker` / `gpt-6-luna` / max; implementation and deterministic offline checks complete; no live inference/deployment; M3 evaluation exit remains open |
 | C3.2 | Content-specific candidate selection, scores/evidence/confidence, boundary refinement, deduplication, title/hooks, cache reuse and UI | C3.1 | done | Lead integration + `m3_ui`, `m3_runtime`, `m3_tests` / `gpt-6-luna` / max; implementation and deterministic regressions complete; fixtures are not M1 quality measurements |
 | C3.UI | Clean source intake and progressive disclosure without behavior changes | C3.1/C3.2 | done | `clean_ui`, `agent_docs`, `asset_routes`, independent `ui_review` / gpt-6-luna / max; evidence below |
+| C3.TRACE | Browser console import and analysis diagnostics | C3.UI | in_progress | Lead; LUNA Max backend/frontend authors and independent reviewer; safe source diagnostics delivered through authenticated snapshots/live events |
 | C4.1 | Caption/framing/edit contracts and audio-preserving renderer | M3 | planned | Unassigned |
 | C4.2 | Preview/editor, overrides, translations, export lifecycle | C4.1 contracts | planned | Unassigned |
 | C5.1 | Clip export integration with YouTube storage and uploads | M4 | planned | Unassigned |
