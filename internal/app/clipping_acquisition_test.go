@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -342,6 +343,36 @@ func TestClippingPublicImportStreamsAndFinalizesWithoutStoringShareURLPlaintext(
 	ready, err := store.ClippingSource(source.ID)
 	if err != nil || ready.Status != ClippingSourceReady || ready.SizeBytes != int64(len(media)) || ready.UploadOffset != int64(len(media)) {
 		t.Fatalf("imported source=%+v error=%v", ready, err)
+	}
+	for _, expected := range []struct {
+		stage  string
+		status ClippingSourceDiagnosticStatus
+	}{
+		{ClippingDiagnosticStageURLValidation, ClippingDiagnosticCompleted},
+		{ClippingDiagnosticStageReservation, ClippingDiagnosticCompleted},
+		{ClippingDiagnosticStageDispatch, ClippingDiagnosticQueued},
+		{ClippingDiagnosticStageDispatch, ClippingDiagnosticStarted},
+		{ClippingDiagnosticStageURLValidation, ClippingDiagnosticStarted},
+		{ClippingDiagnosticStageDownload, ClippingDiagnosticCompleted},
+		{ClippingDiagnosticStageProbe, ClippingDiagnosticCompleted},
+		{ClippingDiagnosticStageHash, ClippingDiagnosticCompleted},
+		{ClippingDiagnosticStageReady, ClippingDiagnosticCompleted},
+		{ClippingDiagnosticStageDispatch, ClippingDiagnosticCompleted},
+	} {
+		found := false
+		for _, item := range ready.Diagnostics {
+			if item.Stage == expected.stage && item.Status == expected.status {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("successful import trace omitted %s/%s: %+v", expected.stage, expected.status, ready.Diagnostics)
+		}
+	}
+	encoded, err := json.Marshal(clippingSourceSummary(ready))
+	if err != nil || strings.Contains(string(encoded), "resourcekey=highly-sensitive") || strings.Contains(string(encoded), rawURL) || strings.Contains(string(encoded), ready.StoragePath) {
+		t.Fatalf("source diagnostics snapshot leaked sensitive import data: %s error=%v", encoded, err)
 	}
 	stored, err := os.ReadFile(ready.StoragePath)
 	if err != nil || !bytes.Equal(stored, media) {

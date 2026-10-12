@@ -191,6 +191,17 @@ func TestClippingM2SchemaAdditivelyMigratesAndAcceptsV1Callback(t *testing.T) {
 		t.Fatalf("open M2 database through additive migration: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	migratedSource, err := store.ClippingSource(sourceID)
+	if err != nil || len(migratedSource.Diagnostics) != 0 {
+		t.Fatalf("M2 source diagnostics default=%+v error=%v", migratedSource.Diagnostics, err)
+	}
+	if err := store.AppendClippingSourceDiagnostic(sourceID, ClippingDiagnosticStageDispatch, ClippingDiagnosticQueued, ""); err != nil {
+		t.Fatalf("append source trace after M2 migration: %v", err)
+	}
+	migratedSource, err = store.ClippingSource(sourceID)
+	if err != nil || len(migratedSource.Diagnostics) != 1 || migratedSource.Diagnostics[0].Sequence != 1 {
+		t.Fatalf("M2 source did not accept additive diagnostic history: trace=%+v error=%v", migratedSource.Diagnostics, err)
+	}
 
 	job, err := store.ClippingJob(jobID)
 	if err != nil || job.ContentType != "general" || job.MinClipSeconds != 15 || job.MaxClipSeconds != 180 || job.CandidateLimit != 10 {
