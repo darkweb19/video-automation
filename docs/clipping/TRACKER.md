@@ -4,6 +4,8 @@ Last updated: 2026-10-12 (America/Toronto). This file is the authoritative statu
 
 ## Current checkpoint
 
+- C2.5 is in progress: repair public YouTube imports when only separate direct HTTPS tracks are available. Baseline is clean `944fbf258e6ac760f470ad177367d56e3ad4c999` on `feat/clipper-ai`; main coordination only, LUNA Max implementation and independent read-only review, TERRA unavailable. Preserve acquisition security, quality and lifecycle bounds; tests use synthetic media only. No deployment or paid/live media operation is authorized.
+
 - C3.TRACE is complete: browser-console tracing starts at Import link and reports actual import diagnostics and subsequent observed analysis status/candidate availability. Baseline was clean `83a10f9` on `feat/clipper-ai`. LUNA Max backend/frontend authors and independent reviewer participated; TERRA was unavailable and disclosed. Full Go, focused race, vet, build, 31 clipping and 87 dashboard Node checks pass; independent review approved and scoped Chromium verification passed. Feature publication follows this handoff commit. Next: deploy the updated Railway app and inspect the console when reproducing an import failure.
 - C3.UI is complete: clean YouTube/public-link and video drag/drop/upload intake, preserved actions through closed settings and on-demand detail views, 25 clipping and 87 dashboard tests, full Go regression suite, and independent LUNA Max approval. Baseline `480b32ba72614bc58244efaf76f2dbbf7bcedbf0` on `feat/clipper-ai`; initially clean. Next: user reviews this UI locally, then scopes M4/C4.1+C4.2. M4 is not started.
 
@@ -17,6 +19,7 @@ Last updated: 2026-10-12 (America/Toronto). This file is the authoritative statu
 
 | Date | User instruction / scope | Effect |
 | --- | --- | --- |
+| 2026-10-12 | Fix YouTube separate-track link imports; preserve combined path, security/quality/bounds; synthetic tests, independent LUNA Max review, operator docs/handoff, meaningful commits and push to existing feature branch; no main-thread implementation | Authorizes C2.5 implementation, local checks, docs, ordinary commits and fast-forward push only to `feat/clipper-ai`. TERRA unavailable; actual agents use `gpt-6-luna` / `max`. No deployment, paid inference, real YouTube test downloads, merge, force-push or main changes. |
 | 2026-10-12 | Browser console logs for each pipeline step beginning on Import link; failures must be logged; implement and push working branch using LUNA/TERRA Max with lead coordination | Authorizes C3.TRACE instrumentation and necessary tests/docs, ordinary commits and fast-forward push to `feat/clipper-ai`. TERRA unavailable; use disclosed LUNA Max authors and independent reviewer. No paid test runs or deployment included. |
 | 2026-10-08 | Analyze, ask questions, plan, and wait; do not implement | Research/planning authorized; feature implementation withheld |
 | 2026-10-08 | Update AGENTS.md and implementation-plan guidelines for sessions and multiple models | Repository documentation edits and agent-assisted document review authorized |
@@ -62,6 +65,7 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 | C2.2 | Upload and public-link adapters | C2.1 contracts | done | m2_acquisition / LUNA Max; checkpoint below |
 | C2.3 | Worker protocol, retries/cancellation, batch queue, progress | C2.1 contracts | done | m2_integration + m2_ui / LUNA Max; checkpoint below |
 | C2.4 | Bounded public YouTube single-video link import | C2.1/C2.2 | done | Pinned extractor behind an authenticated DNS-pinned HTTPS proxy; one muxed audio/video stream uses existing bounded import lifecycle and actual media probe; offline/runtime and full regression checks passed |
+| C2.5 | Safe compatible separate-track YouTube import fallback | C2.4 | in_progress | `luna_implementation` / gpt-6-luna / max; independent `luna_review` / same model/effort; user-authorized bounded bugfix |
 | C3.1 | Full-source ASR, original-script segments, audio/visual event scan, global context, finalist sequence inspections, worker provenance | M2 | done | `m3_worker` / `gpt-6-luna` / max; implementation and deterministic offline checks complete; no live inference/deployment; M3 evaluation exit remains open |
 | C3.2 | Content-specific candidate selection, scores/evidence/confidence, boundary refinement, deduplication, title/hooks, cache reuse and UI | C3.1 | done | Lead integration + `m3_ui`, `m3_runtime`, `m3_tests` / `gpt-6-luna` / max; implementation and deterministic regressions complete; fixtures are not M1 quality measurements |
 | C3.UI | Clean source intake and progressive disclosure without behavior changes | C3.1/C3.2 | done | `clean_ui`, `agent_docs`, `asset_routes`, independent `ui_review` / gpt-6-luna / max; evidence below |
@@ -77,6 +81,16 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 Dependencies marked “contracts” allow parallel implementation only after the shared interface is agreed and file ownership assigned. All milestone tasks inherit PLAN.md acceptance criteria. Split these tasks into smaller numbered tasks as needed; preserve completed IDs and evidence.
 
 ## Active assignments
+
+C2.5 current assignments (2026-10-12):
+
+| Task ID | Agent / actual model / effort | Exclusive write paths | Contract/dependency | Required checks | State |
+| --- | --- | --- | --- | --- | --- |
+| C2.5 implementation | luna_implementation / gpt-6-luna / max | Importer/acquisition/probe/diagnostic code and tests | Combined path preserved, metadata selection, original audio, safe download/copy mux/validation/atomic publish, aggregate bytes/disk/lifecycle bounds | Synthetic selection/media and failure/recovery cases; relevant regressions | in_progress |
+| C2.5 browser diagnostics | luna_diagnostics_ui / gpt-6-luna / max | internal/webui/static/clipping.js; tests/clipping-ui.test.cjs | Fixed backend stage/code contract; same diagnostic payload; safe action-scoped console logging | Clipping UI 32/32, dashboard UI 87/87, JS syntax, scoped independent review approved | done |
+| C2.5 runtime contract/docs | luna_runtime_docs / gpt-6-luna / max | docs/clipping/YOUTUBE-IMPORT.md; README.md; AGENTS.md architecture sentence; tools/clipping/check_youtube_runtime_contract.py | Bounded full metadata argv; pinned offline synthetic metadata; actual code behavior | Offline pinned extractor contract; docs accuracy/link/whitespace | in_progress |
+| C2.5 independent review | luna_review / gpt-6-luna / max | Read-only | Reviewer does not author reviewed changes | Security/correctness/lifecycle/quality/diagnostics and evidence | in_progress |
+| C2.5 coordination | main thread / model and effort not exposed | docs/clipping/TRACKER.md; SESSION.md | No implementation code authored by lead; branch/main preservation, integration checks and publication coordination | Review acceptance, regression evidence, clean feature-only push | in_progress |
 
 TERRA is not exposed in this session; M2 implementation and independent review use the requested available LUNA Max. The lead model/effort are not exposed to the agent interface; no lead-model claim is made. M1 assignments below are historical.
 
