@@ -109,20 +109,24 @@ func youtubeVideoID(u *url.URL) (string, bool) {
 }
 
 func (a *ClippingAcquisition) extractYouTubeMedia(ctx context.Context, canonicalURL *url.URL) (youtubeSelection, error) {
+	return a.extractYouTubeMediaWithTrace(ctx, canonicalURL, nil, nil, nil)
+}
+
+func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, canonicalURL *url.URL, onMetadataRetrieved, onFormatSelectionStarted, onFormatSelected func()) (youtubeSelection, error) {
 	if err := ctx.Err(); err != nil {
 		return youtubeSelection{}, err
 	}
 	var err error
 	videoID, ok := youtubeVideoID(canonicalURL)
 	if !ok {
-		return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube link could not be imported; upload an original file you are permitted to reuse")}
+		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube link could not be imported; upload an original file you are permitted to reuse")}, "invalid_url")
 	}
 	executable := a.youtubeExecutable
 	if executable == "" {
 		executable = findYouTubeExecutable(clippingYouTubeExecutablePaths)
 	}
 	if err != nil || executable == "" {
-		return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}
+		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}, "runtime_unavailable")
 	}
 	runtimeSpec := a.youtubeRuntime
 	if runtimeSpec == "" {
@@ -130,10 +134,10 @@ func (a *ClippingAcquisition) extractYouTubeMedia(ctx context.Context, canonical
 	}
 	runtimeName, runtimePath, hasRuntimePath := strings.Cut(runtimeSpec, ":")
 	if !hasRuntimePath || runtimeName != "deno" || runtimePath == "" {
-		return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}
+		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}, "runtime_unavailable")
 	}
 	if _, err := exec.LookPath(runtimePath); err != nil {
-		return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}
+		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}, "runtime_unavailable")
 	}
 
 	extractorCtx, cancel := context.WithTimeout(ctx, clippingYouTubeExtractorTimeout)
@@ -143,12 +147,12 @@ func (a *ClippingAcquisition) extractYouTubeMedia(ctx context.Context, canonical
 		if ctx.Err() != nil {
 			return youtubeSelection{}, ctx.Err()
 		}
-		return youtubeSelection{}, fmt.Errorf("%w: YouTube importer proxy could not start", errClippingImportRetryable)
+		return youtubeSelection{}, withClippingDiagnosticCode(fmt.Errorf("%w: YouTube importer proxy could not start", errClippingImportRetryable), "extractor_proxy_failure")
 	}
 	defer proxy.Close()
 	denoCache, err := createYouTubeDenoCache()
 	if err != nil {
-		return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}
+		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}, "runtime_unavailable")
 	}
 	defer os.RemoveAll(denoCache)
 
@@ -182,22 +186,45 @@ func (a *ClippingAcquisition) extractYouTubeMedia(ctx context.Context, canonical
 		return youtubeSelection{}, ctx.Err()
 	}
 	if errors.Is(extractorCtx.Err(), context.DeadlineExceeded) {
-		return youtubeSelection{}, fmt.Errorf("%w: YouTube metadata request timed out", errClippingImportRetryable)
+		return youtubeSelection{}, withClippingDiagnosticCode(fmt.Errorf("%w: YouTube metadata request timed out", errClippingImportRetryable), "extractor_timeout")
 	}
 	if limitedOutput.exceeded {
-		return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "No supported audio/video format is available; upload an original file you are permitted to reuse")}
+		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "No supported audio/video format is available; upload an original file you are permitted to reuse")}, "extractor_output_limit")
 	}
 	if runErr != nil {
 		// The child output can contain signed media URLs and provider responses.
 		// Never include command output, stderr, or the child error in a returned error.
-		return youtubeSelection{}, fmt.Errorf("%w: YouTube metadata request failed", errClippingImportRetryable)
+		return youtubeSelection{}, withClippingDiagnosticCode(fmt.Errorf("%w: YouTube metadata request failed", errClippingImportRetryable), "extractor_exit_failure")
 	}
 	if err := proxy.Err(); err != nil {
-		return youtubeSelection{}, fmt.Errorf("%w: YouTube metadata proxy stopped", errClippingImportRetryable)
+		return youtubeSelection{}, withClippingDiagnosticCode(fmt.Errorf("%w: YouTube metadata proxy stopped", errClippingImportRetryable), "extractor_proxy_failure")
+	}
+	if onMetadataRetrieved != nil {
+		onMetadataRetrieved()
+	}
+	if onFormatSelectionStarted != nil {
+		onFormatSelectionStarted()
 	}
 	selection, err := parseYouTubeExtractorOutput(limitedOutput.data, videoID)
 	if err != nil {
-		return youtubeSelection{}, err
+		code := "metadata_invalid"
+		var outcome *ClippingAcquisitionError
+		if errors.As(err, &outcome) {
+			switch outcome.Reason {
+			case "youtube_format_unavailable":
+				code = "format_unavailable"
+			case "youtube_video_unavailable":
+				code = "video_unavailable"
+			case "youtube_duration_limit_exceeded":
+				code = "duration_limit_exceeded"
+			case "youtube_size_limit_exceeded":
+				code = "size_limit_exceeded"
+			}
+		}
+		return youtubeSelection{}, withClippingDiagnosticCode(err, code)
+	}
+	if onFormatSelected != nil {
+		onFormatSelected()
 	}
 	return selection, nil
 }

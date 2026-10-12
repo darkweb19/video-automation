@@ -34,23 +34,24 @@ const (
 )
 
 type clippingSourceView struct {
-	ID                string               `json:"id"`
-	Kind              ClippingSourceKind   `json:"kind"`
-	Status            ClippingSourceStatus `json:"status"`
-	RightsAttested    bool                 `json:"rights_attested"`
-	OriginalName      string               `json:"original_name"`
-	MediaType         string               `json:"media_type"`
-	DeclaredSizeBytes int64                `json:"declared_size_bytes"`
-	SizeBytes         int64                `json:"size_bytes"`
-	UploadOffset      int64                `json:"upload_offset"`
-	DurationMS        int64                `json:"duration_ms"`
-	SHA256            string               `json:"sha256,omitempty"`
-	RetainUntil       int64                `json:"retain_until"`
-	Progress          int                  `json:"progress"`
-	Error             string               `json:"error,omitempty"`
-	MediaURL          string               `json:"media_url,omitempty"`
-	CreatedAt         int64                `json:"created_at"`
-	UpdatedAt         int64                `json:"updated_at"`
+	ID                string                     `json:"id"`
+	Kind              ClippingSourceKind         `json:"kind"`
+	Status            ClippingSourceStatus       `json:"status"`
+	RightsAttested    bool                       `json:"rights_attested"`
+	OriginalName      string                     `json:"original_name"`
+	MediaType         string                     `json:"media_type"`
+	DeclaredSizeBytes int64                      `json:"declared_size_bytes"`
+	SizeBytes         int64                      `json:"size_bytes"`
+	UploadOffset      int64                      `json:"upload_offset"`
+	DurationMS        int64                      `json:"duration_ms"`
+	SHA256            string                     `json:"sha256,omitempty"`
+	RetainUntil       int64                      `json:"retain_until"`
+	Progress          int                        `json:"progress"`
+	Error             string                     `json:"error,omitempty"`
+	Diagnostics       []ClippingSourceDiagnostic `json:"diagnostics,omitempty"`
+	MediaURL          string                     `json:"media_url,omitempty"`
+	CreatedAt         int64                      `json:"created_at"`
+	UpdatedAt         int64                      `json:"updated_at"`
 }
 
 type clippingStageView struct {
@@ -134,7 +135,7 @@ func clippingSourceSummary(source ClippingSource) clippingSourceView {
 		ID: source.ID, Kind: source.Kind, Status: source.Status, RightsAttested: source.RightsAttested, OriginalName: source.OriginalName,
 		MediaType: source.MediaType, DeclaredSizeBytes: source.DeclaredSizeBytes, SizeBytes: source.SizeBytes,
 		UploadOffset: source.UploadOffset, DurationMS: source.DurationMS, SHA256: source.SHA256,
-		RetainUntil: source.RetainUntil, Progress: progress, Error: source.Failure, MediaURL: mediaURL,
+		RetainUntil: source.RetainUntil, Progress: progress, Error: source.Failure, Diagnostics: source.Diagnostics, MediaURL: mediaURL,
 		CreatedAt: source.CreatedAt, UpdatedAt: source.UpdatedAt,
 	}
 }

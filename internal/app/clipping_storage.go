@@ -60,6 +60,8 @@ func (s *Store) migrateClipping() error {
 			import_lease_until INTEGER NOT NULL DEFAULT 0,
 			media_lease_until INTEGER NOT NULL DEFAULT 0,
 			cleanup_complete INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_complete IN (0,1)),
+			diagnostics_json TEXT NOT NULL DEFAULT '[]',
+			diagnostics_sequence INTEGER NOT NULL DEFAULT 0 CHECK(diagnostics_sequence >= 0),
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
 			deleted_at INTEGER NOT NULL DEFAULT 0
@@ -186,6 +188,10 @@ func (s *Store) migrateClipping() error {
 	// support ADD COLUMN IF NOT EXISTS on every version used by the app, so
 	// inspect fixed table names and issue only missing additive columns.
 	for table, columns := range map[string]map[string]string{
+		"clipping_sources": {
+			"diagnostics_json":     "TEXT NOT NULL DEFAULT '[]'",
+			"diagnostics_sequence": "INTEGER NOT NULL DEFAULT 0 CHECK(diagnostics_sequence >= 0)",
+		},
 		"clipping_jobs": {
 			"content_type":     "TEXT NOT NULL DEFAULT 'general' CHECK(content_type IN ('general','podcast','comedy','gaming','movie'))",
 			"min_clip_seconds": "INTEGER NOT NULL DEFAULT 15 CHECK(min_clip_seconds BETWEEN 15 AND 180)",
@@ -458,7 +464,7 @@ func cleanClippingSourceName(name string) string {
 }
 
 func clippingSourceColumns() string {
-	return `id,kind,status,original_name,media_type,source_url,rights_attested,storage_path,failure,declared_size_bytes,reserved_size_bytes,size_bytes,upload_offset,duration_ms,sha256,retain_until,import_attempts,next_import_at,import_lease_until,media_lease_until,cleanup_complete,created_at,updated_at,deleted_at`
+	return `id,kind,status,original_name,media_type,source_url,rights_attested,storage_path,failure,declared_size_bytes,reserved_size_bytes,size_bytes,upload_offset,duration_ms,sha256,retain_until,import_attempts,next_import_at,import_lease_until,media_lease_until,cleanup_complete,diagnostics_json,diagnostics_sequence,created_at,updated_at,deleted_at`
 }
 
 type clippingRowScanner interface {
@@ -469,11 +475,14 @@ func scanClippingSource(row clippingRowScanner) (ClippingSource, error) {
 	var source ClippingSource
 	var cleanupComplete int
 	var rightsAttested int
+	var diagnosticsJSON string
+	var diagnosticsSequence int64
 	err := row.Scan(&source.ID, &source.Kind, &source.Status, &source.OriginalName, &source.MediaType, &source.SourceURL, &rightsAttested, &source.StoragePath, &source.Failure,
 		&source.DeclaredSizeBytes, &source.ReservedSizeBytes, &source.SizeBytes, &source.UploadOffset, &source.DurationMS, &source.SHA256, &source.RetainUntil,
-		&source.ImportAttempts, &source.NextImportAt, &source.ImportLeaseUntil, &source.MediaLeaseUntil, &cleanupComplete, &source.CreatedAt, &source.UpdatedAt, &source.DeletedAt)
+		&source.ImportAttempts, &source.NextImportAt, &source.ImportLeaseUntil, &source.MediaLeaseUntil, &cleanupComplete, &diagnosticsJSON, &diagnosticsSequence, &source.CreatedAt, &source.UpdatedAt, &source.DeletedAt)
 	source.CleanupComplete = cleanupComplete != 0
 	source.RightsAttested = rightsAttested != 0
+	source.Diagnostics = decodeClippingSourceDiagnostics(diagnosticsJSON)
 	return source, err
 }
 

@@ -38,6 +38,28 @@ const (
 	ClippingSourceDeleted   ClippingSourceStatus = "deleted"
 )
 
+type ClippingSourceDiagnosticStatus string
+
+const (
+	ClippingDiagnosticStarted   ClippingSourceDiagnosticStatus = "started"
+	ClippingDiagnosticCompleted ClippingSourceDiagnosticStatus = "completed"
+	ClippingDiagnosticFailed    ClippingSourceDiagnosticStatus = "failed"
+	ClippingDiagnosticRetrying  ClippingSourceDiagnosticStatus = "retrying"
+	ClippingDiagnosticQueued    ClippingSourceDiagnosticStatus = "queued"
+)
+
+const MaxClippingSourceDiagnostics = 128
+
+// ClippingSourceDiagnostic is a bounded, safe audit item for source intake.
+// Its fields intentionally exclude provider URLs, media names, and raw errors.
+type ClippingSourceDiagnostic struct {
+	Sequence int64                          `json:"sequence"`
+	Stage    string                         `json:"stage"`
+	Status   ClippingSourceDiagnosticStatus `json:"status"`
+	Code     string                         `json:"code,omitempty"`
+	At       int64                          `json:"at"`
+}
+
 type ClippingJobStatus string
 
 const (
@@ -76,30 +98,31 @@ type ClippingSourceCreate struct {
 // ClippingSource is the durable source record. SourceURL and StoragePath may
 // contain sensitive data or host-local paths and must never be serialized.
 type ClippingSource struct {
-	ID                string               `json:"id"`
-	Kind              ClippingSourceKind   `json:"kind"`
-	Status            ClippingSourceStatus `json:"status"`
-	OriginalName      string               `json:"original_name,omitempty"`
-	MediaType         string               `json:"media_type,omitempty"`
-	SourceURL         string               `json:"-"`
-	StoragePath       string               `json:"-"`
-	RightsAttested    bool                 `json:"rights_attested"`
-	Failure           string               `json:"error,omitempty"`
-	DeclaredSizeBytes int64                `json:"declared_size_bytes,omitempty"`
-	ReservedSizeBytes int64                `json:"reserved_size_bytes,omitempty"`
-	SizeBytes         int64                `json:"size_bytes,omitempty"`
-	UploadOffset      int64                `json:"upload_offset,omitempty"`
-	DurationMS        int64                `json:"duration_ms,omitempty"`
-	SHA256            string               `json:"sha256,omitempty"`
-	RetainUntil       int64                `json:"retain_until,omitempty"`
-	ImportAttempts    int                  `json:"import_attempts,omitempty"`
-	NextImportAt      int64                `json:"next_import_at,omitempty"`
-	ImportLeaseUntil  int64                `json:"-"`
-	MediaLeaseUntil   int64                `json:"-"`
-	CleanupComplete   bool                 `json:"cleanup_complete"`
-	CreatedAt         int64                `json:"created_at"`
-	UpdatedAt         int64                `json:"updated_at"`
-	DeletedAt         int64                `json:"deleted_at,omitempty"`
+	ID                string                     `json:"id"`
+	Kind              ClippingSourceKind         `json:"kind"`
+	Status            ClippingSourceStatus       `json:"status"`
+	OriginalName      string                     `json:"original_name,omitempty"`
+	MediaType         string                     `json:"media_type,omitempty"`
+	SourceURL         string                     `json:"-"`
+	StoragePath       string                     `json:"-"`
+	RightsAttested    bool                       `json:"rights_attested"`
+	Failure           string                     `json:"error,omitempty"`
+	Diagnostics       []ClippingSourceDiagnostic `json:"diagnostics,omitempty"`
+	DeclaredSizeBytes int64                      `json:"declared_size_bytes,omitempty"`
+	ReservedSizeBytes int64                      `json:"reserved_size_bytes,omitempty"`
+	SizeBytes         int64                      `json:"size_bytes,omitempty"`
+	UploadOffset      int64                      `json:"upload_offset,omitempty"`
+	DurationMS        int64                      `json:"duration_ms,omitempty"`
+	SHA256            string                     `json:"sha256,omitempty"`
+	RetainUntil       int64                      `json:"retain_until,omitempty"`
+	ImportAttempts    int                        `json:"import_attempts,omitempty"`
+	NextImportAt      int64                      `json:"next_import_at,omitempty"`
+	ImportLeaseUntil  int64                      `json:"-"`
+	MediaLeaseUntil   int64                      `json:"-"`
+	CleanupComplete   bool                       `json:"cleanup_complete"`
+	CreatedAt         int64                      `json:"created_at"`
+	UpdatedAt         int64                      `json:"updated_at"`
+	DeletedAt         int64                      `json:"deleted_at,omitempty"`
 }
 
 type ClippingBatchCreate struct {

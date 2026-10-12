@@ -255,11 +255,22 @@ func (a *ClippingAcquisition) CreatePublicImport(ctx context.Context, rightsAtte
 		return ClippingSource{}, err
 	}
 	if _, err := a.ensureSourcePaths(source.ID); err != nil {
+		trace := newClippingDiagnosticTrace(a, source.ID)
+		trace.record(ClippingDiagnosticStageURLValidation, ClippingDiagnosticCompleted, "")
+		trace.record(ClippingDiagnosticStageReservation, ClippingDiagnosticFailed, "source_unavailable")
 		_ = a.store.FailClippingSource(source.ID, "storage_path_unavailable")
 		a.store.PublishClippingSource(source.ID)
 		return ClippingSource{}, err
 	}
-	a.store.PublishClippingSource(source.ID)
+	trace := newClippingDiagnosticTrace(a, source.ID)
+	trace.record(ClippingDiagnosticStageURLValidation, ClippingDiagnosticCompleted, "")
+	trace.record(ClippingDiagnosticStageReservation, ClippingDiagnosticCompleted, "")
+	trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticQueued, "")
+	if updated, readErr := a.store.ClippingSource(source.ID); readErr == nil {
+		source = updated
+	} else {
+		a.store.PublishClippingSource(source.ID)
+	}
 	return source, nil
 }
 
@@ -453,7 +464,8 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 		}
 		return true, claimErr
 	}
-	a.store.PublishClippingSource(claimed.ID)
+	trace := newClippingDiagnosticTrace(a, claimed.ID)
+	trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticStarted, "")
 	paths, pathErr := a.ensureSourcePaths(claimed.ID)
 	recoverFinalizedFile := false
 	if pathErr == nil {
@@ -486,10 +498,10 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 	}
 	a.store.clippingMu.Unlock()
 	if pathErr != nil {
-		return true, a.retryImport(claimed, pathErr)
+		return true, a.retryClippingImport(claimed, trace, pathErr)
 	}
 	if err := opCtx.Err(); err != nil {
-		return true, a.retryImport(claimed, err)
+		return true, a.retryClippingImport(claimed, trace, err)
 	}
 
 	leaseCtx, stopLease, leaseFailure := a.startImportLeaseKeepalive(opCtx, claimed)
@@ -499,65 +511,86 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 	if recoverFinalizedFile {
 		if _, err := a.finalizeSource(importCtx, claimed.ID, ClippingSourceImporting); err != nil {
 			if leaseErr := leaseFailure(); leaseErr != nil {
-				return true, a.retryImport(claimed, leaseErr)
+				return true, a.retryClippingImport(claimed, trace, leaseErr)
 			}
 			if errors.Is(err, errClippingInvalidMedia) {
 				reason := "invalid_media"
 				if claimed.Kind == ClippingSourceYouTube {
 					reason = youtubeProbeFailureReason(err)
 				}
+				trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticFailed, clippingDiagnosticCode(ClippingDiagnosticStageProbe, err))
 				a.failAndRemove(claimed.ID, reason)
 				return true, nil
 			}
 			if errors.Is(err, context.Canceled) && ctx.Err() == nil {
 				return true, nil
 			}
-			return true, a.retryImport(claimed, err)
+			return true, a.retryClippingImport(claimed, trace, err)
 		}
+		trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticCompleted, "")
 		return true, nil
 	}
-	if err := a.importToDisk(importCtx, claimed, paths.temp); err != nil {
+	if err := a.importToDisk(importCtx, claimed, paths.temp, trace); err != nil {
 		if leaseErr := leaseFailure(); leaseErr != nil {
-			return true, a.retryImport(claimed, leaseErr)
+			return true, a.retryClippingImport(claimed, trace, leaseErr)
 		}
 		if errors.Is(err, context.Canceled) && ctx.Err() == nil {
 			// CancelSource tombstones the row after canceling the operation.
+			trace.finish(ClippingDiagnosticFailed, err)
+			trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticFailed, "import_canceled")
 			return true, nil
 		}
 		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) && importCtx.Err() != nil && ctx.Err() != nil {
-			return true, a.retryImport(claimed, err)
+			return true, a.retryClippingImport(claimed, trace, err)
 		}
 		if isPermanentClippingImportError(err) {
+			code := clippingDiagnosticCode(trace.activeStage, err)
+			trace.finish(ClippingDiagnosticFailed, err)
+			trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticFailed, code)
 			a.failAndRemove(claimed.ID, safeClippingFailure(err))
 			return true, nil
 		}
-		return true, a.retryImport(claimed, err)
+		return true, a.retryClippingImport(claimed, trace, err)
 	}
 	if leaseErr := leaseFailure(); leaseErr != nil {
-		return true, a.retryImport(claimed, leaseErr)
+		return true, a.retryClippingImport(claimed, trace, leaseErr)
 	}
 	if err := importCtx.Err(); err != nil {
-		return true, a.retryImport(claimed, err)
+		return true, a.retryClippingImport(claimed, trace, err)
 	}
 	_, err = a.finalizeSource(importCtx, claimed.ID, ClippingSourceImporting)
 	if err != nil {
 		if leaseErr := leaseFailure(); leaseErr != nil {
-			return true, a.retryImport(claimed, leaseErr)
+			return true, a.retryClippingImport(claimed, trace, leaseErr)
 		}
 		if errors.Is(err, errClippingInvalidMedia) {
 			reason := "invalid_media"
 			if claimed.Kind == ClippingSourceYouTube {
 				reason = youtubeProbeFailureReason(err)
 			}
+			trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticFailed, clippingDiagnosticCode(ClippingDiagnosticStageProbe, err))
 			a.failAndRemove(claimed.ID, reason)
 			return true, nil
 		}
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-			return true, a.retryImport(claimed, err)
+			return true, a.retryClippingImport(claimed, trace, err)
 		}
-		return true, a.retryImport(claimed, err)
+		return true, a.retryClippingImport(claimed, trace, err)
 	}
+	trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticCompleted, "")
 	return true, nil
+}
+
+func (a *ClippingAcquisition) retryClippingImport(source ClippingSource, trace *clippingDiagnosticTrace, cause error) error {
+	status := ClippingDiagnosticRetrying
+	code := "retry_scheduled"
+	if source.ImportAttempts >= MaxClippingImportAttempts {
+		status = ClippingDiagnosticFailed
+		code = clippingDiagnosticCode(trace.activeStage, cause)
+	}
+	trace.finish(status, cause)
+	trace.record(ClippingDiagnosticStageDispatch, status, code)
+	return a.retryImport(source, cause)
 }
 
 func (a *ClippingAcquisition) startImportLeaseKeepalive(parent context.Context, source ClippingSource) (context.Context, func(), func() error) {
@@ -738,29 +771,38 @@ func (a *ClippingAcquisition) CleanupFailedSources(ctx context.Context) (int, er
 	return cleaned, nil
 }
 
-func (a *ClippingAcquisition) importToDisk(ctx context.Context, source ClippingSource, tempPath string) error {
+func (a *ClippingAcquisition) importToDisk(ctx context.Context, source ClippingSource, tempPath string, trace *clippingDiagnosticTrace) error {
+	trace.start(ClippingDiagnosticStageURLValidation)
 	if a.security == nil {
-		return permanentClippingImportError{errors.New("source URL encryption is unavailable")}
+		return withClippingDiagnosticCode(permanentClippingImportError{errors.New("source URL encryption is unavailable")}, "source_unavailable")
 	}
 	plainURL, err := a.security.DecryptSetting(clippingSourceURLSetting, source.SourceURL)
 	if err != nil {
-		return permanentClippingImportError{errors.New("stored source URL could not be decrypted")}
+		return withClippingDiagnosticCode(permanentClippingImportError{errors.New("stored source URL could not be decrypted")}, "source_unavailable")
 	}
 	u, kind, err := normalizeClippingImportURL(plainURL)
 	if err != nil {
 		return permanentClippingImportError{err}
 	}
 	if kind != source.Kind {
-		return permanentClippingImportError{errors.New("stored source type does not match its URL")}
+		return withClippingDiagnosticCode(permanentClippingImportError{errors.New("stored source type does not match its URL")}, "source_unavailable")
 	}
+	trace.complete()
 	var response *http.Response
 	if source.Kind == ClippingSourceYouTube {
-		selection, err := a.extractYouTubeMedia(ctx, u)
+		trace.start(ClippingDiagnosticStageMetadata)
+		selection, err := a.extractYouTubeMediaWithTrace(ctx, u,
+			func() { trace.complete() },
+			func() { trace.start(ClippingDiagnosticStageFormat) },
+			func() { trace.complete() },
+		)
 		if err != nil {
 			return err
 		}
+		trace.start(ClippingDiagnosticStageDownload)
 		response, err = a.fetchYouTubeMediaURL(ctx, selection)
 	} else {
+		trace.start(ClippingDiagnosticStageDownload)
 		response, err = a.fetchClippingURL(ctx, u, source.Kind)
 	}
 	if err != nil {
@@ -873,6 +915,7 @@ func (a *ClippingAcquisition) importToDisk(ctx context.Context, source ClippingS
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("%w: sync media response: %v", errClippingImportRetryable, err)
 	}
+	trace.complete()
 	return nil
 }
 
@@ -1126,26 +1169,39 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 	if err := file.Close(); err != nil {
 		return ClippingSource{}, err
 	}
+	trace := newClippingDiagnosticTrace(a, sourceID)
+	trace.start(ClippingDiagnosticStageProbe)
 	media, err := a.probe(ctx, localPath)
 	if err != nil {
 		if errors.Is(err, errClippingInvalidMedia) {
 			if errors.Is(err, errClippingDurationLimitExceeded) {
-				return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingDurationLimitExceeded)
+				probeErr := errors.Join(errClippingInvalidMedia, errClippingDurationLimitExceeded)
+				trace.finish(ClippingDiagnosticFailed, probeErr)
+				return ClippingSource{}, probeErr
 			}
+			trace.finish(ClippingDiagnosticFailed, errClippingInvalidMedia)
 			return ClippingSource{}, errClippingInvalidMedia
 		}
+		trace.finish(ClippingDiagnosticFailed, err)
 		return ClippingSource{}, fmt.Errorf("validate local media: %w", err)
 	}
 	if media.DurationMS > MaxClippingSourceDurationMS {
-		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingDurationLimitExceeded)
+		probeErr := errors.Join(errClippingInvalidMedia, errClippingDurationLimitExceeded)
+		trace.finish(ClippingDiagnosticFailed, probeErr)
+		return ClippingSource{}, probeErr
 	}
 	if media.DurationMS < 1 || !reasonableClippingDimensions(media.Width, media.Height) || source.Kind == ClippingSourceYouTube && media.AudioStreams < 1 {
+		trace.finish(ClippingDiagnosticFailed, errClippingInvalidMedia)
 		return ClippingSource{}, errClippingInvalidMedia
 	}
+	trace.complete()
+	trace.start(ClippingDiagnosticStageHash)
 	digest, err := hashClippingFile(ctx, localPath)
 	if err != nil {
+		trace.finish(ClippingDiagnosticFailed, err)
 		return ClippingSource{}, err
 	}
+	trace.complete()
 	if err := ctx.Err(); err != nil {
 		return ClippingSource{}, err
 	}
@@ -1180,13 +1236,16 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 		}
 		return ClippingSource{}, err
 	}
+	trace.start(ClippingDiagnosticStageReady)
 	if err := a.store.MarkClippingSourceReady(sourceID, info.Size(), media.DurationMS, digest); err != nil {
+		trace.finish(ClippingDiagnosticFailed, err)
 		if localPath == tempPath {
 			_ = os.Rename(finalPath, tempPath)
 			_ = syncClippingDirectory(filepath.Dir(finalPath))
 		}
 		return ClippingSource{}, err
 	}
+	trace.complete()
 	a.store.PublishClippingSource(sourceID)
 	return a.store.ClippingSource(sourceID)
 }
@@ -1454,7 +1513,7 @@ func probeClippingMedia(ctx context.Context, localPath string) (clippingMediaPro
 	}
 	probePath, err := exec.LookPath("ffprobe")
 	if err != nil {
-		return clippingMediaProbeResult{}, errors.New("ffprobe is unavailable")
+		return clippingMediaProbeResult{}, errClippingProbeUnavailable
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, clippingProbeTimeout)
 	defer cancel()
@@ -2016,6 +2075,7 @@ func isRedirectStatus(status int) bool {
 
 var errInvalidClippingImportURL = errors.New("invalid public media URL")
 var errUnsafeClippingDestination = errors.New("unsafe public media destination")
+var errClippingProbeUnavailable = errors.New("ffprobe is unavailable")
 
 type permanentClippingImportError struct {
 	err error
