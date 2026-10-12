@@ -1,4 +1,16 @@
-# Session handoff — 2026-10-09 (America/Toronto), Clipping UI cleanup
+# Session handoff — 2026-10-12 (America/Toronto), browser pipeline tracing
+
+## Current focus — C3.TRACE complete; Railway deployment next
+
+- User authorized browser console logs from Import link through actual import stages, failures and subsequent analysis, agent-assisted implementation, and commits/push to the working `feat/clipper-ai` branch. Baseline `83a10f9` was clean. Lead coordinates actual `gpt-6-luna` / `max` backend/frontend authors and a separate read-only reviewer; TERRA is unavailable and disclosed.
+- Additive SQLite source diagnostic columns retain the latest 128 allowlisted entries with a durable monotonic sequence. Authenticated source responses and existing live snapshots expose stage/status/reason/timestamp only. Source lifecycle timestamps, acquisition policy, credentials and worker protocol are preserved. Browser logging begins with the current import action; old source history stays silent, duplicate snapshots are suppressed and logout clears tracking.
+- Logs cover actual import admission/queue, YouTube metadata/format stages, download, probe, hash and readiness. Ready sources wait for manual analysis. Subsequent analysis actions log observed statuses and use one bounded detail read on completion to report persisted candidate count without opening panels or polling. Individual Modal Whisper/audio/visual substeps are not streamed by the current protocol.
+- Final checks passed: complete Go suite serialized (`go test ./... -count=1 -p=1`, app 31.515s), focused diagnostic/import race suite (5.606s), `go vet ./...`, binary build, 31 clipping and 87 dashboard Node checks, JS syntax and whitespace. Earlier overlapping full suites timed out in an unrelated FFmpeg combiner test; the independent serial suite passed. An initial baseline proxy-cancellation timing check also failed before instrumentation; the final full/race checks passed. No live imports, paid calls, deployment or main updates occurred.
+- Independent read-only review approved with no blocker. Scoped Chromium checks passed for immediate click logging, native URL rejection, missing-rights rejection and initial-load silence. The sandbox's first Chromium launch was blocked; the supported scoped network permission enabled the local test. Feature-only fast-forward publication and remote/local parity are checked after this final handoff commit; Git history records the series. Updated tracing requires the Railway Go/dashboard deployment; no Modal code changed. Next: deploy the branch's app, open Console with Preserve log, filter `[FrameVault Clipping]`, import a permitted source and use the safe failed-stage code for further diagnosis.
+
+---
+
+# Historical session handoff — 2026-10-09 (America/Toronto), Clipping UI cleanup
 
 ## Current focus — C3.UI complete; M4 is next
 
