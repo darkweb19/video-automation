@@ -106,6 +106,7 @@ class Element {
 }
 
 function createUI(request) {
+  const logs = [];
   const elements = new Map([...markup.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*\bid="([^"]+)"[^>]*)>/gi)]
     .map((match) => {
       const node = new Element(match[1], match[3]);
@@ -125,7 +126,12 @@ function createUI(request) {
     createElement: (tag) => new Element(tag),
     createDocumentFragment: () => new Element('#fragment')
   };
-  const window = { document, location: { origin: 'http://localhost' }, confirm: () => true };
+  const window = {
+    document,
+    location: { origin: 'http://localhost' },
+    confirm: () => true,
+    console: { log(...values) { logs.push(values); } }
+  };
   elements.get('clipping-link-form').onReset = () => {
     elements.get('clipping-link').value = '';
     elements.get('clipping-link-permission-check').checked = false;
@@ -140,11 +146,15 @@ function createUI(request) {
   });
   vm.runInContext(source, context, { filename: 'static/clipping.js' });
   window.ClippingUI.configure({ request });
-  return { api: window.ClippingUI, elements };
+  return { api: window.ClippingUI, elements, logs };
 }
 
 function treeText(node) {
   return [node.textContent, ...node.children.flatMap(treeText)].filter(Boolean).join('\n');
+}
+
+function traceText(logs) {
+  return logs.flat().join('\n');
 }
 
 function treeTags(node) {
@@ -903,6 +913,279 @@ test('YouTube imports accept supported single-video links, require rights attest
   assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/import').length, supportedLinks.length, 'playlist, live, and malformed YouTube links never reach the API');
   assert.match(markup, /Public YouTube import supports one HTTPS watch, shorts, embed, or youtu\.be video/);
   assert.match(markup, /restricted videos, and unsupported formats require an original-file upload/);
+});
+
+test('console tracing begins on Import link click and reports native and scripted validation failures safely', async () => {
+  const requests = [];
+  const app = createUI(async (route, options = {}) => {
+    requests.push({ route, options });
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    throw new Error('Unexpected request');
+  });
+  await app.api.start();
+  assert.equal(app.logs.length, 0, 'initial source/job history does not create console output');
+
+  const form = app.elements.get('clipping-link-form');
+  const link = app.elements.get('clipping-link');
+  const permission = app.elements.get('clipping-link-permission-check');
+  const submit = app.elements.get('clipping-link-submit');
+  link.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&token=do-not-log-this-url';
+  link.emit('input');
+  permission.checked = true;
+  permission.emit('change');
+  submit.click();
+  form.emit('invalid', { target: link });
+  assert.match(traceText(app.logs), /\[FrameVault Clipping\]/);
+  assert.match(traceText(app.logs), /Import link clicked/);
+  assert.match(traceText(app.logs), /Import validation failed[\s\S]*reason=invalid_link/);
+
+  link.value = 'https://not-supported.example/private?api_key=must-not-appear';
+  link.emit('input');
+  permission.checked = true;
+  permission.emit('change');
+  await form.emit('submit')[0];
+  assert.match(traceText(app.logs), /reason=unsupported_link/);
+  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/import'), false);
+  assert.doesNotMatch(traceText(app.logs), /youtube\.com|not-supported|do-not-log-this-url|api_key|must-not-appear/);
+  for (const entry of app.logs) for (const value of entry) assert.equal(typeof value, 'string', 'console arguments are fixed strings and safe scalar fields');
+});
+
+test('import request failures are logged with only a fixed reason and numeric HTTP status', async () => {
+  const secretMessage = 'https://media.example/private?signature=secret-value transcript-fragment';
+  const app = createUI(async (route) => {
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/sources/import') {
+      const error = new Error(secretMessage);
+      error.status = 502;
+      throw error;
+    }
+    throw new Error('Unexpected request');
+  });
+  await app.api.start();
+  const link = app.elements.get('clipping-link');
+  link.value = 'https://drive.google.com/file/d/sensitive-source/view?secret=never-log';
+  link.emit('input');
+  app.elements.get('clipping-link-permission-check').checked = true;
+  app.elements.get('clipping-link-permission-check').emit('change');
+  await app.elements.get('clipping-link-form').emit('submit')[0];
+  assert.match(traceText(app.logs), /Import request failed[\s\S]*http=502[\s\S]*reason=import_failed/);
+  assert.doesNotMatch(traceText(app.logs), /media\.example|signature|secret-value|transcript-fragment|sensitive-source|never-log/);
+});
+
+test('source diagnostics replay once across SSE, import response, and list refresh; analysis logs observed states and persisted candidate evidence', async () => {
+  const source = {
+    id: 'clipsrc_trace1', status: 'ready',
+    diagnostics: [
+      { sequence: 1, stage: 'source_url_validation', status: 'started', at: 100 },
+      { sequence: 2, stage: 'source_url_validation', status: 'completed', at: 101 },
+      { sequence: 3, stage: 'source_reservation', status: 'completed', at: 102 },
+      { sequence: 4, stage: 'import_dispatch', status: 'started', at: 103 },
+      { sequence: 5, stage: 'import_dispatch', status: 'completed', at: 104 },
+      { sequence: 6, stage: 'media_download', status: 'completed', at: 105 },
+      { sequence: 7, stage: 'media_probe', status: 'completed', at: 106 },
+      { sequence: 8, stage: 'media_hash', status: 'completed', at: 107 },
+      { sequence: 9, stage: 'source_ready', status: 'completed', at: 108 }
+    ]
+  };
+  let job = null;
+  let jobDetail = null;
+  let detailRequests = 0;
+  let app;
+  app = createUI(async (route, options = {}) => {
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/sources') return [source];
+    if (route === '/api/clipping/jobs' && !options.method) return job ? [job] : [];
+    if (route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/sources/import') {
+      app.api.handleEvent('clipping_source', { data: JSON.stringify({ id: source.id, source }) });
+      return { source };
+    }
+    if (route === '/api/clipping/jobs' && options.method === 'POST') {
+      job = {
+        id: 'clipjob_trace1', source_id: source.id, status: 'queued',
+        stages: [{ name: 'analysis', status: 'queued' }]
+      };
+      return { job };
+    }
+    if (route === '/api/clipping/jobs/clipjob_trace1') {
+      detailRequests++;
+      return { job: jobDetail || job };
+    }
+    throw new Error('Unexpected request');
+  });
+  await app.api.start();
+  assert.equal(app.logs.length, 0, 'source history is silent until the user starts an import');
+  const link = app.elements.get('clipping-link');
+  link.value = 'https://drive.google.com/file/d/trace/view';
+  link.emit('input');
+  app.elements.get('clipping-link-permission-check').checked = true;
+  app.elements.get('clipping-link-permission-check').emit('change');
+  const submit = app.elements.get('clipping-link-submit');
+  submit.click();
+  await app.elements.get('clipping-link-form').emit('submit')[0];
+
+  let renderedTrace = traceText(app.logs);
+  assert.match(renderedTrace, /Import step Source URL validation: started/);
+  assert.match(renderedTrace, /Import step Metadata extraction|Import step Media download/);
+  assert.match(renderedTrace, /Source ready; waiting for manual analysis/);
+  assert.equal((renderedTrace.match(/Source ready; waiting for manual analysis/g) || []).length, 1, 'replayed sequence 9 logs once');
+  assert.doesNotMatch(renderedTrace, /Whisper|transcription substep|transcript text/);
+
+  app.elements.get('clipping-job-budget').value = '1.00';
+  const analyze = app.elements.get('clipping-sources').querySelectorAll('button').find((button) => button.textContent === 'Start analysis');
+  assert.ok(analyze);
+  analyze.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(traceText(app.logs), /Analysis request started/);
+  assert.match(traceText(app.logs), /Analysis status observed: queued/);
+
+  for (const status of ['running', 'paused_budget', 'canceled', 'completed']) {
+    job = { ...job, status, stages: [{ name: 'analysis', status }] };
+    jobDetail = status === 'completed' ? {
+      ...job,
+      artifacts: [{
+        type: 'clipping.analysis',
+        payload_json: JSON.stringify({
+          analysis_version: 'framevault.clipping.analysis.v2',
+          transcript: { segments: [{ text: 'transcript-secret-do-not-log' }] },
+          candidates: [{ id: 'candidate_1', title: 'candidate-title-do-not-log' }, { id: 'candidate_2' }]
+        })
+      }]
+    } : null;
+    app.api.handleEvent('clipping_job', { data: JSON.stringify({ id: job.id, job }) });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  renderedTrace = traceText(app.logs);
+  for (const status of ['running', 'paused', 'canceled', 'completed']) assert.match(renderedTrace, new RegExp(`Analysis status observed: ${status}`));
+  assert.match(renderedTrace, /Candidate availability observed[\s\S]*count=2/);
+  assert.equal(detailRequests, 1, 'a completed summary without artifacts triggers one authenticated detail fetch');
+  assert.doesNotMatch(renderedTrace, /transcript-secret-do-not-log|candidate-title-do-not-log|trace\/view/);
+});
+
+test('separate imports keep source failures and safe reasons correlated to their own action', async () => {
+  const sources = [];
+  let importNumber = 0;
+  let app;
+  app = createUI(async (route, options = {}) => {
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/sources') return sources;
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/sources/import') {
+      importNumber++;
+      const source = importNumber === 1
+        ? { id: 'clipsrc_first', status: 'ready', diagnostics: [{ sequence: 1, stage: 'source_ready', status: 'completed' }] }
+        : { id: 'clipsrc_second', status: 'failed', error: 'private-token=https://secret.invalid', diagnostics: [{ sequence: 1, stage: 'media_download', status: 'failed', code: 'download_timeout' }] };
+      sources.push(source);
+      app.api.handleEvent('clipping_source', { data: JSON.stringify({ id: source.id, source }) });
+      return { source };
+    }
+    throw new Error('Unexpected request');
+  });
+  await app.api.start();
+  const form = app.elements.get('clipping-link-form');
+  const link = app.elements.get('clipping-link');
+  const permission = app.elements.get('clipping-link-permission-check');
+  const importOne = async (url) => {
+    link.value = url;
+    link.emit('input');
+    permission.checked = true;
+    permission.emit('change');
+    app.elements.get('clipping-link-submit').click();
+    await form.emit('submit')[0];
+  };
+  await importOne('https://drive.google.com/file/d/first/view');
+  await importOne('https://dropbox.com/s/second/private');
+  const output = traceText(app.logs);
+  assert.match(output, /source=clipsrc_first/);
+  assert.match(output, /source=clipsrc_second/);
+  assert.match(output, /Import step Media download: failed[\s\S]*source=clipsrc_second[\s\S]*reason=download_timeout/);
+  assert.equal((output.match(/Source ready; waiting for manual analysis/g) || []).length, 1);
+  assert.doesNotMatch(output, /first\/view|second\/private|private-token|secret\.invalid/);
+  const actionIDs = [...output.matchAll(/action=(\d+)/g)].map((match) => match[1]);
+  assert.ok(new Set(actionIDs).size >= 2, 'each import receives its own action correlation ID');
+});
+
+test('completed job summaries fetch saved details once and safely report detail-fetch failures', async () => {
+  const source = { id: 'clipsrc_details', status: 'ready', duration_ms: 30_000 };
+  let job = null;
+  let detailRequests = 0;
+  const app = createUI(async (route, options = {}) => {
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/sources') return [source];
+    if (route === '/api/clipping/jobs' && !options.method) return job ? [job] : [];
+    if (route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/jobs' && options.method === 'POST') {
+      job = { id: 'clipjob_details', source_id: source.id, status: 'queued', stages: [{ name: 'analysis', status: 'queued' }] };
+      return { job };
+    }
+    if (route === '/api/clipping/jobs/clipjob_details') {
+      detailRequests++;
+      const error = new Error('secret=bearer-private transcript=private text');
+      error.status = 503;
+      throw error;
+    }
+    throw new Error('Unexpected request');
+  });
+  await app.api.start();
+  app.elements.get('clipping-job-budget').value = '1.00';
+  app.elements.get('clipping-sources').querySelectorAll('button').find((button) => button.textContent === 'Start analysis').click();
+  await new Promise((resolve) => setImmediate(resolve));
+  job = { ...job, status: 'completed', stages: [{ name: 'analysis', status: 'completed' }] };
+  const event = { data: JSON.stringify({ id: job.id, job }) };
+  app.api.handleEvent('clipping_job', event);
+  app.api.handleEvent('clipping_job', event);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const output = traceText(app.logs);
+  assert.equal(detailRequests, 1, 'duplicate completion snapshots do not start duplicate detail fetches');
+  assert.match(output, /Analysis result details unavailable[\s\S]*http=503[\s\S]*reason=analysis_failed/);
+  assert.doesNotMatch(output, /bearer-private|transcript=private text/);
+});
+
+test('logout clears trace state and a late import rejection cannot mutate a new session action', async () => {
+  const imports = [];
+  let sourceSnapshot = { id: 'clipsrc_old', status: 'ready', diagnostics: [{ sequence: 1, stage: 'source_ready', status: 'completed' }] };
+  const app = createUI((route, options = {}) => {
+    if (route === '/api/clipping/config') return Promise.resolve({ worker_available: false });
+    if (route === '/api/clipping/sources') return Promise.resolve(sourceSnapshot ? [sourceSnapshot] : []);
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return Promise.resolve([]);
+    if (route === '/api/clipping/sources/import') return new Promise((resolve, reject) => { imports.push({ resolve, reject }); });
+    throw new Error('Unexpected request');
+  });
+  await app.api.start();
+  assert.equal(app.logs.length, 0, 'pre-existing import history stays silent on initial load');
+  const beginImport = (url) => {
+    app.elements.get('clipping-link').value = url;
+    app.elements.get('clipping-link').emit('input');
+    app.elements.get('clipping-link-permission-check').checked = true;
+    app.elements.get('clipping-link-permission-check').emit('change');
+    app.elements.get('clipping-link-submit').click();
+    return app.elements.get('clipping-link-form').emit('submit')[0];
+  };
+  const oldPending = beginImport('https://drive.google.com/file/d/old/view?token=late-secret');
+  app.api.stop(true);
+  sourceSnapshot = null;
+  await app.api.start();
+  const newPending = beginImport('https://dropbox.com/s/new/current?token=current-secret');
+  assert.equal(imports.length, 2);
+
+  sourceSnapshot = { id: 'clipsrc_current', status: 'importing', diagnostics: [{ sequence: 1, stage: 'media_download', status: 'started' }] };
+  app.api.handleEvent('clipping_source', { data: JSON.stringify({ id: sourceSnapshot.id, source: sourceSnapshot }) });
+  imports[0].reject(new Error('late token=late-secret https://late.secret.invalid/private'));
+  await oldPending;
+  imports[1].resolve({});
+  await newPending;
+
+  const output = traceText(app.logs);
+  assert.doesNotMatch(output, /clipsrc_old|late-secret|current-secret|late\.secret\.invalid|\/private/);
+  assert.match(output, /Import step Media download: started[\s\S]*source=clipsrc_current/);
+  const clickActionIDs = app.logs
+    .filter((entry) => entry.includes('Import link clicked'))
+    .map((entry) => entry.find((value) => value.startsWith('action='))?.slice('action='.length));
+  assert.equal(clickActionIDs.length, 2);
+  assert.notEqual(clickActionIDs[0], clickActionIDs[1], 'late work cannot collide with an action in a later lifecycle');
 });
 
 test('individual and batch submissions send exact microUSD limits and stable idempotency keys', async () => {
