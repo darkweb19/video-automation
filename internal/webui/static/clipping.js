@@ -5,6 +5,11 @@
   const MAX_SAFE_MICRO_USD = Number.MAX_SAFE_INTEGER;
   const MAX_JOB_BUDGET_MICRO_USD = 4_000_000;
   const MAX_BATCH_BUDGET_MICRO_USD = 400_000_000;
+  const TRACE_PREFIX = "[FrameVault Clipping]";
+  const MAX_TRACE_ACTIONS = 32;
+  const MAX_TRACE_SOURCES = 64;
+  const MAX_TRACE_JOBS = 64;
+  const MAX_PENDING_SOURCE_SNAPSHOTS = 16;
   const CONTENT_TYPES = ["general", "podcast", "comedy", "gaming", "movie"];
   const MEDIA_EXTENSIONS = new Set([
     "3gp", "aac", "aif", "aiff", "avi", "flac", "m2ts", "m2v", "m4a", "m4v", "mkv", "mov", "mp3",
@@ -16,6 +21,41 @@
     audio_events: "Audio events",
     scene_motion_events: "Scene and motion events",
     candidate_selection: "Candidate selection"
+  };
+  const IMPORT_TRACE_STAGES = {
+    source_url_validation: "Source URL validation",
+    source_reservation: "Source reservation",
+    import_dispatch: "Import dispatch",
+    metadata_extraction: "Metadata extraction",
+    format_selection: "Format selection",
+    media_download: "Media download",
+    media_probe: "Media validation",
+    media_hash: "Source hashing",
+    source_ready: "Source ready; waiting for manual analysis"
+  };
+  const IMPORT_TRACE_STATUSES = new Set(["started", "completed", "failed", "retrying", "queued"]);
+  const IMPORT_TRACE_CODES = new Set([
+    "invalid_url", "unsupported_source", "unsafe_destination", "runtime_unavailable", "extractor_proxy_failure",
+    "extractor_timeout", "extractor_exit_failure", "extractor_output_limit", "metadata_invalid", "format_unavailable",
+    "video_unavailable", "duration_limit_exceeded", "size_limit_exceeded", "provider_denied_download",
+    "non_media_response", "partial_response_rejected", "download_failed", "probe_runtime_unavailable", "probe_timeout",
+    "media_invalid", "probe_failed", "hash_failed", "import_canceled", "retry_scheduled", "source_unavailable",
+    "download_timeout", "hash_timeout", "import_timeout", "youtube_import_unavailable", "youtube_video_unavailable",
+    "youtube_format_unavailable", "youtube_duration_limit_exceeded", "youtube_size_limit_exceeded", "youtube_media_invalid"
+  ]);
+  const SAFE_TRACE_REASONS = new Set([
+    ...IMPORT_TRACE_CODES, "invalid_link", "unsupported_link", "rights_confirmation_missing", "native_validation_failed",
+    "import_failed", "analysis_failed", "invalid_budget", "invalid_options", "request_canceled"
+  ]);
+  const ANALYSIS_TRACE_STATUSES = {
+    queued: "queued",
+    running: "running",
+    paused_budget: "paused",
+    canceled: "canceled",
+    cancelled: "canceled",
+    completed: "completed",
+    failed: "failed",
+    uncertain: "uncertain"
   };
 
   function parseUSDToMicroUSD(value) {
@@ -181,6 +221,21 @@
     selectedSourceIDs: new Set(),
     pendingJobKeys: new Map(),
     pendingBatchKeys: new Map(),
+    traceActions: new Map(),
+    nextTraceActionID: 0,
+    sourceTraceActions: new Map(),
+    sourceTraceSequences: new Map(),
+    sourceTraceTerminalStatuses: new Map(),
+    sourceTraceBacklog: new Map(),
+    pendingImportTraceActions: new Set(),
+    pendingLinkTraceActionID: 0,
+    nativeInvalidTraceActionID: 0,
+    nativeInvalidResetQueued: false,
+    jobTraceActions: new Map(),
+    jobTraceStatuses: new Map(),
+    jobCandidateCounts: new Map(),
+    jobTraceDetailsRequested: new Set(),
+    pendingAnalysisTraceActions: new Map(),
     linkConsentValue: "",
     config: null,
     upload: null,
@@ -216,6 +271,327 @@
 
   function current(lifecycle) {
     return state.active && lifecycle === state.lifecycle;
+  }
+
+  function traceSourceID(value) {
+    if (typeof value !== "string") return "";
+    const id = safeID(value);
+    return id.startsWith("clipsrc_") ? id : "";
+  }
+
+  function traceJobID(value) {
+    if (typeof value !== "string") return "";
+    const id = safeID(value);
+    return id.startsWith("clipjob_") ? id : "";
+  }
+
+  function traceLog(actionID, message, details = {}) {
+    if (!Number.isSafeInteger(actionID) || actionID <= 0 || !root.console || typeof root.console.log !== "function") return;
+    const values = [TRACE_PREFIX, message, `action=${actionID}`];
+    const sourceID = traceSourceID(details.sourceID);
+    const jobID = traceJobID(details.jobID);
+    if (sourceID) values.push(`source=${sourceID}`);
+    if (jobID) values.push(`job=${jobID}`);
+    if (Number.isSafeInteger(details.sequence) && details.sequence > 0) values.push(`sequence=${details.sequence}`);
+    if (Number.isSafeInteger(details.count) && details.count >= 0) values.push(`count=${details.count}`);
+    if (Number.isInteger(details.httpStatus) && details.httpStatus >= 100 && details.httpStatus <= 599) values.push(`http=${details.httpStatus}`);
+    if (SAFE_TRACE_REASONS.has(details.reason)) values.push(`reason=${details.reason}`);
+    root.console.log(...values);
+  }
+
+  function createTraceAction(kind, sourceID = "") {
+    state.nextTraceActionID++;
+    const actionID = state.nextTraceActionID;
+    const safeSourceID = traceSourceID(sourceID);
+    const action = {
+      kind,
+      sourceID: safeSourceID,
+      lifecycle: state.lifecycle,
+      sourceIDsBefore: new Set(state.sources.slice(0, MAX_TRACE_SOURCES).map((source) => traceSourceID(source && source.id)).filter(Boolean)),
+      knownJobIDs: new Set(state.jobs.slice(0, MAX_TRACE_JOBS).map((job) => traceJobID(job && job.id)).filter(Boolean)),
+      pending: true
+    };
+    state.traceActions.set(actionID, action);
+    while (state.traceActions.size > MAX_TRACE_ACTIONS) {
+      const oldestID = state.traceActions.keys().next().value;
+      forgetTraceAction(oldestID);
+    }
+    if (kind === "analysis" && safeSourceID) {
+      state.pendingAnalysisTraceActions.set(safeSourceID, actionID);
+      while (state.pendingAnalysisTraceActions.size > MAX_TRACE_SOURCES) {
+        state.pendingAnalysisTraceActions.delete(state.pendingAnalysisTraceActions.keys().next().value);
+      }
+    }
+    return actionID;
+  }
+
+  function forgetTraceAction(actionID) {
+    const action = state.traceActions.get(actionID);
+    if (!action) return;
+    state.traceActions.delete(actionID);
+    state.pendingImportTraceActions.delete(actionID);
+    if (state.pendingLinkTraceActionID === actionID) state.pendingLinkTraceActionID = 0;
+    if (action.sourceID && state.pendingAnalysisTraceActions.get(action.sourceID) === actionID) {
+      state.pendingAnalysisTraceActions.delete(action.sourceID);
+    }
+    for (const [sourceID, associatedActionID] of state.sourceTraceActions) {
+      if (associatedActionID !== actionID) continue;
+      state.sourceTraceActions.delete(sourceID);
+      state.sourceTraceSequences.delete(sourceID);
+      state.sourceTraceTerminalStatuses.delete(sourceID);
+      state.sourceTraceBacklog.delete(sourceID);
+    }
+    for (const [jobID, associatedActionID] of state.jobTraceActions) {
+      if (associatedActionID !== actionID) continue;
+      state.jobTraceActions.delete(jobID);
+      state.jobTraceStatuses.delete(jobID);
+      state.jobCandidateCounts.delete(jobID);
+    }
+  }
+
+  function boundedSet(map, key, value, maximum, onEvict) {
+    map.set(key, value);
+    while (map.size > maximum) {
+      const oldestKey = map.keys().next().value;
+      const oldValue = map.get(oldestKey);
+      map.delete(oldestKey);
+      onEvict?.(oldestKey, oldValue);
+    }
+  }
+
+  function traceRequestFailure(error, fallback = "import_failed") {
+    const rawStatus = error && error.status;
+    const status = typeof rawStatus === "number" ? rawStatus : NaN;
+    return {
+      reason: SAFE_TRACE_REASONS.has(fallback) ? fallback : "import_failed",
+      httpStatus: Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined
+    };
+  }
+
+  function safeImportReason(value, fallback = "source_unavailable") {
+    return typeof value === "string" && IMPORT_TRACE_CODES.has(value)
+      ? value
+      : IMPORT_TRACE_CODES.has(fallback) ? fallback : "source_unavailable";
+  }
+
+  function sourceDiagnosticList(source) {
+    return Array.isArray(source && source.diagnostics) ? source.diagnostics.slice(-128) : [];
+  }
+
+  function sourceTraceSnapshot(source) {
+    const snapshot = { id: traceSourceID(source && source.id), diagnostics: sourceDiagnosticList(source).map((record) => ({
+      sequence: Number.isSafeInteger(record && record.sequence) && record.sequence > 0 ? record.sequence : 0,
+      stage: typeof (record && record.stage) === "string" && Object.hasOwn(IMPORT_TRACE_STAGES, record.stage) ? record.stage : "",
+      status: typeof (record && record.status) === "string" && IMPORT_TRACE_STATUSES.has(record.status) ? record.status : "",
+      code: typeof (record && record.code) === "string" && IMPORT_TRACE_CODES.has(record.code) ? record.code : ""
+    })) };
+    if (source?.status === "ready" || source?.status === "failed") snapshot.status = source.status;
+    if (typeof source?.error === "string" && IMPORT_TRACE_CODES.has(source.error)) snapshot.error = source.error;
+    return snapshot;
+  }
+
+  function rememberUnmatchedSourceTrace(source) {
+    const sourceID = traceSourceID(source && source.id);
+    if (!sourceID || !state.pendingImportTraceActions.size || !sourceDiagnosticList(source).length) return;
+    boundedSet(state.sourceTraceBacklog, sourceID, sourceTraceSnapshot(source), MAX_PENDING_SOURCE_SNAPSHOTS);
+  }
+
+  function observeSourceTrace(source) {
+    const sourceID = traceSourceID(source && source.id);
+    const actionID = sourceID && state.sourceTraceActions.get(sourceID);
+    if (!sourceID || !actionID || !state.traceActions.has(actionID)) {
+      rememberUnmatchedSourceTrace(source);
+      return;
+    }
+    const diagnostics = sourceDiagnosticList(source)
+      .filter((record) => record && Number.isSafeInteger(record.sequence) && record.sequence > 0)
+      .sort((left, right) => left.sequence - right.sequence);
+    let highWater = state.sourceTraceSequences.get(sourceID) || 0;
+    if (!state.sourceTraceSequences.has(sourceID)) {
+      boundedSet(state.sourceTraceSequences, sourceID, highWater, MAX_TRACE_SOURCES, (evictedID) => {
+        state.sourceTraceActions.delete(evictedID);
+        state.sourceTraceBacklog.delete(evictedID);
+        state.sourceTraceTerminalStatuses.delete(evictedID);
+      });
+    }
+    for (const record of diagnostics) {
+      if (record.sequence <= highWater) continue;
+      highWater = record.sequence;
+      const stage = typeof record.stage === "string" && Object.hasOwn(IMPORT_TRACE_STAGES, record.stage)
+        ? IMPORT_TRACE_STAGES[record.stage] : "";
+      const status = typeof record.status === "string" && IMPORT_TRACE_STATUSES.has(record.status) ? record.status : "";
+      if (!stage || !status) continue;
+      const reason = record.status === "failed" || record.status === "retrying"
+        ? safeImportReason(record.code, record.status === "retrying" ? "retry_scheduled" : "source_unavailable")
+        : "";
+      const step = record.stage === "source_ready" && record.status === "completed"
+        ? "Source ready; waiting for manual analysis"
+        : `Import step ${stage}: ${status}`;
+      traceLog(actionID, step, { sourceID, sequence: record.sequence, reason });
+      if (record.status === "failed") state.sourceTraceTerminalStatuses.set(sourceID, "failed");
+      if (record.stage === "source_ready" && record.status === "completed") state.sourceTraceTerminalStatuses.set(sourceID, "ready");
+    }
+    state.sourceTraceSequences.set(sourceID, highWater);
+    const sourceStatus = typeof source.status === "string" ? source.status.toLowerCase() : "";
+    if ((sourceStatus === "ready" || sourceStatus === "failed")
+      && state.sourceTraceTerminalStatuses.get(sourceID) !== sourceStatus) {
+      state.sourceTraceTerminalStatuses.set(sourceID, sourceStatus);
+      if (sourceStatus === "ready") traceLog(actionID, "Source ready; waiting for manual analysis", { sourceID });
+      else traceLog(actionID, "Source import failed", { sourceID, reason: safeImportReason(source.error, "source_unavailable") });
+    }
+  }
+
+  function bindSourceTrace(actionID, source) {
+    const sourceID = traceSourceID(source && source.id);
+    if (!sourceID || !state.traceActions.has(actionID)) return;
+    boundedSet(state.sourceTraceActions, sourceID, actionID, MAX_TRACE_SOURCES, (evictedID) => {
+      state.sourceTraceSequences.delete(evictedID);
+      state.sourceTraceTerminalStatuses.delete(evictedID);
+      state.sourceTraceBacklog.delete(evictedID);
+    });
+    observeSourceTrace(source);
+    const backlog = state.sourceTraceBacklog.get(sourceID);
+    if (backlog) {
+      state.sourceTraceBacklog.delete(sourceID);
+      observeSourceTrace(backlog);
+    }
+    const snapshot = state.sources.find((item) => traceSourceID(item && item.id) === sourceID);
+    if (snapshot) observeSourceTrace(snapshot);
+  }
+
+  function traceSourceEvent(payload) {
+    const source = payload && payload.source && typeof payload.source === "object" ? payload.source : payload;
+    if (!source || typeof source !== "object") return;
+    observeSourceTrace(source);
+  }
+
+  function diagnosticSourceFromImport(payload) {
+    if (!payload || typeof payload !== "object") return null;
+    if (payload.source && typeof payload.source === "object") return payload.source;
+    return payload;
+  }
+
+  function traceJobArtifactCandidates(job) {
+    if (Array.isArray(job && job.candidates)) return job.candidates.length;
+    const artifacts = Array.isArray(job && job.artifacts) ? job.artifacts : [];
+    for (const artifact of artifacts) {
+      if (!artifact || typeof artifact !== "object" || typeof artifact.payload_json !== "string") continue;
+      let payload;
+      try { payload = JSON.parse(artifact.payload_json); } catch (_error) { continue; }
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+      const data = payload.payload && typeof payload.payload === "object" && !Array.isArray(payload.payload) ? payload.payload : payload;
+      if (Array.isArray(data.candidates)) return data.candidates.length;
+      if (data.candidate_pools && typeof data.candidate_pools === "object" && !Array.isArray(data.candidate_pools)) {
+        const pools = Object.values(data.candidate_pools).filter(Array.isArray);
+        if (pools.length) return Math.min(10000, pools.reduce((total, candidates) => total + candidates.length, 0));
+      }
+    }
+    return null;
+  }
+
+  function bindJobTrace(actionID, job) {
+    const jobID = traceJobID(job && job.id);
+    const action = state.traceActions.get(actionID);
+    const sourceID = traceSourceID(job && job.source_id);
+    if (!jobID || !action || action.kind !== "analysis" || sourceID !== action.sourceID) return false;
+    boundedSet(state.jobTraceActions, jobID, actionID, MAX_TRACE_JOBS, (evictedID) => {
+      state.jobTraceStatuses.delete(evictedID);
+      state.jobCandidateCounts.delete(evictedID);
+    });
+    if (state.pendingAnalysisTraceActions.get(sourceID) === actionID) state.pendingAnalysisTraceActions.delete(sourceID);
+    action.pending = false;
+    observeJobTrace(actionID, job);
+    return true;
+  }
+
+  function maybeFetchJobTraceDetails(actionID, job) {
+    const jobID = traceJobID(job && job.id);
+    const sourceID = traceSourceID(job && job.source_id);
+    const action = state.traceActions.get(actionID);
+    if (!jobID || !sourceID || !action || action.kind !== "analysis" || action.sourceID !== sourceID
+      || state.jobTraceActions.get(jobID) !== actionID || state.jobTraceDetailsRequested.has(jobID)) return;
+    const analysisStage = Array.isArray(job.stages)
+      ? job.stages.find((stage) => stage && stage.name === "analysis")
+      : null;
+    if (analysisStage?.status !== "completed" && job.status !== "completed") return;
+    if (traceJobArtifactCandidates(job) !== null) return;
+
+    state.jobTraceDetailsRequested.add(jobID);
+    while (state.jobTraceDetailsRequested.size > MAX_TRACE_JOBS) {
+      state.jobTraceDetailsRequested.delete(state.jobTraceDetailsRequested.values().next().value);
+    }
+    const lifecycle = state.lifecycle;
+    void api(`/api/clipping/jobs/${encodeURIComponent(jobID)}`).then((response) => {
+      if (!current(lifecycle) || state.jobTraceActions.get(jobID) !== actionID) return;
+      const detail = response && response.job && typeof response.job === "object" ? response.job : response;
+      if (!detail || traceJobID(detail.id) !== jobID || traceSourceID(detail.source_id) !== sourceID) return;
+      observeJobTrace(actionID, detail);
+    }).catch((error) => {
+      if (!current(lifecycle) || state.jobTraceActions.get(jobID) !== actionID || error?.name === "AbortError") return;
+      traceLog(actionID, "Analysis result details unavailable", {
+        sourceID, jobID, ...traceRequestFailure(error, "analysis_failed")
+      });
+    });
+  }
+
+  function observeJobTrace(actionID, job) {
+    const jobID = traceJobID(job && job.id);
+    const sourceID = traceSourceID(job && job.source_id);
+    if (!jobID || !sourceID || state.jobTraceActions.get(jobID) !== actionID || !state.traceActions.has(actionID)) return;
+    const analysisStage = Array.isArray(job.stages)
+      ? job.stages.find((stage) => stage && stage.name === "analysis")
+      : null;
+    const stageStatus = analysisStage && typeof analysisStage.status === "string" && Object.hasOwn(ANALYSIS_TRACE_STATUSES, analysisStage.status)
+      ? ANALYSIS_TRACE_STATUSES[analysisStage.status]
+      : "";
+    const jobStatus = typeof job.status === "string" && Object.hasOwn(ANALYSIS_TRACE_STATUSES, job.status)
+      ? ANALYSIS_TRACE_STATUSES[job.status] : "";
+    const status = stageStatus || jobStatus;
+    if (status && state.jobTraceStatuses.get(jobID) !== status) {
+      state.jobTraceStatuses.set(jobID, status);
+      traceLog(actionID, `Analysis status observed: ${status}`, { sourceID, jobID });
+    }
+    const candidateCount = traceJobArtifactCandidates(job);
+    if (candidateCount !== null && state.jobCandidateCounts.get(jobID) !== candidateCount) {
+      state.jobCandidateCounts.set(jobID, candidateCount);
+      traceLog(actionID, candidateCount ? "Candidate availability observed" : "Candidate results observed", {
+        sourceID, jobID, count: Math.min(10000, candidateCount)
+      });
+    }
+    maybeFetchJobTraceDetails(actionID, job);
+  }
+
+  function observeJobSnapshots(jobs) {
+    for (const job of Array.isArray(jobs) ? jobs : []) {
+      const jobID = traceJobID(job && job.id);
+      const sourceID = traceSourceID(job && job.source_id);
+      if (!jobID || !sourceID) continue;
+      const mappedActionID = state.jobTraceActions.get(jobID);
+      if (mappedActionID) {
+        observeJobTrace(mappedActionID, job);
+        continue;
+      }
+      const actionID = state.pendingAnalysisTraceActions.get(sourceID);
+      const action = actionID && state.traceActions.get(actionID);
+      if (!action || action.knownJobIDs.has(jobID)) continue;
+      bindJobTrace(actionID, job);
+    }
+  }
+
+  function traceJobEvent(payload) {
+    const job = payload && payload.job && typeof payload.job === "object" ? payload.job : payload;
+    if (!job || typeof job !== "object") return;
+    const jobID = traceJobID(job.id);
+    const sourceID = traceSourceID(job.source_id);
+    if (!jobID || !sourceID) return;
+    const mappedActionID = state.jobTraceActions.get(jobID);
+    if (mappedActionID) {
+      observeJobTrace(mappedActionID, job);
+      return;
+    }
+    const actionID = state.pendingAnalysisTraceActions.get(sourceID);
+    const action = actionID && state.traceActions.get(actionID);
+    if (action && !action.knownJobIDs.has(jobID)) bindJobTrace(actionID, job);
   }
 
   function element(tag, className, text) {
@@ -767,6 +1143,8 @@
       const detail = response && response.job && typeof response.job === "object" ? response.job : response;
       if (!detail || (detail.id && safeID(detail.id) !== id)) throw new Error("Saved job details did not match this job.");
       state.jobDetails.set(id, detail);
+      const traceActionID = state.jobTraceActions.get(traceJobID(id));
+      if (traceActionID) observeJobTrace(traceActionID, detail);
       state.expandedJobIDs.add(id);
     } catch (error) {
       if (current(lifecycle) && error.name !== "AbortError") state.jobDetailErrors.set(id, error.message || "Saved analysis details could not be loaded.");
@@ -1359,8 +1737,14 @@
       const payload = await api(path);
       if (!current(lifecycle) || sequence !== state.requestSequence[kind]) return;
       const record = Array.isArray(payload) ? payload : payload && (payload[kind] || payload.items) || [];
-      if (kind === "sources") state.sources = Array.isArray(record) ? record : [];
-      if (kind === "jobs") state.jobs = Array.isArray(record) ? record : [];
+      if (kind === "sources") {
+        state.sources = Array.isArray(record) ? record : [];
+        for (const source of state.sources) observeSourceTrace(source);
+      }
+      if (kind === "jobs") {
+        state.jobs = Array.isArray(record) ? record : [];
+        observeJobSnapshots(state.jobs);
+      }
       if (kind === "batches") state.batches = Array.isArray(record) ? record : [];
       render();
     } catch (error) {
@@ -1417,6 +1801,66 @@
       return "This public YouTube video could not be imported. It may require sign-in or lack a supported audio/video format. Upload an original file you have permission to reuse.";
     }
     return "The request could not be completed.";
+  }
+
+  function beginImportTraceFromClick() {
+    if (!state.active) return;
+    const actionID = createTraceAction("import");
+    state.pendingLinkTraceActionID = actionID;
+    traceLog(actionID, "Import link clicked");
+  }
+
+  function importTraceForSubmit() {
+    const pendingID = state.pendingLinkTraceActionID;
+    state.pendingLinkTraceActionID = 0;
+    const action = state.traceActions.get(pendingID);
+    if (action && action.kind === "import" && action.lifecycle === state.lifecycle && action.pending) return pendingID;
+    const actionID = createTraceAction("import");
+    traceLog(actionID, "Import link submitted");
+    return actionID;
+  }
+
+  function failImportValidation(actionID, reason) {
+    const action = state.traceActions.get(actionID);
+    if (!action || action.failureLogged) return;
+    action.failureLogged = true;
+    action.pending = false;
+    traceLog(actionID, "Import validation failed", { reason });
+  }
+
+  function handleNativeImportValidity(event) {
+    if (!state.active) return;
+    let actionID = state.nativeInvalidTraceActionID;
+    if (!actionID) {
+      actionID = importTraceForSubmit();
+      state.nativeInvalidTraceActionID = actionID;
+    }
+    if (!state.nativeInvalidResetQueued) {
+      state.nativeInvalidResetQueued = true;
+      const lifecycle = state.lifecycle;
+      Promise.resolve().then(() => {
+        if (lifecycle !== state.lifecycle) return;
+        state.nativeInvalidTraceActionID = 0;
+        state.nativeInvalidResetQueued = false;
+      });
+    }
+    const target = event && event.target;
+    const reason = target === ui.linkPermissionCheck
+      ? "rights_confirmation_missing"
+      : target === ui.link ? "invalid_link" : "native_validation_failed";
+    failImportValidation(actionID, reason);
+  }
+
+  function associateNewSourceWithImport(actionID) {
+    const action = state.traceActions.get(actionID);
+    if (!action || state.sourceTraceActions.size && [...state.sourceTraceActions.values()].includes(actionID)) return;
+    const pendingCount = [...state.pendingImportTraceActions].filter((id) => state.traceActions.has(id)).length;
+    if (pendingCount !== 1) return;
+    const created = state.sources.filter((source) => {
+      const sourceID = traceSourceID(source && source.id);
+      return sourceID && !action.sourceIDsBefore.has(sourceID);
+    });
+    if (created.length === 1) bindSourceTrace(actionID, created[0]);
   }
 
   function classifyYouTubeLink(url, raw) {
@@ -1489,6 +1933,7 @@
     event.preventDefault();
     const lifecycle = state.lifecycle;
     if (!current(lifecycle)) return;
+    const actionID = importTraceForSubmit();
     ui.linkError.textContent = "";
     const kind = classifyLink(ui.link.value);
     if (kind === "invalid" || kind === "unsupported" || kind === "youtube_invalid") {
@@ -1497,28 +1942,52 @@
         : kind === "youtube_invalid"
           ? "Use one HTTPS public YouTube watch, shorts, embed, or youtu.be video link. Playlists and live or upcoming streams are not supported; restricted videos or unsupported formats need an original-file upload you are permitted to reuse."
           : "Use a public Google Drive or Dropbox link, or a supported single-video YouTube link.";
+      failImportValidation(actionID, kind === "unsupported" ? "unsupported_link" : "invalid_link");
       return;
     }
     if (!ui.linkPermissionCheck.checked) {
       ui.linkError.textContent = kind === "youtube" || kind === "youtube_invalid"
         ? "Confirm that you have permission to reuse and process this YouTube footage."
         : "Confirm that you have permission to reuse this video and have it processed.";
+      failImportValidation(actionID, "rights_confirmation_missing");
       return;
     }
+    const action = state.traceActions.get(actionID);
+    if (action) action.failureLogged = false;
+    state.pendingImportTraceActions.add(actionID);
+    traceLog(actionID, "Import request started");
     ui.linkSubmit.disabled = true;
     const label = ui.linkSubmit.textContent;
     ui.linkSubmit.textContent = "Checking link…";
     try {
-      await api("/api/clipping/sources/import", {
+      const payload = await api("/api/clipping/sources/import", {
         method: "POST",
         body: JSON.stringify({ url: ui.link.value.trim(), rights_attested: true })
       });
       if (!current(lifecycle)) return;
+      const importedSource = diagnosticSourceFromImport(payload);
+      const sourceID = traceSourceID(importedSource && importedSource.id);
+      if (sourceID) bindSourceTrace(actionID, importedSource);
+      traceLog(actionID, "Import request accepted", { sourceID });
       ui.linkForm.reset();
       updateLinkDisclosure();
       await refresh();
+      if (!sourceID) associateNewSourceWithImport(actionID);
+      const traceAction = state.traceActions.get(actionID);
+      if (traceAction && traceAction.lifecycle === lifecycle) {
+        traceAction.pending = false;
+        state.pendingImportTraceActions.delete(actionID);
+      }
     } catch (error) {
-      if (current(lifecycle)) ui.linkError.textContent = friendlyError(error, kind);
+      if (current(lifecycle)) {
+        ui.linkError.textContent = friendlyError(error, kind);
+        traceLog(actionID, "Import request failed", traceRequestFailure(error, "import_failed"));
+      }
+      const traceAction = state.traceActions.get(actionID);
+      if (traceAction && traceAction.lifecycle === lifecycle) {
+        traceAction.pending = false;
+        state.pendingImportTraceActions.delete(actionID);
+      }
     } finally {
       if (current(lifecycle)) {
         ui.linkSubmit.textContent = label;
@@ -1670,15 +2139,22 @@
   async function createJob(sourceID) {
     const lifecycle = state.lifecycle;
     if (!current(lifecycle)) return;
+    const safeSourceID = traceSourceID(sourceID);
+    const actionID = createTraceAction("analysis", safeSourceID);
+    traceLog(actionID, "Analysis submission requested", { sourceID: safeSourceID });
     const budget = parseBudgetUSD(ui.jobBudget.value, MAX_JOB_BUDGET_MICRO_USD);
     if (budget === null) {
       ui.sourcesError.textContent = "Enter a per-job budget from $0.01 to $4.00.";
+      traceLog(actionID, "Analysis request failed", { sourceID: safeSourceID, reason: "invalid_budget" });
+      if (state.pendingAnalysisTraceActions.get(safeSourceID) === actionID) state.pendingAnalysisTraceActions.delete(safeSourceID);
       focusInDisclosures([ui.settingsDisclosure, ui.jobSettingsDisclosure], ui.jobBudget);
       return;
     }
     const options = selectionOptions(ui.jobMinSeconds.value, ui.jobMaxSeconds.value, ui.jobCandidateLimit.value);
     if (!options) {
       ui.sourcesError.textContent = "Use clip lengths from 15 to 180 seconds, with minimum no greater than maximum, and choose 7 to 10 candidates.";
+      traceLog(actionID, "Analysis request failed", { sourceID: safeSourceID, reason: "invalid_options" });
+      if (state.pendingAnalysisTraceActions.get(safeSourceID) === actionID) state.pendingAnalysisTraceActions.delete(safeSourceID);
       focusInDisclosures([ui.settingsDisclosure, ui.jobSettingsDisclosure], ui.jobMinSeconds);
       return;
     }
@@ -1690,16 +2166,33 @@
     const idempotencyKey = state.pendingJobKeys.get(fingerprint) || newIdempotencyKey();
     state.pendingJobKeys.set(fingerprint, idempotencyKey);
     try {
-      await api("/api/clipping/jobs", {
+      traceLog(actionID, "Analysis request started", { sourceID: safeSourceID });
+      const payload = await api("/api/clipping/jobs", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ source_id: sourceID, budget_micro_usd: budget, content_type: profile, ...options })
       });
       if (!current(lifecycle)) return;
       state.pendingJobKeys.delete(fingerprint);
+      const createdJob = payload && payload.job && typeof payload.job === "object" ? payload.job : payload;
+      const jobID = traceJobID(createdJob && createdJob.id);
+      if (jobID) {
+        const correlatedJob = createdJob.source_id ? createdJob : { ...createdJob, source_id: safeSourceID };
+        bindJobTrace(actionID, correlatedJob);
+      }
+      traceLog(actionID, "Analysis request accepted", { sourceID: safeSourceID, jobID });
+      if (!jobID && state.pendingAnalysisTraceActions.get(safeSourceID) !== actionID) {
+        state.pendingAnalysisTraceActions.set(safeSourceID, actionID);
+      }
       await Promise.allSettled([load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError), load("batches", "/api/clipping/batches", renderBatches, ui.batchesError)]);
     } catch (error) {
-      if (current(lifecycle)) ui.sourcesError.textContent = error.message || "The analysis job could not be queued.";
+      if (current(lifecycle)) {
+        ui.sourcesError.textContent = error.message || "The analysis job could not be queued.";
+        traceLog(actionID, "Analysis request failed", { sourceID: safeSourceID, ...traceRequestFailure(error, "analysis_failed") });
+      }
+      if (state.pendingAnalysisTraceActions.get(safeSourceID) === actionID) state.pendingAnalysisTraceActions.delete(safeSourceID);
+      const action = state.traceActions.get(actionID);
+      if (action) action.pending = false;
     } finally {
       if (current(lifecycle) && buttonNode) buttonNode.disabled = false;
     }
@@ -1797,6 +2290,10 @@
       if (!current(lifecycle)) return;
       state.selectedSourceIDs.delete(id);
       state.sourceContentTypes.delete(id);
+      state.sourceTraceActions.delete(id);
+      state.sourceTraceSequences.delete(id);
+      state.sourceTraceTerminalStatuses.delete(id);
+      state.sourceTraceBacklog.delete(id);
       await refresh();
     } catch (error) {
       if (current(lifecycle)) ui.sourcesError.textContent = error.message || "The source could not be removed.";
@@ -1918,6 +2415,8 @@
     ui.link.addEventListener("input", updateLinkDisclosure);
     ui.link.addEventListener("change", updateLinkDisclosure);
     ui.linkPermissionCheck.addEventListener("change", updateLinkDisclosure);
+    ui.linkSubmit.addEventListener("click", beginImportTraceFromClick);
+    ui.linkForm.addEventListener("invalid", handleNativeImportValidity, true);
     ui.linkForm.addEventListener("submit", submitImport);
     [ui.batchJobBudget, ui.batchBudget, ui.batchMinSeconds, ui.batchMaxSeconds, ui.batchCandidateLimit]
       .forEach((input) => input.addEventListener("input", renderBatchReadiness));
@@ -1941,9 +2440,27 @@
     return refresh();
   }
 
+  function clearTraceState() {
+    state.traceActions.clear();
+    state.sourceTraceActions.clear();
+    state.sourceTraceSequences.clear();
+    state.sourceTraceTerminalStatuses.clear();
+    state.sourceTraceBacklog.clear();
+    state.pendingImportTraceActions.clear();
+    state.pendingLinkTraceActionID = 0;
+    state.nativeInvalidTraceActionID = 0;
+    state.nativeInvalidResetQueued = false;
+    state.jobTraceActions.clear();
+    state.jobTraceStatuses.clear();
+    state.jobCandidateCounts.clear();
+    state.jobTraceDetailsRequested.clear();
+    state.pendingAnalysisTraceActions.clear();
+  }
+
   function stop(clear = true) {
     state.active = false;
     state.lifecycle++;
+    clearTraceState();
     state.controllers.forEach((controller) => controller.abort());
     state.controllers.clear();
     if (state.upload) state.upload.controller?.abort();
@@ -2009,7 +2526,9 @@
       const payload = JSON.parse(event.data);
       const id = safeID(payload && payload.id);
       if (!id) return;
+      if (kind === "clipping_source") traceSourceEvent(payload);
       if (kind === "clipping_job") {
+        traceJobEvent(payload);
         changedJobID = id;
         state.jobDetails.delete(id);
         state.jobDetailErrors.delete(id);
