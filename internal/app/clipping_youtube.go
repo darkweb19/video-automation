@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -19,7 +20,6 @@ import (
 const (
 	clippingYouTubeExtractorTimeout = 90 * time.Second
 	clippingYouTubeOutputLimit      = 4 << 20
-	clippingYouTubeMuxedFormat      = "best[acodec!=none][vcodec!=none][protocol=https][ext=mp4]/best[acodec!=none][vcodec!=none][protocol=https][ext=webm]"
 	clippingYouTubeRuntime          = "deno:/usr/bin/deno"
 )
 
@@ -29,43 +29,89 @@ var clippingYouTubeExecutablePaths = []string{"/usr/local/bin/yt-dlp", "/usr/bin
 
 var errClippingDurationLimitExceeded = errors.New("source duration exceeds the four-hour limit")
 
+const clippingYouTubeMaxAVSkewMS int64 = 2_000
+
+// youtubeImportExpectation stores only the sanitized properties needed to
+// validate a finalized YouTube source after a process restart. Direct URLs,
+// extractor IDs, headers, and raw metadata are intentionally absent.
+type youtubeImportExpectation struct {
+	Version           int     `json:"version"`
+	DurationMS        int64   `json:"duration_ms"`
+	VideoCodec        string  `json:"video_codec"`
+	VideoWidth        int     `json:"video_width"`
+	VideoHeight       int     `json:"video_height"`
+	VideoFPS          float64 `json:"video_fps"`
+	VideoQuality      float64 `json:"video_quality"`
+	VideoTBR          float64 `json:"video_tbr"`
+	AudioCodec        string  `json:"audio_codec"`
+	OriginalAudio     bool    `json:"original_audio"`
+	SeparateTracks    bool    `json:"separate_tracks"`
+	WorkspaceComplete bool    `json:"workspace_complete,omitempty"`
+}
+
 type youtubeSelection struct {
 	URL        *url.URL
 	DurationMS int64
 	SizeBytes  int64
 	UserAgent  string
 	Referer    string
+	Tracks     youtubeFormatSelection
+	Separate   bool
+	MediaRole  string
 }
 
 type youtubeExtractorOutput struct {
-	ID                  string          `json:"id"`
-	Type                string          `json:"_type"`
-	Availability        string          `json:"availability"`
-	LiveStatus          string          `json:"live_status"`
-	IsLive              bool            `json:"is_live"`
-	Duration            json.Number     `json:"duration"`
-	Entries             json.RawMessage `json:"entries"`
-	RequestedDownloads  []youtubeFormat `json:"requested_downloads"`
-	TopLevelFormatID    string          `json:"format_id"`
-	TopLevelAudioCodec  string          `json:"acodec"`
-	TopLevelVideoCodec  string          `json:"vcodec"`
-	TopLevelProtocol    string          `json:"protocol"`
-	TopLevelExtension   string          `json:"ext"`
-	TopLevelDirectURL   string          `json:"url"`
-	TopLevelFileSize    json.Number     `json:"filesize"`
-	TopLevelFileSizeEst json.Number     `json:"filesize_approx"`
+	ID           string          `json:"id"`
+	Type         string          `json:"_type"`
+	Availability string          `json:"availability"`
+	LiveStatus   string          `json:"live_status"`
+	IsLive       bool            `json:"is_live"`
+	Duration     json.Number     `json:"duration"`
+	Entries      json.RawMessage `json:"entries"`
+	Formats      []youtubeFormat `json:"formats"`
 }
 
 type youtubeFormat struct {
-	FormatID       string            `json:"format_id"`
-	AudioCodec     string            `json:"acodec"`
-	VideoCodec     string            `json:"vcodec"`
-	Protocol       string            `json:"protocol"`
-	Extension      string            `json:"ext"`
-	URL            string            `json:"url"`
-	HTTPHeaders    map[string]string `json:"http_headers"`
-	FileSize       json.Number       `json:"filesize"`
-	FileSizeApprox json.Number       `json:"filesize_approx"`
+	FormatID           string            `json:"format_id"`
+	AudioCodec         string            `json:"acodec"`
+	VideoCodec         string            `json:"vcodec"`
+	Protocol           string            `json:"protocol"`
+	Extension          string            `json:"ext"`
+	URL                string            `json:"url"`
+	HTTPHeaders        map[string]string `json:"http_headers"`
+	FileSize           json.Number       `json:"filesize"`
+	FileSizeApprox     json.Number       `json:"filesize_approx"`
+	Width              int               `json:"width"`
+	Height             int               `json:"height"`
+	FPS                json.Number       `json:"fps"`
+	TBR                json.Number       `json:"tbr"`
+	Quality            json.Number       `json:"quality"`
+	ABR                json.Number       `json:"abr"`
+	ASR                json.Number       `json:"asr"`
+	AudioChannels      json.Number       `json:"audio_channels"`
+	Language           string            `json:"language"`
+	LanguagePreference json.Number       `json:"language_preference"`
+	FormatNote         string            `json:"format_note"`
+	HasDRM             bool              `json:"has_drm"`
+}
+
+// yt-dlp may emit the string "maybe" for manifest formats. Treat every
+// explicit value except JSON false or null as DRM-protected/unknown so one
+// format cannot make the bounded metadata document fail to decode and no
+// ambiguous candidate can be selected.
+func (format *youtubeFormat) UnmarshalJSON(data []byte) error {
+	type plain youtubeFormat
+	var decoded struct {
+		*plain
+		HasDRM json.RawMessage `json:"has_drm"`
+	}
+	decoded.plain = (*plain)(format)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	value := strings.TrimSpace(string(decoded.HasDRM))
+	format.HasDRM = value != "" && value != "false" && value != "null"
+	return nil
 }
 
 func youtubeImportOutcome(reason, message string) *ClippingAcquisitionError {
@@ -112,7 +158,7 @@ func (a *ClippingAcquisition) extractYouTubeMedia(ctx context.Context, canonical
 	return a.extractYouTubeMediaWithTrace(ctx, canonicalURL, nil, nil, nil)
 }
 
-func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, canonicalURL *url.URL, onMetadataRetrieved, onFormatSelectionStarted, onFormatSelected func()) (youtubeSelection, error) {
+func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, canonicalURL *url.URL, onMetadataRetrieved, onFormatSelectionStarted func(), onFormatSelected func(youtubeSelection)) (youtubeSelection, error) {
 	if err := ctx.Err(); err != nil {
 		return youtubeSelection{}, err
 	}
@@ -168,7 +214,6 @@ func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, 
 		"--skip-download",
 		"--no-simulate",
 		"--dump-single-json",
-		"--format", clippingYouTubeMuxedFormat,
 		"--no-remote-components",
 		"--js-runtimes", runtimeSpec,
 		"--proxy", proxy.AuthenticatedURL(),
@@ -213,6 +258,8 @@ func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, 
 			switch outcome.Reason {
 			case "youtube_format_unavailable":
 				code = "format_unavailable"
+			case "youtube_original_audio_unavailable":
+				code = "original_audio_unavailable"
 			case "youtube_video_unavailable":
 				code = "video_unavailable"
 			case "youtube_duration_limit_exceeded":
@@ -224,7 +271,7 @@ func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, 
 		return youtubeSelection{}, withClippingDiagnosticCode(err, code)
 	}
 	if onFormatSelected != nil {
-		onFormatSelected()
+		onFormatSelected(selection)
 	}
 	return selection, nil
 }
@@ -294,32 +341,46 @@ func parseYouTubeExtractorOutput(output []byte, expectedID string) (youtubeSelec
 	if !ok || durationMS > MaxClippingSourceDurationMS {
 		return fallback("youtube_format_unavailable")
 	}
-	if len(metadata.RequestedDownloads) != 1 {
+	formats := metadata.Formats
+	if len(formats) == 0 {
 		return fallback("youtube_format_unavailable")
 	}
-	format := metadata.RequestedDownloads[0]
-	if strings.TrimSpace(format.FormatID) == "" || !hasYouTubeAudioVideo(format.AudioCodec, format.VideoCodec) ||
-		!strings.EqualFold(strings.TrimSpace(format.Protocol), "https") || !supportedYouTubeExtension(format.Extension) {
+	chosen, err := selectYouTubeFormats(formats, expectedID)
+	if err != nil {
+		if errors.Is(err, errYouTubeOriginalAudioUnavailable) {
+			return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_original_audio_unavailable", "An original audio track could not be identified safely; upload an original file you are permitted to reuse")}
+		}
 		return fallback("youtube_format_unavailable")
 	}
-	if metadata.TopLevelFormatID != "" && metadata.TopLevelFormatID != format.FormatID ||
-		metadata.TopLevelAudioCodec != "" && !hasYouTubeAudioVideo(metadata.TopLevelAudioCodec, metadata.TopLevelVideoCodec) ||
-		metadata.TopLevelProtocol != "" && !strings.EqualFold(metadata.TopLevelProtocol, format.Protocol) ||
-		metadata.TopLevelExtension != "" && !strings.EqualFold(metadata.TopLevelExtension, format.Extension) {
-		return fallback("youtube_format_unavailable")
+	selection := youtubeSelection{DurationMS: durationMS, Tracks: chosen, Separate: chosen.Separate}
+	selectedFormats := make([]youtubeFormat, 0, 2)
+	if chosen.Separate {
+		selectedFormats = append(selectedFormats, *chosen.Video, *chosen.Audio)
+	} else if chosen.Combined != nil {
+		selectedFormats = append(selectedFormats, *chosen.Combined)
 	}
-	if metadata.TopLevelDirectURL != "" && metadata.TopLevelDirectURL != format.URL {
-		return fallback("youtube_format_unavailable")
-	}
-	for _, size := range []json.Number{format.FileSize, format.FileSizeApprox, metadata.TopLevelFileSize, metadata.TopLevelFileSizeEst} {
-		value, present, sizeErr := parseYouTubeDeclaredSize(size)
+	var aggregateDeclared int64
+	for _, format := range selectedFormats {
+		declared := format.FileSize
+		if declared == "" {
+			declared = format.FileSizeApprox
+		}
+		value, present, sizeErr := parseYouTubeDeclaredSize(declared)
 		if sizeErr != nil {
 			return fallback("youtube_format_unavailable")
 		}
-		if present && value > MaxClippingSourceBytes {
-			return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_size_limit_exceeded", "The video exceeds the 20 GiB limit; upload a smaller original file you are permitted to reuse")}
+		if present {
+			if importStreamExceedsLimit(aggregateDeclared, value, MaxClippingSourceBytes) {
+				return youtubeSelection{}, permanentClippingImportError{youtubeImportOutcome("youtube_size_limit_exceeded", "The selected source tracks exceed the 20 GiB limit; upload a smaller original file you are permitted to reuse")}
+			}
+			aggregateDeclared += value
 		}
 	}
+	if chosen.Separate {
+		selection.SizeBytes = aggregateDeclared
+		return selection, nil
+	}
+	format := *chosen.Combined
 	mediaURL, err := url.Parse(format.URL)
 	if err != nil || validateYouTubeMediaURL(mediaURL) != nil {
 		return fallback("youtube_format_unavailable")
@@ -328,7 +389,9 @@ func parseYouTubeExtractorOutput(output []byte, expectedID string) (youtubeSelec
 	if err != nil {
 		return fallback("youtube_format_unavailable")
 	}
-	selection := youtubeSelection{URL: mediaURL, DurationMS: durationMS, UserAgent: userAgent}
+	selection.URL = mediaURL
+	selection.SizeBytes = aggregateDeclared
+	selection.UserAgent = userAgent
 	if referer {
 		selection.Referer = "https://www.youtube.com/watch?v=" + expectedID
 	}
@@ -412,6 +475,134 @@ func hasYouTubeAudioVideo(audioCodec, videoCodec string) bool {
 	return audioCodec != "" && audioCodec != "none" && videoCodec != "" && videoCodec != "none"
 }
 
+func expectationForYouTubeSelection(selection youtubeSelection) (youtubeImportExpectation, error) {
+	var videoFormat, audioFormat *youtubeFormat
+	if selection.Separate {
+		videoFormat, audioFormat = selection.Tracks.Video, selection.Tracks.Audio
+	} else {
+		videoFormat, audioFormat = selection.Tracks.Combined, selection.Tracks.Combined
+	}
+	if videoFormat == nil || audioFormat == nil {
+		return youtubeImportExpectation{}, errClippingInvalidMedia
+	}
+	width, height := videoFormat.Width, videoFormat.Height
+	if !reasonableClippingDimensions(width, height) {
+		return youtubeImportExpectation{}, errClippingInvalidMedia
+	}
+	videoCodec, ok := normalizedYouTubeVideoCodec(videoFormat.VideoCodec)
+	if !ok {
+		return youtubeImportExpectation{}, errClippingInvalidMedia
+	}
+	audioCodec, ok := normalizedYouTubeAudioCodec(audioFormat.AudioCodec)
+	if !ok {
+		return youtubeImportExpectation{}, errClippingInvalidMedia
+	}
+	return youtubeImportExpectation{
+		Version: 1, DurationMS: selection.DurationMS, VideoCodec: videoCodec,
+		VideoWidth: width, VideoHeight: height,
+		VideoFPS: safeYouTubeMetadataNumber(videoFormat.FPS), VideoQuality: safeYouTubeMetadataNumber(videoFormat.Quality),
+		VideoTBR: safeYouTubeMetadataNumber(videoFormat.TBR), AudioCodec: audioCodec,
+		OriginalAudio:  youtubeFormatLanguagePreference(audioFormat.LanguagePreference) == youtubeOriginalLanguagePreference,
+		SeparateTracks: selection.Separate,
+	}, nil
+}
+
+func validYouTubeImportExpectation(expectation youtubeImportExpectation) bool {
+	return expectation.Version == 1 && expectation.DurationMS > 0 && expectation.DurationMS <= MaxClippingSourceDurationMS &&
+		reasonableClippingDimensions(expectation.VideoWidth, expectation.VideoHeight) &&
+		isSupportedExpectedYouTubeCodec("video", expectation.VideoCodec) && isSupportedExpectedYouTubeCodec("audio", expectation.AudioCodec) &&
+		finiteNonnegative(expectation.VideoFPS) && finiteNonnegative(expectation.VideoQuality) && finiteNonnegative(expectation.VideoTBR)
+}
+
+func validateYouTubeProbeExpectation(expectation youtubeImportExpectation, media clippingMediaProbeResult) error {
+	if !validYouTubeImportExpectation(expectation) || media.AudioStreams != 1 || media.VideoCodec == "" || media.AudioCodec == "" ||
+		media.VideoCodec != expectation.VideoCodec || media.AudioCodec != expectation.AudioCodec ||
+		media.Width != expectation.VideoWidth || media.Height != expectation.VideoHeight ||
+		!media.VideoTimingValid || !media.AudioTimingValid || media.VideoDurationMS <= 0 || media.AudioDurationMS <= 0 {
+		return errors.Join(errClippingInvalidMedia, errClippingYouTubeAVStreamMissing)
+	}
+	if media.DurationMS <= 0 || media.DurationMS > MaxClippingSourceDurationMS ||
+		!youtubeTimesWithin(media.DurationMS, expectation.DurationMS, clippingYouTubeDurationToleranceMS) ||
+		!youtubeTimesWithin(media.VideoDurationMS, media.AudioDurationMS, clippingYouTubeDurationToleranceMS) ||
+		!youtubeTimesWithin(media.VideoDurationMS, media.DurationMS, clippingYouTubeDurationToleranceMS) ||
+		!youtubeTimesWithin(media.AudioDurationMS, media.DurationMS, clippingYouTubeDurationToleranceMS) ||
+		!youtubeTimesWithin(media.VideoStartMS, media.AudioStartMS, clippingYouTubeMaxAVSkewMS) ||
+		media.VideoStartMS < -clippingYouTubeMaxAVSkewMS || media.AudioStartMS < -clippingYouTubeMaxAVSkewMS ||
+		media.VideoStartMS > media.DurationMS+clippingYouTubeMaxAVSkewMS || media.AudioStartMS > media.DurationMS+clippingYouTubeMaxAVSkewMS {
+		return errors.Join(errClippingInvalidMedia, errClippingYouTubeAVTimingMismatch)
+	}
+	if expectation.VideoFPS > 0 && (!media.VideoFPSValid || math.Abs(media.VideoFPS-expectation.VideoFPS) > 0.5) {
+		return errors.Join(errClippingInvalidMedia, errClippingYouTubeAVTimingMismatch)
+	}
+	return nil
+}
+
+func finiteNonnegative(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+}
+
+func isSupportedExpectedYouTubeCodec(kind, codec string) bool {
+	if kind == "video" {
+		_, ok := clippingSupportedVideoCodecs[codec]
+		return ok
+	}
+	if kind == "audio" {
+		_, ok := clippingSupportedAudioCodecs[codec]
+		return ok
+	}
+	return false
+}
+
+func normalizedYouTubeVideoCodec(raw string) (string, bool) {
+	codec := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case strings.HasPrefix(codec, "avc1"), strings.HasPrefix(codec, "avc3"):
+		return "h264", true
+	case strings.HasPrefix(codec, "hev1"), strings.HasPrefix(codec, "hvc1"):
+		return "hevc", true
+	case strings.HasPrefix(codec, "vp09"), codec == "vp9":
+		return "vp9", true
+	case strings.HasPrefix(codec, "vp08"), codec == "vp8":
+		return "vp8", true
+	case strings.HasPrefix(codec, "av01"), codec == "av1":
+		return "av1", true
+	case strings.HasPrefix(codec, "mpeg1video"):
+		return "mpeg1video", true
+	case strings.HasPrefix(codec, "mpeg2video"):
+		return "mpeg2video", true
+	case strings.HasPrefix(codec, "mpeg4"):
+		return "mpeg4", true
+	case strings.HasPrefix(codec, "theora"):
+		return "theora", true
+	default:
+		return "", false
+	}
+}
+
+func normalizedYouTubeAudioCodec(raw string) (string, bool) {
+	codec := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case strings.HasPrefix(codec, "mp4a"):
+		return "aac", true
+	case strings.HasPrefix(codec, "opus"):
+		return "opus", true
+	case strings.HasPrefix(codec, "vorbis"):
+		return "vorbis", true
+	case strings.HasPrefix(codec, "ac-3"), strings.HasPrefix(codec, "ac3"):
+		return "ac3", true
+	case strings.HasPrefix(codec, "ec-3"), strings.HasPrefix(codec, "eac3"):
+		return "eac3", true
+	case strings.HasPrefix(codec, "flac"):
+		return "flac", true
+	case strings.HasPrefix(codec, "mp3"):
+		return "mp3", true
+	case strings.HasPrefix(codec, "alac"):
+		return "alac", true
+	default:
+		return "", false
+	}
+}
+
 // parseYouTubeDeclaredSize keeps JSON sizes exact near the 20 GiB bound.
 func parseYouTubeDeclaredSize(number json.Number) (int64, bool, error) {
 	if number == "" {
@@ -468,7 +659,7 @@ func (a *ClippingAcquisition) fetchYouTubeMediaURL(ctx context.Context, selectio
 		if err != nil {
 			return nil, permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "No supported audio/video format is available; upload an original file you are permitted to reuse")}
 		}
-		request.Header.Set("Accept", "video/*,application/octet-stream")
+		request.Header.Set("Accept", "video/*,audio/*,application/octet-stream")
 		request.Header.Set("Accept-Encoding", "identity")
 		if selection.UserAgent != "" {
 			request.Header.Set("User-Agent", selection.UserAgent)

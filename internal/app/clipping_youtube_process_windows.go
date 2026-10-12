@@ -17,3 +17,5 @@ func configureYouTubeSubprocess(command *exec.Cmd) {
 		return command.Process.Kill()
 	}
 }
+
+func youtubeMuxOutputLimitReached(_ *exec.Cmd, _ error) bool { return false }

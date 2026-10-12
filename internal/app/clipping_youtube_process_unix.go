@@ -22,3 +22,11 @@ func configureYouTubeSubprocess(command *exec.Cmd) {
 		return err
 	}
 }
+
+func youtubeMuxOutputLimitReached(command *exec.Cmd, runErr error) bool {
+	if runErr == nil || command == nil || command.ProcessState == nil {
+		return false
+	}
+	status, ok := command.ProcessState.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGXFSZ
+}

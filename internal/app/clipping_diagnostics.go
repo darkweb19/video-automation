@@ -9,58 +9,79 @@ import (
 )
 
 const (
-	ClippingDiagnosticStageURLValidation = "source_url_validation"
-	ClippingDiagnosticStageReservation   = "source_reservation"
-	ClippingDiagnosticStageDispatch      = "import_dispatch"
-	ClippingDiagnosticStageMetadata      = "metadata_extraction"
-	ClippingDiagnosticStageFormat        = "format_selection"
-	ClippingDiagnosticStageDownload      = "media_download"
-	ClippingDiagnosticStageProbe         = "media_probe"
-	ClippingDiagnosticStageHash          = "media_hash"
-	ClippingDiagnosticStageReady         = "source_ready"
+	ClippingDiagnosticStageURLValidation  = "source_url_validation"
+	ClippingDiagnosticStageReservation    = "source_reservation"
+	ClippingDiagnosticStageDispatch       = "import_dispatch"
+	ClippingDiagnosticStageMetadata       = "metadata_extraction"
+	ClippingDiagnosticStageFormat         = "format_selection"
+	ClippingDiagnosticStageDownload       = "media_download"
+	ClippingDiagnosticStageVideoDownload  = "video_track_download"
+	ClippingDiagnosticStageAudioDownload  = "audio_track_download"
+	ClippingDiagnosticStageTrackMux       = "track_mux"
+	ClippingDiagnosticStageMergedValidate = "merged_validation"
+	ClippingDiagnosticStageProbe          = "media_probe"
+	ClippingDiagnosticStageHash           = "media_hash"
+	ClippingDiagnosticStageReady          = "source_ready"
 )
 
 var clippingDiagnosticStages = map[string]struct{}{
-	ClippingDiagnosticStageURLValidation: {},
-	ClippingDiagnosticStageReservation:   {},
-	ClippingDiagnosticStageDispatch:      {},
-	ClippingDiagnosticStageMetadata:      {},
-	ClippingDiagnosticStageFormat:        {},
-	ClippingDiagnosticStageDownload:      {},
-	ClippingDiagnosticStageProbe:         {},
-	ClippingDiagnosticStageHash:          {},
-	ClippingDiagnosticStageReady:         {},
+	ClippingDiagnosticStageURLValidation:  {},
+	ClippingDiagnosticStageReservation:    {},
+	ClippingDiagnosticStageDispatch:       {},
+	ClippingDiagnosticStageMetadata:       {},
+	ClippingDiagnosticStageFormat:         {},
+	ClippingDiagnosticStageDownload:       {},
+	ClippingDiagnosticStageVideoDownload:  {},
+	ClippingDiagnosticStageAudioDownload:  {},
+	ClippingDiagnosticStageTrackMux:       {},
+	ClippingDiagnosticStageMergedValidate: {},
+	ClippingDiagnosticStageProbe:          {},
+	ClippingDiagnosticStageHash:           {},
+	ClippingDiagnosticStageReady:          {},
 }
 
 var clippingDiagnosticCodes = map[string]struct{}{
-	"invalid_url":               {},
-	"unsupported_source":        {},
-	"unsafe_destination":        {},
-	"runtime_unavailable":       {},
-	"extractor_proxy_failure":   {},
-	"extractor_timeout":         {},
-	"extractor_exit_failure":    {},
-	"extractor_output_limit":    {},
-	"metadata_invalid":          {},
-	"format_unavailable":        {},
-	"video_unavailable":         {},
-	"duration_limit_exceeded":   {},
-	"size_limit_exceeded":       {},
-	"provider_denied_download":  {},
-	"non_media_response":        {},
-	"partial_response_rejected": {},
-	"download_failed":           {},
-	"probe_runtime_unavailable": {},
-	"probe_timeout":             {},
-	"media_invalid":             {},
-	"probe_failed":              {},
-	"hash_failed":               {},
-	"hash_timeout":              {},
-	"import_canceled":           {},
-	"import_timeout":            {},
-	"retry_scheduled":           {},
-	"source_unavailable":        {},
-	"download_timeout":          {},
+	"invalid_url":                    {},
+	"unsupported_source":             {},
+	"unsafe_destination":             {},
+	"runtime_unavailable":            {},
+	"extractor_proxy_failure":        {},
+	"extractor_timeout":              {},
+	"extractor_exit_failure":         {},
+	"extractor_output_limit":         {},
+	"metadata_invalid":               {},
+	"format_unavailable":             {},
+	"combined_tracks_selected":       {},
+	"separate_tracks_selected":       {},
+	"original_audio_selected":        {},
+	"original_audio_unavailable":     {},
+	"video_track_download_failed":    {},
+	"audio_track_download_failed":    {},
+	"track_size_limit_exceeded":      {},
+	"track_content_invalid":          {},
+	"track_mux_failed":               {},
+	"track_mux_timeout":              {},
+	"mux_output_size_limit_exceeded": {},
+	"av_stream_missing":              {},
+	"av_timing_mismatch":             {},
+	"video_unavailable":              {},
+	"duration_limit_exceeded":        {},
+	"size_limit_exceeded":            {},
+	"provider_denied_download":       {},
+	"non_media_response":             {},
+	"partial_response_rejected":      {},
+	"download_failed":                {},
+	"probe_runtime_unavailable":      {},
+	"probe_timeout":                  {},
+	"media_invalid":                  {},
+	"probe_failed":                   {},
+	"hash_failed":                    {},
+	"hash_timeout":                   {},
+	"import_canceled":                {},
+	"import_timeout":                 {},
+	"retry_scheduled":                {},
+	"source_unavailable":             {},
+	"download_timeout":               {},
 }
 
 // AppendClippingSourceDiagnostic persists one safe, monotonic source trace
@@ -170,6 +191,12 @@ func clippingDiagnosticCode(stage string, err error) string {
 	if err == nil {
 		return ""
 	}
+	if errors.Is(err, errClippingYouTubeAVStreamMissing) {
+		return "av_stream_missing"
+	}
+	if errors.Is(err, errClippingYouTubeAVTimingMismatch) {
+		return "av_timing_mismatch"
+	}
 	var coded clippingDiagnosticError
 	if errors.As(err, &coded) {
 		return coded.code
@@ -187,6 +214,12 @@ func clippingDiagnosticCode(stage string, err error) string {
 			return "hash_timeout"
 		case ClippingDiagnosticStageDownload:
 			return "download_timeout"
+		case ClippingDiagnosticStageVideoDownload:
+			return "video_track_download_failed"
+		case ClippingDiagnosticStageAudioDownload:
+			return "audio_track_download_failed"
+		case ClippingDiagnosticStageTrackMux:
+			return "track_mux_timeout"
 		default:
 			return "import_timeout"
 		}
@@ -223,6 +256,8 @@ func clippingDiagnosticCode(stage string, err error) string {
 			return "invalid_url"
 		case "youtube_format_unavailable":
 			return "format_unavailable"
+		case "youtube_original_audio_unavailable":
+			return "original_audio_unavailable"
 		case "youtube_import_unavailable":
 			return "runtime_unavailable"
 		case "youtube_video_unavailable":

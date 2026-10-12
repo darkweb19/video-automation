@@ -54,6 +54,9 @@ func (s *Store) migrateClipping() error {
 			upload_offset INTEGER NOT NULL DEFAULT 0 CHECK(upload_offset >= 0),
 			duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(duration_ms >= 0),
 			sha256 TEXT NOT NULL DEFAULT '',
+			import_expectation_json TEXT NOT NULL DEFAULT '',
+			import_expected_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK(import_expected_size_bytes >= 0),
+			import_expected_sha256 TEXT NOT NULL DEFAULT '',
 			retain_until INTEGER NOT NULL DEFAULT 0,
 			import_attempts INTEGER NOT NULL DEFAULT 0 CHECK(import_attempts >= 0),
 			next_import_at INTEGER NOT NULL DEFAULT 0,
@@ -189,8 +192,11 @@ func (s *Store) migrateClipping() error {
 	// inspect fixed table names and issue only missing additive columns.
 	for table, columns := range map[string]map[string]string{
 		"clipping_sources": {
-			"diagnostics_json":     "TEXT NOT NULL DEFAULT '[]'",
-			"diagnostics_sequence": "INTEGER NOT NULL DEFAULT 0 CHECK(diagnostics_sequence >= 0)",
+			"diagnostics_json":           "TEXT NOT NULL DEFAULT '[]'",
+			"diagnostics_sequence":       "INTEGER NOT NULL DEFAULT 0 CHECK(diagnostics_sequence >= 0)",
+			"import_expectation_json":    "TEXT NOT NULL DEFAULT ''",
+			"import_expected_size_bytes": "INTEGER NOT NULL DEFAULT 0 CHECK(import_expected_size_bytes >= 0)",
+			"import_expected_sha256":     "TEXT NOT NULL DEFAULT ''",
 		},
 		"clipping_jobs": {
 			"content_type":     "TEXT NOT NULL DEFAULT 'general' CHECK(content_type IN ('general','podcast','comedy','gaming','movie'))",
@@ -464,7 +470,7 @@ func cleanClippingSourceName(name string) string {
 }
 
 func clippingSourceColumns() string {
-	return `id,kind,status,original_name,media_type,source_url,rights_attested,storage_path,failure,declared_size_bytes,reserved_size_bytes,size_bytes,upload_offset,duration_ms,sha256,retain_until,import_attempts,next_import_at,import_lease_until,media_lease_until,cleanup_complete,diagnostics_json,diagnostics_sequence,created_at,updated_at,deleted_at`
+	return `id,kind,status,original_name,media_type,source_url,rights_attested,storage_path,failure,declared_size_bytes,reserved_size_bytes,size_bytes,upload_offset,duration_ms,sha256,import_expectation_json,import_expected_size_bytes,import_expected_sha256,retain_until,import_attempts,next_import_at,import_lease_until,media_lease_until,cleanup_complete,diagnostics_json,diagnostics_sequence,created_at,updated_at,deleted_at`
 }
 
 type clippingRowScanner interface {
@@ -478,7 +484,7 @@ func scanClippingSource(row clippingRowScanner) (ClippingSource, error) {
 	var diagnosticsJSON string
 	var diagnosticsSequence int64
 	err := row.Scan(&source.ID, &source.Kind, &source.Status, &source.OriginalName, &source.MediaType, &source.SourceURL, &rightsAttested, &source.StoragePath, &source.Failure,
-		&source.DeclaredSizeBytes, &source.ReservedSizeBytes, &source.SizeBytes, &source.UploadOffset, &source.DurationMS, &source.SHA256, &source.RetainUntil,
+		&source.DeclaredSizeBytes, &source.ReservedSizeBytes, &source.SizeBytes, &source.UploadOffset, &source.DurationMS, &source.SHA256, &source.ImportExpectation, &source.ImportExpectedSize, &source.ImportExpectedSHA, &source.RetainUntil,
 		&source.ImportAttempts, &source.NextImportAt, &source.ImportLeaseUntil, &source.MediaLeaseUntil, &cleanupComplete, &diagnosticsJSON, &diagnosticsSequence, &source.CreatedAt, &source.UpdatedAt, &source.DeletedAt)
 	source.CleanupComplete = cleanupComplete != 0
 	source.RightsAttested = rightsAttested != 0
@@ -646,7 +652,90 @@ func (s *Store) ResetClippingSourceImportProgress(id string) error {
 	if !safeClippingSourceID(id) {
 		return ErrClippingSourceNotFound
 	}
-	result, err := s.db.Exec(`UPDATE clipping_sources SET upload_offset=0,size_bytes=0,updated_at=? WHERE id=? AND status='importing'`, time.Now().Unix(), id)
+	result, err := s.db.Exec(`UPDATE clipping_sources SET upload_offset=0,size_bytes=0,import_expectation_json='',import_expected_size_bytes=0,import_expected_sha256='',updated_at=? WHERE id=? AND status='importing'`, time.Now().Unix(), id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrClippingInvalidState
+	}
+	return nil
+}
+
+func (s *Store) SetClippingSourceImportExpectation(id string, expectation youtubeImportExpectation) error {
+	if !safeClippingSourceID(id) || !validYouTubeImportExpectation(expectation) {
+		return ErrClippingInvalidState
+	}
+	encoded, err := json.Marshal(expectation)
+	if err != nil || len(encoded) > 2048 {
+		return ErrClippingInvalidState
+	}
+	result, err := s.db.Exec(`UPDATE clipping_sources SET import_expectation_json=?,import_expected_size_bytes=0,import_expected_sha256='',updated_at=? WHERE id=? AND status='importing' AND kind='youtube_original_file'`, string(encoded), time.Now().Unix(), id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrClippingInvalidState
+	}
+	return nil
+}
+
+// CompleteClippingSourceTrackWorkspace persists that the split tracks were
+// removed and their directory synced. The marker prevents restart-time
+// capacity reconciliation from recreating a scratch reservation after mux.
+// Callers serialize this with clippingMu and only after durable cleanup.
+func (s *Store) CompleteClippingSourceTrackWorkspace(id string) error {
+	if !safeClippingSourceID(id) {
+		return ErrClippingInvalidState
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var kind ClippingSourceKind
+	var status ClippingSourceStatus
+	var encoded string
+	if err := tx.QueryRow(`SELECT kind,status,import_expectation_json FROM clipping_sources WHERE id=?`, id).Scan(&kind, &status, &encoded); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrClippingSourceNotFound
+		}
+		return err
+	}
+	var expectation youtubeImportExpectation
+	if kind != ClippingSourceYouTube || status != ClippingSourceImporting || json.Unmarshal([]byte(encoded), &expectation) != nil || !validYouTubeImportExpectation(expectation) || !expectation.SeparateTracks {
+		return ErrClippingInvalidState
+	}
+	expectation.WorkspaceComplete = true
+	updated, err := json.Marshal(expectation)
+	if err != nil || len(updated) > 2048 {
+		return ErrClippingInvalidState
+	}
+	if _, err := tx.Exec(`UPDATE clipping_sources SET import_expectation_json=?,updated_at=? WHERE id=? AND status='importing' AND kind='youtube_original_file'`, string(updated), time.Now().Unix(), id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SetClippingSourceImportFinalExpectation durably binds a complete temporary
+// output to its validated size and digest before atomic publication. Recovery
+// after rename can therefore reject a same-size corrupted or partial file.
+func (s *Store) SetClippingSourceImportFinalExpectation(id string, sizeBytes int64, sha256Hex string) error {
+	if !safeClippingSourceID(id) || sizeBytes < 1 || sizeBytes > MaxClippingSourceBytes || len(sha256Hex) != sha256.Size*2 {
+		return ErrClippingInvalidState
+	}
+	if _, err := hex.DecodeString(sha256Hex); err != nil {
+		return ErrClippingInvalidState
+	}
+	result, err := s.db.Exec(`UPDATE clipping_sources SET import_expected_size_bytes=?,import_expected_sha256=?,updated_at=? WHERE id=? AND status='importing' AND kind='youtube_original_file' AND import_expectation_json<>''`, sizeBytes, strings.ToLower(sha256Hex), time.Now().Unix(), id)
 	if err != nil {
 		return err
 	}
@@ -679,7 +768,9 @@ func (s *Store) MarkClippingSourceReady(id string, sizeBytes, durationMS int64, 
 	var status ClippingSourceStatus
 	var rightsAttested int
 	var declared, offset int64
-	if err := tx.QueryRow(`SELECT kind,status,declared_size_bytes,upload_offset,rights_attested FROM clipping_sources WHERE id=?`, id).Scan(&kind, &status, &declared, &offset, &rightsAttested); err != nil {
+	var expectedSize int64
+	var expectedSHA, expectationJSON string
+	if err := tx.QueryRow(`SELECT kind,status,declared_size_bytes,upload_offset,rights_attested,import_expectation_json,import_expected_size_bytes,import_expected_sha256 FROM clipping_sources WHERE id=?`, id).Scan(&kind, &status, &declared, &offset, &rightsAttested, &expectationJSON, &expectedSize, &expectedSHA); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrClippingSourceNotFound
 		}
@@ -696,6 +787,13 @@ func (s *Store) MarkClippingSourceReady(id string, sizeBytes, durationMS int64, 
 	}
 	if kind != ClippingSourceUpload && status == ClippingSourceImporting && offset != 0 {
 		return ErrClippingInvalidState
+	}
+	if kind == ClippingSourceYouTube {
+		var expectation youtubeImportExpectation
+		if expectationJSON == "" || json.Unmarshal([]byte(expectationJSON), &expectation) != nil || !validYouTubeImportExpectation(expectation) ||
+			expectation.SeparateTracks && !expectation.WorkspaceComplete || expectedSize != sizeBytes || !strings.EqualFold(expectedSHA, sha256Hex) {
+			return ErrClippingInvalidState
+		}
 	}
 	now := time.Now().Unix()
 	_, err = tx.Exec(`UPDATE clipping_sources SET status='ready',reserved_size_bytes=?,size_bytes=?,upload_offset=?,duration_ms=?,sha256=?,failure='',next_import_at=0,import_lease_until=0,updated_at=? WHERE id=?`, sizeBytes, sizeBytes, sizeBytes, durationMS, strings.ToLower(sha256Hex), now, id)

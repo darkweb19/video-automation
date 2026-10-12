@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"math"
 	"math/big"
 	"mime"
 	"net"
@@ -27,33 +28,38 @@ import (
 )
 
 const (
-	ClippingUploadChunkBytes         int64 = 16 << 20
-	clippingImportReadBytes                = int(ClippingUploadChunkBytes)
-	clippingImportMaxDuration              = 12 * time.Hour
-	clippingImportLeaseDuration            = 15 * time.Minute
-	clippingImportLeaseRenewInterval       = 5 * time.Minute
-	clippingImportMaxRedirects             = 5
-	clippingImportResponseTimeout          = 30 * time.Second
-	clippingFreeSpaceFloorBytes            = int64(4 << 30)
-	clippingProbeTimeout                   = 15 * time.Second
-	clippingProbeOutputLimit               = 64 << 10
-	clippingProbeMaxAllocation             = 64 << 20
-	clippingDecoderTimeout                 = 5 * time.Second
-	clippingDecoderOutputLimit             = 2 << 20
-	clippingMediaMinDimension              = 144
-	clippingMediaMaxDimension              = 8192
-	clippingMediaMaxPixels                 = 50_000_000
+	ClippingUploadChunkBytes           int64 = 16 << 20
+	clippingImportReadBytes                  = int(ClippingUploadChunkBytes)
+	clippingImportMaxDuration                = 12 * time.Hour
+	clippingImportLeaseDuration              = 15 * time.Minute
+	clippingImportLeaseRenewInterval         = 5 * time.Minute
+	clippingImportMaxRedirects               = 5
+	clippingImportResponseTimeout            = 30 * time.Second
+	clippingFreeSpaceFloorBytes              = int64(4 << 30)
+	clippingYouTubeTrackWorkspaceBytes       = MaxClippingSourceBytes
+	clippingYouTubeMuxTimeout                = 3 * time.Hour
+	clippingYouTubeDurationToleranceMS int64 = 2_000
+	clippingProbeTimeout                     = 15 * time.Second
+	clippingProbeOutputLimit                 = 64 << 10
+	clippingProbeMaxAllocation               = 64 << 20
+	clippingDecoderTimeout                   = 5 * time.Second
+	clippingDecoderOutputLimit               = 2 << 20
+	clippingMediaMinDimension                = 144
+	clippingMediaMaxDimension                = 8192
+	clippingMediaMaxPixels                   = 50_000_000
 )
 
 var (
-	ErrClippingUploadChunkTooLarge = errors.New("upload chunk exceeds 16 MiB")
-	ErrClippingUploadOffset        = errors.New("upload offset does not match the persisted offset")
-	ErrClippingUploadIncomplete    = errors.New("upload is incomplete")
-	ErrClippingRightsNotAttested   = errors.New("explicit rights and processing attestation is required")
-	ErrClippingPlatformUnavailable = errors.New("native clipping source files require a Linux or Unix host; run the application in Docker/Linux")
-	ErrYouTubeImportUnavailable    = errors.New("YouTube import is unavailable; upload an original file you are permitted to reuse")
-	errClippingInvalidMedia        = errors.New("source is not a supported video with a valid duration and dimensions")
-	errClippingImportRetryable     = errors.New("public media import failed")
+	ErrClippingUploadChunkTooLarge     = errors.New("upload chunk exceeds 16 MiB")
+	ErrClippingUploadOffset            = errors.New("upload offset does not match the persisted offset")
+	ErrClippingUploadIncomplete        = errors.New("upload is incomplete")
+	ErrClippingRightsNotAttested       = errors.New("explicit rights and processing attestation is required")
+	ErrClippingPlatformUnavailable     = errors.New("native clipping source files require a Linux or Unix host; run the application in Docker/Linux")
+	ErrYouTubeImportUnavailable        = errors.New("YouTube import is unavailable; upload an original file you are permitted to reuse")
+	errClippingInvalidMedia            = errors.New("source is not a supported video with a valid duration and dimensions")
+	errClippingImportRetryable         = errors.New("public media import failed")
+	errClippingYouTubeAVStreamMissing  = errors.New("YouTube source is missing required audio/video stream timing")
+	errClippingYouTubeAVTimingMismatch = errors.New("YouTube source audio/video timing does not match")
 )
 
 var clippingDecoderCache sync.Map // executable identity -> map[codec]struct{}
@@ -84,10 +90,20 @@ type clippingIPResolver interface {
 type clippingTransportFactory func(*url.URL, []net.IP) http.RoundTripper
 
 type clippingMediaProbeResult struct {
-	DurationMS   int64
-	Width        int
-	Height       int
-	AudioStreams int
+	DurationMS       int64
+	Width            int
+	Height           int
+	AudioStreams     int
+	VideoCodec       string
+	AudioCodec       string
+	VideoStartMS     int64
+	AudioStartMS     int64
+	VideoDurationMS  int64
+	AudioDurationMS  int64
+	VideoTimingValid bool
+	AudioTimingValid bool
+	VideoFPS         float64
+	VideoFPSValid    bool
 }
 
 type clippingMediaProbe func(context.Context, string) (clippingMediaProbeResult, error)
@@ -109,15 +125,16 @@ type ClippingAcquisition struct {
 	store    *Store
 	security *Security
 
-	resolver          clippingIPResolver
-	transportFactory  clippingTransportFactory
-	probe             clippingMediaProbe
-	now               func() time.Time
-	diskAvailable     func(string) (int64, error)
-	leaseRenewEvery   time.Duration
-	youtubeExecutable string
-	youtubeRuntime    string
-	youtubeMaxBytes   int64
+	resolver                clippingIPResolver
+	transportFactory        clippingTransportFactory
+	probe                   clippingMediaProbe
+	now                     func() time.Time
+	diskAvailable           func(string) (int64, error)
+	leaseRenewEvery         time.Duration
+	youtubeExecutable       string
+	youtubeRuntime          string
+	youtubeMaxBytes         int64
+	youtubeFFmpegExecutable string
 
 	processImportMu sync.Mutex
 	locksMu         sync.Mutex
@@ -469,24 +486,51 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 	paths, pathErr := a.ensureSourcePaths(claimed.ID)
 	recoverFinalizedFile := false
 	if pathErr == nil {
-		tempInfo, tempErr := os.Lstat(paths.temp)
-		finalInfo, finalErr := os.Lstat(paths.final)
-		if tempErr != nil && !errors.Is(tempErr, os.ErrNotExist) {
-			pathErr = tempErr
-		} else if finalErr != nil && !errors.Is(finalErr, os.ErrNotExist) {
-			pathErr = finalErr
-		} else if tempErr == nil && finalErr == nil {
-			pathErr = errors.New("source storage has conflicting temporary and final files")
-		} else if errors.Is(tempErr, os.ErrNotExist) && finalErr == nil {
-			if finalInfo.Size() != claimed.SizeBytes || finalInfo.Size() <= 0 {
-				pathErr = errors.New("finalized import file does not match its persisted size")
+		if claimed.Kind == ClippingSourceYouTube {
+			tempInfo, tempErr := os.Lstat(paths.temp)
+			finalInfo, finalErr := os.Lstat(paths.final)
+			if tempErr != nil && !errors.Is(tempErr, os.ErrNotExist) {
+				pathErr = tempErr
+			} else if finalErr != nil && !errors.Is(finalErr, os.ErrNotExist) {
+				pathErr = finalErr
+			} else if errors.Is(tempErr, os.ErrNotExist) && finalErr == nil && youtubeFinalExpectationMatches(claimed, finalInfo) {
+				videoBytes, videoErr := safeGeneratedFileSize(paths.videoTrack)
+				audioBytes, audioErr := safeGeneratedFileSize(paths.audioTrack)
+				if videoErr != nil {
+					pathErr = videoErr
+				} else if audioErr != nil {
+					pathErr = audioErr
+				} else if videoBytes != 0 || audioBytes != 0 {
+					pathErr = a.clearYouTubeImportArtifactsLocked(claimed.ID, paths, true)
+				} else {
+					recoverFinalizedFile = true
+				}
 			} else {
-				recoverFinalizedFile = true
+				// A temporary mux or track file has no durable completion marker.
+				// Discard it and restart the selected import from clean paths.
+				_ = tempInfo
+				pathErr = a.clearYouTubeImportArtifactsLocked(claimed.ID, paths, true)
 			}
-		} else if tempInfo != nil {
-			pathErr = os.Remove(paths.temp)
-			if errors.Is(pathErr, os.ErrNotExist) {
-				pathErr = nil
+		} else {
+			tempInfo, tempErr := os.Lstat(paths.temp)
+			finalInfo, finalErr := os.Lstat(paths.final)
+			if tempErr != nil && !errors.Is(tempErr, os.ErrNotExist) {
+				pathErr = tempErr
+			} else if finalErr != nil && !errors.Is(finalErr, os.ErrNotExist) {
+				pathErr = finalErr
+			} else if tempErr == nil && finalErr == nil {
+				pathErr = errors.New("source storage has conflicting temporary and final files")
+			} else if errors.Is(tempErr, os.ErrNotExist) && finalErr == nil {
+				if finalInfo.Size() != claimed.SizeBytes || finalInfo.Size() <= 0 {
+					pathErr = errors.New("finalized import file does not match its persisted size")
+				} else {
+					recoverFinalizedFile = true
+				}
+			} else if tempInfo != nil {
+				pathErr = os.Remove(paths.temp)
+				if errors.Is(pathErr, os.ErrNotExist) {
+					pathErr = nil
+				}
 			}
 		}
 	}
@@ -760,6 +804,7 @@ func (a *ClippingAcquisition) CleanupFailedSources(ctx context.Context) (int, er
 			err = a.store.ReleaseFailedClippingSourceReservation(source.ID)
 		}
 		if err == nil {
+			delete(a.store.clippingImportWorkspaces, source.ID)
 			a.store.PublishClippingSource(source.ID)
 			cleaned++
 		}
@@ -794,10 +839,40 @@ func (a *ClippingAcquisition) importToDisk(ctx context.Context, source ClippingS
 		selection, err := a.extractYouTubeMediaWithTrace(ctx, u,
 			func() { trace.complete() },
 			func() { trace.start(ClippingDiagnosticStageFormat) },
-			func() { trace.complete() },
+			func(selection youtubeSelection) {
+				trace.activeStage = ""
+				code := "combined_tracks_selected"
+				if selection.Separate {
+					code = "separate_tracks_selected"
+				}
+				trace.record(ClippingDiagnosticStageFormat, ClippingDiagnosticCompleted, code)
+				if selection.Separate && selection.Tracks.Audio != nil && youtubeFormatLanguagePreference(selection.Tracks.Audio.LanguagePreference) == youtubeOriginalLanguagePreference {
+					trace.record(ClippingDiagnosticStageFormat, ClippingDiagnosticCompleted, "original_audio_selected")
+				}
+			},
 		)
 		if err != nil {
 			return err
+		}
+		expectation, expectationErr := expectationForYouTubeSelection(selection)
+		if expectationErr != nil {
+			return withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "The selected audio/video tracks cannot be validated safely; upload an original file you are permitted to reuse")}, "format_unavailable")
+		}
+		a.store.clippingMu.Lock()
+		persistErr := a.store.SetClippingSourceImportExpectation(source.ID, expectation)
+		if persistErr == nil && selection.Separate {
+			persistErr = a.reserveYouTubeWorkspaceLocked(source.ID)
+		}
+		a.store.clippingMu.Unlock()
+		if persistErr != nil {
+			return persistErr
+		}
+		if selection.Separate {
+			videoID, validID := youtubeVideoID(u)
+			if !validID {
+				return withClippingDiagnosticCode(permanentClippingImportError{errors.New("stored source URL could not be validated")}, "source_unavailable")
+			}
+			return a.importYouTubeSeparateTracks(ctx, source, videoID, tempPath, selection, expectation, trace)
 		}
 		trace.start(ClippingDiagnosticStageDownload)
 		response, err = a.fetchYouTubeMediaURL(ctx, selection)
@@ -862,8 +937,11 @@ func (a *ClippingAcquisition) importToDisk(ctx context.Context, source ClippingS
 	if err := a.ensureImporting(source.ID); err != nil {
 		return err
 	}
-	if err := a.checkClippingStorageCapacity(0); err != nil {
-		return err
+	a.store.clippingMu.Lock()
+	capacityErr := a.checkClippingStorageCapacity(0)
+	a.store.clippingMu.Unlock()
+	if capacityErr != nil {
+		return capacityErr
 	}
 	file, err := openClippingPartTruncate(tempPath)
 	if err != nil {
@@ -1118,6 +1196,12 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 	if source.Status != expectedStatus {
 		return ClippingSource{}, errors.New("source is no longer available for finalization")
 	}
+	var youtubeExpectation youtubeImportExpectation
+	if source.Kind == ClippingSourceYouTube {
+		if json.Unmarshal([]byte(source.ImportExpectation), &youtubeExpectation) != nil || !validYouTubeImportExpectation(youtubeExpectation) {
+			return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVStreamMissing)
+		}
+	}
 	paths, err := a.sourcePaths(sourceID)
 	if err != nil {
 		return ClippingSource{}, err
@@ -1162,6 +1246,16 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 		file.Close()
 		return ClippingSource{}, errors.New("persisted import size does not match the media file")
 	}
+	if source.Kind == ClippingSourceYouTube && source.ImportExpectedSize > 0 &&
+		(source.ImportExpectedSize != info.Size() || !validSHA256Hex(source.ImportExpectedSHA)) {
+		file.Close()
+		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVTimingMismatch)
+	}
+	if source.Kind == ClippingSourceYouTube && localPath == finalPath &&
+		(source.ImportExpectedSize != info.Size() || !validSHA256Hex(source.ImportExpectedSHA)) {
+		file.Close()
+		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVTimingMismatch)
+	}
 	if err := file.Sync(); err != nil {
 		file.Close()
 		return ClippingSource{}, err
@@ -1194,6 +1288,15 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 		trace.finish(ClippingDiagnosticFailed, errClippingInvalidMedia)
 		return ClippingSource{}, errClippingInvalidMedia
 	}
+	if source.Kind == ClippingSourceYouTube {
+		trace.complete()
+		trace.start(ClippingDiagnosticStageMergedValidate)
+		if err := validateYouTubeProbeExpectation(youtubeExpectation, media); err != nil {
+			trace.finish(ClippingDiagnosticFailed, err)
+			return ClippingSource{}, err
+		}
+		trace.complete()
+	}
 	trace.complete()
 	trace.start(ClippingDiagnosticStageHash)
 	digest, err := hashClippingFile(ctx, localPath)
@@ -1204,6 +1307,10 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 	trace.complete()
 	if err := ctx.Err(); err != nil {
 		return ClippingSource{}, err
+	}
+	if source.Kind == ClippingSourceYouTube && source.ImportExpectedSize > 0 &&
+		(source.ImportExpectedSize != info.Size() || !strings.EqualFold(source.ImportExpectedSHA, digest)) {
+		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVTimingMismatch)
 	}
 	a.store.clippingMu.Lock()
 	defer a.store.clippingMu.Unlock()
@@ -1219,6 +1326,11 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 	}
 	if err := ctx.Err(); err != nil {
 		return ClippingSource{}, err
+	}
+	if current.Kind == ClippingSourceYouTube {
+		if err := a.store.SetClippingSourceImportFinalExpectation(sourceID, info.Size(), digest); err != nil {
+			return ClippingSource{}, err
+		}
 	}
 	if localPath == tempPath {
 		if err := os.Rename(tempPath, finalPath); err != nil {
@@ -1245,9 +1357,18 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 		}
 		return ClippingSource{}, err
 	}
+	delete(a.store.clippingImportWorkspaces, sourceID)
 	trace.complete()
 	a.store.PublishClippingSource(sourceID)
 	return a.store.ClippingSource(sourceID)
+}
+
+func validSHA256Hex(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func (a *ClippingAcquisition) retryImport(source ClippingSource, cause error) error {
@@ -1263,9 +1384,13 @@ func (a *ClippingAcquisition) retryImport(source ClippingSource, cause error) er
 		return currentErr
 	}
 	if pathErr == nil {
-		removeErr := os.Remove(paths.temp)
-		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			pathErr = removeErr
+		if source.Kind == ClippingSourceYouTube {
+			pathErr = a.clearYouTubeImportArtifactsLocked(source.ID, paths, true)
+		} else {
+			removeErr := removeGeneratedRegularFile(paths.temp)
+			if removeErr != nil {
+				pathErr = removeErr
+			}
 		}
 	}
 	if pathErr == nil {
@@ -1281,7 +1406,9 @@ func (a *ClippingAcquisition) retryImport(source ClippingSource, cause error) er
 		if readErr == nil && updated.Status == ClippingSourceFailed && pathErr == nil {
 			if removeErr := os.RemoveAll(filepath.Dir(paths.final)); removeErr == nil {
 				if syncErr := syncClippingDirectory(filepath.Dir(filepath.Dir(paths.final))); syncErr == nil {
-					_ = a.store.ReleaseFailedClippingSourceReservation(source.ID)
+					if a.store.ReleaseFailedClippingSourceReservation(source.ID) == nil {
+						delete(a.store.clippingImportWorkspaces, source.ID)
+					}
 				}
 			}
 		}
@@ -1315,6 +1442,7 @@ func (a *ClippingAcquisition) failAndRemove(sourceID, reason string) {
 	if err := a.store.ReleaseFailedClippingSourceReservation(sourceID); err != nil {
 		return
 	}
+	delete(a.store.clippingImportWorkspaces, sourceID)
 	a.store.PublishClippingSource(sourceID)
 }
 
@@ -1326,12 +1454,18 @@ func (a *ClippingAcquisition) removeSourceFiles(sourceID string) error {
 	if err := os.RemoveAll(filepath.Dir(paths.final)); err != nil {
 		return err
 	}
-	return syncClippingDirectory(filepath.Dir(filepath.Dir(paths.final)))
+	if err := syncClippingDirectory(filepath.Dir(filepath.Dir(paths.final))); err != nil {
+		return err
+	}
+	delete(a.store.clippingImportWorkspaces, sourceID)
+	return nil
 }
 
 type clippingSourcePaths struct {
-	temp  string
-	final string
+	temp       string
+	final      string
+	videoTrack string
+	audioTrack string
 }
 
 func (a *ClippingAcquisition) sourcePaths(sourceID string) (clippingSourcePaths, error) {
@@ -1343,7 +1477,12 @@ func (a *ClippingAcquisition) sourcePaths(sourceID string) (clippingSourcePaths,
 	if err != nil {
 		return clippingSourcePaths{}, err
 	}
-	return clippingSourcePaths{temp: tempPath, final: finalPath}, nil
+	directory := filepath.Dir(finalPath)
+	return clippingSourcePaths{
+		temp: tempPath, final: finalPath,
+		videoTrack: filepath.Join(directory, "source.video.part"),
+		audioTrack: filepath.Join(directory, "source.audio.part"),
+	}, nil
 }
 
 func (a *ClippingAcquisition) ensureSourcePaths(sourceID string) (clippingSourcePaths, error) {
@@ -1363,7 +1502,16 @@ func (a *ClippingAcquisition) ensureSourcePaths(sourceID string) (clippingSource
 	if err != nil {
 		return clippingSourcePaths{}, err
 	}
-	if !pathWithin(dataRoot, filepath.Dir(final)) || filepath.Dir(temp) != filepath.Dir(final) || filepath.Base(final) != "source.media" || filepath.Base(temp) != "source.media.part" {
+	video, err := filepath.Abs(paths.videoTrack)
+	if err != nil {
+		return clippingSourcePaths{}, err
+	}
+	audio, err := filepath.Abs(paths.audioTrack)
+	if err != nil {
+		return clippingSourcePaths{}, err
+	}
+	if !pathWithin(dataRoot, filepath.Dir(final)) || filepath.Dir(temp) != filepath.Dir(final) || filepath.Dir(video) != filepath.Dir(final) || filepath.Dir(audio) != filepath.Dir(final) ||
+		filepath.Base(final) != "source.media" || filepath.Base(temp) != "source.media.part" || filepath.Base(video) != "source.video.part" || filepath.Base(audio) != "source.audio.part" {
 		return clippingSourcePaths{}, errors.New("source storage path is outside its generated directory")
 	}
 	if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
@@ -1381,7 +1529,7 @@ func (a *ClippingAcquisition) ensureSourcePaths(sourceID string) (clippingSource
 	if physicalDir != expectedDir || !pathWithin(physicalRoot, physicalDir) {
 		return clippingSourcePaths{}, errors.New("source directory resolves through a symlink")
 	}
-	for _, path := range []string{final, temp} {
+	for _, path := range []string{final, temp, paths.videoTrack, paths.audioTrack} {
 		if info, err := os.Lstat(path); err == nil {
 			if !info.Mode().IsRegular() {
 				return clippingSourcePaths{}, errors.New("source path is not a regular file")
@@ -1487,11 +1635,15 @@ type clippingProbeOutput struct {
 }
 
 type clippingProbeStream struct {
-	CodecType string `json:"codec_type"`
-	CodecName string `json:"codec_name"`
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
-	Duration  string `json:"duration"`
+	CodecType        string            `json:"codec_type"`
+	CodecName        string            `json:"codec_name"`
+	Width            int               `json:"width"`
+	Height           int               `json:"height"`
+	Duration         string            `json:"duration"`
+	StartTime        string            `json:"start_time"`
+	AverageFrameRate string            `json:"avg_frame_rate"`
+	RealFrameRate    string            `json:"r_frame_rate"`
+	Tags             map[string]string `json:"tags"`
 }
 
 var clippingSupportedVideoCodecs = map[string]struct{}{
@@ -1524,7 +1676,7 @@ func probeClippingMedia(ctx context.Context, localPath string) (clippingMediaPro
 		"-max_alloc", strconv.Itoa(clippingProbeMaxAllocation),
 		"-protocol_whitelist", "file,crypto,data",
 		"-format_whitelist", "mov,matroska,webm",
-		"-show_entries", "format=duration,format_name:stream=codec_type,codec_name,width,height,duration",
+		"-show_entries", "format=duration,format_name:stream=codec_type,codec_name,width,height,duration,start_time,avg_frame_rate,r_frame_rate:stream_tags=DURATION",
 		"-of", "json",
 		"-i", localPath,
 	}
@@ -1562,7 +1714,8 @@ func summarizeClippingProbeStreams(output clippingProbeOutput, decoders map[stri
 	hasVideo := false
 	audioStreams := 0
 	width, height := 0, 0
-	durationMS, durationSet := parseDurationMilliseconds(output.Format.Duration)
+	durationMS, durationSet := parseFFprobeDurationMilliseconds(output.Format.Duration)
+	result := clippingMediaProbeResult{}
 	for _, stream := range output.Streams {
 		switch stream.CodecType {
 		case "audio":
@@ -1570,19 +1723,37 @@ func summarizeClippingProbeStreams(output clippingProbeOutput, decoders map[stri
 				return clippingMediaProbeResult{}, errClippingInvalidMedia
 			}
 			audioStreams++
-			if streamDuration, ok := parseDurationMilliseconds(stream.Duration); ok && (!durationSet || streamDuration > durationMS) {
+			streamDuration, hasDuration := ffprobeStreamDuration(stream)
+			if hasDuration && (!durationSet || streamDuration > durationMS) {
 				durationMS = streamDuration
 				durationSet = true
+			}
+			if result.AudioCodec == "" {
+				result.AudioCodec = stream.CodecName
+				result.AudioStartMS, result.AudioTimingValid = parseSignedMilliseconds(stream.StartTime)
+				result.AudioDurationMS = streamDuration
+				result.AudioTimingValid = result.AudioTimingValid && hasDuration
 			}
 		case "video":
 			if !supportedClippingCodec("video", stream.CodecName, decoders) {
 				return clippingMediaProbeResult{}, errClippingInvalidMedia
 			}
 			hasVideo = true
+			if result.VideoCodec == "" {
+				result.VideoCodec = stream.CodecName
+				result.VideoStartMS, result.VideoTimingValid = parseSignedMilliseconds(stream.StartTime)
+				result.VideoDurationMS, _ = ffprobeStreamDuration(stream)
+				_, hasDuration := ffprobeStreamDuration(stream)
+				result.VideoTimingValid = result.VideoTimingValid && hasDuration
+				result.VideoFPS, result.VideoFPSValid = parseProbeFrameRate(stream.RealFrameRate)
+				if !result.VideoFPSValid {
+					result.VideoFPS, result.VideoFPSValid = parseProbeFrameRate(stream.AverageFrameRate)
+				}
+			}
 			if reasonableClippingDimensions(stream.Width, stream.Height) && width == 0 {
 				width, height = stream.Width, stream.Height
 			}
-			if streamDuration, ok := parseDurationMilliseconds(stream.Duration); ok && (!durationSet || streamDuration > durationMS) {
+			if streamDuration, ok := ffprobeStreamDuration(stream); ok && (!durationSet || streamDuration > durationMS) {
 				durationMS = streamDuration
 				durationSet = true
 			}
@@ -1596,7 +1767,86 @@ func summarizeClippingProbeStreams(output clippingProbeOutput, decoders map[stri
 	if !hasVideo || width == 0 || !durationSet || durationMS <= 0 {
 		return clippingMediaProbeResult{}, errClippingInvalidMedia
 	}
-	return clippingMediaProbeResult{DurationMS: durationMS, Width: width, Height: height, AudioStreams: audioStreams}, nil
+	result.DurationMS = durationMS
+	result.Width = width
+	result.Height = height
+	result.AudioStreams = audioStreams
+	return result, nil
+}
+
+func parseProbeFrameRate(raw string) (float64, bool) {
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(raw))
+	if !ok || rate.Sign() <= 0 {
+		return 0, false
+	}
+	value, _ := rate.Float64()
+	if math.IsNaN(value) || math.IsInf(value, 0) || value > 1000 {
+		return 0, false
+	}
+	return value, true
+}
+
+func ffprobeStreamDuration(stream clippingProbeStream) (int64, bool) {
+	if duration, ok := parseFFprobeDurationMilliseconds(stream.Duration); ok {
+		return duration, true
+	}
+	return parseFFprobeDurationMilliseconds(stream.Tags["DURATION"])
+}
+
+func parseFFprobeDurationMilliseconds(raw string) (int64, bool) {
+	if milliseconds, ok := parseDurationMilliseconds(raw); ok {
+		return milliseconds, true
+	}
+	parts := strings.Split(strings.TrimSpace(raw), ":")
+	if len(parts) != 3 {
+		return 0, false
+	}
+	hours, hourErr := strconv.ParseInt(parts[0], 10, 32)
+	minutes, minuteErr := strconv.ParseInt(parts[1], 10, 32)
+	seconds, secondOK := new(big.Rat).SetString(parts[2])
+	if hourErr != nil || minuteErr != nil || hours < 0 || minutes < 0 || minutes >= 60 || !secondOK || seconds.Sign() < 0 || seconds.Cmp(big.NewRat(60, 1)) >= 0 {
+		return 0, false
+	}
+	total := new(big.Rat).Mul(big.NewRat(hours*3600+minutes*60, 1), big.NewRat(1, 1))
+	total.Add(total, seconds)
+	milliseconds := new(big.Rat).Mul(total, big.NewRat(1000, 1))
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(milliseconds.Num(), milliseconds.Denom(), remainder)
+	if new(big.Int).Lsh(remainder, 1).Cmp(milliseconds.Denom()) >= 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if !quotient.IsInt64() || quotient.Sign() <= 0 {
+		return 0, false
+	}
+	return quotient.Int64(), true
+}
+
+func parseSignedMilliseconds(raw string) (int64, bool) {
+	seconds, ok := new(big.Rat).SetString(strings.TrimSpace(raw))
+	if !ok {
+		return 0, false
+	}
+	negative := seconds.Sign() < 0
+	seconds.Abs(seconds)
+	milliseconds := new(big.Rat).Mul(seconds, big.NewRat(1000, 1))
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(milliseconds.Num(), milliseconds.Denom(), remainder)
+	if new(big.Int).Lsh(remainder, 1).Cmp(milliseconds.Denom()) >= 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if negative {
+		quotient.Neg(quotient)
+	}
+	if !quotient.IsInt64() {
+		return 0, false
+	}
+	return quotient.Int64(), true
+}
+
+func youtubeTimesWithin(left, right, tolerance int64) bool {
+	difference := new(big.Int).Sub(big.NewInt(left), big.NewInt(right))
+	difference.Abs(difference)
+	return difference.Cmp(big.NewInt(tolerance)) <= 0
 }
 
 func supportedClippingCodec(codecType, codecName string, decoders map[string]struct{}) bool {
@@ -2180,11 +2430,100 @@ func (a *ClippingAcquisition) checkClippingStorageCapacity(additionalSourceBytes
 			}
 		}
 	}
-	needed := clippingFreeSpaceFloorBytes + additionalSourceBytes + outstanding
+	if err := a.reconcileYouTubeWorkspaceReservationsLocked(sources); err != nil {
+		return clippingOutcome("unsupported", "storage_reservation_unavailable", "Temporary source workspace could not be reconciled safely")
+	}
+	var workspace int64
+	for _, remaining := range a.store.clippingImportWorkspaces {
+		if remaining < 0 || remaining > clippingYouTubeTrackWorkspaceBytes || workspace > int64(^uint64(0)>>1)-remaining {
+			return clippingOutcome("unsupported", "storage_reservation_unavailable", "Temporary source workspace reservation is invalid")
+		}
+		workspace += remaining
+	}
+	needed := clippingFreeSpaceFloorBytes + additionalSourceBytes + outstanding + workspace
 	if available < needed {
-		return clippingOutcome("unsupported", "storage_reservation_unavailable", "Not enough free storage is available for the source reservation and safety margin")
+		return clippingOutcome("unsupported", "storage_reservation_unavailable", "Not enough free storage is available for the source, temporary track workspace, and safety margin")
 	}
 	return nil
+}
+
+// reconcileYouTubeWorkspaceReservationsLocked reconstructs scratch accounting
+// for stale split imports after a process restart. Existing bytes are already
+// reflected in Statfs; the map reserves only the remaining 20 GiB track cap.
+// The caller holds Store.clippingMu so admission and import writes see one
+// serialized view.
+func (a *ClippingAcquisition) reconcileYouTubeWorkspaceReservationsLocked(sources []ClippingSource) error {
+	if a.store.clippingImportWorkspaces == nil {
+		a.store.clippingImportWorkspaces = make(map[string]int64)
+	}
+	for _, source := range sources {
+		if source.Kind != ClippingSourceYouTube {
+			continue
+		}
+		if source.Status == ClippingSourceReady {
+			delete(a.store.clippingImportWorkspaces, source.ID)
+			continue
+		}
+		if source.Status != ClippingSourceImporting {
+			continue
+		}
+		if _, active := a.store.clippingImportWorkspaces[source.ID]; active {
+			continue
+		}
+		separate := false
+		workspaceComplete := false
+		if source.ImportExpectation != "" {
+			var expectation youtubeImportExpectation
+			if err := json.Unmarshal([]byte(source.ImportExpectation), &expectation); err != nil || !validYouTubeImportExpectation(expectation) {
+				return errors.New("stored YouTube import expectation is invalid")
+			}
+			separate = expectation.SeparateTracks
+			workspaceComplete = expectation.WorkspaceComplete
+		}
+		paths, err := a.sourcePaths(source.ID)
+		if err != nil {
+			return err
+		}
+		videoBytes, err := safeGeneratedFileSize(paths.videoTrack)
+		if err != nil {
+			return err
+		}
+		audioBytes, err := safeGeneratedFileSize(paths.audioTrack)
+		if err != nil {
+			return err
+		}
+		if importStreamExceedsLimit(videoBytes, audioBytes, MaxClippingSourceBytes) {
+			return errors.New("stored YouTube track workspace exceeds its aggregate limit")
+		}
+		used := videoBytes + audioBytes
+		if workspaceComplete {
+			if used != 0 {
+				return errors.New("completed YouTube track workspace still contains staged bytes")
+			}
+			continue
+		}
+		if !separate && used == 0 {
+			continue
+		}
+		a.store.clippingImportWorkspaces[source.ID] = clippingYouTubeTrackWorkspaceBytes - used
+	}
+	return nil
+}
+
+func safeGeneratedFileSize(path string) (int64, error) {
+	file, err := openClippingRegularFile(path, os.O_RDONLY)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() < 0 {
+		return 0, errors.New("staged source file size could not be validated")
+	}
+	return info.Size(), nil
 }
 
 func mustClippingPrefixes(values []string) []netip.Prefix {
