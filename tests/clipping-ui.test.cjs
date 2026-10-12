@@ -1064,6 +1064,115 @@ test('source diagnostics replay once across SSE, import response, and list refre
   assert.doesNotMatch(renderedTrace, /transcript-secret-do-not-log|candidate-title-do-not-log|trace\/view/);
 });
 
+test('YouTube diagnostics identify combined or split selection, track stages, and safe failures without leaking media data', async () => {
+  const combined = {
+    id: 'clipsrc_combined_trace', kind: 'youtube_original_file', status: 'ready',
+    title: 'private metadata title', original_name: 'private-filename.mp4',
+    diagnostics: [
+      { sequence: 1, stage: 'format_selection', status: 'completed', code: 'combined_tracks_selected' },
+      { sequence: 2, stage: 'media_download', status: 'completed' },
+      { sequence: 3, stage: 'source_ready', status: 'completed' }
+    ]
+  };
+  const separate = {
+    id: 'clipsrc_split_trace', kind: 'youtube_original_file', status: 'ready',
+    media_url: 'https://cdn.example/private?signature=must-not-log',
+    diagnostics: [
+      { sequence: 1, stage: 'format_selection', status: 'completed', code: 'separate_tracks_selected' },
+      { sequence: 2, stage: 'format_selection', status: 'completed', code: 'original_audio_selected' },
+      { sequence: 3, stage: 'video_track_download', status: 'started', format_id: 'private-video-format' },
+      { sequence: 4, stage: 'video_track_download', status: 'failed', code: 'video_track_download_failed' },
+      { sequence: 5, stage: 'video_track_download', status: 'retrying', code: 'retry_scheduled' },
+      { sequence: 6, stage: 'video_track_download', status: 'completed' },
+      { sequence: 7, stage: 'audio_track_download', status: 'started' },
+      { sequence: 8, stage: 'audio_track_download', status: 'completed' },
+      { sequence: 9, stage: 'track_mux', status: 'started' },
+      { sequence: 10, stage: 'track_mux', status: 'completed' },
+      { sequence: 11, stage: 'merged_validation', status: 'started' },
+      { sequence: 12, stage: 'merged_validation', status: 'completed' },
+      { sequence: 13, stage: 'source_ready', status: 'completed' }
+    ]
+  };
+  const failed = {
+    id: 'clipsrc_split_failed_trace', kind: 'youtube_original_file', status: 'failed',
+    error: 'raw extractor stderr with https://private.example/?token=never-log',
+    diagnostics: [
+      { sequence: 1, stage: 'format_selection', status: 'failed', code: 'original_audio_unavailable' },
+      { sequence: 2, stage: 'video_track_download', status: 'failed', code: 'track_size_limit_exceeded' },
+      { sequence: 3, stage: 'video_track_download', status: 'failed', code: 'video_track_download_failed' },
+      { sequence: 4, stage: 'audio_track_download', status: 'failed', code: 'audio_track_download_failed' },
+      { sequence: 5, stage: 'video_track_download', status: 'failed', code: 'track_content_invalid' },
+      { sequence: 6, stage: 'track_mux', status: 'failed', code: 'track_mux_failed' },
+      { sequence: 7, stage: 'track_mux', status: 'failed', code: 'track_mux_timeout' },
+      { sequence: 8, stage: 'track_mux', status: 'failed', code: 'mux_output_size_limit_exceeded' },
+      { sequence: 9, stage: 'merged_validation', status: 'failed', code: 'av_stream_missing' },
+      { sequence: 10, stage: 'merged_validation', status: 'failed', code: 'av_timing_mismatch' },
+      { sequence: 11, stage: 'merged_validation', status: 'failed', code: 'signature=https://private.example/?token=must-not-log' }
+    ]
+  };
+  const fixtures = [combined, separate, failed];
+  const sources = [];
+  let app;
+  app = createUI(async (route, options = {}) => {
+    if (route === '/api/clipping/config') return { worker_available: false };
+    if (route === '/api/clipping/sources') return sources;
+    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    if (route === '/api/clipping/sources/import') {
+      const source = fixtures.shift();
+      assert.ok(source, 'the test provides one diagnostic fixture for each import');
+      sources.push(source);
+      return { source };
+    }
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+  assert.equal(app.logs.length, 0, 'pre-existing YouTube diagnostics stay silent on initial load');
+
+  const form = app.elements.get('clipping-link-form');
+  const link = app.elements.get('clipping-link');
+  const permission = app.elements.get('clipping-link-permission-check');
+  const importFixture = async () => {
+    link.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&token=do-not-log-this-url';
+    link.emit('input');
+    permission.checked = true;
+    permission.emit('change');
+    app.elements.get('clipping-link-submit').click();
+    await form.emit('submit')[0];
+    const source = sources.at(-1);
+    const event = { data: JSON.stringify({ id: source.id, source }) };
+    app.api.handleEvent('clipping_source', event);
+    app.api.handleEvent('clipping_source', event);
+    await app.api.refresh();
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  await importFixture();
+  await importFixture();
+  await importFixture();
+
+  const output = traceText(app.logs);
+  assert.match(output, /Import step Format selection: completed[\s\S]*selection=combined_tracks_selected/);
+  assert.match(output, /Import step Media download: completed/);
+  assert.match(output, /Import step Format selection: completed[\s\S]*selection=separate_tracks_selected/);
+  assert.match(output, /Import step Format selection: completed[\s\S]*selection=original_audio_selected/);
+  for (const stage of ['Video track download', 'Audio track download', 'Track mux', 'Merged media validation']) {
+    assert.match(output, new RegExp(`Import step ${stage}: started`));
+    assert.match(output, new RegExp(`Import step ${stage}: completed`));
+  }
+  for (const code of [
+    'original_audio_unavailable', 'track_size_limit_exceeded', 'video_track_download_failed', 'audio_track_download_failed',
+    'track_content_invalid', 'track_mux_failed', 'track_mux_timeout', 'mux_output_size_limit_exceeded', 'av_stream_missing', 'av_timing_mismatch'
+  ]) assert.match(output, new RegExp(`reason=${code}`), `the safe failure code ${code} is retained`);
+  assert.match(output, /Import step Merged media validation: failed[\s\S]*reason=source_unavailable/);
+  assert.equal(app.logs.filter((entry) => entry.includes('source=clipsrc_split_trace') && entry.includes('sequence=1')).length, 1,
+    'duplicate SSE and list snapshots are deduplicated by sequence');
+  assert.equal(app.logs.filter((entry) => entry.includes('source=clipsrc_split_trace') && entry.includes('sequence=6')).length, 1,
+    'completed track diagnostics are logged once');
+  assert.match(output, /Import step Video track download: retrying[\s\S]*reason=retry_scheduled/);
+  assert.doesNotMatch(output, /youtube\.com|do-not-log-this-url|cdn\.example|signature=|private-format|private metadata|private-filename|extractor stderr|private\.example|must-not-log/);
+  for (const entry of app.logs) for (const value of entry) assert.equal(typeof value, 'string', 'console arguments remain fixed strings and safe scalar fields');
+});
+
 test('separate imports keep source failures and safe reasons correlated to their own action', async () => {
   const sources = [];
   let importNumber = 0;
