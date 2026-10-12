@@ -346,6 +346,7 @@
       state.jobTraceActions.delete(jobID);
       state.jobTraceStatuses.delete(jobID);
       state.jobCandidateCounts.delete(jobID);
+      state.jobTraceDetailsRequested.delete(jobID);
     }
   }
 
@@ -497,6 +498,7 @@
     boundedSet(state.jobTraceActions, jobID, actionID, MAX_TRACE_JOBS, (evictedID) => {
       state.jobTraceStatuses.delete(evictedID);
       state.jobCandidateCounts.delete(evictedID);
+      state.jobTraceDetailsRequested.delete(evictedID);
     });
     if (state.pendingAnalysisTraceActions.get(sourceID) === actionID) state.pendingAnalysisTraceActions.delete(sourceID);
     action.pending = false;
