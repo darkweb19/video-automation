@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-const youtubeParserFixture = `{"id":"abcdefghijk","duration":75.125,"filesize":1024,"_type":"video","live_status":"not_live","is_live":false,"format_id":"18","ext":"mp4","protocol":"https","url":"https://rr1---sn.googlevideo.com/videoplayback?signature=signed-secret","acodec":"mp4a.40.2","vcodec":"avc1.42001E","requested_downloads":[{"format_id":"18","ext":"mp4","protocol":"https","url":"https://rr1---sn.googlevideo.com/videoplayback?signature=signed-secret","acodec":"mp4a.40.2","vcodec":"avc1.42001E","http_headers":{"User-Agent":"SyntheticRuntimeCheck/1.0","Referer":"https://www.youtube.com/watch?v=abcdefghijk","Accept":"*/*","Accept-Language":"en-US,en;q=0.5","Sec-Fetch-Mode":"navigate","X-Untrusted":"must-not-forward"}}]}`
+const youtubeParserFixture = `{"id":"abcdefghijk","duration":75.125,"_type":"video","live_status":"not_live","is_live":false,"formats":[{"format_id":"progressive","ext":"mp4","protocol":"https","url":"https://rr1---sn.googlevideo.com/videoplayback?signature=signed-secret","acodec":"mp4a.40.2","vcodec":"avc1.42001E","filesize":1024,"width":1280,"height":720,"fps":30,"tbr":2000,"quality":5,"http_headers":{"User-Agent":"SyntheticRuntimeCheck/1.0","Referer":"https://www.youtube.com/watch?v=abcdefghijk","Accept":"*/*","Accept-Language":"en-US,en;q=0.5","Sec-Fetch-Mode":"navigate","X-Untrusted":"must-not-forward"}}]}`
 
 func TestYouTubeDenoCacheUsesPrivatePermissions(t *testing.T) {
 	directory, err := createYouTubeDenoCache()
@@ -51,7 +51,7 @@ func TestYouTubeExecutableResolutionIgnoresAmbientPATH(t *testing.T) {
 	}
 }
 
-func TestParseYouTubeExtractorOutputAcceptsOneMuxedPinnedShape(t *testing.T) {
+func TestParseYouTubeExtractorOutputAcceptsFullMetadataShape(t *testing.T) {
 	selection, err := parseYouTubeExtractorOutput([]byte(youtubeParserFixture), "abcdefghijk")
 	if err != nil {
 		t.Fatalf("parse synthetic yt-dlp output: %v", err)
@@ -61,6 +61,33 @@ func TestParseYouTubeExtractorOutputAcceptsOneMuxedPinnedShape(t *testing.T) {
 	}
 	if selection.UserAgent != "SyntheticRuntimeCheck/1.0" || selection.Referer != "https://www.youtube.com/watch?v=abcdefghijk" {
 		t.Fatalf("selected request headers were not safely normalized: %+v", selection)
+	}
+}
+
+func TestParseYouTubeExtractorOutputHandlesMixedDirectAndManifestHasDRMMaybe(t *testing.T) {
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(youtubeParserFixture), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	formats := metadata["formats"].([]any)
+	formats = append(formats, map[string]any{
+		"format_id": "manifest-only", "ext": "m4a", "protocol": "http_dash_segments",
+		"url":    "https://rr1---sn.googlevideo.com/manifest?signature=manifest-secret",
+		"acodec": "opus", "vcodec": "none", "language": "fr", "language_preference": 10,
+		"has_drm": "maybe",
+	})
+	metadata["formats"] = formats
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	selection, err := parseYouTubeExtractorOutput(encoded, "abcdefghijk")
+	if err != nil {
+		t.Fatalf("parse mixed direct and manifest formats: %v", err)
+	}
+	if selection.Tracks.Combined == nil || selection.Tracks.Combined.FormatID != "progressive" || selection.Separate {
+		t.Fatalf("selection = %#v; want the eligible progressive format", selection)
 	}
 }
 
@@ -89,57 +116,59 @@ func TestParseYouTubeExtractorOutputRejectsUnsafeAndUnsupportedMetadata(t *testi
 		{name: "missing duration", edit: func(value map[string]any) { delete(value, "duration") }, code: "youtube_format_unavailable"},
 		{name: "invalid duration", edit: func(value map[string]any) { value["duration"] = "NaN" }, code: "youtube_format_unavailable"},
 		{name: "duration exceeds four hours", edit: func(value map[string]any) { value["duration"] = MaxClippingSourceDurationMS/1000 + 1 }, code: "youtube_duration_limit_exceeded"},
-		{name: "declared size exceeds 20 GiB", edit: func(value map[string]any) { value["filesize"] = MaxClippingSourceBytes + 1 }, code: "youtube_size_limit_exceeded"},
-		{name: "declared size exceeds int64", edit: func(value map[string]any) { value["filesize"] = json.Number("999999999999999999999999") }, code: "youtube_size_limit_exceeded"},
+		{name: "declared size exceeds 20 GiB", edit: func(value map[string]any) {
+			value["formats"].([]any)[0].(map[string]any)["filesize"] = MaxClippingSourceBytes + 1
+		}, code: "youtube_size_limit_exceeded"},
+		{name: "declared size exceeds int64", edit: func(value map[string]any) {
+			value["formats"].([]any)[0].(map[string]any)["filesize"] = json.Number("999999999999999999999999")
+		}, code: "youtube_size_limit_exceeded"},
 		{name: "video only", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["acodec"] = "none"
-		}, code: "youtube_format_unavailable"},
+			value["formats"].([]any)[0].(map[string]any)["acodec"] = "none"
+		}, code: "youtube_original_audio_unavailable"},
 		{name: "audio only", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["vcodec"] = "none"
+			value["formats"].([]any)[0].(map[string]any)["vcodec"] = "none"
 		}, code: "youtube_format_unavailable"},
-		{name: "no selected format", edit: func(value map[string]any) { value["requested_downloads"] = []any{} }, code: "youtube_format_unavailable"},
-		{name: "multiple selected formats", edit: func(value map[string]any) {
-			value["requested_downloads"] = append(value["requested_downloads"].([]any), value["requested_downloads"].([]any)[0])
-		}, code: "youtube_format_unavailable"},
+		{name: "missing full formats list", edit: func(value map[string]any) { delete(value, "formats") }, code: "youtube_format_unavailable"},
+		{name: "empty formats list", edit: func(value map[string]any) { value["formats"] = []any{} }, code: "youtube_format_unavailable"},
 		{name: "selected format lacks direct protocol", edit: func(value map[string]any) {
-			delete(value["requested_downloads"].([]any)[0].(map[string]any), "protocol")
+			delete(value["formats"].([]any)[0].(map[string]any), "protocol")
 		}, code: "youtube_format_unavailable"},
 		{name: "manifest protocol", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["protocol"] = "http_dash_segments"
+			value["formats"].([]any)[0].(map[string]any)["protocol"] = "http_dash_segments"
 		}, code: "youtube_format_unavailable"},
 		{name: "unsupported container", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["ext"] = "mkv"
+			value["formats"].([]any)[0].(map[string]any)["ext"] = "mkv"
 		}, code: "youtube_format_unavailable"},
 		{name: "invalid user agent", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["User-Agent"] = "bad\r\nInjected: yes"
+			value["formats"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["User-Agent"] = "bad\r\nInjected: yes"
 		}, code: "youtube_format_unavailable"},
 		{name: "oversized user agent", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["User-Agent"] = strings.Repeat("A", 513)
+			value["formats"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["User-Agent"] = strings.Repeat("A", 513)
 		}, code: "youtube_format_unavailable"},
 		{name: "referer to unapproved host", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Referer"] = "https://evil.test/watch?v=abcdefghijk"
+			value["formats"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Referer"] = "https://evil.test/watch?v=abcdefghijk"
 		}, code: "youtube_format_unavailable"},
 		{name: "referer with extra query", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Referer"] = "https://www.youtube.com/watch?v=abcdefghijk&list=private-list"
+			value["formats"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Referer"] = "https://www.youtube.com/watch?v=abcdefghijk&list=private-list"
 		}, code: "youtube_format_unavailable"},
 		{name: "cookie header rejected", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Cookie"] = "private-cookie"
+			value["formats"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Cookie"] = "private-cookie"
 		}, code: "youtube_format_unavailable"},
 		{name: "authorization header rejected", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Authorization"] = "private-token"
+			value["formats"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Authorization"] = "private-token"
 		}, code: "youtube_format_unavailable"},
 		{name: "proxy authorization header rejected", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Proxy-Authorization"] = "private-token"
+			value["formats"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Proxy-Authorization"] = "private-token"
 		}, code: "youtube_format_unavailable"},
 		{name: "host header rejected", edit: func(value map[string]any) {
-			value["requested_downloads"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Host"] = "attacker.test"
+			value["formats"].([]any)[0].(map[string]any)["http_headers"].(map[string]any)["Host"] = "attacker.test"
 		}, code: "youtube_format_unavailable"},
 		{name: "unapproved host", edit: func(value map[string]any) {
-			format := value["requested_downloads"].([]any)[0].(map[string]any)
+			format := value["formats"].([]any)[0].(map[string]any)
 			format["url"] = "https://evil.test/video?signature=signed-secret"
 		}, code: "youtube_format_unavailable"},
 		{name: "non-HTTPS media", edit: func(value map[string]any) {
-			format := value["requested_downloads"].([]any)[0].(map[string]any)
+			format := value["formats"].([]any)[0].(map[string]any)
 			format["url"] = "http://rr1---sn.googlevideo.com/video?signature=signed-secret"
 		}, code: "youtube_format_unavailable"},
 	}
@@ -397,7 +426,12 @@ func TestYouTubeImportUsesFixedCommandAndKeepsSignedURLOutOfPersistence(t *testi
 	_, store, security, acquisition := newClippingAcquisitionFixture(t)
 	acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
 	acquisition.probe = func(context.Context, string) (clippingMediaProbeResult, error) {
-		return clippingMediaProbeResult{DurationMS: 75_125, Width: 1280, Height: 720, AudioStreams: 1}, nil
+		return clippingMediaProbeResult{
+			DurationMS: 75_125, Width: 1280, Height: 720, AudioStreams: 1,
+			VideoCodec: "h264", AudioCodec: "aac", VideoStartMS: 0, AudioStartMS: 0,
+			VideoDurationMS: 75_125, AudioDurationMS: 75_125, VideoTimingValid: true, AudioTimingValid: true,
+			VideoFPS: 30, VideoFPSValid: true,
+		}, nil
 	}
 	acquisition.transportFactory = func(u *url.URL, addresses []net.IP) http.RoundTripper {
 		return clippingRoundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -479,10 +513,13 @@ func TestYouTubeImportUsesFixedCommandAndKeepsSignedURLOutOfPersistence(t *testi
 		t.Fatal(err)
 	}
 	arguments := strings.Split(strings.TrimSuffix(string(args), "\x00"), "\x00")
-	for _, required := range []string{"--ignore-config", "--no-plugin-dirs", "--no-cookies", "--no-playlist", "--skip-download", "--no-simulate", "--dump-single-json", "--no-remote-components", "--js-runtimes", acquisition.youtubeRuntime, "--format", clippingYouTubeMuxedFormat} {
+	for _, required := range []string{"--ignore-config", "--no-plugin-dirs", "--no-cookies", "--no-playlist", "--skip-download", "--no-simulate", "--dump-single-json", "--no-remote-components", "--js-runtimes", acquisition.youtubeRuntime} {
 		if !containsString(arguments, required) {
 			t.Errorf("fixed yt-dlp args omitted %q: %q", required, safeYouTubeTestArgs(arguments))
 		}
+	}
+	if containsString(arguments, "--format") {
+		t.Errorf("metadata extraction must not constrain yt-dlp to a muxed format: %q", safeYouTubeTestArgs(arguments))
 	}
 	if !containsString(arguments, "https://www.youtube.com/watch?v=abcdefghijk") || containsString(arguments, "si=tracking") || containsString(arguments, "--cookies") || containsString(arguments, "--netrc") {
 		t.Fatalf("yt-dlp received query noise, credentials options or noncanonical URL: %q", safeYouTubeTestArgs(arguments))
@@ -652,6 +689,20 @@ func TestYouTubeFinalizationRechecksActualDurationAndAudio(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := acquisition.store.UpdateClippingSourceProgress(source.ID, ClippingSourceImporting, 0, int64(len("synthetic media"))); err != nil {
+				acquisition.store.clippingMu.Unlock()
+				t.Fatal(err)
+			}
+			selection, err := parseYouTubeExtractorOutput([]byte(youtubeParserFixture), "abcdefghijk")
+			if err != nil {
+				acquisition.store.clippingMu.Unlock()
+				t.Fatal(err)
+			}
+			expectation, err := expectationForYouTubeSelection(selection)
+			if err != nil {
+				acquisition.store.clippingMu.Unlock()
+				t.Fatal(err)
+			}
+			if err := acquisition.store.SetClippingSourceImportExpectation(source.ID, expectation); err != nil {
 				acquisition.store.clippingMu.Unlock()
 				t.Fatal(err)
 			}
