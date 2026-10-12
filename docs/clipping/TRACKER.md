@@ -4,7 +4,7 @@ Last updated: 2026-10-12 (America/Toronto). This file is the authoritative statu
 
 ## Current checkpoint
 
-- C2.5 local implementation and independent review are complete. The importer preserves progressive MP4/WebM priority, then selects safe direct separate tracks from metadata, prefers identifiable Original audio, stream-copies into seekable Matroska with an exact kernel file-size cap, and verifies timing/quality facts plus SHA-256 before atomic Ready publication. Baseline was clean `944fbf258e6ac760f470ad177367d56e3ad4c999` on `feat/clipper-ai`; main coordinated and authored only central tracking/handoff, with LUNA Max implementation/testing and independent review. TERRA is unavailable. All final local checks pass; ordinary feature-only publication follows the final handoff commit. No deployment, paid inference or real YouTube media test occurred.
+- C2.5 local implementation and independent review are complete. The importer preserves progressive MP4/WebM priority, then selects safe direct separate tracks from metadata, prefers identifiable Original audio, stream-copies into seekable Matroska with an exact kernel file-size cap, and verifies timing/quality facts plus SHA-256 before atomic Ready publication. Baseline was clean `944fbf258e6ac760f470ad177367d56e3ad4c999` on `feat/clipper-ai`; main coordinated and authored only central tracking/handoff, with LUNA Max implementation/testing and independent review. TERRA is unavailable. All final local checks pass; eleven scoped commits were published by fast-forward and verified at `646402d54af28b8eca2cb5dd6fdc08e61bbddda3`; this publication record follows separately. No deployment, paid inference or real YouTube media test occurred.
 
 - C3.TRACE is complete: browser-console tracing starts at Import link and reports actual import diagnostics and subsequent observed analysis status/candidate availability. Baseline was clean `83a10f9` on `feat/clipper-ai`. LUNA Max backend/frontend authors and independent reviewer participated; TERRA was unavailable and disclosed. Full Go, focused race, vet, build, 31 clipping and 87 dashboard Node checks pass; independent review approved and scoped Chromium verification passed. Feature publication follows this handoff commit. Next: deploy the updated Railway app and inspect the console when reproducing an import failure.
 - C3.UI is complete: clean YouTube/public-link and video drag/drop/upload intake, preserved actions through closed settings and on-demand detail views, 25 clipping and 87 dashboard tests, full Go regression suite, and independent LUNA Max approval. Baseline `480b32ba72614bc58244efaf76f2dbbf7bcedbf0` on `feat/clipper-ai`; initially clean. Next: user reviews this UI locally, then scopes M4/C4.1+C4.2. M4 is not started.
@@ -91,7 +91,7 @@ C2.5 assignments (2026-10-12; initial agent quota interruptions were resumed und
 | C2.5 integration tests | luna_import_tests, luna_finish_tests / gpt-6-luna / max | clipping_youtube_tracks_test.go; clipping_youtube_recovery_test.go | Synthetic actual FFmpeg media; no live YouTube downloads | Eleven integration tests; packet SHA parity, exact kernel cap, cancellation, restart and reservation checks | done |
 | C2.5 runtime/docs | luna_runtime_docs, luna_finish_backend / gpt-6-luna / max | Offline extractor checker; YOUTUBE-IMPORT.md; README.md; AGENTS.md architecture/prerequisites | Pinned bounded full metadata and actual implemented operator behavior | Offline pinned CLI contract, link/whitespace and independent review | done |
 | C2.5 independent review | luna_review, luna_finish_review / gpt-6-luna / max | Read-only | Reviewers authored no implementation | Final integrated approval, including combined-manifest Original regression | done |
-| C2.5 coordination | main thread / model and effort not exposed | TRACKER.md; SESSION.md | No main-thread implementation; verify branch preservation and publication | Integrated regressions complete; feature-only push follows final handoff commit | in_progress |
+| C2.5 coordination | main thread / model and effort not exposed | TRACKER.md; SESSION.md | No main-thread implementation; verify branch preservation and publication | Integrated regressions complete; eleven feature commits pushed and remote parity verified at 646402d; publication record follows separately | done |
 
 TERRA is not exposed in this session; M2 implementation and independent review use the requested available LUNA Max. The lead model/effort are not exposed to the agent interface; no lead-model claim is made. M1 assignments below are historical.
 
@@ -136,6 +136,12 @@ C3.UI assignments (completed and independently reviewed): `clean_ui` (`gpt-6-lun
 Only the lead edits this tracker. Agent conclusions do not automatically constitute acceptance. Reconcile shared-worktree changes and verify integrated behavior.
 
 ## Evidence and decisions
+
+### 2026-10-12 — C2.5 feature-only publication verified
+
+- Pushed eleven meaningful commits from baseline `944fbf258e6ac760f470ad177367d56e3ad4c999` through handoff `646402d54af28b8eca2cb5dd6fdc08e61bbddda3` by ordinary fast-forward to `refs/heads/feat/clipper-ai`. The remote feature SHA equals local HEAD at that checkpoint, and the worktree is clean.
+- Read-only `git ls-remote --heads origin feat/clipper-ai main` confirmed remote `main` remains `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`; cached `origin/main` and historical `work` also remain unchanged, with no local main branch. No merge, force-push, deployment, paid inference or real YouTube media test occurred.
+- This non-empty publication-record commit is a separate follow-up under the same authorization. Its push and final branch parity are verified after it is committed; use Git history/remote branch ref for its final SHA rather than a self-referential value in this file. C2.5's authorized code/test/docs work is complete; deployment/live verification and M4 remain outside scope.
 
 ### 2026-10-12 — C2.5 separate-track YouTube import repair
 
