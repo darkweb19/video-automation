@@ -29,6 +29,10 @@
     metadata_extraction: "Metadata extraction",
     format_selection: "Format selection",
     media_download: "Media download",
+    video_track_download: "Video track download",
+    audio_track_download: "Audio track download",
+    track_mux: "Track mux",
+    merged_validation: "Merged media validation",
     media_probe: "Media validation",
     media_hash: "Source hashing",
     source_ready: "Source ready; waiting for manual analysis"
@@ -37,14 +41,22 @@
   const IMPORT_TRACE_CODES = new Set([
     "invalid_url", "unsupported_source", "unsafe_destination", "runtime_unavailable", "extractor_proxy_failure",
     "extractor_timeout", "extractor_exit_failure", "extractor_output_limit", "metadata_invalid", "format_unavailable",
+    "combined_tracks_selected", "separate_tracks_selected", "original_audio_selected",
     "video_unavailable", "duration_limit_exceeded", "size_limit_exceeded", "provider_denied_download",
     "non_media_response", "partial_response_rejected", "download_failed", "probe_runtime_unavailable", "probe_timeout",
     "media_invalid", "probe_failed", "hash_failed", "import_canceled", "retry_scheduled", "source_unavailable",
     "download_timeout", "hash_timeout", "import_timeout", "youtube_import_unavailable", "youtube_video_unavailable",
-    "youtube_format_unavailable", "youtube_duration_limit_exceeded", "youtube_size_limit_exceeded", "youtube_media_invalid"
+    "youtube_format_unavailable", "youtube_duration_limit_exceeded", "youtube_size_limit_exceeded", "youtube_media_invalid",
+    "original_audio_unavailable", "track_size_limit_exceeded", "video_track_download_failed", "audio_track_download_failed",
+    "track_content_invalid", "track_mux_failed", "track_mux_timeout", "mux_output_size_limit_exceeded", "av_stream_missing",
+    "av_timing_mismatch"
+  ]);
+  const IMPORT_TRACE_SELECTIONS = new Set([
+    "combined_tracks_selected", "separate_tracks_selected", "original_audio_selected"
   ]);
   const SAFE_TRACE_REASONS = new Set([
-    ...IMPORT_TRACE_CODES, "invalid_link", "unsupported_link", "rights_confirmation_missing", "native_validation_failed",
+    ...[...IMPORT_TRACE_CODES].filter((code) => !IMPORT_TRACE_SELECTIONS.has(code)),
+    "invalid_link", "unsupported_link", "rights_confirmation_missing", "native_validation_failed",
     "import_failed", "analysis_failed", "invalid_budget", "invalid_options", "request_canceled"
   ]);
   const ANALYSIS_TRACE_STATUSES = {
@@ -296,6 +308,7 @@
     if (Number.isSafeInteger(details.count) && details.count >= 0) values.push(`count=${details.count}`);
     if (Number.isInteger(details.httpStatus) && details.httpStatus >= 100 && details.httpStatus <= 599) values.push(`http=${details.httpStatus}`);
     if (SAFE_TRACE_REASONS.has(details.reason)) values.push(`reason=${details.reason}`);
+    if (IMPORT_TRACE_SELECTIONS.has(details.selection)) values.push(`selection=${details.selection}`);
     root.console.log(...values);
   }
 
@@ -370,9 +383,9 @@
   }
 
   function safeImportReason(value, fallback = "source_unavailable") {
-    return typeof value === "string" && IMPORT_TRACE_CODES.has(value)
+    return typeof value === "string" && IMPORT_TRACE_CODES.has(value) && !IMPORT_TRACE_SELECTIONS.has(value)
       ? value
-      : IMPORT_TRACE_CODES.has(fallback) ? fallback : "source_unavailable";
+      : IMPORT_TRACE_CODES.has(fallback) && !IMPORT_TRACE_SELECTIONS.has(fallback) ? fallback : "source_unavailable";
   }
 
   function sourceDiagnosticList(source) {
@@ -425,10 +438,12 @@
       const reason = record.status === "failed" || record.status === "retrying"
         ? safeImportReason(record.code, record.status === "retrying" ? "retry_scheduled" : "source_unavailable")
         : "";
+      const selection = record.stage === "format_selection" && record.status === "completed"
+        && IMPORT_TRACE_SELECTIONS.has(record.code) ? record.code : "";
       const step = record.stage === "source_ready" && record.status === "completed"
         ? "Source ready; waiting for manual analysis"
         : `Import step ${stage}: ${status}`;
-      traceLog(actionID, step, { sourceID, sequence: record.sequence, reason });
+      traceLog(actionID, step, { sourceID, sequence: record.sequence, reason, selection });
       if (record.status === "failed") state.sourceTraceTerminalStatuses.set(sourceID, "failed");
       if (record.stage === "source_ready" && record.status === "completed") state.sourceTraceTerminalStatuses.set(sourceID, "ready");
     }
