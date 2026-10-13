@@ -54,6 +54,14 @@ The user authorized C3.1/C3.2 implementation, local review/checks, ten meaningfu
 
 Reservations use a bounded operator-declared per-second estimate, not a Modal quote. Only an explicit invoice amount and reference (including zero) settles the hold. Unknown completion is not automatically retried. Worker capabilities are attempt-scoped, HTTPS-only and retention-bound; source SHA-256 is checked before analysis. The complete operational contract and limitations are in [M3-IMPLEMENTATION.md](../clipping/M3-IMPLEMENTATION.md).
 
+### C2.6 import retry repair and C3.UI2 intake refinement — 2026-10-13
+
+Request separate direct YouTube tracks concurrently. An eligible per-track transient failure gets one bounded retry after 250 ms; remove and sync only that failed track file and restore its committed bytes to scratch-space accounting while retaining a successful peer. A selected-track HTTP 401, 403, or 410 schedules the existing outer retry with fresh metadata, within the five-attempt limit. See [YOUTUBE-IMPORT.md](../clipping/YOUTUBE-IMPORT.md) for the exact retry classes and safe diagnostic codes.
+
+Keep the initial Clipping view centered on link import and file upload. Place public-link constraints in a closed disclosure and source metadata, batch selection/profile, and removal in a per-source **Details** disclosure; keep the source name, concise status, progress/error, and primary analysis action visible. Preserve an open source disclosure and the focused source control when the source list refreshes. This is a presentation refinement to the existing plain JavaScript dashboard and same-origin APIs, not a change to the source or analysis lifecycle.
+
+The `/api/events` response does not set a hop-by-hop `Connection` header. Local streaming tests cover HTTP/1.1 and HTTP/2 with race checks; Go's HTTP/2 server also strips that header. Those tests do not verify a particular live proxy path. Live YouTube import is unverified because the current outbound proxy returned a policy 403. No deployment or universal source-availability claim follows from this repair.
+
 This ADR records the accepted M2 design, not deployed behavior. Append or supersede decisions with evidence when subsequent evaluation resolves providers/render placement or later requirements change. Do not silently rewrite accepted architecture during an agent task.
 
 Related: [ADR-001](001-go-service-layout.md), [ADR-003](003-railway-persistence.md), [implementation plan](../clipping/PLAN.md), [tracker](../clipping/TRACKER.md).
