@@ -57,6 +57,12 @@ var clippingDiagnosticCodes = map[string]struct{}{
 	"original_audio_unavailable":     {},
 	"video_track_download_failed":    {},
 	"audio_track_download_failed":    {},
+	"track_request_failed":           {},
+	"track_http_retryable":           {},
+	"track_access_denied":            {},
+	"track_body_incomplete":          {},
+	"track_storage_failed":           {},
+	"track_transfer_aborted":         {},
 	"track_size_limit_exceeded":      {},
 	"track_content_invalid":          {},
 	"track_mux_failed":               {},
@@ -287,6 +293,15 @@ type clippingDiagnosticTrace struct {
 
 func newClippingDiagnosticTrace(acquisition *ClippingAcquisition, sourceID string) *clippingDiagnosticTrace {
 	return &clippingDiagnosticTrace{acquisition: acquisition, sourceID: sourceID}
+}
+
+// fork gives concurrent import stages independent active-stage state while
+// retaining the shared durable diagnostic writer.
+func (trace *clippingDiagnosticTrace) fork() *clippingDiagnosticTrace {
+	if trace == nil {
+		return nil
+	}
+	return &clippingDiagnosticTrace{acquisition: trace.acquisition, sourceID: trace.sourceID}
 }
 
 func (trace *clippingDiagnosticTrace) record(stage string, status ClippingSourceDiagnosticStatus, code string) {

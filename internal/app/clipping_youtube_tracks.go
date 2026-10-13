@@ -19,6 +19,31 @@ import (
 
 const clippingYouTubeMuxLimitLauncher = "import os,resource,sys; limit=int(sys.argv[1]); _,hard=resource.getrlimit(resource.RLIMIT_FSIZE); (hard != resource.RLIM_INFINITY and hard < limit) and sys.exit(125); resource.setrlimit(resource.RLIMIT_FSIZE,(limit,limit)); os.execv(sys.argv[2],sys.argv[2:])"
 
+const (
+	clippingYouTubeTrackTransferAttempts = 2
+)
+
+var clippingYouTubeTrackRetryDelay = 250 * time.Millisecond
+
+var errClippingYouTubePeerTrackFailed = errors.New("peer YouTube track download failed")
+
+type youtubeTrackTransferRetryError struct{ err error }
+
+func (e youtubeTrackTransferRetryError) Error() string { return e.err.Error() }
+func (e youtubeTrackTransferRetryError) Unwrap() error { return e.err }
+
+func retryableYouTubeTrackTransfer(err error) error {
+	if err == nil {
+		return nil
+	}
+	return youtubeTrackTransferRetryError{err: err}
+}
+
+func isRetryableYouTubeTrackTransfer(err error) bool {
+	var retryable youtubeTrackTransferRetryError
+	return errors.As(err, &retryable)
+}
+
 func youtubeSelectionForTrack(format youtubeFormat, expectedID, role string) (youtubeSelection, error) {
 	mediaURL, err := url.Parse(format.URL)
 	if err != nil || validateYouTubeMediaURL(mediaURL) != nil {
@@ -70,11 +95,35 @@ func (a *ClippingAcquisition) importYouTubeSeparateTracks(ctx context.Context, s
 	if err != nil {
 		return err
 	}
-	if err := a.downloadYouTubeTrack(ctx, source.ID, videoRequest, *selection.Tracks.Video, paths.videoTrack, "video", maxTracks, trace); err != nil {
+	trackCtx, cancelTracks := context.WithCancelCause(ctx)
+	defer cancelTracks(nil)
+	type trackDownloadResult struct {
+		role string
+		err  error
+	}
+	results := make(chan trackDownloadResult, 2)
+	go func() {
+		results <- trackDownloadResult{role: "video", err: a.downloadYouTubeTrack(trackCtx, source.ID, videoRequest, *selection.Tracks.Video, paths.videoTrack, "video", maxTracks, trace.fork())}
+	}()
+	go func() {
+		results <- trackDownloadResult{role: "audio", err: a.downloadYouTubeTrack(trackCtx, source.ID, audioRequest, *selection.Tracks.Audio, paths.audioTrack, "audio", maxTracks, trace.fork())}
+	}()
+	first := <-results
+	if first.err != nil && trackCtx.Err() == nil {
+		cancelTracks(errClippingYouTubePeerTrackFailed)
+	}
+	second := <-results
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := a.downloadYouTubeTrack(ctx, source.ID, audioRequest, *selection.Tracks.Audio, paths.audioTrack, "audio", maxTracks, trace); err != nil {
-		return err
+	if first.err != nil {
+		return first.err
+	}
+	if second.err != nil {
+		return second.err
+	}
+	if first.role == second.role {
+		return errors.New("duplicate YouTube track download result")
 	}
 	a.store.clippingMu.Lock()
 	capacityErr := a.checkClippingStorageCapacity(0)
@@ -177,79 +226,134 @@ func (a *ClippingAcquisition) commitYouTubeTrackChunk(ctx context.Context, sourc
 }
 
 func (a *ClippingAcquisition) downloadYouTubeTrack(ctx context.Context, sourceID string, request youtubeSelection, format youtubeFormat, localPath, role string, maxTracks int64, trace *clippingDiagnosticTrace) error {
-	stage, failureCode := ClippingDiagnosticStageVideoDownload, "video_track_download_failed"
+	stage := ClippingDiagnosticStageVideoDownload
 	if role == "audio" {
-		stage, failureCode = ClippingDiagnosticStageAudioDownload, "audio_track_download_failed"
+		stage = ClippingDiagnosticStageAudioDownload
 	}
-	trace.start(stage)
+	for attempt := 1; attempt <= clippingYouTubeTrackTransferAttempts; attempt++ {
+		trace.start(stage)
+		committed, err := a.downloadYouTubeTrackAttempt(ctx, sourceID, request, format, localPath, role, maxTracks)
+		if err == nil {
+			trace.complete()
+			return nil
+		}
+		if ctx.Err() != nil {
+			failure := ctx.Err()
+			if errors.Is(context.Cause(ctx), errClippingYouTubePeerTrackFailed) {
+				failure = withClippingDiagnosticCode(failure, "track_transfer_aborted")
+			}
+			trace.finish(ClippingDiagnosticFailed, failure)
+			return ctx.Err()
+		}
+		retrying := attempt < clippingYouTubeTrackTransferAttempts && isRetryableYouTubeTrackTransfer(err)
+		status := ClippingDiagnosticFailed
+		if retrying {
+			status = ClippingDiagnosticRetrying
+		}
+		trace.finish(status, err)
+		if !retrying {
+			return err
+		}
+		if resetErr := a.resetYouTubeTrackAttempt(sourceID, localPath, committed); resetErr != nil {
+			coded := withClippingDiagnosticCode(fmt.Errorf("%w: reset failed track", errClippingImportRetryable), "track_storage_failed")
+			trace.record(stage, ClippingDiagnosticFailed, clippingDiagnosticCode(stage, coded))
+			return coded
+		}
+		timer := time.NewTimer(clippingYouTubeTrackRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			failure := ctx.Err()
+			if errors.Is(context.Cause(ctx), errClippingYouTubePeerTrackFailed) {
+				failure = withClippingDiagnosticCode(failure, "track_transfer_aborted")
+			}
+			trace.record(stage, ClippingDiagnosticFailed, clippingDiagnosticCode(stage, failure))
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return errors.New("YouTube track transfer attempts exhausted")
+}
+
+func (a *ClippingAcquisition) downloadYouTubeTrackAttempt(ctx context.Context, sourceID string, request youtubeSelection, format youtubeFormat, localPath, role string, maxTracks int64) (int64, error) {
+	stage := ClippingDiagnosticStageVideoDownload
+	if role == "audio" {
+		stage = ClippingDiagnosticStageAudioDownload
+	}
 	response, err := a.fetchYouTubeMediaURL(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
-			trace.finish(ClippingDiagnosticFailed, ctx.Err())
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
-		coded := withClippingDiagnosticCode(fmt.Errorf("%w: selected track request failed", errClippingImportRetryable), failureCode)
-		trace.finish(ClippingDiagnosticFailed, coded)
-		return coded
+		if isPermanentClippingImportError(err) {
+			return 0, withClippingDiagnosticCode(err, clippingDiagnosticCode(stage, err))
+		}
+		coded := withClippingDiagnosticCode(fmt.Errorf("%w: selected track request failed", errClippingImportRetryable), "track_request_failed")
+		return 0, retryableYouTubeTrackTransfer(coded)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Range") != "" {
-		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusPartialContent {
-			coded := withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "The selected YouTube track could not be downloaded directly; upload an original file you are permitted to reuse")}, failureCode)
-			trace.finish(ClippingDiagnosticFailed, coded)
-			return coded
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusGone {
+			// Signed media URLs can be denied after extraction. Let the durable
+			// import retry re-extract metadata before treating that URL as final.
+			coded := withClippingDiagnosticCode(fmt.Errorf("%w: selected track access was denied", errClippingImportRetryable), "track_access_denied")
+			return 0, coded
 		}
-		coded := withClippingDiagnosticCode(fmt.Errorf("%w: selected track endpoint returned an unexpected status", errClippingImportRetryable), failureCode)
-		trace.finish(ClippingDiagnosticFailed, coded)
-		return coded
+		if response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 && response.StatusCode <= 599 {
+			coded := withClippingDiagnosticCode(fmt.Errorf("%w: selected track endpoint returned a retryable status", errClippingImportRetryable), "track_http_retryable")
+			return 0, retryableYouTubeTrackTransfer(coded)
+		}
+		coded := withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "The selected YouTube track could not be downloaded directly; upload an original file you are permitted to reuse")}, "track_content_invalid")
+		return 0, coded
 	}
 	if response.ContentLength < -1 || response.ContentLength >= 0 && !a.trackContentLengthWithinReservation(sourceID, response.ContentLength, maxTracks) {
 		coded := withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_size_limit_exceeded", "The selected source tracks exceed the 20 GiB limit; upload smaller original tracks you are permitted to reuse")}, "track_size_limit_exceeded")
-		trace.finish(ClippingDiagnosticFailed, coded)
-		return coded
+		return 0, coded
 	}
 	contentType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if !validYouTubeTrackContentType(contentType, role, format.Extension) {
 		coded := withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "The selected track response is not the expected media type; upload an original file you are permitted to reuse")}, "track_content_invalid")
-		trace.finish(ClippingDiagnosticFailed, coded)
-		return coded
+		return 0, coded
 	}
 	file, err := openClippingPartTruncate(localPath)
 	if err != nil {
-		coded := withClippingDiagnosticCode(fmt.Errorf("%w: prepare staged track", errClippingImportRetryable), failureCode)
-		trace.finish(ClippingDiagnosticFailed, coded)
-		return coded
+		coded := withClippingDiagnosticCode(fmt.Errorf("%w: prepare staged track", errClippingImportRetryable), "track_storage_failed")
+		return 0, coded
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	buffer := make([]byte, clippingImportReadBytes)
 	var committed int64
 	for {
 		if err := ctx.Err(); err != nil {
-			trace.finish(ClippingDiagnosticFailed, err)
-			return err
+			return committed, err
 		}
 		n, readErr := response.Body.Read(buffer)
 		if n > 0 {
 			if importStreamExceedsLimit(committed, int64(n), maxTracks) {
 				coded := withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_size_limit_exceeded", "The selected source tracks exceed the 20 GiB limit; upload smaller original tracks you are permitted to reuse")}, "track_size_limit_exceeded")
-				trace.finish(ClippingDiagnosticFailed, coded)
-				return coded
+				return committed, coded
 			}
 			if err := a.commitYouTubeTrackChunk(ctx, sourceID, file, buffer[:n], committed, maxTracks); err != nil {
 				if ctx.Err() != nil {
-					trace.finish(ClippingDiagnosticFailed, ctx.Err())
-					return ctx.Err()
+					return committed, ctx.Err()
 				}
-				trace.finish(ClippingDiagnosticFailed, err)
-				return err
+				if isPermanentClippingImportError(err) {
+					return committed, err
+				}
+				coded := withClippingDiagnosticCode(fmt.Errorf("%w: commit staged track bytes", errClippingImportRetryable), "track_storage_failed")
+				return committed, coded
 			}
 			committed += int64(n)
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
-				coded := withClippingDiagnosticCode(fmt.Errorf("%w: read staged track", errClippingImportRetryable), failureCode)
-				trace.finish(ClippingDiagnosticFailed, coded)
-				return coded
+				coded := withClippingDiagnosticCode(fmt.Errorf("%w: read staged track", errClippingImportRetryable), "track_body_incomplete")
+				return committed, retryableYouTubeTrackTransfer(coded)
 			}
 			break
 		}
@@ -258,16 +362,45 @@ func (a *ClippingAcquisition) downloadYouTubeTrack(ctx context.Context, sourceID
 		}
 	}
 	if committed == 0 || response.ContentLength >= 0 && committed != response.ContentLength {
-		coded := withClippingDiagnosticCode(fmt.Errorf("%w: selected track length did not match response headers", errClippingImportRetryable), "track_content_invalid")
-		trace.finish(ClippingDiagnosticFailed, coded)
-		return coded
+		coded := withClippingDiagnosticCode(fmt.Errorf("%w: selected track length did not match response headers", errClippingImportRetryable), "track_body_incomplete")
+		return committed, retryableYouTubeTrackTransfer(coded)
 	}
 	if err := file.Sync(); err != nil {
-		coded := withClippingDiagnosticCode(fmt.Errorf("%w: sync staged track", errClippingImportRetryable), failureCode)
-		trace.finish(ClippingDiagnosticFailed, coded)
-		return coded
+		coded := withClippingDiagnosticCode(fmt.Errorf("%w: sync staged track", errClippingImportRetryable), "track_storage_failed")
+		return committed, coded
 	}
-	trace.complete()
+	if err := file.Close(); err != nil {
+		coded := withClippingDiagnosticCode(fmt.Errorf("%w: close staged track", errClippingImportRetryable), "track_storage_failed")
+		return committed, coded
+	}
+	return committed, nil
+}
+
+// resetYouTubeTrackAttempt removes a failed track from byte zero. `committed`
+// is the number of bytes already deducted from the shared scratch reservation;
+// the file's size is deliberately not used because a failed write or fsync can
+// leave uncommitted bytes on disk.
+func (a *ClippingAcquisition) resetYouTubeTrackAttempt(sourceID, localPath string, committed int64) error {
+	a.store.clippingMu.Lock()
+	defer a.store.clippingMu.Unlock()
+	source, err := a.store.ClippingSource(sourceID)
+	if err != nil {
+		return err
+	}
+	if source.Status != ClippingSourceImporting {
+		return errors.New("source import is no longer active")
+	}
+	remaining, reserved := a.store.clippingImportWorkspaces[sourceID]
+	if !reserved || committed < 0 || remaining < 0 || remaining > clippingYouTubeTrackWorkspaceBytes-committed {
+		return errors.New("source track workspace reservation cannot be restored")
+	}
+	if err := removeGeneratedRegularFile(localPath); err != nil {
+		return err
+	}
+	if err := syncClippingDirectory(filepath.Dir(localPath)); err != nil {
+		return err
+	}
+	a.store.clippingImportWorkspaces[sourceID] = remaining + committed
 	return nil
 }
 
