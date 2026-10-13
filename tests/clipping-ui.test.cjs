@@ -122,10 +122,18 @@ function createUI(request) {
       return [match[3], node];
     }));
   const document = {
+    activeElement: null,
     getElementById: (id) => elements.get(id) || null,
-    createElement: (tag) => new Element(tag),
+    createElement: (tag) => {
+      const node = new Element(tag);
+      node.focus = () => { node.focused = true; document.activeElement = node; };
+      return node;
+    },
     createDocumentFragment: () => new Element('#fragment')
   };
+  for (const node of elements.values()) {
+    node.focus = () => { node.focused = true; document.activeElement = node; };
+  }
   const window = {
     document,
     location: { origin: 'http://localhost' },
@@ -146,7 +154,7 @@ function createUI(request) {
   });
   vm.runInContext(source, context, { filename: 'static/clipping.js' });
   window.ClippingUI.configure({ request });
-  return { api: window.ClippingUI, elements, logs };
+  return { api: window.ClippingUI, elements, logs, document };
 }
 
 function treeText(node) {
@@ -349,10 +357,12 @@ test('resumable upload ranges honor the configured limit and never exceed 16 MiB
   assert.equal(pure.validResumeOffset(maxChunk + 2, maxChunk + 1), null);
 });
 
-test('clipping keeps link and upload intake primary and closes operational settings by default', () => {
+test('clipping keeps a concise link and upload intake primary and closes operational settings by default', () => {
   assert.match(markup, /<h2 id="clipping-heading">Add a video<\/h2>/);
-  assert.match(markup, /<h3 id="clipping-link-heading">YouTube link<\/h3>/);
-  assert.match(markup, /Drive and Dropbox links must be publicly accessible/);
+  assert.match(markup, /<h3 id="clipping-link-heading">Import a link<\/h3>/);
+  assert.match(markup, /<h3 id="clipping-upload-heading">Upload a file<\/h3>/);
+  assert.match(markup, /Private links aren’t supported/);
+  assert.match(markup, /<details class="clipping-link-requirements">[\s\S]*<summary>Link requirements<\/summary>/);
   assert.match(markup, /id="clipping-drop-zone"[^>]*role="group"/);
 
   const picker = markup.match(/<input id="clipping-file"([^>]*)>/);
@@ -361,7 +371,7 @@ test('clipping keeps link and upload intake primary and closes operational setti
   assert.match(picker[1], /accept="video\/\*,audio\/\*"/);
   assert.doesNotMatch(picker[1], /\bmultiple\b|\btabindex=/);
   assert.doesNotMatch(picker[1], /\brequired\b/, 'drop-selected files are validated by the form handler');
-  assert.match(markup, /<label for="clipping-file">Video or audio file<\/label>/);
+  assert.match(markup, /<label for="clipping-file">Choose a file<\/label>/);
   assert.match(markup, /id="clipping-upload-permission" type="checkbox" required/);
   assert.match(markup, /id="clipping-upload-submit" class="button primary" type="submit" disabled>Upload video/);
 
@@ -380,8 +390,8 @@ test('clipping keeps link and upload intake primary and closes operational setti
     assert.ok(disclosure, `${id} is a native disclosure`);
     assert.doesNotMatch(disclosure[1], /\bopen\b/, `${id} starts closed`);
   }
-  assert.match(markup, /href="\/static\/clipping\.css\?v=20261009-source-intake"/);
-  assert.match(markup, /src="\/static\/clipping\.js\?v=20261009-source-intake"/);
+  assert.match(markup, /href="\/static\/clipping\.css\?v=20261013-quiet-intake"/);
+  assert.match(markup, /src="\/static\/clipping\.js\?v=20261013-quiet-intake"/);
 });
 
 test('dragged media stays a draft until rights are confirmed and Upload video is submitted', async () => {
@@ -571,10 +581,11 @@ test('resume actions stay disabled during an active transfer and return after pa
   assert.equal(resumeButtons().every((button) => !button.disabled), true, 'failed transfers also restore Resume controls for saved uploading sources');
 });
 
-test('sources and saved work appear only when present; job and batch costs stay in closed disclosures', async () => {
+test('source rows show one status and keep metadata, batch controls and removal in Details', async () => {
+  let sources = [{ id: 'src_visible', status: 'ready', original_name: 'ready.mp4', size_bytes: 128, duration_ms: 30_000 }];
   const app = createUI(async (route) => {
     if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/sources') return [{ id: 'src_visible', status: 'ready', original_name: 'ready.mp4', size_bytes: 128 }];
+    if (route === '/api/clipping/sources') return sources;
     if (route === '/api/clipping/jobs') return [{ id: 'job_visible', source_id: 'src_visible', status: 'running', progress: 0.5, spent_micro_usd: 250_000, budget_micro_usd: 1_000_000 }];
     if (route === '/api/clipping/batches') return [{ id: 'batch_visible', source_ids: ['src_visible'], status: 'running', spent_micro_usd: 300_000, budget_micro_usd: 1_500_000 }];
     throw new Error(`Unexpected request: ${route}`);
@@ -587,6 +598,17 @@ test('sources and saved work appear only when present; job and batch costs stay 
   assert.equal(app.elements.get('clipping-batches-section').hidden, false);
   assert.match(treeText(app.elements.get('clipping-sources')), /Start analysis/);
   assert.match(treeText(app.elements.get('clipping-sources')), /Remove/);
+  assert.equal(app.elements.get('clipping-source-summary').textContent, '1 source');
+  const sourceRow = app.elements.get('clipping-sources').children[0];
+  const sourceStatuses = [];
+  const collectStatuses = (node) => {
+    if (node.classList?.contains('clipping-source-status')) sourceStatuses.push(node);
+    node.children.forEach(collectStatuses);
+  };
+  collectStatuses(sourceRow);
+  assert.equal(sourceStatuses.length, 1, 'each source has one visible state label');
+  assert.equal(sourceStatuses[0].textContent, 'Ready for analysis');
+  assert.equal(sourceStatuses[0].dataset.state, 'ready');
   assert.match(treeText(app.elements.get('clipping-jobs')), /Analysis in progress/);
   assert.match(treeText(app.elements.get('clipping-batches')), /Analysis in progress/);
 
@@ -598,9 +620,25 @@ test('sources and saved work appear only when present; job and batch costs stay 
   assert.match(treeText(jobCost), /\$0\.25 of \$1\.00/);
   assert.match(treeText(batchCost), /\$0\.30 of \$1\.50/);
 
-  const sourceOptions = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Options');
-  assert.ok(sourceOptions);
-  assert.equal(sourceOptions.open, false);
+  const sourceDetails = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Details');
+  assert.ok(sourceDetails);
+  assert.equal(sourceDetails.open, false);
+  assert.match(treeText(sourceDetails), /Duration[\s\S]*File size[\s\S]*Add to batch[\s\S]*Content type[\s\S]*Remove/);
+  assert.equal(sourceRow.children[0].children.some((node) => node.classList?.contains('clipping-row-meta')), false,
+    'duration and size are not repeated beside the source status');
+
+  sourceDetails.open = true;
+  sourceDetails.emit('toggle');
+  const profile = findNode(sourceDetails, (node) => node.tagName === 'select');
+  profile.focus();
+  sources = [...sources, { id: 'src_second', status: 'ready', original_name: 'second.mp4' }];
+  app.api.handleEvent('clipping_source', { data: JSON.stringify({ id: 'src_second', source: sources[1] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  const refreshedRow = app.elements.get('clipping-sources').children.find((node) => node.dataset.sourceId === 'src_visible');
+  const refreshedDetails = findNode(refreshedRow, (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Details');
+  const refreshedProfile = findNode(refreshedDetails, (node) => node.tagName === 'select');
+  assert.equal(refreshedDetails.open, true, 'an SSE source refresh keeps the user-opened disclosure open');
+  assert.equal(app.document.activeElement, refreshedProfile, 'focus stays on the same profile control after the row is rebuilt');
 });
 
 test('source list errors remain visible when the server has no saved sources', async () => {
@@ -911,8 +949,8 @@ test('YouTube imports accept supported single-video links, require rights attest
     assert.match(app.elements.get('clipping-link-error').textContent, /one HTTPS public YouTube|Playlists and live/);
   }
   assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/import').length, supportedLinks.length, 'playlist, live, and malformed YouTube links never reach the API');
-  assert.match(markup, /Public YouTube import supports one HTTPS watch, shorts, embed, or youtu\.be video/);
-  assert.match(markup, /restricted videos, and unsupported formats require an original-file upload/);
+  assert.match(source, /Public YouTube import supports one HTTPS watch, shorts, embed, or youtu\.be video/);
+  assert.match(source, /restricted videos, and unsupported formats require an original-file upload/);
 });
 
 test('console tracing begins on Import link click and reports native and scripted validation failures safely', async () => {
@@ -1107,7 +1145,13 @@ test('YouTube diagnostics identify combined or split selection, track stages, an
       { sequence: 8, stage: 'track_mux', status: 'failed', code: 'mux_output_size_limit_exceeded' },
       { sequence: 9, stage: 'merged_validation', status: 'failed', code: 'av_stream_missing' },
       { sequence: 10, stage: 'merged_validation', status: 'failed', code: 'av_timing_mismatch' },
-      { sequence: 11, stage: 'merged_validation', status: 'failed', code: 'signature=https://private.example/?token=must-not-log' }
+      { sequence: 11, stage: 'merged_validation', status: 'failed', code: 'signature=https://private.example/?token=must-not-log' },
+      { sequence: 12, stage: 'video_track_download', status: 'failed', code: 'track_request_failed', detail: 'https://private.example/request?token=must-not-log' },
+      { sequence: 13, stage: 'video_track_download', status: 'retrying', code: 'track_http_retryable' },
+      { sequence: 14, stage: 'audio_track_download', status: 'failed', code: 'track_access_denied' },
+      { sequence: 15, stage: 'audio_track_download', status: 'failed', code: 'track_body_incomplete' },
+      { sequence: 16, stage: 'video_track_download', status: 'failed', code: 'track_storage_failed' },
+      { sequence: 17, stage: 'audio_track_download', status: 'failed', code: 'track_transfer_aborted' }
     ]
   };
   const fixtures = [combined, separate, failed];
@@ -1161,7 +1205,9 @@ test('YouTube diagnostics identify combined or split selection, track stages, an
   }
   for (const code of [
     'original_audio_unavailable', 'track_size_limit_exceeded', 'video_track_download_failed', 'audio_track_download_failed',
-    'track_content_invalid', 'track_mux_failed', 'track_mux_timeout', 'mux_output_size_limit_exceeded', 'av_stream_missing', 'av_timing_mismatch'
+    'track_content_invalid', 'track_request_failed', 'track_http_retryable', 'track_access_denied', 'track_body_incomplete',
+    'track_storage_failed', 'track_transfer_aborted', 'track_mux_failed', 'track_mux_timeout', 'mux_output_size_limit_exceeded',
+    'av_stream_missing', 'av_timing_mismatch'
   ]) assert.match(output, new RegExp(`reason=${code}`), `the safe failure code ${code} is retained`);
   assert.match(output, /Import step Merged media validation: failed[\s\S]*reason=source_unavailable/);
   assert.equal(app.logs.filter((entry) => entry.includes('source=clipsrc_split_trace') && entry.includes('sequence=1')).length, 1,
@@ -1321,7 +1367,7 @@ test('individual and batch submissions send exact microUSD limits and stable ide
     throw new Error(`Unexpected request: ${route}`);
   });
   await app.api.start();
-  assert.match(treeText(app.elements.get('clipping-sources')), /Media ready/);
+  assert.match(treeText(app.elements.get('clipping-sources')), /Media[\s\S]*Available/);
   const sourceButtons = app.elements.get('clipping-sources').querySelectorAll('button');
   const startButton = sourceButtons.find((node) => node.textContent === 'Start analysis');
   const sourceType = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'select');
@@ -1342,7 +1388,8 @@ test('individual and batch submissions send exact microUSD limits and stable ide
   });
   assert.equal(submissions[0].options.headers['Idempotency-Key'], submissions[1].options.headers['Idempotency-Key']);
 
-  const batchCheck = app.elements.get('clipping-sources').children[0].children[1].children[0].children[0];
+  const batchCheck = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'input' && node.type === 'checkbox');
+  assert.ok(batchCheck, 'batch selection stays available in the source Details disclosure');
   batchCheck.checked = true;
   batchCheck.emit('change');
   app.elements.get('clipping-batch-job-budget').value = '1.25';

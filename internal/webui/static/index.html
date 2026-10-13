@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="/static/project.css?v=20261007-studio">
   <link rel="stylesheet" href="/static/history-settings.css?v=20261007-studio">
   <link rel="stylesheet" href="/static/youtube.css?v=20261007-studio">
-  <link rel="stylesheet" href="/static/clipping.css?v=20261009-source-intake">
+  <link rel="stylesheet" href="/static/clipping.css?v=20261013-quiet-intake">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -207,30 +207,34 @@
 
         <section id="clipping-view" class="view clipping-view" data-page="clipping" aria-labelledby="clipping-heading">
           <div class="clipping-page-head">
-            <div><h2 id="clipping-heading">Add a video</h2><p>Add a public link or choose one file. Adding footage does not start analysis.</p></div>
+            <div><h2 id="clipping-heading">Add a video</h2><p>Import a public link or upload a file. Analysis starts when you choose it.</p></div>
             <button id="clipping-refresh" class="button secondary" type="button">Refresh</button>
           </div>
           <section class="panel clipping-intake" aria-label="Add a video source">
+            <div class="clipping-intake-grid">
             <section class="clipping-link-section" aria-labelledby="clipping-link-heading">
-              <div class="clipping-section-head"><div><h3 id="clipping-link-heading">YouTube link</h3><p>Paste a public video link.</p></div></div>
+              <div class="clipping-section-head"><div><h3 id="clipping-link-heading">Import a link</h3><p>YouTube, Google Drive, or Dropbox.</p></div></div>
               <form id="clipping-link-form" class="clipping-form">
-                <div class="field"><label for="clipping-link">Public video link</label><input id="clipping-link" name="url" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="url" required><small>Drive and Dropbox links must be publicly accessible. YouTube accepts one public video at a time.</small></div>
+                <div class="field"><label for="clipping-link">Video link</label><input id="clipping-link" name="url" type="url" inputmode="url" placeholder="Paste a public video link" autocomplete="url" required><small>Private links aren’t supported.</small></div>
                 <label id="clipping-link-permission" class="clipping-check"><input id="clipping-link-permission-check" type="checkbox" required><span id="clipping-link-permission-copy">I have permission to reuse this video and have it processed.</span></label>
-                <p id="clipping-link-help" class="clipping-help" hidden>Public YouTube import supports one HTTPS watch, shorts, embed, or youtu.be video that is available without sign-in. Playlists, live or upcoming streams, restricted videos, and unsupported formats require an original-file upload you are permitted to reuse.</p>
+                <details class="clipping-link-requirements">
+                  <summary>Link requirements</summary>
+                  <p id="clipping-link-help" class="clipping-help">YouTube accepts one public video at a time. Google Drive and Dropbox links must be publicly accessible.</p>
+                </details>
                 <p id="clipping-link-error" class="form-error" role="alert" aria-live="polite"></p>
                 <button id="clipping-link-submit" class="button primary" type="submit" disabled>Import link</button>
               </form>
             </section>
             <div class="clipping-intake-divider" aria-hidden="true"><span>or</span></div>
             <section class="clipping-upload-section" aria-labelledby="clipping-upload-heading">
-              <div class="clipping-section-head"><div><h3 id="clipping-upload-heading">Upload one video</h3><p>Large uploads can resume from the last saved point if interrupted.</p></div></div>
+              <div class="clipping-section-head"><div><h3 id="clipping-upload-heading">Upload a file</h3><p>Drop one file or choose it from your device.</p></div></div>
               <form id="clipping-upload-form" class="clipping-form">
                 <div id="clipping-drop-zone" class="clipping-drop-zone" role="group" aria-labelledby="clipping-drop-label" aria-describedby="clipping-drop-help">
-                  <strong id="clipping-drop-label">Drop one video or audio file here</strong>
-                  <p id="clipping-drop-help">Choose a file or drag it here. Confirm permission before uploading.</p>
-                  <div class="field clipping-file-field"><label for="clipping-file">Video or audio file</label><input id="clipping-file" name="file" type="file" accept="video/*,audio/*"><small id="clipping-file-name" role="status" aria-live="polite">No file selected.</small></div>
+                  <strong id="clipping-drop-label">Drop one video or audio file</strong>
+                  <p id="clipping-drop-help">Large uploads can resume if interrupted.</p>
+                  <div class="field clipping-file-field"><label for="clipping-file">Choose a file</label><input id="clipping-file" name="file" type="file" accept="video/*,audio/*"><small id="clipping-file-name" role="status" aria-live="polite">No file selected.</small></div>
                 </div>
-                <label class="clipping-check"><input id="clipping-upload-permission" type="checkbox" required><span>I own this video or have permission to reuse it and have it processed.</span></label>
+                <label class="clipping-check"><input id="clipping-upload-permission" type="checkbox" required><span>I have permission to reuse this video and have it processed.</span></label>
                 <p id="clipping-upload-error" class="form-error" role="alert" aria-live="polite"></p>
                 <button id="clipping-upload-submit" class="button primary" type="submit" disabled>Upload video</button>
               </form>
@@ -242,15 +246,16 @@
               </div>
               <input id="clipping-resume-file" class="visually-hidden" type="file" accept="video/*,audio/*" tabindex="-1" aria-label="Choose the original file to resume uploading">
             </section>
+            </div>
           </section>
           <div id="clipping-work-grid" class="clipping-work-grid" hidden>
             <section id="clipping-sources-panel" class="panel clipping-panel clipping-sources-panel" aria-labelledby="clipping-sources-heading" hidden>
-              <div class="clipping-section-head"><div><h3 id="clipping-sources-heading">Sources</h3><p id="clipping-source-summary">Your uploaded and imported footage.</p></div></div>
+              <div class="clipping-section-head"><div><h3 id="clipping-sources-heading">Your videos</h3><p id="clipping-source-summary">Your uploaded and imported videos.</p></div></div>
               <p id="clipping-sources-error" class="form-error" role="alert" aria-live="polite"></p>
               <div id="clipping-sources" class="clipping-list"><p class="empty">Sources will appear here after you add footage.</p></div>
             </section>
             <section id="clipping-jobs-panel" class="panel clipping-panel clipping-jobs-panel" aria-labelledby="clipping-batches-heading" hidden>
-              <div class="clipping-section-head"><div><h3 id="clipping-batches-heading">Batch and jobs</h3><p>Progress and saved analysis for this footage.</p></div></div>
+              <div class="clipping-section-head"><div><h3 id="clipping-batches-heading">Activity</h3><p>Analysis progress and saved results.</p></div></div>
               <section id="clipping-jobs-section" class="clipping-work-subsection" hidden aria-labelledby="clipping-jobs-heading">
                 <div class="clipping-list-heading"><h4 id="clipping-jobs-heading">Analysis jobs</h4><span id="clipping-job-count" class="history-count">0</span></div>
                 <p id="clipping-jobs-error" class="form-error" role="alert" aria-live="polite"></p>
@@ -528,7 +533,7 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/clipping.js?v=20261009-source-intake" defer></script>
+  <script src="/static/clipping.js?v=20261013-quiet-intake" defer></script>
   <script src="/static/app.js?v=20261008-clipping" defer></script>
 </body>
 </html>

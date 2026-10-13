@@ -48,8 +48,9 @@
     "download_timeout", "hash_timeout", "import_timeout", "youtube_import_unavailable", "youtube_video_unavailable",
     "youtube_format_unavailable", "youtube_duration_limit_exceeded", "youtube_size_limit_exceeded", "youtube_media_invalid",
     "original_audio_unavailable", "track_size_limit_exceeded", "video_track_download_failed", "audio_track_download_failed",
-    "track_content_invalid", "track_mux_failed", "track_mux_timeout", "mux_output_size_limit_exceeded", "av_stream_missing",
-    "av_timing_mismatch"
+    "track_content_invalid", "track_request_failed", "track_http_retryable", "track_access_denied", "track_body_incomplete",
+    "track_storage_failed", "track_transfer_aborted", "track_mux_failed", "track_mux_timeout", "mux_output_size_limit_exceeded",
+    "av_stream_missing", "av_timing_mismatch"
   ]);
   const IMPORT_TRACE_SELECTIONS = new Set([
     "combined_tracks_selected", "separate_tracks_selected", "original_audio_selected"
@@ -226,6 +227,7 @@
     batches: [],
     workerConfig: null,
     sourceContentTypes: new Map(),
+    sourceDetailsOpenIDs: new Set(),
     expandedJobIDs: new Set(),
     jobDetails: new Map(),
     jobDetailErrors: new Map(),
@@ -1269,6 +1271,13 @@
     return `${(value / (1024 * 1024)).toFixed(value >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
   }
 
+  function sourceStatusLabel(source, status) {
+    if (status === "uploading") {
+      return safeID(state.upload?.sourceID) === safeID(source && source.id) ? "Uploading" : "Upload paused";
+    }
+    return statusCopy(status, sourceStatusCopy);
+  }
+
   function statusCopy(status, table) {
     return table[String(status || "").toLowerCase()] || "Status unavailable";
   }
@@ -1520,27 +1529,82 @@
     selectUploadFile(files[0]);
   }
 
+  function sourceRowForNode(node) {
+    let currentNode = node;
+    while (currentNode && currentNode !== ui.sources) {
+      const id = safeID(currentNode.dataset?.sourceId);
+      if (id) return id;
+      currentNode = currentNode.parentElement || currentNode.parentNode || currentNode.parent;
+    }
+    return "";
+  }
+
+  function findSourceControl(node, focusKey) {
+    if (node && node.dataset?.clippingFocusKey === focusKey) return node;
+    for (const child of node?.children || []) {
+      const found = findSourceControl(child, focusKey);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function captureSourceFocus() {
+    const active = document.activeElement;
+    const sourceID = sourceRowForNode(active);
+    const focusKey = active?.dataset?.clippingFocusKey || "";
+    if (!sourceID || !focusKey) return null;
+    const focus = { sourceID, focusKey };
+    if (Number.isInteger(active.selectionStart)) focus.selectionStart = active.selectionStart;
+    if (Number.isInteger(active.selectionEnd)) focus.selectionEnd = active.selectionEnd;
+    if (typeof active.selectionDirection === "string") focus.selectionDirection = active.selectionDirection;
+    return focus;
+  }
+
+  function preserveSourceDetailsState() {
+    for (const row of ui.sources.children) {
+      const sourceID = safeID(row.dataset?.sourceId);
+      if (!sourceID) continue;
+      const disclosure = findSourceControl(row, "details");
+      if (disclosure?.open) state.sourceDetailsOpenIDs.add(sourceID);
+      else state.sourceDetailsOpenIDs.delete(sourceID);
+    }
+  }
+
+  function restoreSourceFocus(focus) {
+    if (!focus) return;
+    const row = Array.from(ui.sources.children).find((item) => safeID(item.dataset?.sourceId) === focus.sourceID);
+    const target = findSourceControl(row, focus.focusKey);
+    if (!target || typeof target.focus !== "function") return;
+    target.focus({ preventScroll: true });
+    if (Number.isInteger(focus.selectionStart) && Number.isInteger(focus.selectionEnd)
+      && typeof target.setSelectionRange === "function") {
+      try { target.setSelectionRange(focus.selectionStart, focus.selectionEnd, focus.selectionDirection); } catch (_error) { /* Unsupported input selection. */ }
+    }
+  }
+
   function renderSources() {
+    preserveSourceDetailsState();
+    const focus = captureSourceFocus();
     const fragment = document.createDocumentFragment();
-    const readySources = state.sources.filter((source) => String(source.status).toLowerCase() === "ready");
-    ui.sourceSummary.textContent = `${state.sources.length} ${state.sources.length === 1 ? "source" : "sources"} · ${readySources.length} ready`;
+    const renderedSourceIDs = new Set();
+    ui.sourceSummary.textContent = `${state.sources.length} ${state.sources.length === 1 ? "source" : "sources"}`;
     if (!state.sources.length) {
       fragment.append(element("p", "empty", "Sources will appear here after you add footage."));
     }
     for (const source of state.sources) {
       const id = safeID(source.id);
       if (!id) continue;
+      renderedSourceIDs.add(id);
       const status = String(source.status || "").toLowerCase();
       const row = element("article", "clipping-row");
       row.dataset.sourceId = id;
       const details = element("div", "clipping-row-main");
+      const heading = element("div", "clipping-source-heading");
       const title = element("strong", "clipping-row-title", sourceName(source));
-      const meta = element("div", "clipping-row-meta");
-      const duration = Number(source.duration_ms) > 0 ? formatDuration(source.duration_ms) : "Duration pending";
-      meta.append(element("span", "", `${duration} · ${sourceSize(source)}`));
-      if (status === "ready") meta.append(element("span", "", safeMediaURL(source.media_url) ? "Media ready" : "Media unavailable"));
-      const stateLine = element("p", "clipping-row-state", statusCopy(status, sourceStatusCopy));
-      details.append(title, meta, stateLine);
+      const stateBadge = element("span", "badge clipping-source-status", sourceStatusLabel(source, status));
+      stateBadge.dataset.state = status;
+      heading.append(title, stateBadge);
+      details.append(heading);
       if (status === "uploading") {
         const total = Number(source.declared_size_bytes ?? source.size_bytes);
         const uploaded = Number(source.upload_offset);
@@ -1576,12 +1640,34 @@
       }
       const failureCopy = sourceFailureCopy(source);
       if (failureCopy) details.append(element("p", "clipping-row-error", failureCopy));
+      const sourceOptions = element("details", "clipping-source-options");
+      sourceOptions.dataset.clippingFocusKey = "details";
+      sourceOptions.open = state.sourceDetailsOpenIDs.has(id);
+      sourceOptions.addEventListener("toggle", () => {
+        if (sourceOptions.open) state.sourceDetailsOpenIDs.add(id);
+        else state.sourceDetailsOpenIDs.delete(id);
+      });
+      const optionsSummary = element("summary", "", "Details");
+      optionsSummary.dataset.clippingFocusKey = "details-summary";
+      sourceOptions.append(optionsSummary);
+      const metadata = element("dl", "clipping-source-metadata");
+      metadata.append(
+        element("dt", "", "Duration"),
+        element("dd", "", Number(source.duration_ms) > 0 ? formatDuration(source.duration_ms) : "Not available"),
+        element("dt", "", "File size"),
+        element("dd", "", sourceSize(source))
+      );
+      if (status === "ready" && source.media_url) {
+        metadata.append(element("dt", "", "Media"), element("dd", "", safeMediaURL(source.media_url) ? "Available" : "Unavailable"));
+      }
+      sourceOptions.append(metadata);
       const actions = element("div", "clipping-row-actions");
       if (status === "ready") {
         if (!state.sourceContentTypes.has(id)) state.sourceContentTypes.set(id, "general");
         const checkLabel = element("label", "clipping-check clipping-select");
         const check = element("input");
         check.type = "checkbox";
+        check.dataset.clippingFocusKey = "batch";
         check.checked = state.selectedSourceIDs.has(id);
         check.setAttribute("aria-label", `Select ${sourceName(source)} for a batch`);
         check.addEventListener("change", () => {
@@ -1589,35 +1675,44 @@
           else state.selectedSourceIDs.delete(id);
           renderBatchReadiness();
         });
-        checkLabel.append(check, element("span", "", "Batch"));
-        actions.append(checkLabel);
-        const options = element("details", "clipping-source-options");
-        options.append(element("summary", "", "Options"));
+        checkLabel.append(check, element("span", "", "Add to batch"));
+        sourceOptions.append(checkLabel);
         const typeLabel = element("label", "clipping-content-type", "Content type");
         const typeSelect = makeContentTypeSelect(state.sourceContentTypes.get(id), `Content type for ${sourceName(source)}`);
+        typeSelect.dataset.clippingFocusKey = "content-type";
         typeSelect.addEventListener("change", () => state.sourceContentTypes.set(id, contentType(typeSelect.value)));
         typeLabel.append(typeSelect);
-        options.append(typeLabel);
-        actions.append(options);
-        actions.append(button("Start analysis", "button secondary clipping-action", () => { void createJob(id); }));
+        sourceOptions.append(typeLabel);
+        const analyze = button("Start analysis", "button primary clipping-action", () => { void createJob(id); });
+        analyze.dataset.clippingFocusKey = "analyze";
+        actions.append(analyze);
       } else if (status === "uploading") {
         const resume = button("Resume upload", "button secondary clipping-action", () => chooseResumeFile(id));
+        resume.dataset.clippingFocusKey = "resume";
         resume.disabled = Boolean(state.upload);
         actions.append(resume);
       }
-      actions.append(button("Remove", "text-button clipping-remove", () => { void removeSource(id); }));
+      const remove = button("Remove", "text-button clipping-remove", () => { void removeSource(id); });
+      remove.dataset.clippingFocusKey = "remove";
+      sourceOptions.append(remove);
+      details.append(sourceOptions);
       row.append(details, actions);
       fragment.append(row);
+    }
+    for (const id of Array.from(state.sourceDetailsOpenIDs)) {
+      if (!renderedSourceIDs.has(id)) state.sourceDetailsOpenIDs.delete(id);
     }
     ui.sources.replaceChildren(fragment);
     syncWorkVisibility();
     renderBatchReadiness();
+    restoreSourceFocus(focus);
   }
 
-  function renderCostDetails(spent, budget, label = "Cost details") {
+  function renderCostDetails(spent, budget, label = "Cost details", extra = "") {
     const details = element("details", "clipping-cost-details");
     details.append(element("summary", "", label));
     details.append(element("p", "clipping-cost-copy", `${formatUSD(spent)} of ${formatUSD(budget)}`));
+    if (extra) details.append(element("p", "clipping-cost-copy", extra));
     return details;
   }
 
@@ -1646,8 +1741,12 @@
     bar.setAttribute("aria-valuenow", String(Math.round(progress)));
     track.append(bar);
     const footer = element("div", "clipping-record-footer");
-    if (job.content_type) footer.append(element("span", "", `Profile: ${contentType(job.content_type)}`));
-    footer.append(renderCostDetails(job.spent_micro_usd, job.budget_micro_usd));
+    footer.append(renderCostDetails(
+      job.spent_micro_usd,
+      job.budget_micro_usd,
+      "Cost details",
+      job.content_type ? `Profile: ${contentType(job.content_type)}` : ""
+    ));
     const actions = element("div", "clipping-row-actions");
     if (["queued", "running", "paused_budget"].includes(status)) {
       actions.append(button("Cancel job", "button secondary clipping-action", () => { void cancelJob(job.id); }));
@@ -1930,9 +2029,14 @@
       ui.linkPermissionCheck.checked = false;
     }
     const youtube = kind === "youtube" || kind === "youtube_invalid";
-    ui.linkHelp.hidden = !youtube;
     if (youtube) {
       ui.linkHelp.textContent = "Public YouTube import supports one HTTPS watch, shorts, embed, or youtu.be video that is available without sign-in. Playlists, live or upcoming streams, restricted videos, and unsupported formats require an original-file upload you are permitted to reuse.";
+    } else if (kind === "google_drive" || kind === "dropbox") {
+      ui.linkHelp.textContent = "Anyone with the link must be able to view the file. Sign-in or private links can’t be imported.";
+    } else if (kind === "unsupported") {
+      ui.linkHelp.textContent = "Use a YouTube, Google Drive, or Dropbox link.";
+    } else {
+      ui.linkHelp.textContent = "YouTube accepts one public video at a time. Google Drive and Dropbox links must be publicly accessible.";
     }
     ui.linkPermissionCopy.textContent = youtube
       ? "I have permission to reuse this YouTube footage and have it processed."
@@ -2494,6 +2598,7 @@
       state.batches = [];
       state.workerConfig = null;
       state.sourceContentTypes.clear();
+      state.sourceDetailsOpenIDs.clear();
       state.expandedJobIDs.clear();
       state.jobDetails.clear();
       state.jobDetailErrors.clear();
