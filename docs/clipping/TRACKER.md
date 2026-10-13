@@ -4,6 +4,8 @@ Last updated: 2026-10-12 (America/Toronto). This file is the authoritative statu
 
 ## Current checkpoint
 
+- C2.6 / C3.UI2 in progress: user reports repeat audio-track failure and `/api/events` HTTP/2 reset; authorizes cause investigation, import fixes, simpler clipper UI, tests, Luna Max agents, commits and push to `feat/clipper-ai`. Clean baseline `ae393cc`. Lead owns integration, checks, tracker/handoff and Git; implementation is delegated. Live provider verification depends on available network access; no paid inference or deployment is implied.
+
 - C2.5 local implementation and independent review are complete. The importer preserves progressive MP4/WebM priority, then selects safe direct separate tracks from metadata, prefers identifiable Original audio, stream-copies into seekable Matroska with an exact kernel file-size cap, and verifies timing/quality facts plus SHA-256 before atomic Ready publication. Baseline was clean `944fbf258e6ac760f470ad177367d56e3ad4c999` on `feat/clipper-ai`; main coordinated and authored only central tracking/handoff, with LUNA Max implementation/testing and independent review. TERRA is unavailable. All final local checks pass; eleven scoped commits were published by fast-forward and verified at `646402d54af28b8eca2cb5dd6fdc08e61bbddda3`; this publication record follows separately. No deployment, paid inference or real YouTube media test occurred.
 
 - C3.TRACE is complete: browser-console tracing starts at Import link and reports actual import diagnostics and subsequent observed analysis status/candidate availability. Baseline was clean `83a10f9` on `feat/clipper-ai`. LUNA Max backend/frontend authors and independent reviewer participated; TERRA was unavailable and disclosed. Full Go, focused race, vet, build, 31 clipping and 87 dashboard Node checks pass; independent review approved and scoped Chromium verification passed. Feature publication follows this handoff commit. Next: deploy the updated Railway app and inspect the console when reproducing an import failure.
@@ -19,6 +21,7 @@ Last updated: 2026-10-12 (America/Toronto). This file is the authoritative statu
 
 | Date | User instruction / scope | Effect |
 | --- | --- | --- |
+| 2026-10-12 | Fix recurring audio import failure, find cause/rethink method if needed, simplify UI, test, use Luna Max agents and commit/push feat/clipper-ai | C2.6/C3.UI2 implementation, local/live free acquisition verification where accessible, independent review and feature-only fast-forward publication authorized; no paid inference, merge or deployment. |
 | 2026-10-12 | Fix YouTube separate-track link imports; preserve combined path, security/quality/bounds; synthetic tests, independent LUNA Max review, operator docs/handoff, meaningful commits and push to existing feature branch; no main-thread implementation | Authorizes C2.5 implementation, local checks, docs, ordinary commits and fast-forward push only to `feat/clipper-ai`. TERRA unavailable; actual agents use `gpt-6-luna` / `max`. No deployment, paid inference, real YouTube test downloads, merge, force-push or main changes. |
 | 2026-10-12 | Browser console logs for each pipeline step beginning on Import link; failures must be logged; implement and push working branch using LUNA/TERRA Max with lead coordination | Authorizes C3.TRACE instrumentation and necessary tests/docs, ordinary commits and fast-forward push to `feat/clipper-ai`. TERRA unavailable; use disclosed LUNA Max authors and independent reviewer. No paid test runs or deployment included. |
 | 2026-10-08 | Analyze, ask questions, plan, and wait; do not implement | Research/planning authorized; feature implementation withheld |
@@ -81,6 +84,17 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 Dependencies marked “contracts” allow parallel implementation only after the shared interface is agreed and file ownership assigned. All milestone tasks inherit PLAN.md acceptance criteria. Split these tasks into smaller numbered tasks as needed; preserve completed IDs and evidence.
 
 ## Active assignments
+
+Current repair assignments (all requested agents `gpt-6-luna` / `max`):
+
+| Task | Owner | Exclusive paths | State |
+| --- | --- | --- | --- |
+| C2.6 importer | import_repair | clipping_youtube*.go, clipping_acquisition.go/tests, clipping_diagnostics.go/tests | in_progress; investigate and implement bounded reliable downloads with regressions |
+| C3.UI2 cleanup | ui_cleanup | clipping.js/css, clipping section and cache versions in index.html, tests/clipping-ui.test.cjs | in_progress; preserve actions with concise first view |
+| C2.6 SSE | sse_repair | events.go/events_test.go and new focused SSE tests | in_progress; diagnose HTTP/2/reset behavior separately |
+| C2.6 independent review | repair_review | read-only | pending integrated implementation |
+| C3.UI2 browser verification | browser_checks | /workspace/work/clipper-repair verification artifacts only | in_progress; authenticated Chromium desktop/mobile and real local upload |
+| Coordination | lead | TRACKER.md, SESSION.md; Git/checks | in_progress |
 
 C2.5 assignments (2026-10-12; initial agent quota interruptions were resumed under the same authorized scope):
 
