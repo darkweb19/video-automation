@@ -1,3 +1,14 @@
+# Session handoff — 2026-10-13 (America/Toronto), C2.6 / C3.UI2
+
+- User authorized recurring YouTube audio-import repair, cleaner UI, tests, Luna Max agents and commit/push only to `feat/clipper-ai`; twice resumed after agent quota interruption and reaffirmed main as lead only. All implementation/tests/operator docs came from `gpt-6-luna` / `max`; main coordinated, reviewed, verified and handled Git/tracker/handoff.
+- Concurrent separate-track downloads now have bounded local retries, preserving a successful peer and accurately refunding only failed-track charged bytes after cleanup. Selected-track 401/403/410 uses existing outer fresh-metadata retries. Independent stage diagnostics preserve primary failure, peer cancellation and permanent safety codes. Original audio/quality, DNS/redirect security, storage limits and atomic readiness remain enforced.
+- Clipper has compact link/file intake and concise source rows with metadata/actions under Details, retaining open state/focus across actual SSE refresh. Fixed native file-picker InvalidStateError and hid Pause when idle. Removed SSE's hop-by-hop Connection header; actual HTTP/1.1/H2 tests pass, but Go already strips that header on native H2, so it is not proof of the deployed reset's cause.
+- Final independent review approved with no remaining findings. Final full Go suite passes (48.198s), vet/build pass, focused importer and SSE race tests pass, Node checks pass 33+87, both JS syntax and diff checks pass. Authenticated Chromium passes 18 desktop/mobile checks, including two real synthetic uploads to Ready, actual SSE focus/details retention, no automatic analysis, hidden idle Pause and logout cleanup. See TRACKER.md for exact evidence and corrected review findings.
+- Test evidence is in `/workspace/work/clipper-repair`, outside the repository. YouTube UI failure was explicitly mocked. Live YouTube acquisition remains unverified: environment outbound proxy denied YouTube with policy 403. The original generic error does not prove an exact deployed cause. No paid calls, merge, Docker build, worker/app deployment or main change occurred.
+- Clean starting feature baseline was `ae393cc`; scoped commits are on `feat/clipper-ai`. Final operator docs/handoff are followed by an authorized feature-only fast-forward push and remote/local parity verification; Git history is authoritative for commit IDs. Remote main was checked unchanged at `430751e`. Next operational step: rebuild/deploy the updated app under the deployment workflow and verify a permitted live source with the precise safe diagnostics. Code changes do not require a Modal worker change.
+
+---
+
 # Session handoff — 2026-10-12 (America/Toronto), separate-track YouTube import repair
 
 ## Current focus — C2.5 complete; feature series published
