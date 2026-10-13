@@ -1,3 +1,12 @@
+# Session handoff — 2026-10-13, documentation refresh
+
+- Current task: refresh README, factual AGENTS context and guides for plain language and accurate status. Preserve existing agent instructions verbatim; the main thread remains CTO/lead and delegates implementation.
+- Luna Max agents own README/AGENTS and guides separately; an independent Luna Max reviewer checks accuracy, links and instruction preservation. Lead owns tracker/handoff and Git publication. Documentation only; no runtime changes or new runtime-test claims.
+- Previous repair is published: nine commits through `9240760415c1818f8185c5c434cc15f2c7c9ce15` on `feat/clipper-ai`, verified against remote. Main remains `430751e`. Live YouTube verification and deployment remain outstanding.
+- Documentation refresh complete and independently approved by Luna Max. README is shorter with setup, OAuth, storage and workflow guidance; docs/README.md provides navigation; historical records are labeled. Every original AGENTS line is unchanged, including CTO/lead delegation rules. Factual checks, 78 local links/anchors and diff whitespace pass. No runtime tests were rerun for documentation-only changes. Feature-only publication follows this handoff; no deployment or main change.
+
+---
+
 # Session handoff — 2026-10-13 (America/Toronto), C2.6 / C3.UI2
 
 - User authorized recurring YouTube audio-import repair, cleaner UI, tests, Luna Max agents and commit/push only to `feat/clipper-ai`; twice resumed after agent quota interruption and reaffirmed main as lead only. All implementation/tests/operator docs came from `gpt-6-luna` / `max`; main coordinated, reviewed, verified and handled Git/tracker/handoff.
