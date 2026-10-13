@@ -98,7 +98,7 @@ func TestEventsEndpointRequiresSessionAndSendsReadyContract(t *testing.T) {
 	request.AddCookie(cookies[0])
 	stream := httptest.NewRecorder()
 	handler.ServeHTTP(stream, request)
-	if stream.Code != http.StatusOK || stream.Header().Get("Content-Type") != "text/event-stream" || !strings.Contains(stream.Body.String(), "event: ready\ndata: {\"retry_ms\":3000}") {
+	if stream.Code != http.StatusOK || stream.Header().Get("Content-Type") != "text/event-stream" || stream.Header().Get("Connection") != "" || !strings.Contains(stream.Body.String(), "event: ready\ndata: {\"retry_ms\":3000}") {
 		t.Fatalf("SSE contract status=%d headers=%v body=%q", stream.Code, stream.Header(), stream.Body.String())
 	}
 }

@@ -317,7 +317,8 @@ func (a *dashboardApp) events(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Connection", "keep-alive")
+	// HTTP/1.1 keep-alive is the default. A Connection header is forbidden in
+	// HTTP/2 and intermediaries must not forward it into an HTTP/2 response.
 	w.Header().Set("X-Accel-Buffering", "no")
 	controller := http.NewResponseController(w)
 	channel, unsubscribe := a.store.events.subscribe()
