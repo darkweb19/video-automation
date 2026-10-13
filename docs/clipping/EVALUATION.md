@@ -1,5 +1,7 @@
 # AI clipping evaluation protocol
 
+> Historical M1 benchmark proposal, frozen from the 2026-10-08 planning checkpoint. Remaining M1 feasibility was later waived before M2; the thresholds below remain proposed acceptance semantics, not measurements or a pass. M1 is skipped. The tracker records current milestone status and evidence.
+
 Status: preregistered proposal for C1.2; no benchmark measurements have been collected. The M1 approval authorizes this offline protocol and fixture work. It does not authorize media acquisition, provider calls, GPU jobs, or any spend. The proposed engineering ceiling is US$20 across the whole benchmark, including providers, GPU, render work, transfers, and retries. Current authorized benchmark spend remains US$0. An explicit later approval and permitted inputs are required before C1.3 starts.
 
 The product cost target is a separate, tentative minimum of max(US$1, source duration in hours × US$1) for analysis and the initial 7–10 exports from one source. It is not measured performance, a provider quote, or permission to spend. A 15-minute source therefore has a US$1 target and a four-hour source a US$4 target. The proposal does not claim that either target or the US$20 benchmark ceiling will suffice. Stop before a stage whenever current price information and reservations indicate its allocation or the aggregate ceiling could be exceeded.

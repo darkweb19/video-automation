@@ -42,7 +42,7 @@ Accept only canonical standard watch, shorts, embed, and youtu.be links for one 
 | Separate clipping API/product with its own database | Duplicates auth, persistence, media, and publishing; unnecessary for current personal-channel scope |
 | Run all AI inside the web container | Simplifies transfer but brings large ML dependencies and resource contention into the dashboard process |
 
-Local persistent storage and a single owner limit horizontal scaling. Source retention and disk headroom become material for four-hour videos. Remote workers incur transfer overhead. These costs must appear in M1 results; changing the storage architecture requires an explicit decision.
+Local persistent storage and a single owner limit horizontal scaling. Source retention and disk headroom become material for four-hour videos. Remote workers incur transfer overhead. Remaining M1 feasibility was waived, so these costs are unmeasured; revisit them in any future authorized evaluation. Changing the storage architecture still requires an explicit decision.
 
 ## Approval and evolution
 

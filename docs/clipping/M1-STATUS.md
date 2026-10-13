@@ -1,6 +1,6 @@
 # M1 feasibility checkpoint — 2026-10-08
 
-M1 is authorized. This checkpoint covers C1.1 and C1.2 preparation; it is not an M1 pass or a provider-selection decision. Current paid benchmark authorization is **US$0**. The user authorized publishing this snapshot to `feat/clipper-ai`, based directly on `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`; Git history records the resulting commit.
+This is a historical checkpoint covering C1.1 and C1.2 preparation. M1 was authorized at the time, but the remaining feasibility work was later waived before M2. The current tracker records M1 as skipped, not passed; no provider was selected and no benchmark was run. The paid benchmark authorization recorded at this checkpoint was **US$0**. The user authorized publishing this snapshot to `feat/clipper-ai`, based directly on `430751ee169fbae0d1b7c267c5ff1c077ab13a0a`; Git history records the resulting commit.
 
 ## Work and evidence
 

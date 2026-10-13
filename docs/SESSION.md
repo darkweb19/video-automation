@@ -1,3 +1,5 @@
+> Historical handoff archive. For the current handoff, read [root SESSION.md](../SESSION.md); for clipping status and next actions, read [TRACKER.md](clipping/TRACKER.md). Next steps and publication notes below describe their original sessions, not current instructions.
+
 # Session handoff — 2026-09-25
 
 ## What was done

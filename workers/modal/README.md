@@ -23,9 +23,9 @@ These are the non-test Python modules in this directory:
 
 The M3 clipping worker uses a pinned faster-whisper ASR model plus deterministic media analysis. It does not call an LLM; OpenRouter story and script generation is a separate application workflow. For the clipping architecture and operating limits, see [ADR-004](../../docs/architecture/004-ai-clipping.md), [M2 implementation](../../docs/clipping/M2-IMPLEMENTATION.md), [M3 setup and limitations](../../docs/clipping/M3-IMPLEMENTATION.md), and [YouTube source import](../../docs/clipping/YOUTUBE-IMPORT.md).
 
-## Deploy
+## Deploy the video-generation workers
 
-From the repository root, create the shared API secret once, then deploy the provider app or apps you intend to use:
+From the repository root, create the shared API secret once, then deploy the video-generation provider app or apps you intend to use:
 
 ```bash
 modal secret create video-api-secret MODAL_VIDEO_API_KEY="<your-random-api-key>"
@@ -54,6 +54,8 @@ Both providers support five six-second 480p 9:16 scenes for the default 30-secon
 ## AI clipping worker (M3)
 
 The M3 app in `clipping_m3_worker.py` is separate from the two video-generation apps above. It is an opt-in analysis worker and is not needed to generate videos. Follow [M3 operator setup](../../docs/clipping/M3-IMPLEMENTATION.md) for its dedicated Modal secrets, immutable Hugging Face model revision, matching `FRAMEVAULT_PIPELINE_REVISION`, model-cache setup and signed-in **Clipping > More settings > Analysis worker setup** configuration. The operator must prewarm the pinned model snapshot before analysis; prewarming downloads model weights. The analysis worker loads the prewarmed local snapshot and does not fetch model files during a job.
+
+The clipping worker is code only: it has not been deployed or tested against real media. Its local tests do not establish language quality, cost, or hosted availability.
 
 Transcription, event detection, and candidate inspection are heuristic inputs to the Go selection flow. They do not provide semantic video understanding or an LLM-generated clip judgment. The M3 tests use local fixtures and mocks; they do not deploy the app, download model weights, or make hosted inference calls.
 

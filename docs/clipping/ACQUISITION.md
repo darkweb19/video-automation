@@ -1,5 +1,7 @@
 # C1.1 source acquisition contract
 
+> Historical M1 feasibility artifact, frozen from the 2026-10-08 planning checkpoint. Remaining M1 feasibility was later waived before M2, so this document's proposed route and provisional 16 GiB source limit are not the current importer contract. M1 is skipped, not passed. See [M2 implementation](M2-IMPLEMENTATION.md) for current source limits and workflow, and [YouTube import](YOUTUBE-IMPORT.md) for the current public-link contract.
+
 Status: bounded offline contract and simulated checks complete; live provider acquisition remains unverified. M1 authorization covers this feasibility work only. No user media links were supplied, and this task made no media requests, inspected no credentials, ran no provider job, and incurred no spend. This document does not claim that YouTube ingestion works.
 
 ## Route decision
