@@ -376,8 +376,12 @@ func TestYouTubeImportStreamCopiesSeparateTracksAndPreservesProgressivePath(t *t
 			gotRequests := append([]string(nil), requested...)
 			mu.Unlock()
 			if test.separate {
-				if len(gotRequests) != 2 || gotRequests[0] != "/video-track" || gotRequests[1] != "/original-audio" {
-					t.Fatalf("separate stream requests=%v; want video track and the marked original audio only", gotRequests)
+				requestCounts := map[string]int{}
+				for _, requestPath := range gotRequests {
+					requestCounts[requestPath]++
+				}
+				if len(gotRequests) != 2 || requestCounts["/video-track"] != 1 || requestCounts["/original-audio"] != 1 {
+					t.Fatalf("separate stream requests=%v; want one video track and the marked original audio request", gotRequests)
 				}
 				argumentData, err := os.ReadFile(logPath)
 				if err != nil {
@@ -486,10 +490,13 @@ func TestYouTubeSeparateTrackAggregateAndMergedOutputLimitsAreIndependent(t *tes
 		metadata := c25TinySeparateMetadata("https://rr1---sn.googlevideo.com/video-track?signature=v", "https://rr1---sn.googlevideo.com/original-audio?signature=a", 0, 0)
 		c25InstallExtractor(t, acquisition, metadata, "", "")
 		var trackRequests int
+		var requestsMu sync.Mutex
 		acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
 		acquisition.transportFactory = func(*url.URL, []net.IP) http.RoundTripper {
 			return c25RoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				requestsMu.Lock()
 				trackRequests++
+				requestsMu.Unlock()
 				data, contentType := []byte("12345"), "video/mp4"
 				if request.URL.Path == "/original-audio" {
 					contentType = "audio/mp4"
@@ -508,8 +515,11 @@ func TestYouTubeSeparateTrackAggregateAndMergedOutputLimitsAreIndependent(t *tes
 		if err != nil || len(sources) != 1 || sources[0].Status != ClippingSourceFailed {
 			t.Fatalf("aggregate oversize track pair did not fail closed: sources=%+v error=%v", sources, err)
 		}
-		if trackRequests != 2 {
-			t.Fatalf("aggregate size check read an unexpected number of track requests: %d", trackRequests)
+		requestsMu.Lock()
+		gotTrackRequests := trackRequests
+		requestsMu.Unlock()
+		if gotTrackRequests != 2 {
+			t.Fatalf("aggregate size check read an unexpected number of track requests: %d", gotTrackRequests)
 		}
 		if sources[0].SizeBytes > acquisition.youtubeMaxBytes || sources[0].ReservedSizeBytes != 0 {
 			t.Fatalf("aggregate track failure exceeded its byte cap or retained source reservation: %+v", sources[0])
@@ -713,7 +723,11 @@ func TestYouTubeSeparateTrackCancellationCleansFirstOrSecondDownload(t *testing.
 						}
 						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: body, ContentLength: -1}, nil
 					}
-					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"video/mp4"}}, Body: io.NopCloser(strings.NewReader("VIDEO")), ContentLength: 5}, nil
+					contentType := "video/mp4"
+					if request.URL.Path == "/original-audio" {
+						contentType = "audio/mp4"
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader("VIDEO")), ContentLength: 5}, nil
 				})
 			}
 			source, err := acquisition.CreatePublicImport(context.Background(), true, "https://youtu.be/"+c25SyntheticVideoID, 0)
@@ -770,15 +784,15 @@ func TestYouTubeSeparateTrackRetryDiscardsFirstTrackAndReextracts(t *testing.T) 
 			c25InstallExtractor(t, acquisition, metadata, runLog, "")
 			acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
 			var mu sync.Mutex
-			var failedOnce bool
+			failedAttempts := 0
 			var requested []string
 			acquisition.transportFactory = func(*url.URL, []net.IP) http.RoundTripper {
 				return c25RoundTripFunc(func(request *http.Request) (*http.Response, error) {
 					mu.Lock()
 					requested = append(requested, request.URL.Path)
-					failNow := request.URL.Path == failurePath && !failedOnce
+					failNow := request.URL.Path == failurePath && failedAttempts < clippingYouTubeTrackTransferAttempts
 					if failNow {
-						failedOnce = true
+						failedAttempts++
 					}
 					mu.Unlock()
 					if failNow {
@@ -830,5 +844,474 @@ func TestYouTubeSeparateTrackRetryDiscardsFirstTrackAndReextracts(t *testing.T) 
 				t.Fatalf("durable expectation gained ephemeral extractor data on retry: %q", ready.ImportExpectation)
 			}
 		})
+	}
+}
+
+type c26SignalEOFBody struct {
+	reader *bytes.Reader
+	done   chan struct{}
+	once   sync.Once
+}
+
+func (body *c26SignalEOFBody) Read(buffer []byte) (int, error) {
+	n, err := body.reader.Read(buffer)
+	if errors.Is(err, io.EOF) {
+		body.once.Do(func() { close(body.done) })
+	}
+	return n, err
+}
+
+func (body *c26SignalEOFBody) Close() error { return nil }
+
+type c26PartialFailureBody struct {
+	peerDone <-chan struct{}
+	read     bool
+}
+
+func (body *c26PartialFailureBody) Read(buffer []byte) (int, error) {
+	if body.read {
+		return 0, io.ErrUnexpectedEOF
+	}
+	<-body.peerDone
+	body.read = true
+	return copy(buffer, []byte("partial audio")), io.ErrUnexpectedEOF
+}
+
+func (body *c26PartialFailureBody) Close() error { return nil }
+
+func TestYouTubeSeparateTracksStartTogetherAndRetryPartialAudioWithoutDiscardingVideo(t *testing.T) {
+	tracks := c25MakeSyntheticTracks(t)
+	_, store, _, acquisition := newClippingAcquisitionFixture(t)
+	c25InstallExtractor(t, acquisition, c25SeparateMetadata(tracks, true), "", "")
+	acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
+
+	var mu sync.Mutex
+	startedPaths := map[string]bool{}
+	requestCounts := map[string]int{}
+	initialBothStarted := make(chan struct{})
+	var bothStartedOnce sync.Once
+	type retryObservation struct {
+		remaining int64
+		video     []byte
+	}
+	retryObserved := make(chan retryObservation, 1)
+	videoComplete := make(chan struct{})
+	var transportErr string
+	var sourceID string
+	acquisition.transportFactory = func(*url.URL, []net.IP) http.RoundTripper {
+		return c25RoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Header.Get("Cookie") != "" || request.Header.Get("Authorization") != "" || request.Header.Get("Proxy-Authorization") != "" {
+				return nil, errors.New("synthetic YouTube request forwarded credentials")
+			}
+			mu.Lock()
+			requestCounts[request.URL.Path]++
+			count := requestCounts[request.URL.Path]
+			if count == 1 {
+				startedPaths[request.URL.Path] = true
+				if startedPaths["/video-track"] && startedPaths["/original-audio"] {
+					bothStartedOnce.Do(func() { close(initialBothStarted) })
+				}
+			}
+			mu.Unlock()
+
+			if count == 1 {
+				select {
+				case <-initialBothStarted:
+				case <-time.After(5 * time.Second):
+					mu.Lock()
+					transportErr = "separate tracks did not both start before either response"
+					mu.Unlock()
+					return nil, errors.New("synthetic concurrent-start barrier timed out")
+				}
+			}
+			if request.URL.Path == "/video-track" {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        http.Header{"Content-Type": []string{"video/mp4"}},
+					Body:          &c26SignalEOFBody{reader: bytes.NewReader(tracks.video), done: videoComplete},
+					ContentLength: int64(len(tracks.video)),
+				}, nil
+			}
+			if request.URL.Path != "/original-audio" {
+				return nil, fmt.Errorf("unexpected synthetic track path %q", request.URL.Path)
+			}
+			if count == 1 {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        http.Header{"Content-Type": []string{"audio/mp4"}},
+					Body:          &c26PartialFailureBody{peerDone: videoComplete},
+					ContentLength: int64(len(tracks.audio)),
+				}, nil
+			}
+
+			paths, err := acquisition.sourcePaths(sourceID)
+			if err != nil {
+				return nil, err
+			}
+			video, err := os.ReadFile(paths.videoTrack)
+			if err != nil {
+				return nil, err
+			}
+			store.clippingMu.Lock()
+			remaining := store.clippingImportWorkspaces[sourceID]
+			store.clippingMu.Unlock()
+			retryObserved <- retryObservation{remaining: remaining, video: video}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"audio/mp4"}},
+				Body:          io.NopCloser(bytes.NewReader(tracks.audio)),
+				ContentLength: int64(len(tracks.audio)),
+			}, nil
+		})
+	}
+
+	logPath := filepath.Join(t.TempDir(), "mux-arguments")
+	c25InstallCountingFFmpeg(t, acquisition, logPath)
+	// The request context is deliberately not used as an identity channel; the
+	// fixture records the generated source ID before the importer starts.
+	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://youtu.be/"+c25SyntheticVideoID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID = source.ID
+	if worked, err := acquisition.ProcessNextImport(context.Background()); err != nil || !worked {
+		t.Fatalf("concurrent partial-body import worked=%v error=%v", worked, err)
+	}
+	mu.Lock()
+	gotTransportErr := transportErr
+	gotRequestCounts := map[string]int{
+		"/video-track":    requestCounts["/video-track"],
+		"/original-audio": requestCounts["/original-audio"],
+	}
+	mu.Unlock()
+	if gotTransportErr != "" {
+		t.Fatal(gotTransportErr)
+	}
+	if gotRequestCounts["/video-track"] != 1 || gotRequestCounts["/original-audio"] != 2 {
+		t.Fatalf("unexpected bounded transfer attempts: %v", gotRequestCounts)
+	}
+	select {
+	case observation := <-retryObserved:
+		if observation.remaining != clippingYouTubeTrackWorkspaceBytes-int64(len(tracks.video)) {
+			t.Fatalf("partial audio bytes were not refunded while the completed video charge remained: remaining=%d video=%d want=%d", observation.remaining, len(tracks.video), clippingYouTubeTrackWorkspaceBytes-int64(len(tracks.video)))
+		}
+		if !bytes.Equal(observation.video, tracks.video) {
+			t.Fatal("retry reset discarded or changed the successfully downloaded video track")
+		}
+	default:
+		t.Fatal("audio retry did not expose its reservation/file state before writing the second response")
+	}
+	ready, err := store.ClippingSource(source.ID)
+	if err != nil || ready.Status != ClippingSourceReady {
+		t.Fatalf("transient audio body failure did not recover to Ready: status=%s error=%v", ready.Status, err)
+	}
+	if !c26HasDiagnostic(ready.Diagnostics, ClippingDiagnosticStageAudioDownload, ClippingDiagnosticRetrying, "track_body_incomplete") ||
+		!c26HasDiagnostic(ready.Diagnostics, ClippingDiagnosticStageAudioDownload, ClippingDiagnosticCompleted, "") ||
+		!c26HasDiagnostic(ready.Diagnostics, ClippingDiagnosticStageVideoDownload, ClippingDiagnosticCompleted, "") {
+		t.Fatalf("track diagnostics did not preserve attempt retry and successful peer completion: %+v", ready.Diagnostics)
+	}
+}
+
+func TestYouTubeSeparateTrackFailureCancelsPeerAndBoundsRetryAttempts(t *testing.T) {
+	_, store, _, acquisition := newClippingAcquisitionFixture(t)
+	c25InstallExtractor(t, acquisition, c25TinySeparateMetadata(
+		"https://rr1---sn.googlevideo.com/video-track?signature=v",
+		"https://rr1---sn.googlevideo.com/original-audio?signature=a", 0, 0), "", "")
+	acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
+	var mu sync.Mutex
+	startedPaths := map[string]bool{}
+	requestCounts := map[string]int{}
+	initialBothStarted := make(chan struct{})
+	var bothStartedOnce sync.Once
+	peerBodyStarted := make(chan struct{})
+	acquisition.transportFactory = func(*url.URL, []net.IP) http.RoundTripper {
+		return c25RoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Header.Get("Cookie") != "" || request.Header.Get("Authorization") != "" || request.Header.Get("Proxy-Authorization") != "" {
+				return nil, errors.New("synthetic YouTube request forwarded credentials")
+			}
+			mu.Lock()
+			requestCounts[request.URL.Path]++
+			count := requestCounts[request.URL.Path]
+			if count == 1 {
+				startedPaths[request.URL.Path] = true
+				if startedPaths["/video-track"] && startedPaths["/original-audio"] {
+					bothStartedOnce.Do(func() { close(initialBothStarted) })
+				}
+			}
+			mu.Unlock()
+			if count == 1 {
+				select {
+				case <-initialBothStarted:
+				case <-time.After(5 * time.Second):
+					return nil, errors.New("synthetic concurrent-start barrier timed out")
+				}
+			}
+			if request.URL.Path == "/video-track" {
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("temporary")), ContentLength: -1}, nil
+			}
+			if request.URL.Path == "/original-audio" {
+				contentType := "audio/mp4"
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: &c25BlockingBody{ctx: request.Context(), started: peerBodyStarted}, ContentLength: -1}, nil
+			}
+			return nil, fmt.Errorf("unexpected synthetic track path %q", request.URL.Path)
+		})
+	}
+	acquisition.now = func() time.Time { return time.Now().Add(24 * time.Hour) }
+	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://youtu.be/"+c25SyntheticVideoID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := acquisition.ProcessNextImport(context.Background()); err != nil || !worked {
+		t.Fatalf("bounded failed track import worked=%v error=%v", worked, err)
+	}
+	select {
+	case <-peerBodyStarted:
+	default:
+		t.Fatal("peer response body never started before primary failure cancellation")
+	}
+	mu.Lock()
+	gotRequestCounts := map[string]int{
+		"/video-track":    requestCounts["/video-track"],
+		"/original-audio": requestCounts["/original-audio"],
+	}
+	mu.Unlock()
+	if gotRequestCounts["/video-track"] != clippingYouTubeTrackTransferAttempts || gotRequestCounts["/original-audio"] != 1 {
+		t.Fatalf("primary retry bound or peer cancellation was violated: %v", gotRequestCounts)
+	}
+	retrying, err := store.ClippingSource(source.ID)
+	if err != nil || retrying.Status != ClippingSourceImporting || retrying.ImportAttempts != 1 {
+		t.Fatalf("primary transient failure did not schedule the durable metadata retry: status=%s attempts=%d error=%v", retrying.Status, retrying.ImportAttempts, err)
+	}
+	if !c26HasDiagnostic(retrying.Diagnostics, ClippingDiagnosticStageVideoDownload, ClippingDiagnosticFailed, "track_http_retryable") ||
+		!c26HasDiagnostic(retrying.Diagnostics, ClippingDiagnosticStageAudioDownload, ClippingDiagnosticFailed, "track_transfer_aborted") ||
+		!c26HasDiagnostic(retrying.Diagnostics, ClippingDiagnosticStageDispatch, ClippingDiagnosticRetrying, "retry_scheduled") {
+		t.Fatalf("diagnostics did not distinguish the primary retryable failure from its canceled peer: %+v", retrying.Diagnostics)
+	}
+	paths, err := acquisition.sourcePaths(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{paths.videoTrack, paths.audioTrack} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("durable retry retained a partial track %s: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestYouTubeDeniedTrackStatusesTriggerFreshMetadataRetry(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusGone} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			_, store, _, acquisition := newClippingAcquisitionFixture(t)
+			c25InstallExtractor(t, acquisition, c25TinySeparateMetadata(
+				"https://rr1---sn.googlevideo.com/video-track?signature=v",
+				"https://rr1---sn.googlevideo.com/original-audio?signature=a", 0, 0), "", "")
+			acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
+			var mu sync.Mutex
+			requestCounts := map[string]int{}
+			acquisition.transportFactory = func(*url.URL, []net.IP) http.RoundTripper {
+				return c25RoundTripFunc(func(request *http.Request) (*http.Response, error) {
+					if request.Header.Get("Cookie") != "" || request.Header.Get("Authorization") != "" || request.Header.Get("Proxy-Authorization") != "" {
+						return nil, errors.New("synthetic YouTube request forwarded credentials")
+					}
+					mu.Lock()
+					requestCounts[request.URL.Path]++
+					mu.Unlock()
+					if request.URL.Path == "/video-track" {
+						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"video/mp4"}}, Body: io.NopCloser(strings.NewReader("video")), ContentLength: 5}, nil
+					}
+					if request.URL.Path == "/original-audio" {
+						return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("denied")), ContentLength: 6}, nil
+					}
+					return nil, fmt.Errorf("unexpected synthetic track path %q", request.URL.Path)
+				})
+			}
+			source, err := acquisition.CreatePublicImport(context.Background(), true, "https://youtu.be/"+c25SyntheticVideoID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if worked, err := acquisition.ProcessNextImport(context.Background()); err != nil || !worked {
+				t.Fatalf("denied track import worked=%v error=%v", worked, err)
+			}
+			mu.Lock()
+			gotRequestCounts := map[string]int{
+				"/video-track":    requestCounts["/video-track"],
+				"/original-audio": requestCounts["/original-audio"],
+			}
+			mu.Unlock()
+			if gotRequestCounts["/video-track"] > 1 || gotRequestCounts["/original-audio"] != 1 {
+				t.Fatalf("access-denied status was retried against the same signed URL: %v", gotRequestCounts)
+			}
+			retrying, err := store.ClippingSource(source.ID)
+			if err != nil || retrying.Status != ClippingSourceImporting || retrying.ImportAttempts != 1 {
+				t.Fatalf("access-denied track did not schedule a fresh metadata attempt: status=%s attempts=%d error=%v", retrying.Status, retrying.ImportAttempts, err)
+			}
+			if !c26HasDiagnostic(retrying.Diagnostics, ClippingDiagnosticStageAudioDownload, ClippingDiagnosticFailed, "track_access_denied") ||
+				!c26HasDiagnostic(retrying.Diagnostics, ClippingDiagnosticStageDispatch, ClippingDiagnosticRetrying, "retry_scheduled") {
+				t.Fatalf("access-denied status was mislabeled or not retried safely: %+v", retrying.Diagnostics)
+			}
+			paths, err := acquisition.sourcePaths(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{paths.videoTrack, paths.audioTrack} {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("fresh metadata retry retained partial track %s: %v", filepath.Base(path), err)
+				}
+			}
+		})
+	}
+}
+
+func TestYouTubePeerFailureDuringTrackRetryWaitIsRecorded(t *testing.T) {
+	previousDelay := clippingYouTubeTrackRetryDelay
+	clippingYouTubeTrackRetryDelay = 2 * time.Second
+	defer func() { clippingYouTubeTrackRetryDelay = previousDelay }()
+
+	_, store, _, acquisition := newClippingAcquisitionFixture(t)
+	c25InstallExtractor(t, acquisition, c25TinySeparateMetadata(
+		"https://rr1---sn.googlevideo.com/video-track?signature=v",
+		"https://rr1---sn.googlevideo.com/original-audio?signature=a", 0, 0), "", "")
+	acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
+	var sourceID string
+	var mu sync.Mutex
+	requestCounts := map[string]int{}
+	acquisition.transportFactory = func(*url.URL, []net.IP) http.RoundTripper {
+		return c25RoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			mu.Lock()
+			requestCounts[request.URL.Path]++
+			mu.Unlock()
+			switch request.URL.Path {
+			case "/video-track":
+				return nil, errors.New("synthetic transient video connection loss")
+			case "/original-audio":
+				if !c26WaitForDiagnostic(store, sourceID, ClippingDiagnosticStageVideoDownload, ClippingDiagnosticRetrying, "track_request_failed", 5*time.Second) {
+					return nil, errors.New("video retry diagnostic was not written before peer failure")
+				}
+				return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("missing")), ContentLength: 7}, nil
+			default:
+				return nil, fmt.Errorf("unexpected synthetic track path %q", request.URL.Path)
+			}
+		})
+	}
+	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://youtu.be/"+c25SyntheticVideoID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID = source.ID
+	if worked, err := acquisition.ProcessNextImport(context.Background()); err != nil || !worked {
+		t.Fatalf("peer failure during local retry wait worked=%v error=%v", worked, err)
+	}
+	mu.Lock()
+	gotRequestCounts := map[string]int{
+		"/video-track":    requestCounts["/video-track"],
+		"/original-audio": requestCounts["/original-audio"],
+	}
+	mu.Unlock()
+	if gotRequestCounts["/video-track"] != 1 || gotRequestCounts["/original-audio"] != 1 {
+		t.Fatalf("peer failure did not interrupt the video retry delay: %v", gotRequestCounts)
+	}
+	failed, err := store.ClippingSource(source.ID)
+	if err != nil || failed.Status != ClippingSourceFailed {
+		t.Fatalf("permanent peer status did not fail and clean the source: status=%s error=%v", failed.Status, err)
+	}
+	if !c26HasDiagnostic(failed.Diagnostics, ClippingDiagnosticStageVideoDownload, ClippingDiagnosticRetrying, "track_request_failed") ||
+		!c26HasDiagnostic(failed.Diagnostics, ClippingDiagnosticStageVideoDownload, ClippingDiagnosticFailed, "track_transfer_aborted") ||
+		!c26HasDiagnostic(failed.Diagnostics, ClippingDiagnosticStageAudioDownload, ClippingDiagnosticFailed, "track_content_invalid") {
+		t.Fatalf("peer cancellation during a retry delay lost its terminal stage or primary error: %+v", failed.Diagnostics)
+	}
+}
+
+func c26WaitForDiagnostic(store *Store, sourceID, stage string, status ClippingSourceDiagnosticStatus, code string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		source, err := store.ClippingSource(sourceID)
+		if err == nil && c26HasDiagnostic(source.Diagnostics, stage, status, code) {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return false
+}
+
+func c26HasDiagnostic(diagnostics []ClippingSourceDiagnostic, stage string, status ClippingSourceDiagnosticStatus, code string) bool {
+	for _, item := range diagnostics {
+		if item.Stage == stage && item.Status == status && item.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func TestYouTubeSeparateTrackRejectedRedirectKeepsFormatDiagnostic(t *testing.T) {
+	_, store, _, acquisition := newClippingAcquisitionFixture(t)
+	acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
+
+	var mu sync.Mutex
+	requestCounts := map[string]int{}
+	acquisition.transportFactory = func(_ *url.URL, addresses []net.IP) http.RoundTripper {
+		if len(addresses) != 1 || !addresses[0].Equal(net.ParseIP("8.8.8.8")) {
+			return c25RoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("synthetic media transport did not receive the pinned public address")
+			})
+		}
+		return c25RoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			mu.Lock()
+			requestCounts[request.URL.Path]++
+			mu.Unlock()
+			switch request.URL.Path {
+			case "/video-track":
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"https://evil.test/video?signature=redirect-secret"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			case "/original-audio":
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        http.Header{"Content-Type": []string{"audio/mp4"}},
+					Body:          io.NopCloser(strings.NewReader("audio")),
+					ContentLength: 5,
+				}, nil
+			default:
+				return nil, fmt.Errorf("unexpected synthetic track path %q", request.URL.Path)
+			}
+		})
+	}
+
+	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://youtu.be/"+c25SyntheticVideoID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := acquisition.sourcePaths(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaURL, err := url.Parse("https://rr1---sn.googlevideo.com/video-track?signature=video-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := newClippingDiagnosticTrace(acquisition, source.ID)
+	trackErr := acquisition.downloadYouTubeTrack(context.Background(), source.ID,
+		youtubeSelection{URL: mediaURL}, youtubeFormat{Extension: "mp4"}, paths.videoTrack, "video", MaxClippingSourceBytes, trace)
+	if trackErr == nil || isRetryableYouTubeTrackTransfer(trackErr) {
+		t.Fatalf("permanent redirect rejection error=%v; want a terminal track failure", trackErr)
+	}
+
+	observed, err := store.ClippingSource(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c26HasDiagnostic(observed.Diagnostics, ClippingDiagnosticStageVideoDownload, ClippingDiagnosticFailed, "format_unavailable") ||
+		c26HasDiagnostic(observed.Diagnostics, ClippingDiagnosticStageVideoDownload, ClippingDiagnosticFailed, "track_content_invalid") {
+		t.Fatalf("rejected redirect lost its existing format diagnostic: %+v", observed.Diagnostics)
+	}
+	mu.Lock()
+	videoRequests := requestCounts["/video-track"]
+	mu.Unlock()
+	if videoRequests != 1 {
+		t.Fatalf("permanent redirect rejection made %d requests to the selected video URL; want one", videoRequests)
+	}
+	if strings.Contains(trackErr.Error(), "signature=") || strings.Contains(trackErr.Error(), "evil.test") {
+		t.Fatalf("redirect details leaked into the safe track failure: %q", trackErr)
 	}
 }
