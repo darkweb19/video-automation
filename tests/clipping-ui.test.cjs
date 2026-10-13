@@ -417,6 +417,8 @@ test('dragged media stays a draft until rights are confirmed and Upload video is
     throw new Error(`Unexpected request: ${route}`);
   });
   await app.api.start();
+  const pause = app.elements.get('clipping-upload-cancel');
+  assert.equal(pause.hidden, true, 'Pause is hidden when no upload is active');
 
   const zone = app.elements.get('clipping-drop-zone');
   const nonMedia = { name: 'notes.txt', size: 12, type: 'text/plain' };
@@ -453,6 +455,7 @@ test('dragged media stays a draft until rights are confirmed and Upload video is
   permission.emit('change');
   assert.equal(app.elements.get('clipping-upload-submit').disabled, false);
   app.elements.get('clipping-upload-form').emit('submit');
+  assert.equal(pause.hidden, false, 'Pause appears as soon as an upload starts');
   for (let attempt = 0; attempt < 50 && !requests.some((entry) => entry.route === '/api/clipping/sources/src_drop/finalize'); attempt++) {
     await new Promise((resolve) => setImmediate(resolve));
   }
@@ -461,6 +464,7 @@ test('dragged media stays a draft until rights are confirmed and Upload video is
   assert.equal(JSON.parse(upload.options.body).rights_attested, true);
   assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/src_drop/finalize'), true);
   assert.equal(app.elements.get('clipping-file-name').textContent, 'No file selected.');
+  assert.equal(pause.hidden, true, 'a completed upload hides the obsolete Pause action');
 
   let outsideDropPrevented = false;
   app.elements.get('clipping-view').emit('drop', {
@@ -468,6 +472,17 @@ test('dragged media stays a draft until rights are confirmed and Upload video is
     preventDefault() { outsideDropPrevented = true; }
   });
   assert.equal(outsideDropPrevented, true, 'dropping files elsewhere in Clipping does not navigate away');
+
+  drop([file]);
+  permission.checked = true;
+  permission.emit('change');
+  app.elements.get('clipping-upload-form').emit('submit');
+  assert.equal(pause.hidden, false, 'starting another upload shows Pause again');
+  for (let attempt = 0; attempt < 50 && requests.filter((entry) => entry.route === '/api/clipping/sources/src_drop/finalize').length < 2; attempt++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/src_drop/finalize').length, 2);
+  assert.equal(pause.hidden, true, 'the next completion hides Pause too');
 });
 
 test('native picker selection preserves the selected file without assigning its protected value', async () => {
@@ -587,11 +602,14 @@ test('resume actions stay disabled during an active transfer and return after pa
   app.elements.get('clipping-upload-form').emit('submit');
   for (let attempt = 0; attempt < 50 && !chunkSignal; attempt++) await new Promise((resolve) => setImmediate(resolve));
   assert.ok(chunkSignal, 'the first upload has reached its media transfer');
+  const pause = app.elements.get('clipping-upload-cancel');
+  assert.equal(pause.hidden, false, 'Pause is visible during an active transfer');
   assert.equal(resumeButtons().length, 2);
   assert.equal(resumeButtons().every((button) => button.disabled), true, 'all saved uploads are unavailable while one transfer is active');
 
-  app.elements.get('clipping-upload-cancel').emit('click');
+  pause.emit('click');
   assert.equal(chunkSignal.aborted, true, 'Pause aborts the active media transfer');
+  assert.equal(pause.hidden, true, 'Pause disappears when the transfer is paused');
   assert.equal(resumeButtons()[0].disabled, false, 'the saved source can resume as soon as the active transfer is paused');
   for (let attempt = 0; attempt < 50 && sourceListReads < 3; attempt++) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(resumeButtons().length, 2);
@@ -601,8 +619,10 @@ test('resume actions stay disabled during an active transfer and return after pa
   const original = { name: oldSource.original_name, size: oldSource.declared_size_bytes, type: 'video/mp4', slice() { return { size: 8 }; } };
   app.elements.get('clipping-resume-file').files = [original];
   app.elements.get('clipping-resume-file').emit('change');
+  assert.equal(pause.hidden, false, 'resuming a saved upload shows Pause again');
   for (let attempt = 0; attempt < 50 && !app.elements.get('clipping-upload-error').textContent; attempt++) await new Promise((resolve) => setImmediate(resolve));
   assert.match(app.elements.get('clipping-upload-error').textContent, /Connection interrupted/);
+  assert.equal(pause.hidden, true, 'a failed transfer hides Pause once it is idle');
   for (let attempt = 0; attempt < 50 && sourceListReads < 4; attempt++) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(resumeButtons().length, 2);
   assert.equal(resumeButtons().every((button) => !button.disabled), true, 'failed transfers also restore Resume controls for saved uploading sources');

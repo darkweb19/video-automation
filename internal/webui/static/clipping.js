@@ -1483,6 +1483,7 @@
     state.upload = null;
     ui.uploadSubmit.disabled = false;
     ui.uploadFile.disabled = false;
+    ui.uploadCancel.hidden = true;
     ui.uploadCancel.disabled = false;
     updateUploadReadiness();
     if (!keepResumeActionsDisabled) syncResumeActions();
@@ -2171,6 +2172,7 @@
       controller: null
     };
     state.upload = upload;
+    ui.uploadCancel.hidden = false;
     syncResumeActions();
     state.selectedUploadFile = file;
     ui.uploadError.textContent = "";
@@ -2403,6 +2405,7 @@
       if (state.upload?.sourceID === id) {
         state.upload.controller?.abort();
         state.upload = null;
+        ui.uploadCancel.hidden = true;
         syncResumeActions();
         ui.uploadSubmit.disabled = false;
         ui.uploadFile.disabled = false;
@@ -2544,6 +2547,7 @@
     ui.batchContentType.addEventListener("change", renderBatchReadiness);
     ui.createBatch.addEventListener("click", () => { void createBatch(); });
     ui.retentionForm.addEventListener("submit", saveRetention);
+    ui.uploadCancel.hidden = true;
     updateUploadReadiness();
     updateLinkDisclosure();
   }
@@ -2586,6 +2590,7 @@
     state.controllers.clear();
     if (state.upload) state.upload.controller?.abort();
     state.upload = null;
+    ui.uploadCancel.hidden = true;
     clearSelectedUpload();
     syncResumeActions();
     state.dropDepth = 0;
