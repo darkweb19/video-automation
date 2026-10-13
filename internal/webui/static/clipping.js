@@ -689,7 +689,7 @@
       return false;
     }
     state.selectedUploadFile = file;
-    ui.uploadFile.value = file === ui.uploadFile.files?.[0] ? ui.uploadFile.value : "";
+    if (file !== ui.uploadFile.files?.[0]) ui.uploadFile.value = "";
     ui.uploadPermission.checked = false;
     ui.uploadError.textContent = "";
     updateUploadReadiness();

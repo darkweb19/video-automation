@@ -13,7 +13,13 @@ const dashboardSource = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
 class Element {
   get value() { return this._value || ''; }
   set value(value) {
-    this._value = String(value ?? '');
+    const next = String(value ?? '');
+    if (this.type === 'file' && next !== '') {
+      const error = new Error('File input values can only be cleared programmatically.');
+      error.name = 'InvalidStateError';
+      throw error;
+    }
+    this._value = next;
     if (this.type === 'file' && this._value === '') this.files = [];
   }
 
@@ -462,6 +468,27 @@ test('dragged media stays a draft until rights are confirmed and Upload video is
     preventDefault() { outsideDropPrevented = true; }
   });
   assert.equal(outsideDropPrevented, true, 'dropping files elsewhere in Clipping does not navigate away');
+});
+
+test('native picker selection preserves the selected file without assigning its protected value', async () => {
+  const app = createUI(async (route) => {
+    if (route === '/api/clipping/config') return { max_source_bytes: 100 };
+    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
+    throw new Error(`Unexpected request: ${route}`);
+  });
+  await app.api.start();
+
+  const file = { name: 'picked.mp4', size: 3, type: 'video/mp4' };
+  const picker = app.elements.get('clipping-file');
+  picker.files = [file];
+  // Simulate the browser-populated value after a user chooses a native file.
+  picker._value = 'C:\\fakepath\\picked.mp4';
+  picker.emit('change');
+
+  assert.equal(picker.files[0], file, 'the native picker retains its selected file');
+  assert.equal(picker.value, 'C:\\fakepath\\picked.mp4');
+  assert.equal(app.elements.get('clipping-file-name').textContent, 'Selected file: picked.mp4');
+  assert.equal(app.elements.get('clipping-upload-submit').disabled, true, 'rights confirmation remains required');
 });
 
 test('active upload blocks a second file and stop clears the pending drop draft', async () => {
