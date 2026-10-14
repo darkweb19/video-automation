@@ -1980,43 +1980,44 @@
     if (created.length === 1) bindSourceTrace(actionID, created[0]);
   }
 
-  function classifyYouTubeLink(url, raw) {
+  // The backend independently validates the video ID and constructs a safe URL.
+  function classifyYouTubeLink(url) {
     const host = url.hostname.toLowerCase();
-    const videoHosts = new Set([
-      "youtube.com", "www.youtube.com", "m.youtube.com",
-      "youtube-nocookie.com", "www.youtube-nocookie.com"
+    const hosts = new Set([
+      "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+      "youtube-nocookie.com", "www.youtube-nocookie.com", "youtu.be", "www.youtu.be"
     ]);
-    const shortHosts = new Set(["youtu.be"]);
-    if (!videoHosts.has(host) && !shortHosts.has(host)) return null;
-    if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || raw.includes("#")) return "youtube_invalid";
-    const playlistSelectors = new Set(["list", "playlist", "playlist_id", "video_ids", "start_radio", "index"]);
-    for (const key of url.searchParams.keys()) {
-      if (playlistSelectors.has(key.toLowerCase())) return "youtube_invalid";
-    }
-
-    const videoIDPattern = /^[A-Za-z0-9_-]{11}$/;
-    let videoID = "";
-    if (shortHosts.has(host)) {
-      const match = /^\/([A-Za-z0-9_-]{11})$/.exec(url.pathname);
-      if (match) videoID = match[1];
-    } else if (url.pathname === "/watch") {
+    if (!hosts.has(host)) return null;
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password ||
+        (url.port && url.port !== "443" && !(url.protocol === "http:" && url.port === "80"))) return "youtube_invalid";
+    const segments = url.pathname.split("/").filter(Boolean);
+    let id = "";
+    if (host === "youtu.be" || host === "www.youtu.be") {
+      if (segments.length === 1) id = segments[0];
+    } else if (segments.length === 1 && segments[0] === "watch") {
       const ids = url.searchParams.getAll("v");
-      if (ids.length === 1) videoID = ids[0];
-    } else {
-      const match = /^\/(?:shorts|embed)\/([A-Za-z0-9_-]{11})$/.exec(url.pathname);
-      if (match) videoID = match[1];
+      if (ids.length === 1) id = ids[0];
+    } else if (segments.length === 2 && ["shorts", "embed", "live", "v"].includes(segments[0])) {
+      id = segments[1];
     }
-    return videoIDPattern.test(videoID) ? "youtube" : "youtube_invalid";
+    return /^[A-Za-z0-9_-]{11}$/.test(id) ? "youtube" : "youtube_invalid";
   }
 
   function classifyLink(value) {
     const raw = String(value || "").trim();
+    if (/^[A-Za-z0-9_-]{11}$/.test(raw)) return "youtube";
     let url;
-    try { url = new URL(raw); } catch (_error) { return "invalid"; }
-    const youtubeKind = classifyYouTubeLink(url, raw);
+    let hasScheme = true;
+    try { url = new URL(raw); }
+    catch (_error) {
+      hasScheme = false;
+      try { url = new URL("https://" + raw); }
+      catch (_otherError) { return "invalid"; }
+    }
+    const youtubeKind = classifyYouTubeLink(url);
     if (youtubeKind) return youtubeKind;
-    if (url.protocol !== "https:") return "invalid";
-    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (!hasScheme || url.protocol !== "https:") return "invalid";
+    const host = url.hostname.toLowerCase().replace(/^www[.]/, "");
     if (host === "drive.google.com" || host === "docs.google.com") return "google_drive";
     if (host === "dropbox.com" || host.endsWith(".dropboxusercontent.com")) return "dropbox";
     return "unsupported";
@@ -2031,7 +2032,7 @@
     }
     const youtube = kind === "youtube" || kind === "youtube_invalid";
     if (youtube) {
-      ui.linkHelp.textContent = "Public YouTube import supports one HTTPS watch, shorts, embed, or youtu.be video that is available without sign-in. Playlists, live or upcoming streams, restricted videos, and unsupported formats require an original-file upload you are permitted to reuse.";
+      ui.linkHelp.textContent = "On this test branch, paste an 11-character YouTube video ID or any common YouTube watch, Shorts, live, embed or youtu.be video link.";
     } else if (kind === "google_drive" || kind === "dropbox") {
       ui.linkHelp.textContent = "Anyone with the link must be able to view the file. Sign-in or private links can’t be imported.";
     } else if (kind === "unsupported") {
@@ -2045,7 +2046,7 @@
     ui.linkSubmit.disabled = !ui.linkPermissionCheck.checked;
     const note = ui.linkForm.querySelector(".field small");
     if (note) note.textContent = youtube
-      ? "Use one HTTPS public YouTube watch?v=, /shorts/, /embed/, or youtu.be/{id} link. Access and supported formats can vary."
+      ? "Paste an 11-character YouTube video ID or common YouTube video URL, with or without https://."
       : kind === "unsupported"
         ? "Use a public Google Drive or Dropbox link, or a supported single-video YouTube link."
         : "Google Drive and Dropbox links must be publicly accessible.";
@@ -2062,7 +2063,7 @@
       ui.linkError.textContent = kind === "invalid"
         ? "Enter a valid HTTPS link."
         : kind === "youtube_invalid"
-          ? "Use one HTTPS public YouTube watch, shorts, embed, or youtu.be video link. Playlists and live or upcoming streams are not supported; restricted videos or unsupported formats need an original-file upload you are permitted to reuse."
+          ? "Enter a valid YouTube video ID or YouTube video URL. A playlist-only link is not a video."
           : "Use a public Google Drive or Dropbox link, or a supported single-video YouTube link.";
       failImportValidation(actionID, kind === "unsupported" ? "unsupported_link" : "invalid_link");
       return;
