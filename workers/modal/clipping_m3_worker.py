@@ -106,7 +106,7 @@ LEDGER_PATH = f"{LEDGER_DIR}/clipping-dispatches.sqlite3"
 # imports this module inside deployed containers from /root, where the source
 # tree is intentionally flattened and repository-relative paths do not exist.
 CLIPPING_IMAGE_PACKAGES = (
-    "modal==1.1.4",
+    "modal==1.3.1",
     "fastapi==0.115.12",
     "faster-whisper==1.1.1",
     "ctranslate2==4.6.0",
@@ -1163,7 +1163,7 @@ _MODAL_MODEL_VOLUME: Any = None
 _MODAL_LEDGER_VOLUME: Any = None
 
 
-# Keep each registered handler at module scope. Modal 1.1.4 App.function
+# Keep each registered handler at module scope. Modal App.function
 # rejects nested local handlers by default unless they use serialized=True.
 def clipping_ledger_owner(
     operation: str = "prune",
@@ -1409,18 +1409,18 @@ def _install_modal_app() -> Any:
     )
     prewarm_image = _add_worker_source_files(
         modal.Image.debian_slim(python_version="3.11").pip_install(
-            "modal==1.1.4",
+            "modal==1.3.1",
             "huggingface-hub==0.30.2",
         ).env({"FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR})
     )
     api_image = _add_worker_source_files(
         modal.Image.debian_slim(python_version="3.11").pip_install(
-            "modal==1.1.4",
+            "modal==1.3.1",
             "fastapi==0.115.12",
         )
     )
 
-    # Modal 1.1.4 App.function requires globally addressable functions unless
+    # Modal App.function requires globally addressable functions unless
     # serialized=True. Keep these implementations module-global and register
     # them directly, avoiding serialization of captured resource handles.
     _MODAL_FUNCTIONS.clear()
@@ -1440,12 +1440,10 @@ def _install_modal_app() -> Any:
         volumes={LEDGER_DIR: _MODAL_LEDGER_VOLUME},
         secrets=[runtime_secret],
         schedule=modal.Period(seconds=60),
-        # Modal 1.1.4 App.function source semantics: max_containers caps
-        # function concurrency, max_inputs=1 retires a container after one
-        # input, and default inputs are nonconcurrent. App.function does not
-        # forward deprecated concurrency_limit when these options are used.
+        # Keep one ledger owner container at a time; retire it after each
+        # input so subsequent invocations reload the authoritative volume.
         max_containers=1,
-        max_inputs=1,
+        single_use_containers=True,
         retries=modal.Retries(max_retries=0),
     )(clipping_ledger_owner)
     _MODAL_FUNCTIONS["callback_replay"] = app.function(

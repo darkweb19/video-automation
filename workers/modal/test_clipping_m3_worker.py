@@ -93,7 +93,7 @@ def video_only_source_core_wire_payload():
         "python_distributions_count": "17",
         "os_release_sha256": "e" * 64,
         "python_version": "3.11.9",
-        "modal_version": "1.1.4",
+        "modal_version": "1.3.1",
         "runtime_manifest_sha256": "f" * 64,
     }
 
@@ -251,7 +251,7 @@ def source_analysis(dispatch):
             "ffmpeg_configuration_sha256": "f" * 64,
             "runtime_manifest_sha256": "a" * 64,
             "python_version": "3.11.9",
-            "modal_version": "1.1.4",
+            "modal_version": "1.3.1",
             "prompt_version": "none-extractive-no-llm-v1",
         },
         "pipeline_revision": "framevault_m3_worker_v1",
@@ -567,7 +567,7 @@ class ClippingM3WorkerTests(unittest.TestCase):
         self.assertEqual(payload["algorithm_versions"]["pipeline_revision"], "framevault_m3_worker_v1")
         self.assertEqual(payload["pipeline_revision"], "framevault_m3_worker_v1")
         self.assertEqual(payload["model_versions"]["language_mode"], "auto")
-        self.assertEqual(payload["runtime_versions"], {"python": "3.11.9", "modal": "1.1.4"})
+        self.assertEqual(payload["runtime_versions"], {"python": "3.11.9", "modal": "1.3.1"})
         self.assertEqual(payload["candidate_inspections"][0]["sampled_frames"], 120)
         self.assertEqual(payload["candidate_inspections"][0]["visual_events"][0]["kind"], "dense_motion_change")
         self.assertIsNone(payload["transcript"]["segments"][0]["confidence"])
@@ -588,7 +588,7 @@ class ClippingM3WorkerTests(unittest.TestCase):
             "ffmpeg_version": "fixture-ffmpeg",
             "ffmpeg_configuration_sha256": "b" * 64,
             "python_version": "3.11.9",
-            "modal_version": "1.1.4",
+            "modal_version": "1.3.1",
             "runtime_manifest_sha256": "c" * 64,
         }
 
@@ -669,7 +669,7 @@ class ClippingM3WorkerTests(unittest.TestCase):
                 "python_distributions_count": "17",
                 "os_release_sha256": "a" * 64,
                 "python_version": "3.11.9",
-                "modal_version": "1.1.4",
+                "modal_version": "1.3.1",
                 "runtime_manifest_sha256": "b" * 64,
             }
             result = analyze_dispatch(
@@ -939,6 +939,7 @@ class ClippingM3WorkerTests(unittest.TestCase):
         self.assertEqual(set(function_options), set(handlers))
         for options in function_options.values():
             self.assertNotIn("concurrency_limit", options)
+            self.assertNotIn("max_inputs", options)
         expected_secrets = {
             "clipping_dispatch_api": "dispatch_api_secret",
             "clipping_ledger_owner": "runtime_secret",
@@ -957,15 +958,15 @@ class ClippingM3WorkerTests(unittest.TestCase):
         self.assertIn("schedule", options)
         self.assertNotIn("gpu", options)
         self.assertNotIn("concurrency_limit", options)
-        for name in ("max_containers", "max_inputs"):
-            self.assertIsInstance(options[name], ast.Constant)
-            self.assertEqual(options[name].value, 1)
+        self.assertIsInstance(options["max_containers"], ast.Constant)
+        self.assertEqual(options["max_containers"].value, 1)
+        self.assertIsInstance(options["single_use_containers"], ast.Constant)
+        self.assertIs(options["single_use_containers"].value, True)
         self.assertIsInstance(options["cpu"], ast.Constant)
         self.assertGreater(options["cpu"].value, 0)
-        self.assertIn("modal==1.1.4", worker_source)
-        self.assertIn("max_inputs=1 retires a container after one", worker_source)
+        self.assertIn("modal==1.3.1", worker_source)
         requirements = worker_path.with_name("requirements-clipping.txt").read_text(encoding="utf-8")
-        self.assertIn("modal==1.1.4", requirements)
+        self.assertIn("modal==1.3.1", requirements)
         for function_name, expected_limit in (
             ("clipping_analysis_task", 1),
             ("clipping_dispatch_api", 100),
