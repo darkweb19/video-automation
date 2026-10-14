@@ -19,6 +19,7 @@ from clipping_analysis import (
     MAX_AUDIO_EVENTS,
     analysis_runtime_manifest,
     _MODEL_CACHE,
+    _require_cuda_runtime_libraries,
     _model_snapshot_fingerprint,
     _configured_model_revision,
     analyze_source,
@@ -52,6 +53,18 @@ def no_op_candidate_inspector(_path, _start, _end, *, cancel_check):
 
 
 class ClippingAnalysisTests(unittest.TestCase):
+    def test_cuda_runtime_preflight_reports_missing_cudnn_cleanly(self):
+        with patch("ctypes.CDLL") as library_loader:
+            _require_cuda_runtime_libraries()
+        self.assertEqual(
+            [call.args[0] for call in library_loader.call_args_list],
+            ["libcublas.so.12", "libcudnn_ops.so.9"],
+        )
+
+        with patch("ctypes.CDLL", side_effect=OSError("library missing")):
+            with self.assertRaisesRegex(AnalysisError, "CUDA 12/cuDNN 9"):
+                _require_cuda_runtime_libraries()
+
     def test_full_timeline_keeps_late_non_speech_and_visual_events(self):
         duration_ms = 37 * 60 * 1000
         late_start = duration_ms - 9_000

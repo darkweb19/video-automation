@@ -2,6 +2,7 @@
 
 import asyncio
 import ast
+import clipping_m3_worker as clipping_worker
 import hashlib
 import importlib.util
 import ipaddress
@@ -360,6 +361,54 @@ class ClippingM3WorkerTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json(), {"detail": "unauthorized"})
+
+    def test_dispatch_runs_blocking_ledger_and_spawn_off_event_loop(self):
+        from fastapi.testclient import TestClient
+
+        events = []
+
+        def ledger_remote(operation, request):
+            with self.assertRaises(RuntimeError):
+                asyncio.get_running_loop()
+            events.append("ledger")
+            return {"claimed": True}
+
+        def admission(_dispatch, rpc):
+            rpc("claim", {"attempt": "test"})
+            return "analysis", None
+
+        def gpu_spawn(*_args):
+            with self.assertRaises(RuntimeError):
+                asyncio.get_running_loop()
+            events.append("gpu_spawn")
+
+        now = int(time.time())
+        payload = dispatch_payload(
+            expires_at=now + 120,
+            callback_expires_at=now + 300,
+        )
+        configured = {
+            WORKER_SECRET_KEY: "a" * 64,
+            WORKER_ORIGIN_KEY: "https://framevault.dev",
+            WORKER_PIPELINE_REVISION_KEY: "framevault_m3_worker_v1",
+        }
+        functions = {
+            "ledger_owner": SimpleNamespace(remote=ledger_remote),
+            "analysis": SimpleNamespace(spawn=gpu_spawn),
+        }
+        with patch.dict(os.environ, configured), patch.dict(clipping_worker._MODAL_FUNCTIONS, functions), (
+            patch.object(clipping_worker, "_configured_model_revision", return_value="a" * 40)
+        ), patch.object(clipping_worker, "dispatch_admission", side_effect=admission):
+            response = TestClient(clipping_dispatch_api()).post(
+                "/dispatch",
+                json=payload,
+                headers={"Authorization": "Bearer " + "a" * 64,
+                         "X-FrameVault-Media-Capability": MEDIA_CAP,
+                         "X-FrameVault-Callback-Capability": CALLBACK_CAP},
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(events, ["ledger", "gpu_spawn"])
+        self.assertEqual(response.json()["attempt_id"], payload["attempt_id"])
 
     def test_dispatch_body_is_stream_bounded_and_content_length_is_validated(self):
         async def chunks(*items):
@@ -965,6 +1014,8 @@ class ClippingM3WorkerTests(unittest.TestCase):
         self.assertIsInstance(options["cpu"], ast.Constant)
         self.assertGreater(options["cpu"].value, 0)
         self.assertIn("modal==1.3.1", worker_source)
+        self.assertIn("nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04", worker_source)
+        self.assertIn("modal.Image.from_registry(GPU_CUDA_IMAGE", worker_source)
         requirements = worker_path.with_name("requirements-clipping.txt").read_text(encoding="utf-8")
         self.assertIn("modal==1.3.1", requirements)
         for function_name, expected_limit in (

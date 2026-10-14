@@ -115,6 +115,8 @@ CLIPPING_IMAGE_PACKAGES = (
     "huggingface-hub==0.30.2",
     "tokenizers==0.21.1",
 )
+# CTranslate2 4.6 requires CUDA 12 and cuDNN 9 for GPU transcription.
+GPU_CUDA_IMAGE = "nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04"
 MAX_DISPATCH_BODY_BYTES = 64 * 1024
 MAX_CALLBACK_BODY_BYTES = MAX_ARTIFACT_BYTES + MAX_CALLBACK_OVERHEAD_BYTES
 MAX_MEDIA_STREAM_START_SKEW_MS = 50
@@ -1282,6 +1284,7 @@ def clipping_model_prewarm_task() -> dict[str, Any]:
 def clipping_dispatch_api() -> Any:
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
 
     api = FastAPI()
 
@@ -1335,7 +1338,10 @@ def clipping_dispatch_api() -> Any:
             callback_headers(callback_capability)
         except ProtocolError:
             raise HTTPException(status_code=400, detail="invalid worker capabilities") from None
-        try:
+        # Dispatch admission is a synchronous ledger operation. Run it and
+        # its Modal spawn in a worker thread rather than blocking the ASGI loop.
+        # Keep admission and enqueue together to preserve idempotency behavior.
+        def admit_and_enqueue() -> None:
             owner_rpc = lambda operation, ledger_request: _MODAL_FUNCTIONS["ledger_owner"].remote(
                 operation,
                 dict(ledger_request),
@@ -1345,6 +1351,9 @@ def clipping_dispatch_api() -> Any:
                 _MODAL_FUNCTIONS["analysis"].spawn(payload, media_capability, callback_capability)
             elif action == "replay":
                 _MODAL_FUNCTIONS["callback_replay"].spawn(payload, callback_capability, cached_callback)
+
+        try:
+            await run_in_threadpool(admit_and_enqueue)
         except Exception as error:
             _safe_log_failure("clipping_dispatch_enqueue_failed", dispatch, error)
             raise HTTPException(status_code=503, detail="worker temporarily unavailable") from None
@@ -1402,7 +1411,8 @@ def _install_modal_app() -> Any:
         required_keys=[WORKER_MODEL_REVISION_KEY],
     )
     gpu_image = _add_worker_source_files(
-        modal.Image.debian_slim(python_version="3.11")
+        modal.Image.from_registry(GPU_CUDA_IMAGE, add_python="3.11")
+        .entrypoint([])
         .apt_install("ffmpeg")
         .pip_install(*CLIPPING_IMAGE_PACKAGES)
         .env({"FRAMEVAULT_WHISPER_DEVICE": "cuda", "FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR})

@@ -211,6 +211,18 @@ _MANIFEST_LOCK = threading.Lock()
 _PYAV_OPEN_LOCK = threading.RLock()
 
 
+def _require_cuda_runtime_libraries() -> None:
+    """Fail with a callback-safe error instead of crashing CTranslate2 on missing cuDNN."""
+    import ctypes
+
+    try:
+        ctypes.CDLL("libcublas.so.12")
+        cudnn_ops = ctypes.CDLL("libcudnn_ops.so.9")
+        getattr(cudnn_ops, "cudnnCreateTensorDescriptor")
+    except (OSError, AttributeError) as error:
+        raise AnalysisError("CUDA 12/cuDNN 9 runtime libraries are unavailable") from error
+
+
 def _whisper_model(
     model_name: str,
     model_class: Any,
@@ -232,6 +244,8 @@ def _whisper_model(
         except ImportError as error:
             raise AnalysisError("pinned Hugging Face model loader is unavailable") from error
         device = os.environ.get("FRAMEVAULT_WHISPER_DEVICE", "cuda")
+        if device == "cuda":
+            _require_cuda_runtime_libraries()
         compute_type = "float16" if device == "cuda" else "int8"
         cache_root = Path(os.environ.get("FRAMEVAULT_WHISPER_CACHE", "/tmp/framevault-whisper-cache"))
         try:
