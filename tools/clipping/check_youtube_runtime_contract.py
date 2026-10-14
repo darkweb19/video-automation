@@ -31,7 +31,6 @@ EXPECTED_HTTP_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
     "User-Agent": USER_AGENT,
 }
-SYNTHETIC_PROXY = "http://127.0.0.1:1"
 RUNTIME_SPEC = "deno:/usr/bin/deno"
 MAX_METADATA_BYTES = 4 << 20
 PRODUCTION_ARG_SHAPE = [
@@ -49,8 +48,6 @@ PRODUCTION_ARG_SHAPE = [
     "--no-remote-components",
     "--js-runtimes",
     "runtimeSpec",
-    "--proxy",
-    "proxy.AuthenticatedURL()",
     "canonicalURL.String()",
 ]
 EXPECTED = {
@@ -102,7 +99,6 @@ def check_pins() -> None:
         '"--no-remote-components"',
         '"--js-runtimes"',
         '"deno:/usr/bin/deno"',
-        '"--proxy"',
         '"--load-info-json"',
     ):
         if option not in contract_text:
@@ -293,14 +289,12 @@ def run_fixture(fixture: dict[str, object]) -> dict[str, object]:
         deno_dir = Path(temp_dir) / "deno-cache"
         deno_dir.mkdir(mode=0o700)
         info_path.write_text(json.dumps(fixture), encoding="utf-8")
-        # Local InfoJSON replaces the URL. The inert proxy is never contacted and
-        # no media download, model call, or external network connection is made.
+        # Local InfoJSON replaces the URL; no media download, model call,
+        # or external network connection is made.
         argv = ["yt-dlp"]
         for item in PRODUCTION_ARG_SHAPE:
             if item == "runtimeSpec":
                 argv.append(RUNTIME_SPEC)
-            elif item == "proxy.AuthenticatedURL()":
-                argv.append(SYNTHETIC_PROXY)
             elif item == "canonicalURL.String()":
                 argv.extend(["--load-info-json", str(info_path)])
             else:
