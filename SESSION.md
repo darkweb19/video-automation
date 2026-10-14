@@ -1,3 +1,12 @@
+# Session handoff — 2026-10-13, C2.7 YouTube format validation
+
+- User requested a fix for the unsupported audio/video format error and supplied a valid youtu.be short URL. Existing normalization handles this URL; its actual metadata cannot be checked because environment network policy blocks YouTube. Exact video-specific cause remains unconfirmed.
+- Luna Max author `format_fix` and independent reviewer `format_review` reproduced two false rejections: legitimate negative quality-ranking values and completed `was_live` recordings. Pinned yt-dlp 2026.8.19 source confirms both metadata cases. Accept finite signed quality through selection and stored expectations; accept completed recordings with existing duration/direct-format validation. Keep active/upcoming, processing and unknown live statuses rejected. No extractor pin, quality-selection priority or security-bound change.
+- Focused parser/selector normal and race tests pass; independent review approved. Full-suite verification initially exposed a pre-existing flaky cancellation assertion: the net.Pipe fake can return a zero-byte read from a bufio empty write. The corrected test requires EOF, tolerates empty reads, and rejects timeout/unexpected bytes. It passes 1,000 normal and 500 race repetitions; reviewer independently passed 100 race repetitions. No runtime proxy edit.
+- Final full Go suite and vet passed; diff whitespace checks passed. All implementation and tests came from Luna Max; main remained CTO/lead and owns tracker/handoff/Git. Continuing publication scope is feat/clipper-ai only; baseline 24b11a1. No deployment or paid call. After publication, deploy the updated app through the normal workflow and retry the supplied link; live success is not claimed here.
+
+---
+
 # Session handoff — 2026-10-13, documentation refresh
 
 - Current task: refresh README, factual AGENTS context and guides for plain language and accurate status. Preserve existing agent instructions verbatim; the main thread remains CTO/lead and delegates implementation.
