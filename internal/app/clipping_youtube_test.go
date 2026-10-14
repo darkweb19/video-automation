@@ -588,6 +588,9 @@ func TestYouTubeImportUsesFixedCommandAndKeepsSignedURLOutOfPersistence(t *testi
 			t.Errorf("fixed yt-dlp args omitted %q: %q", required, safeYouTubeTestArgs(arguments))
 		}
 	}
+	if containsString(arguments, "--proxy") {
+		t.Fatalf("direct-metadata test branch must not use the yt-dlp proxy: %q", safeYouTubeTestArgs(arguments))
+	}
 	if containsString(arguments, "--format") {
 		t.Errorf("metadata extraction must not constrain yt-dlp to a muxed format: %q", safeYouTubeTestArgs(arguments))
 	}
