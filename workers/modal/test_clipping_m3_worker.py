@@ -348,6 +348,19 @@ class ClippingM3WorkerTests(unittest.TestCase):
             if invalid:
                 self.assertNotIn(invalid, str(raised.exception.detail))
 
+    def test_dispatch_api_injects_request_without_query_parameter(self):
+        from fastapi.testclient import TestClient
+
+        api = clipping_dispatch_api()
+        route = next(route for route in api.routes if getattr(route, "path", None) == "/dispatch")
+        self.assertFalse(route.dependant.query_params)
+
+        with patch.dict(os.environ, {WORKER_SECRET_KEY: "a" * 64}):
+            response = TestClient(api).post("/dispatch", json={})
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"detail": "unauthorized"})
+
     def test_dispatch_body_is_stream_bounded_and_content_length_is_validated(self):
         async def chunks(*items):
             for item in items:

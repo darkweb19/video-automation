@@ -1285,7 +1285,6 @@ def clipping_dispatch_api() -> Any:
 
     api = FastAPI()
 
-    @api.post("/dispatch")
     async def dispatch_endpoint(request: Request) -> Any:
         shared_secret = os.environ.get(WORKER_SECRET_KEY, "")
         expected_origin = os.environ.get(WORKER_ORIGIN_KEY)
@@ -1351,6 +1350,11 @@ def clipping_dispatch_api() -> Any:
             raise HTTPException(status_code=503, detail="worker temporarily unavailable") from None
         return JSONResponse(status_code=202, content=dispatch_ack(dispatch))
 
+    # With postponed annotations, the factory-local Request name would be
+    # evaluated as a query parameter if registered as a forward reference.
+    # Bind the actual FastAPI Request type before registering the route.
+    dispatch_endpoint.__annotations__["request"] = Request
+    api.add_api_route("/dispatch", dispatch_endpoint, methods=["POST"])
     return api
 
 
