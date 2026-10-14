@@ -1,3 +1,14 @@
+> **Temporary diagnostic branch: `bug/fix-clipper-ai`.** This branch bypasses
+> the application's authenticated CONNECT proxy for **yt-dlp metadata extraction
+> only**. User input is converted to a validated eleven-character YouTube ID and
+> then a canonical `https://www.youtube.com/watch?v=ID` URL; arbitrary supplied
+> hosts are never forwarded to yt-dlp. The Go media downloader's existing CDN
+> allowlist, pinned DNS, HTTPS, size, codec, and storage checks remain unchanged.
+> The form also accepts bare video IDs and common YouTube URL variants.
+> This is for diagnosing Railway extraction failures, **not a production fix**.
+> The base documentation below describes the proxy-enabled design. Revert or
+> revalidate this bypass before merging into a production branch.
+
 # Public YouTube video-link import
 
 **Status:** The bounded public-link importer and C2.6 separate-track retry repair passed local verification and independent review; see the [clipping tracker](TRACKER.md#current-checkpoint) for exact evidence. The pinned-extractor full-metadata contract passes its offline synthetic check. Live YouTube import and deployment remain unverified. A live attempt from this environment was blocked by an outbound network policy HTTP 403; the cause of the original deployed import failure remains unknown. This guide documents best-effort support, not universal availability. M1 feasibility remains skipped, M3 worker deployment and real-media quality/cost evidence remain outstanding, and publishing is planned separately.
