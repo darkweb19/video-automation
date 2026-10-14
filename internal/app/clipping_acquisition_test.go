@@ -61,6 +61,14 @@ func TestClippingImportURLPolicyAndErrorRedaction(t *testing.T) {
 		{raw: "https://m.youtube.com/shorts/abcdefghijk?t=42&feature=share", want: "https://www.youtube.com/watch?v=abcdefghijk"},
 		{raw: "https://www.youtube-nocookie.com/embed/abcdefghijk?start=12", want: "https://www.youtube.com/watch?v=abcdefghijk"},
 		{raw: "https://youtu.be/abcdefghijk?si=tracking", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "abcdefghijk", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "www.youtube.com/watch?v=abcdefghijk&list=PL123", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "http://youtube.com/watch?v=abcdefghijk", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "https://music.youtube.com/watch?v=abcdefghijk", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "youtu.be/abcdefghijk", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "https://www.youtube.com/live/abcdefghijk?feature=share", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "https://www.youtube.com/shorts/abcdefghijk/#share", want: "https://www.youtube.com/watch?v=abcdefghijk"},
+		{raw: "https://www.youtu.be/abcdefghijk", want: "https://www.youtube.com/watch?v=abcdefghijk"},
 	} {
 		normalized, sourceKind, normalizeErr := normalizeClippingImportURL(test.raw)
 		if normalizeErr != nil || sourceKind != ClippingSourceYouTube || normalized.String() != test.want {
@@ -77,12 +85,12 @@ func TestClippingImportURLPolicyAndErrorRedaction(t *testing.T) {
 		"https://127.0.0.1/file/d/id/view",
 		"https://drive.google.com/file/d/id/view#fragment",
 		"https://example.test/movie.mp4",
+		"https://example.test/watch?v=abcdefghijk",
+		"ftp://youtube.com/watch?v=abcdefghijk",
+		"https://user:pass@youtube.com/watch?v=abcdefghijk",
 		"https://drive.google.com/file/d/id/view\n",
-		"https://www.youtube.com/watch?v=abcdefghijk&list=PL123",
 		"https://www.youtube.com/watch?v=abcdefghijk&v=abcdefghijk",
-		"https://www.youtube.com/live/abcdefghijk",
 		"https://www.youtube.com/shorts/abcdefghijk/extra",
-		"https://www.youtu.be/abcdefghijk",
 	} {
 		if _, _, err := normalizeClippingImportURL(raw); err == nil {
 			t.Errorf("unsafe or unsupported URL accepted: %q", raw)
