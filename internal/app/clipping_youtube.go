@@ -162,7 +162,6 @@ func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, 
 	if err := ctx.Err(); err != nil {
 		return youtubeSelection{}, err
 	}
-	var err error
 	videoID, ok := youtubeVideoID(canonicalURL)
 	if !ok {
 		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube link could not be imported; upload an original file you are permitted to reuse")}, "invalid_url")
@@ -171,7 +170,7 @@ func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, 
 	if executable == "" {
 		executable = findYouTubeExecutable(clippingYouTubeExecutablePaths)
 	}
-	if err != nil || executable == "" {
+	if executable == "" {
 		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}, "runtime_unavailable")
 	}
 	runtimeSpec := a.youtubeRuntime
@@ -188,14 +187,9 @@ func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, 
 
 	extractorCtx, cancel := context.WithTimeout(ctx, clippingYouTubeExtractorTimeout)
 	defer cancel()
-	proxy, err := startYouTubeProxy(extractorCtx, a.resolver)
-	if err != nil {
-		if ctx.Err() != nil {
-			return youtubeSelection{}, ctx.Err()
-		}
-		return youtubeSelection{}, withClippingDiagnosticCode(fmt.Errorf("%w: YouTube importer proxy could not start", errClippingImportRetryable), "extractor_proxy_failure")
-	}
-	defer proxy.Close()
+	// Temporary test branch: bypass the authenticated CONNECT proxy for
+	// metadata extraction. Only the validated canonical YouTube URL is passed
+	// to the subprocess; media downloads retain pinned-DNS protection.
 	denoCache, err := createYouTubeDenoCache()
 	if err != nil {
 		return youtubeSelection{}, withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube importer is unavailable in this runtime; upload an original file you are permitted to reuse")}, "runtime_unavailable")
@@ -216,7 +210,6 @@ func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, 
 		"--dump-single-json",
 		"--no-remote-components",
 		"--js-runtimes", runtimeSpec,
-		"--proxy", proxy.AuthenticatedURL(),
 		canonicalURL.String(),
 	}
 	command := exec.CommandContext(extractorCtx, executable, args...)
@@ -240,9 +233,6 @@ func (a *ClippingAcquisition) extractYouTubeMediaWithTrace(ctx context.Context, 
 		// The child output can contain signed media URLs and provider responses.
 		// Never include command output, stderr, or the child error in a returned error.
 		return youtubeSelection{}, withClippingDiagnosticCode(fmt.Errorf("%w: YouTube metadata request failed", errClippingImportRetryable), "extractor_exit_failure")
-	}
-	if err := proxy.Err(); err != nil {
-		return youtubeSelection{}, withClippingDiagnosticCode(fmt.Errorf("%w: YouTube metadata proxy stopped", errClippingImportRetryable), "extractor_proxy_failure")
 	}
 	if onMetadataRetrieved != nil {
 		onMetadataRetrieved()
