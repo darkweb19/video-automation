@@ -2128,8 +2128,16 @@ func clippingURLName(u *url.URL) string {
 }
 
 func normalizeClippingImportURL(raw string) (*url.URL, ClippingSourceKind, error) {
-	if raw == "" || raw != strings.TrimSpace(raw) || len(raw) > 8192 || strings.Contains(raw, "#") || hasURLControl(raw) {
+	if raw == "" || raw != strings.TrimSpace(raw) || len(raw) > 8192 || hasURLControl(raw) {
 		return nil, "", clippingOutcome("unsupported", "invalid_url", "Enter a valid HTTPS share URL without credentials or fragments")
+	}
+	// Diagnostic branch: accept common YouTube links or bare 11-character IDs,
+	// but pass only a validated canonical YouTube watch URL to yt-dlp.
+	if videoID, ok := flexibleYouTubeVideoID(raw); ok {
+		return &url.URL{Scheme: "https", Host: "www.youtube.com", Path: "/watch", RawQuery: "v=" + videoID}, ClippingSourceYouTube, nil
+	}
+	if strings.Contains(raw, "#") {
+		return nil, "", clippingOutcome("unsupported", "invalid_url", "Enter a valid HTTPS share URL without fragments")
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -2291,6 +2299,66 @@ func parseYouTubeReference(u *url.URL, host string) (string, bool) {
 		}
 	default:
 		return "", false
+	}
+	return id, validYouTubeVideoID(id)
+}
+
+// flexibleYouTubeVideoID accepts IDs and common YouTube link shapes without
+// ever permitting a caller-supplied arbitrary URL to reach the extractor.
+func flexibleYouTubeVideoID(raw string) (string, bool) {
+	if validYouTubeVideoID(raw) {
+		return raw, true
+	}
+	candidate := raw
+	if !strings.Contains(candidate, "://") {
+		candidate = "https://" + candidate
+	}
+	u, err := url.Parse(candidate)
+	if err != nil || u.Host == "" || u.User != nil || u.Opaque != "" || u.RawFragment != "" {
+		return "", false
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return "", false
+	}
+	if port := u.Port(); port != "" && port != "443" && !(u.Scheme == "http" && port == "80") {
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.HasSuffix(u.Host, ".") || strings.Contains(u.Host, "%") {
+		return "", false
+	}
+	switch host {
+	case "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+		"youtube-nocookie.com", "www.youtube-nocookie.com", "youtu.be", "www.youtu.be":
+	default:
+		return "", false
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return "", false
+	}
+	var id string
+	if host == "youtu.be" || host == "www.youtu.be" {
+		id = strings.Trim(strings.TrimPrefix(u.Path, "/"), "/")
+		if strings.Contains(id, "/") {
+			return "", false
+		}
+	} else if u.Path == "/watch" || u.Path == "/watch/" {
+		values := query["v"]
+		if len(values) != 1 {
+			return "", false
+		}
+		id = values[0]
+	} else {
+		for _, prefix := range []string{"/shorts/", "/embed/", "/live/", "/v/"} {
+			if strings.HasPrefix(u.Path, prefix) {
+				id = strings.TrimSuffix(strings.TrimPrefix(u.Path, prefix), "/")
+				if strings.Contains(id, "/") {
+					return "", false
+				}
+				break
+			}
+		}
 	}
 	return id, validYouTubeVideoID(id)
 }
