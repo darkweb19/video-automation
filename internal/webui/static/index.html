@@ -215,7 +215,7 @@
             <section class="clipping-link-section" aria-labelledby="clipping-link-heading">
               <div class="clipping-section-head"><div><h3 id="clipping-link-heading">Import a link</h3><p>YouTube, Google Drive, or Dropbox.</p></div></div>
               <form id="clipping-link-form" class="clipping-form">
-                <div class="field"><label for="clipping-link">Video link</label><input id="clipping-link" name="url" type="url" inputmode="url" placeholder="Paste a public video link" autocomplete="url" required><small>Private links aren’t supported.</small></div>
+                <div class="field"><label for="clipping-link">Video link</label><input id="clipping-link" name="url" type="text" inputmode="url" placeholder="Paste a video link or YouTube ID" autocomplete="off" required><small>Private links aren’t supported.</small></div>
                 <label id="clipping-link-permission" class="clipping-check"><input id="clipping-link-permission-check" type="checkbox" required><span id="clipping-link-permission-copy">I have permission to reuse this video and have it processed.</span></label>
                 <details class="clipping-link-requirements">
                   <summary>Link requirements</summary>
@@ -533,7 +533,7 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/clipping.js?v=20261013-quiet-intake" defer></script>
+  <script src="/static/clipping.js?v=20261014-direct-extractor-test" defer></script>
   <script src="/static/app.js?v=20261008-clipping" defer></script>
 </body>
 </html>
