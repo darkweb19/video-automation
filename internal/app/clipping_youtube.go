@@ -324,7 +324,8 @@ func parseYouTubeExtractorOutput(output []byte, expectedID string) (youtubeSelec
 	if availability != "" && availability != "public" {
 		return fallback("youtube_format_unavailable")
 	}
-	if metadata.IsLive || metadata.LiveStatus != "" && metadata.LiveStatus != "not_live" {
+	liveStatus := strings.ToLower(strings.TrimSpace(metadata.LiveStatus))
+	if metadata.IsLive || liveStatus != "" && liveStatus != "not_live" && liveStatus != "was_live" {
 		return fallback("youtube_format_unavailable")
 	}
 	if metadata.Duration == "" {
@@ -511,7 +512,7 @@ func validYouTubeImportExpectation(expectation youtubeImportExpectation) bool {
 	return expectation.Version == 1 && expectation.DurationMS > 0 && expectation.DurationMS <= MaxClippingSourceDurationMS &&
 		reasonableClippingDimensions(expectation.VideoWidth, expectation.VideoHeight) &&
 		isSupportedExpectedYouTubeCodec("video", expectation.VideoCodec) && isSupportedExpectedYouTubeCodec("audio", expectation.AudioCodec) &&
-		finiteNonnegative(expectation.VideoFPS) && finiteNonnegative(expectation.VideoQuality) && finiteNonnegative(expectation.VideoTBR)
+		finiteNonnegative(expectation.VideoFPS) && finiteNumber(expectation.VideoQuality) && finiteNonnegative(expectation.VideoTBR)
 }
 
 func validateYouTubeProbeExpectation(expectation youtubeImportExpectation, media clippingMediaProbeResult) error {
@@ -538,7 +539,11 @@ func validateYouTubeProbeExpectation(expectation youtubeImportExpectation, media
 }
 
 func finiteNonnegative(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+	return finiteNumber(value) && value >= 0
+}
+
+func finiteNumber(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func isSupportedExpectedYouTubeCodec(kind, codec string) bool {

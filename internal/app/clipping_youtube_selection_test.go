@@ -82,6 +82,23 @@ func TestSelectYouTubeFormatsRanksVideoDimensionsBeforeFrameRate(t *testing.T) {
 	}
 }
 
+func TestSelectYouTubeFormatsRanksNegativeQualityBelowKnownQuality(t *testing.T) {
+	unknownDRC := selectionFormat("unknown-drc", "mp4", "avc1", "mp4a", 1080, "30", "-1.5", "4000", "0", "0", "0", "")
+	unknown := selectionFormat("unknown", "mp4", "avc1", "mp4a", 1080, "30", "-1", "4000", "0", "0", "0", "")
+	known := selectionFormat("known", "mp4", "avc1", "mp4a", 1080, "30", "0", "4000", "0", "0", "0", "")
+	selected, err := selectYouTubeFormats([]youtubeFormat{unknownDRC, unknown, known}, selectionTestVideoID)
+	if err != nil {
+		t.Fatalf("selectYouTubeFormats() error = %v", err)
+	}
+	if selected.Combined == nil || selected.Combined.FormatID != "known" {
+		t.Fatalf("selected = %#v, want the candidate with known quality", selected)
+	}
+	selected, err = selectYouTubeFormats([]youtubeFormat{unknownDRC}, selectionTestVideoID)
+	if err != nil || selected.Combined == nil || selected.Combined.FormatID != "unknown-drc" {
+		t.Fatalf("sole negative-quality candidate was not kept eligible: selected=%#v error=%v", selected, err)
+	}
+}
+
 func TestSelectYouTubeFormatsRejectsDRMFormats(t *testing.T) {
 	formats := []youtubeFormat{
 		selectionFormat("drm-combined", "mp4", "avc1", "mp4a", 2160, "60", "10", "9000", "0", "0", "0", ""),
@@ -106,20 +123,28 @@ func TestSelectYouTubeFormatsRejectsDRMFormats(t *testing.T) {
 func TestSelectYouTubeFormatsRejectsMalformedRankingMetadata(t *testing.T) {
 	badNaN := selectionFormat("video-nan", "webm", "vp9", "none", 1440, "NaN", "8", "4000", "0", "0", "0", "")
 	badInfinity := selectionFormat("video-infinity", "webm", "vp9", "none", 1440, "30", "8", "+Inf", "0", "0", "0", "")
+	badNonFiniteQuality := selectionFormat("video-nan-quality", "webm", "vp9", "none", 2160, "30", "NaN", "4000", "0", "0", "0", "")
 	badNegativeMetric := selectionFormat("video-negative-tbr", "webm", "vp9", "none", 1440, "30", "8", "-1", "0", "0", "0", "")
+	badNegativeFPS := selectionFormat("video-negative-fps", "webm", "vp9", "none", 1440, "-1", "8", "4000", "0", "0", "0", "")
 	badNegativeDimension := selectionFormat("video-negative-width", "webm", "vp9", "none", 1440, "30", "8", "4000", "0", "0", "0", "")
 	badNegativeDimension.Width = -10
 	badZeroDimension := selectionFormat("video-zero-width", "webm", "vp9", "none", 1440, "30", "8", "4000", "0", "0", "0", "")
 	badZeroDimension.Width = 0
 	badAudio := selectionFormat("audio-negative", "m4a", "none", "mp4a", 0, "0", "0", "0", "-1", "48000", "2", "en").withLanguagePreference("10")
+	badNegativeSampleRate := selectionFormat("audio-negative-sample-rate", "m4a", "none", "mp4a", 0, "0", "0", "0", "128", "-1", "2", "en").withLanguagePreference("10")
+	badNegativeChannels := selectionFormat("audio-negative-channels", "m4a", "none", "mp4a", 0, "0", "0", "0", "128", "48000", "-1", "en").withLanguagePreference("10")
 	formats := []youtubeFormat{
 		badNaN,
 		badInfinity,
+		badNonFiniteQuality,
 		badNegativeMetric,
+		badNegativeFPS,
 		badNegativeDimension,
 		badZeroDimension,
 		selectionFormat("video-valid", "webm", "vp9", "none", 720, "30", "4", "2000", "0", "0", "0", ""),
 		badAudio,
+		badNegativeSampleRate,
+		badNegativeChannels,
 		selectionFormat("audio-valid-original", "m4a", "none", "mp4a", 0, "0", "0", "0", "128", "48000", "2", "en").withLanguagePreference("10"),
 	}
 

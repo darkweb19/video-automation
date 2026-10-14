@@ -276,12 +276,18 @@ func validYouTubeFormatMetadata(format youtubeFormat, hasVideo bool) bool {
 		}
 	}
 	for _, number := range []json.Number{
-		format.FPS, format.TBR, format.Quality, format.ABR, format.ASR, format.AudioChannels,
+		format.FPS, format.TBR, format.ABR, format.ASR, format.AudioChannels,
 	} {
 		value, ok := parseYouTubeMetadataNumber(number)
 		if !ok || value < 0 {
 			return false
 		}
+	}
+	// Quality only ranks formats. yt-dlp uses negative values for unknown or
+	// lower-priority quality, so retain any finite value and let it rank below
+	// ordinary nonnegative values instead of discarding an otherwise valid URL.
+	if _, ok := parseYouTubeMetadataNumber(format.Quality); !ok {
+		return false
 	}
 	preference, ok := parseYouTubeMetadataNumber(format.LanguagePreference)
 	if !ok || preference < 0 && preference != -1 && preference != -10 {

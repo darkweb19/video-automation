@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -64,6 +65,73 @@ func TestParseYouTubeExtractorOutputAcceptsFullMetadataShape(t *testing.T) {
 	}
 }
 
+func TestParseYouTubeExtractorOutputAllowsMissingAndNegativeRankingMetadata(t *testing.T) {
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(youtubeParserFixture), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	format := metadata["formats"].([]any)[0].(map[string]any)
+	format["fps"] = nil
+	format["quality"] = -1 // yt-dlp's unknown-quality sentinel is ranking metadata.
+	format["tbr"] = nil
+	format["filesize"] = nil
+	delete(format, "filesize_approx")
+
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := parseYouTubeExtractorOutput(encoded, "abcdefghijk")
+	if err != nil {
+		t.Fatalf("parse a safe format with absent/null optional ranking metadata: %v", err)
+	}
+	expectation, err := expectationForYouTubeSelection(selection)
+	if err != nil {
+		t.Fatalf("build expectation for selected format: %v", err)
+	}
+	if expectation.VideoQuality != -1 || !validYouTubeImportExpectation(expectation) {
+		t.Fatalf("negative quality sentinel did not survive safe expectation validation: %+v", expectation)
+	}
+	stored, err := json.Marshal(expectation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored youtubeImportExpectation
+	if err := json.Unmarshal(stored, &restored); err != nil || restored.VideoQuality != -1 || !validYouTubeImportExpectation(restored) {
+		t.Fatalf("stored quality sentinel failed expectation roundtrip: restored=%+v error=%v", restored, err)
+	}
+	invalid := restored
+	invalid.VideoFPS = -1
+	if validYouTubeImportExpectation(invalid) {
+		t.Fatal("negative persisted frame rate was accepted")
+	}
+	invalid = restored
+	invalid.VideoTBR = -1
+	if validYouTubeImportExpectation(invalid) {
+		t.Fatal("negative persisted bitrate was accepted")
+	}
+	invalid = restored
+	invalid.VideoQuality = math.NaN()
+	if validYouTubeImportExpectation(invalid) {
+		t.Fatal("non-finite persisted quality was accepted")
+	}
+}
+
+func TestParseYouTubeExtractorOutputAcceptsCompletedLiveArchive(t *testing.T) {
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(youtubeParserFixture), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	metadata["live_status"] = "was_live"
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseYouTubeExtractorOutput(encoded, "abcdefghijk"); err != nil {
+		t.Fatalf("a completed archive with bounded duration and safe direct media was rejected: %v", err)
+	}
+}
+
 func TestParseYouTubeExtractorOutputHandlesMixedDirectAndManifestHasDRMMaybe(t *testing.T) {
 	var metadata map[string]any
 	if err := json.Unmarshal([]byte(youtubeParserFixture), &metadata); err != nil {
@@ -111,6 +179,8 @@ func TestParseYouTubeExtractorOutputRejectsUnsafeAndUnsupportedMetadata(t *testi
 		{name: "playlist object", edit: func(value map[string]any) { value["_type"] = "playlist"; value["entries"] = []any{} }, code: "youtube_format_unavailable"},
 		{name: "live flag", edit: func(value map[string]any) { value["is_live"] = true }, code: "youtube_format_unavailable"},
 		{name: "upcoming status", edit: func(value map[string]any) { value["live_status"] = "is_upcoming" }, code: "youtube_format_unavailable"},
+		{name: "post-live processing status", edit: func(value map[string]any) { value["live_status"] = "post_live" }, code: "youtube_format_unavailable"},
+		{name: "unknown live status", edit: func(value map[string]any) { value["live_status"] = "future_status" }, code: "youtube_format_unavailable"},
 		{name: "restricted availability", edit: func(value map[string]any) { value["availability"] = "needs_auth" }, code: "youtube_video_unavailable"},
 		{name: "unknown availability", edit: func(value map[string]any) { value["availability"] = "unrecognized_state" }, code: "youtube_format_unavailable"},
 		{name: "missing duration", edit: func(value map[string]any) { delete(value, "duration") }, code: "youtube_format_unavailable"},
@@ -413,12 +483,12 @@ func TestYouTubeProxyClosesActiveTunnelOnCancellation(t *testing.T) {
 	upstream := <-upstreamReady
 	cancel()
 	_ = tunnel.SetReadDeadline(time.Now().Add(time.Second))
-	if _, err := reader.ReadByte(); err == nil {
-		t.Fatal("active client tunnel remained open after cancellation")
+	if _, err := reader.ReadByte(); !errors.Is(err, io.EOF) {
+		t.Fatalf("client tunnel did not close with EOF after cancellation: %v", err)
 	}
 	_ = upstream.SetReadDeadline(time.Now().Add(time.Second))
-	if _, err := upstream.Read(make([]byte, 1)); err == nil {
-		t.Fatal("active upstream tunnel remained open after cancellation")
+	if n, err := io.ReadFull(upstream, make([]byte, 1)); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("upstream tunnel did not close with EOF after cancellation: read %d bytes, error %v", n, err)
 	}
 }
 
