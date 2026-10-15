@@ -1110,8 +1110,13 @@ class RemoteDispatchLedger:
             raise WorkerUnavailable("ledger owner returned an invalid claim response")
         return response["claimed"], response["cached"]
 
-    def complete(self, dispatch: StageDispatch, result: dict[str, Any]) -> None:
-        response = self._rpc("complete", {"dispatch": dispatch.as_dict(), "result": result, "now": None})
+    def complete(
+        self,
+        dispatch: StageDispatch,
+        result: dict[str, Any],
+        now: int | None = None,
+    ) -> None:
+        response = self._rpc("complete", {"dispatch": dispatch.as_dict(), "result": result, "now": now})
         if not isinstance(response, Mapping) or dict(response) != {"completed": True}:
             raise WorkerUnavailable("ledger owner did not confirm result completion")
 
@@ -1581,9 +1586,24 @@ def _install_modal_app() -> Any:
     gpu_image = _add_worker_source_files(
         modal.Image.from_registry(GPU_CUDA_IMAGE, add_python="3.11")
         .entrypoint([])
-        .apt_install("ffmpeg")
+        .apt_install("ffmpeg", "rustc", "cargo")
         .pip_install(*CLIPPING_IMAGE_PACKAGES)
-        .env({"FRAMEVAULT_WHISPER_DEVICE": "cuda", "FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR})
+        # Bake the Rust source into the image before compiling. No network crates.
+        .add_local_dir(
+            str(Path(__file__).resolve().parent / "scene-analyzer"),
+            remote_path="/build/framevault-scene-analyzer",
+            copy=True,
+        )
+        .run_commands(
+            "cd /build/framevault-scene-analyzer && cargo build --offline --release",
+            "install -m 0755 /build/framevault-scene-analyzer/target/release/framevault-scene-analyzer /usr/local/bin/framevault-scene-analyzer",
+        )
+        .env({
+            "FRAMEVAULT_WHISPER_DEVICE": "cuda",
+            "FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR,
+            "FRAMEVAULT_SCENE_ENGINE": "rust",
+            "FRAMEVAULT_SCENE_DECODE": "auto",
+        })
     )
     prewarm_image = _add_worker_source_files(
         modal.Image.debian_slim(python_version="3.11").pip_install(
