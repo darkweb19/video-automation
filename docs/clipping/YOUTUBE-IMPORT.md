@@ -29,3 +29,29 @@ python3 tools/clipping/check_youtube_runtime_contract.py
 It checks the pinned package versions and hashes, the Docker runtime contract, and yt-dlp's native selection against a synthetic local InfoJSON fixture. It also serves generated video and audio tracks over a local HTTP server and verifies yt-dlp's actual download, merge/remux, fixed output path, and MP4/audio result with ffprobe. Go's `internal/app` tests use a fake yt-dlp executable with real local FFmpeg/ffprobe media to validate arguments, actual MP4 output, audio checks, size limits, cancellation, cleanup, and atomic Ready publication. These checks require no live YouTube request or paid inference.
 
 Live YouTube verification remains subject to the deployment network policy. In the development environment used for this rebuild, the permitted outbound proxy returned HTTP CONNECT 403 for YouTube, so a live import could not confirm the upstream failure mode. The exact cause of earlier link failures therefore remains unproven; the hermetic checks validate the new importer contract without claiming otherwise.
+
+## Debugging failed live imports (diagnostics branch)
+
+On the **fix/clipper-youtube-import-diagnostics** branch, console logs are emitted at request acceptance, claim/retry, per-stage transitions, yt-dlp startup/exit, progress approximately every 30 seconds, media probe, and staging. Logs include the source ID as a correlation key and fixed machine-readable reason/category strings. They never print the submitted YouTube URL, signed media URLs, extractor text, titles, or tokens.
+
+1. Deploy this branch to the same runtime and persistent data volume as the failing service; a different environment may not reproduce the failure. On Railway open the service's **Deploy Logs**. With Docker Compose use `docker compose logs -f video-automation`.
+2. Open your dashboard in a browser, open **Developer Tools → Console**, import one public video that you have permission to process, and filter for `[clipper/youtube-import]`. Copy the `source_id` from the accepted-request message.
+3. Filter server logs by that ID or `clipping youtube` / `clipping import`. Find `import queued`, `import claimed`, the lifecycle `stage` events, `downloader started`, `downloader exited`, and finally a `source_ready` or failed/retrying stage.
+4. A request that fails **before** `import queued` is an HTTP, authorization, input-validation, encryption, or source-storage failure. If queued but never claimed, confirm the application processor started (`clipping import worker started`) and inspect queue or database access. If claimed but no downloader start, inspect runtime availability, workspace/storage reservation, or source URL decryption. If the downloader exits nonzero, read its `exit_code` and `stderr_category`. If it exits zero but import fails, inspect output-marker, probe, size, or publication diagnostics.
+
+Common sanitized `stderr_category` values:
+
+| Category | Primary investigation |
+| --- | --- |
+| `proxy_failure` | Outbound proxy / HTTP CONNECT policy, DNS, or egress restrictions |
+| `upstream_http_403` / `upstream_http_401` | YouTube or media-CDN access rejection |
+| `upstream_rate_limited` | Rate limiting from the deployment IP |
+| `bot_challenge` | YouTube anti-automation challenge in that environment |
+| `private_video`, `age_restricted`, `geo_blocked` | Video access or region requirements |
+| `format_unavailable` | Unsupported or missing original video/audio format |
+| `certificate_failure`, `network_timeout` | TLS or transport problem |
+| `no_stderr` / `unclassified_extractor_error` | No recognizable safe category; use exit code and stage trace for next diagnosis |
+
+Categories are heuristics for investigation, not proof of root cause. They intentionally do not expose raw stderr. The status remains retriable/permanent according to the original importer behavior; instrumentation alone does not enable arbitrary URLs, cookies, proxy bypass, or unsupported media.
+
+For tests, run `go test ./internal/app` (requires the repository's Go toolchain, ffmpeg, and ffprobe) and `python3 tools/clipping/check_youtube_runtime_contract.py` in a supported runtime. No live download is performed by those hermetic checks. Live YouTube imports must be exercised separately within the deployment environment.
