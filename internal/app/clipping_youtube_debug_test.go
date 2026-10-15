@@ -34,6 +34,7 @@ func TestYouTubeDiagnosticStderrSafeFixedCategories(t *testing.T) {
 		{"empty", "", "no_stderr"},
 		{"signed URL", "ERROR: https://media.example/v?sig=SUPER_SECRET HTTP Error 403: Forbidden", "upstream_http_403"},
 		{"proxy", "ERROR: Tunnel connection failed: 403 Forbidden", "proxy_failure"},
+		{"proxy HTTP CONNECT", "Proxy returned HTTP CONNECT 403", "proxy_failure"},
 		{"rate limit", "HTTP Error 429: Too Many Requests", "upstream_rate_limited"},
 		{"bot", "Sign in to confirm you're not a bot", "bot_challenge"},
 		{"geo block", "This video is not available in your country", "geo_blocked"},
