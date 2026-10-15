@@ -1596,6 +1596,11 @@ class ClippingM3WorkerTests(unittest.TestCase):
                         "_add_worker_source_files",
                         side_effect=lambda image: image,
                     ),
+                    patch.object(
+                        worker_module,
+                        "_add_rust_scene_image",
+                        side_effect=lambda image: image,
+                    ),
                 ):
                     deployed_app = worker_module._install_modal_app()
 
