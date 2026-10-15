@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import importlib.metadata
 import json
+import logging
 import math
 import os
 import platform
@@ -752,7 +753,7 @@ def analyze_source(
         },
         "visual_events": visual_events,
         "visual_scan": {
-            "algorithm_version": VISUAL_ALGORITHM_VERSION,
+            "algorithm_version": str(visual_scan.get("algorithm_version", VISUAL_ALGORITHM_VERSION)),
             "covered_duration_ms": min(source_duration_ms, _safe_int(visual_scan.get("covered_duration_ms"), source_duration_ms)),
         },
         "analysis_versions": {
@@ -763,9 +764,9 @@ def analyze_source(
             ),
             "model": model_name if use_default_transcriber else ("injected-transcriber" if has_audio_stream else "not-used-no-audio-stream"),
             "audio_events": str(audio_scan.get("algorithm_version", AUDIO_ALGORITHM_VERSION)),
-            "visual_events": VISUAL_ALGORITHM_VERSION,
+            "visual_events": str(visual_scan.get("algorithm_version", VISUAL_ALGORITHM_VERSION)),
             "context_timeline": CONTEXT_ALGORITHM_VERSION,
-            "candidate_inspection": CANDIDATE_INSPECTION_ALGORITHM_VERSION,
+            "candidate_inspection": RUST_DENSE_ALGORITHM_VERSION if _rust_scene_enabled() and candidate_inspector is None else CANDIDATE_INSPECTION_ALGORITHM_VERSION,
             "pipeline_revision": pipeline_revision,
             "audio_available": str(has_audio_stream).lower(),
             "prompt_version": "none-extractive-no-llm-v1",
@@ -1164,6 +1165,11 @@ def inspect_candidate_window(
 
     if start_ms < 0 or end_ms <= start_ms:
         raise AnalysisError("candidate inspection window is invalid")
+    if _rust_scene_enabled():
+        return _rust_scene_analysis(
+            media_path, source_duration_ms=end_ms, start_ms=start_ms,
+            end_ms=end_ms, mode="dense", cancel_check=cancel_check,
+        )
     frame_bytes = _DENSE_VISUAL_WIDTH * _DENSE_VISUAL_HEIGHT
     command = [
         ffmpeg,
@@ -1507,6 +1513,113 @@ def _append_pulse_pattern(events: list[dict[str, Any]], group: list[dict[str, An
     })
 
 
+
+RUST_SCENE_ENGINE_VERSION = "rust-scene-v1-gray-histogram-motion"
+RUST_DENSE_ALGORITHM_VERSION = "rust-scene-dense-v1"
+RUST_SCENE_OUTPUT_LIMIT = 512 * 1024
+
+
+def _rust_scene_enabled() -> bool:
+    """Opt-in locally, enabled explicitly in the deployed Modal GPU image."""
+    return os.environ.get("FRAMEVAULT_SCENE_ENGINE", "python").lower() == "rust"
+
+
+def _rust_scene_analysis(
+    media_path: str | Path,
+    *,
+    source_duration_ms: int,
+    start_ms: int,
+    end_ms: int,
+    mode: str,
+    cancel_check: Callable[[], None],
+) -> dict[str, Any]:
+    """Run the model-free Rust/FFmpeg analyzer with live lease cancellation.
+
+    JSON is a bounded internal protocol. Rust and FFmpeg are terminated as one
+    process group if the lease expires or the output violates its constraints.
+    """
+    executable = os.environ.get("FRAMEVAULT_SCENE_BINARY", "/usr/local/bin/framevault-scene-analyzer")
+    if not Path(executable).is_file():
+        raise AnalysisError("Rust scene analyzer executable is unavailable")
+    decode = os.environ.get("FRAMEVAULT_SCENE_DECODE", "auto")
+    if decode not in {"auto", "software", "cuda"}:
+        raise AnalysisError("Rust decoder configuration is invalid")
+    command = [
+        executable, "--input", str(media_path),
+        "--duration-ms", str(source_duration_ms),
+        "--start-ms", str(start_ms),
+        "--end-ms", str(end_ms),
+        "--mode", mode,
+        "--decode", decode,
+    ]
+    cancel_check()
+    process = subprocess.Popen(
+        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    output = bytearray()
+    try:
+        while True:
+            cancel_check()
+            if not selector.select(0.25):
+                continue
+            block = os.read(process.stdout.fileno(), 8192)
+            if not block:
+                break
+            if len(output) + len(block) > RUST_SCENE_OUTPUT_LIMIT:
+                raise AnalysisError("Rust scene analyzer result exceeds its bound")
+            output.extend(block)
+        cancel_check()
+        if process.wait() != 0:
+            raise AnalysisError("Rust scene analyzer failed")
+        try:
+            result = json.loads(output)
+        except (ValueError, UnicodeError) as error:
+            raise AnalysisError("Rust scene analyzer returned invalid JSON") from error
+        if not isinstance(result, dict) or result.get("engine") != "rust-scene-v1":
+            raise AnalysisError("Rust scene analyzer returned an unsupported version")
+        if result.get("decoder") not in ("cuda", "software"):
+            raise AnalysisError("Rust scene decoder provenance is invalid")
+        if mode == "full":
+            if result.get("covered_duration_ms") != source_duration_ms:
+                raise AnalysisError("Rust scene coverage does not match the source")
+            events = _bounded_events(result.get("events"), source_duration_ms, MAX_VISUAL_EVENTS)
+            if any(item["kind"] not in ("scene_change", "motion_change") for item in events):
+                raise AnalysisError("Rust scene analyzer returned an unsupported event")
+            result["events"] = events
+        else:
+            frames = result.get("sampled_frames")
+            if (
+                result.get("sample_rate_hz") != _DENSE_VISUAL_SAMPLE_RATE_HZ
+                or isinstance(frames, bool)
+                or not isinstance(frames, int)
+                or not 0 <= frames <= MAX_CANDIDATE_INSPECTION_FRAMES
+                or not isinstance(result.get("visual_events"), list)
+            ):
+                raise AnalysisError("Rust dense scene sampling metadata is invalid")
+            result["visual_events"] = _validate_dense_events(result["visual_events"], source_duration_ms)
+            for event in result["visual_events"]:
+                if event["start_ms"] < start_ms or event["end_ms"] > end_ms:
+                    raise AnalysisError("Rust dense scene event is outside the requested window")
+        logging.getLogger("framevault.clipping").info(
+            "clipping_rust_scene_finished mode=%s decoder=%s events=%d",
+            mode, result["decoder"],
+            len(result["events"] if mode == "full" else result["visual_events"]),
+        )
+        return result
+    except Exception:
+        _kill_process_group(process)
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        if process.poll() is None:
+            process.wait()
+
+
 def scan_visual_events(
     media_path: str | Path,
     duration_ms: int,
@@ -1515,6 +1628,15 @@ def scan_visual_events(
     ffmpeg: str = "ffmpeg",
 ) -> dict[str, Any]:
     """Scan all frames for cuts and low-resolution frame-to-frame motion."""
+
+    if _rust_scene_enabled():
+        return {
+            **_rust_scene_analysis(
+                media_path, source_duration_ms=duration_ms, start_ms=0,
+                end_ms=duration_ms, mode="full", cancel_check=cancel_check,
+            ),
+            "algorithm_version": RUST_SCENE_ENGINE_VERSION,
+        }
 
     events = _scan_scene_changes(media_path, duration_ms, cancel_check=cancel_check, ffmpeg=ffmpeg)
     events.extend(_scan_motion(media_path, duration_ms, cancel_check=cancel_check, ffmpeg=ffmpeg))
