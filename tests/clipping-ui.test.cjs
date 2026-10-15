@@ -1,70 +1,66 @@
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const { test } = require('node:test');
-const pure = require('../internal/webui/static/clipping.js');
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const { test } = require("node:test");
+const pure = require("../internal/webui/static/clipping.js");
 
-const staticDir = path.join(__dirname, '..', 'internal', 'webui', 'static');
-const markup = fs.readFileSync(path.join(staticDir, 'index.html'), 'utf8');
-const source = fs.readFileSync(path.join(staticDir, 'clipping.js'), 'utf8');
-const dashboardSource = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
+const staticDir = path.join(__dirname, "..", "internal", "webui", "static");
+const markup = fs.readFileSync(path.join(staticDir, "index.html"), "utf8");
+const source = fs.readFileSync(path.join(staticDir, "clipping.js"), "utf8");
+const styles = fs.readFileSync(path.join(staticDir, "clipping.css"), "utf8");
+const dashboardSource = fs.readFileSync(path.join(staticDir, "app.js"), "utf8");
 
 class Element {
-  get value() { return this._value || ''; }
-  set value(value) {
-    const next = String(value ?? '');
-    if (this.type === 'file' && next !== '') {
-      const error = new Error('File input values can only be cleared programmatically.');
-      error.name = 'InvalidStateError';
-      throw error;
-    }
-    this._value = next;
-    if (this.type === 'file' && this._value === '') this.files = [];
-  }
-
-  constructor(tag = 'div', id = '') {
-    this.tagName = tag.toLowerCase();
-    this.id = id;
+  constructor(tag, id, attributes) {
+    this.tagName = String(tag || "div").toLowerCase();
+    this.id = id || "";
     this.children = [];
     this.listeners = new Map();
     this.attributes = new Map();
-    this.style = {};
     this.dataset = {};
-    this.className = '';
+    this.style = {};
+    this.className = "";
+    this.parent = null;
+    this.parentElement = null;
+    this.disabled = false;
+    this.checked = false;
+    this.hidden = false;
     this.open = false;
+    this.type = "";
+    this.files = [];
+    this._textContent = "";
+    this.value = "";
+    this.defaultValue = "";
     this.classList = {
       contains: (name) => this.className.split(/\s+/).filter(Boolean).includes(name),
       add: (name) => this.classList.toggle(name, true),
       remove: (name) => this.classList.toggle(name, false),
       toggle: (name, enabled) => {
         const names = new Set(this.className.split(/\s+/).filter(Boolean));
-        enabled ??= !names.has(name);
+        enabled = enabled === undefined ? !names.has(name) : enabled;
         if (enabled) names.add(name);
         else names.delete(name);
-        this.className = [...names].join(' ');
+        this.className = Array.from(names).join(" ");
         return enabled;
       }
     };
-    this.value = '';
-    this.textContent = '';
-    this.hidden = false;
-    this.disabled = false;
-    this.checked = false;
-    this.files = [];
-    this.type = '';
-    this.href = '';
-    this.clicked = false;
-    this.defaultValue = this.value;
+    for (const [name, value] of Object.entries(attributes || {})) this.setAttribute(name, value);
+  }
+  get textContent() { return this._textContent; }
+  set textContent(value) {
+    this._textContent = String(value === undefined || value === null ? "" : value);
+    this.children = [];
   }
   append(...nodes) {
     for (const node of nodes) {
-      if (node.tagName === '#fragment') {
+      if (node.tagName === "#fragment") {
         this.append(...node.children);
         node.children = [];
         continue;
       }
       node.parent = this;
+      node.parentElement = this;
       this.children.push(node);
     }
   }
@@ -73,1871 +69,422 @@ class Element {
     this.append(...nodes);
   }
   addEventListener(name, callback) {
-    const listeners = this.listeners.get(name) || [];
-    listeners.push(callback);
-    this.listeners.set(name, listeners);
+    const list = this.listeners.get(name) || [];
+    list.push(callback);
+    this.listeners.set(name, list);
   }
-  emit(name, event = {}) {
-    const value = { preventDefault() {}, ...event };
+  emit(name, event) {
+    const value = Object.assign({ preventDefault() {} }, event || {});
     return (this.listeners.get(name) || []).map((callback) => callback(value));
   }
-  setAttribute(name, value) { this.attributes.set(name, String(value)); }
-  querySelector(selector) {
-    if (selector === '.field small') return null;
-    return null;
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+    if (name.startsWith("data-")) {
+      const key = name.slice(5).replace(/-([a-z])/g, (_match, char) => char.toUpperCase());
+      this.dataset[key] = String(value);
+    }
   }
+  removeAttribute(name) {
+    this.attributes.delete(name);
+    if (name.startsWith("data-")) delete this.dataset[name.slice(5).replace(/-([a-z])/g, (_m, c) => c.toUpperCase())];
+  }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  reset() {
+    const resetNode = (node) => {
+      if (["input", "textarea", "select"].includes(node.tagName)) {
+        node.value = node.defaultValue;
+        node.checked = node.defaultChecked;
+      }
+      for (const child of node.children) resetNode(child);
+    };
+    resetNode(this);
+  }
+  focus() { if (this.disabled) return; this.focused = true; this.ownerDocument.activeElement = this; }
+  click() { this.emit("click"); }
   querySelectorAll(selector) {
-    const all = [];
+    const matches = [];
     const visit = (node) => {
       for (const child of node.children) {
-        if (selector === 'button' && child.tagName === 'button') all.push(child);
+        if (selector === "button" && child.tagName === "button") matches.push(child);
         visit(child);
       }
     };
     visit(this);
-    return all;
+    return matches;
   }
-  closest(selector) {
-    let node = this;
-    const tag = selector.toLowerCase();
-    while (node) {
-      if (node.tagName === tag) return node;
-      node = node.parent;
-    }
-    return null;
+}
+
+function parseAttributes(raw) {
+  const attributes = {};
+  for (const match of raw.matchAll(/([a-zA-Z_:][a-zA-Z0-9_:.-]*)(?:="([^"]*)")?/g)) {
+    attributes[match[1]] = match[2] === undefined ? "" : match[2];
   }
-  reset() { this.onReset?.(); }
-  click() { this.clicked = true; this.emit('click'); }
-  focus() { this.focused = true; }
-}
-
-function createUI(request) {
-  const logs = [];
-  const elements = new Map([...markup.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*\bid="([^"]+)"[^>]*)>/gi)]
-    .map((match) => {
-      const node = new Element(match[1], match[3]);
-      const value = match[2].match(/\bvalue="([^"]*)"/);
-      if (value) node.value = value[1];
-      const className = match[2].match(/\bclass="([^"]*)"/);
-      if (className) node.className = className[1];
-      node.type = match[2].match(/\btype="([^"]*)"/)?.[1] || '';
-      node.accept = match[2].match(/\baccept="([^"]*)"/)?.[1] || '';
-      node.multiple = /\bmultiple(?:\s|$)/.test(match[2]);
-      node.hidden = /\bhidden(?:\s|$)/.test(match[2]);
-      node.disabled = /\bdisabled(?:\s|$)/.test(match[2]);
-      return [match[3], node];
-    }));
-  const document = {
-    activeElement: null,
-    getElementById: (id) => elements.get(id) || null,
-    createElement: (tag) => {
-      const node = new Element(tag);
-      node.focus = () => { node.focused = true; document.activeElement = node; };
-      return node;
-    },
-    createDocumentFragment: () => new Element('#fragment')
-  };
-  for (const node of elements.values()) {
-    node.focus = () => { node.focused = true; document.activeElement = node; };
-  }
-  const window = {
-    document,
-    location: { origin: 'http://localhost' },
-    confirm: () => true,
-    console: { log(...values) { logs.push(values); } }
-  };
-  elements.get('clipping-link-form').onReset = () => {
-    elements.get('clipping-link').value = '';
-    elements.get('clipping-link-permission-check').checked = false;
-  };
-  const context = vm.createContext({
-    window,
-    document,
-    URL,
-    TextEncoder,
-    AbortController,
-    module: undefined
-  });
-  vm.runInContext(source, context, { filename: 'static/clipping.js' });
-  window.ClippingUI.configure({ request });
-  return { api: window.ClippingUI, elements, logs, document };
-}
-
-function treeText(node) {
-  return [node.textContent, ...node.children.flatMap(treeText)].filter(Boolean).join('\n');
-}
-
-function traceText(logs) {
-  return logs.flat().join('\n');
-}
-
-function treeTags(node) {
-  return [node.tagName, ...node.children.flatMap(treeTags)];
+  return attributes;
 }
 
 function findNode(node, predicate) {
   if (predicate(node)) return node;
-  for (const child of node.children) {
+  for (const child of node.children || []) {
     const found = findNode(child, predicate);
     if (found) return found;
   }
   return null;
 }
 
-class StudioElement {
-  constructor(tag, attributes = {}) {
-    this.tagName = tag.toLowerCase();
-    this.attributes = new Map(Object.entries(attributes));
-    this.id = attributes.id || '';
-    this.className = attributes.class || '';
-    this.dataset = {};
-    Object.entries(attributes).forEach(([key, value]) => {
-      if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase())] = value;
-    });
-    this.listeners = new Map();
-    this.textContent = '';
-    this.value = attributes.value || '';
-    this.hidden = Object.hasOwn(attributes, 'hidden');
-    this.disabled = false;
-    this.style = {};
-    this.classList = {
-      contains: (name) => this.className.split(/\s+/).filter(Boolean).includes(name),
-      toggle: (name, enabled) => {
-        const names = new Set(this.className.split(/\s+/).filter(Boolean));
-        enabled ??= !names.has(name);
-        if (enabled) names.add(name);
-        else names.delete(name);
-        this.className = [...names].join(' ');
-        return enabled;
-      },
-      add: (name) => this.classList.toggle(name, true),
-      remove: (name) => this.classList.toggle(name, false)
-    };
-  }
-  addEventListener(name, callback) {
-    const listeners = this.listeners.get(name) || [];
-    listeners.push(callback);
-    this.listeners.set(name, listeners);
-  }
-  emit(name, event = {}) {
-    return (this.listeners.get(name) || []).map((callback) => callback({ preventDefault() {}, ...event }));
-  }
-  setAttribute(name, value) { this.attributes.set(name, String(value)); }
-  getAttribute(name) { return this.attributes.get(name) ?? null; }
-  removeAttribute(name) { this.attributes.delete(name); }
-  toggleAttribute(name, enabled) { if (enabled) this.setAttribute(name, ''); else this.removeAttribute(name); }
-  contains(node) { return node === this; }
-  focus() { this.focused = true; }
+function findNodes(node, predicate, output) {
+  output = output || [];
+  if (predicate(node)) output.push(node);
+  for (const child of node.children || []) findNodes(child, predicate, output);
+  return output;
 }
 
-function studioMarkupAttributes(fragment) {
-  const attributes = {};
-  for (const match of fragment.matchAll(/([a-zA-Z_:][a-zA-Z0-9_:.-]*)(?:="([^"]*)")?/g)) {
-    attributes[match[1]] = match[2] ?? '';
-  }
-  return attributes;
+function treeText(node) {
+  return [node._textContent || "", ...(node.children || []).map(treeText)].filter(Boolean).join("\n");
 }
 
-function createDashboardNavigation() {
-  const byID = new Map();
-  for (const match of markup.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*\bid="([^"]+)"[^>]*)>/gi)) {
-    byID.set(match[3], new StudioElement(match[1], studioMarkupAttributes(match[2])));
-  }
-  const views = [...markup.matchAll(/<section\b([^>]*\bdata-page="([^"]+)"[^>]*)>/gi)]
-    .map((match) => new StudioElement('section', studioMarkupAttributes(match[1])));
-  const navItems = [...markup.matchAll(/<button\b([^>]*\bdata-view="([^"]+)"[^>]*)>/gi)]
-    .map((match) => new StudioElement('button', studioMarkupAttributes(match[1])));
-  const modeOptions = [...markup.matchAll(/<button\b([^>]*\bclass="[^"]*mode-option[^"]*"[^>]*)>/gi)]
-    .map((match) => new StudioElement('button', studioMarkupAttributes(match[1])));
-  const createButtons = [...markup.matchAll(/<button\b([^>]*\bdata-create-mode="([^"]+)"[^>]*)>/gi)]
-    .map((match) => new StudioElement('button', studioMarkupAttributes(match[1])));
-  const goButtons = [...markup.matchAll(/<button\b([^>]*\bdata-go="([^"]+)"[^>]*)>/gi)]
-    .map((match) => new StudioElement('button', studioMarkupAttributes(match[1])));
-  const sidebar = byID.get('workspace-navigation');
+function createUI(handler) {
+  const elements = new Map();
   const document = {
-    title: '',
     activeElement: null,
-    querySelector(selector) {
-      if (selector.startsWith('#')) return byID.get(selector.slice(1)) || null;
-      if (selector === '.sidebar') return sidebar;
-      if (selector === '.view.active') return views.find((view) => view.classList.contains('active')) || null;
-      if (selector.includes('.nav-item[')) return navItems.find((item) => item.getAttribute('aria-current') === 'page' && !item.disabled) || null;
-      if (selector === '.nav-item:not(:disabled)') return navItems.find((item) => !item.disabled) || null;
-      return null;
+    getElementById(id) { return elements.get(id) || null; },
+    createElement(tag) {
+      const node = new Element(tag);
+      node.ownerDocument = document;
+      return node;
     },
-    querySelectorAll(selector) {
-      if (selector === '.view') return views;
-      if (selector === '.nav-item') return navItems;
-      if (selector === '.mode-option') return modeOptions;
-      if (selector === '[data-create-mode]') return createButtons;
-      if (selector === '[data-go]') return goButtons;
-      return [];
-    },
-    createElement: (tag) => new StudioElement(tag),
-    addEventListener() {}
+    createDocumentFragment() {
+      const node = new Element("#fragment");
+      node.ownerDocument = document;
+      return node;
+    }
   };
-  class EventSourceStub {
-    constructor(url, options) {
-      this.url = url;
-      this.options = options;
-      this.readyState = 0;
-      this.listeners = new Map();
-      EventSourceStub.instances.push(this);
+  const idPattern = /<([a-z][a-z0-9-]*)\b([^>]*\bid="([^"]+)"[^>]*)>/gi;
+  for (const match of markup.matchAll(idPattern)) {
+    const attributes = parseAttributes(match[2]);
+    const node = new Element(match[1], match[3], attributes);
+    node.ownerDocument = document;
+    node.type = attributes.type || "";
+    node.value = attributes.value || "";
+    node.defaultValue = node.value;
+    node.checked = Object.hasOwn(attributes, "checked");
+    node.defaultChecked = node.checked;
+    node.disabled = Object.hasOwn(attributes, "disabled");
+    node.hidden = Object.hasOwn(attributes, "hidden");
+    node.open = Object.hasOwn(attributes, "open");
+    for (const [name, value] of Object.entries(attributes)) {
+      if (name.startsWith("data-")) node.dataset[name.slice(5).replace(/-([a-z])/g, (_m, c) => c.toUpperCase())] = value;
     }
-    addEventListener(name, callback) {
-      const callbacks = this.listeners.get(name) || [];
-      callbacks.push(callback);
-      this.listeners.set(name, callbacks);
-    }
-    emit(name, event = {}) {
-      if (name === 'open') this.readyState = 1;
-      (this.listeners.get(name) || []).forEach((callback) => callback(event));
-    }
-    close() { this.readyState = 2; }
+    elements.set(match[3], node);
   }
-  EventSourceStub.instances = [];
-  const clipping = {
-    configuredRequest: null,
-    refreshCount: 0,
-    events: [],
-    configure(options) { this.configuredRequest = options.request; },
-    refresh() { this.refreshCount++; },
-    handleEvent(kind, event) { this.events.push({ kind, data: event.data }); },
-    stop() {},
-    start() {}
+  const requests = [];
+  const request = async (endpoint, options) => {
+    const call = { endpoint, options: options || {} };
+    requests.push(call);
+    if (handler) return handler(endpoint, options || {}, requests);
+    return {};
   };
   const window = {
     document,
-    ClippingUI: clipping,
-    EventSource: EventSourceStub,
-    location: { href: 'http://localhost/' },
-    history: { replaceState() {} },
-    navigator: { onLine: true },
-    matchMedia: () => ({ matches: false }),
-    requestAnimationFrame: (callback) => callback(),
-    scrollTo() {},
-    addEventListener() {},
-    setTimeout: () => 1,
-    clearTimeout() {}
+    location: { origin: "http://localhost" },
+    console: { log() {} }
   };
-  const context = vm.createContext({
-    document,
-    window,
-    URL,
-    URLSearchParams,
-    TextEncoder,
-    Blob,
-    AbortController,
-    Event,
-    fetch: () => Promise.reject(new Error('Unexpected fetch in navigation test'))
-  });
-  const instrumented = dashboardSource.replace('  bootstrap();', `
-    refreshJobState = () => Promise.resolve();
-    globalThis.__dashboard = { bindEvents, state, elements, startJobEventStream };
-  `);
-  assert.notEqual(instrumented, dashboardSource, 'dashboard test instrumentation must match');
-  vm.runInContext(instrumented, context, { filename: 'static/app.js' });
-  return { ...context.__dashboard, navItems, views, clipping, EventSourceStub, document };
+  const context = vm.createContext({ window, document, URL, AbortController, module: undefined });
+  vm.runInContext(source, context, { filename: "static/clipping.js" });
+  window.ClippingUI.configure({ request });
+  return { api: window.ClippingUI, document, elements, requests, request };
 }
 
-test('budget values become exact integer microUSD and reject invalid decimals', () => {
-  assert.equal(pure.parseUSDToMicroUSD('1'), 1_000_000);
-  assert.equal(pure.parseUSDToMicroUSD('0.01'), 10_000);
-  assert.equal(pure.parseUSDToMicroUSD('12.345678'), 12_345_678);
-  assert.equal(pure.parseBudgetUSD('4.00', 4_000_000), 4_000_000);
-  assert.equal(pure.parseBudgetUSD('4.01', 4_000_000), null);
-  assert.equal(pure.parseUSDToMicroUSD('0'), null);
-  assert.equal(pure.parseUSDToMicroUSD('1.0000001'), null);
-  assert.equal(pure.parseUSDToMicroUSD('-1'), null);
-  assert.equal(pure.parseUSDToMicroUSD('1e2'), null);
-  assert.equal(pure.formatUSD(1_000_000), '$1.00');
-});
-
-test('resumable upload ranges honor the configured limit and never exceed 16 MiB', () => {
-  const maxChunk = 16 * 1024 * 1024;
-  assert.equal(pure.uploadChunkLimit({ max_upload_chunk_bytes: maxChunk * 2 }), maxChunk);
-  assert.equal(pure.uploadChunkLimit({ max_upload_chunk_bytes: 1024 }), 1024);
-  assert.deepEqual(pure.nextUploadRange(0, maxChunk + 1, { max_upload_chunk_bytes: maxChunk * 2 }), { start: 0, end: maxChunk });
-  assert.deepEqual(pure.nextUploadRange(maxChunk, maxChunk + 1, { max_upload_chunk_bytes: maxChunk }), { start: maxChunk, end: maxChunk + 1 });
-  assert.equal(pure.validResumeOffset(maxChunk, maxChunk + 1), maxChunk);
-  assert.equal(pure.validResumeOffset(maxChunk + 2, maxChunk + 1), null);
-});
-
-test('clipping keeps a concise link and upload intake primary and closes operational settings by default', () => {
-  assert.match(markup, /<h2 id="clipping-heading">Add a video<\/h2>/);
-  assert.match(markup, /<h3 id="clipping-link-heading">Import a link<\/h3>/);
-  assert.match(markup, /<h3 id="clipping-upload-heading">Upload a file<\/h3>/);
-  assert.match(markup, /Private links aren’t supported/);
-  assert.match(markup, /<details class="clipping-link-requirements">[\s\S]*<summary>Link requirements<\/summary>/);
-  assert.match(markup, /id="clipping-drop-zone"[^>]*role="group"/);
-
-  const picker = markup.match(/<input id="clipping-file"([^>]*)>/);
-  assert.ok(picker, 'the native video picker remains in the form');
-  assert.match(picker[1], /type="file"/);
-  assert.match(picker[1], /accept="video\/\*,audio\/\*"/);
-  assert.doesNotMatch(picker[1], /\bmultiple\b|\btabindex=/);
-  assert.doesNotMatch(picker[1], /\brequired\b/, 'drop-selected files are validated by the form handler');
-  assert.match(markup, /<label for="clipping-file">Choose a file<\/label>/);
-  assert.match(markup, /id="clipping-upload-permission" type="checkbox" required/);
-  assert.match(markup, /id="clipping-upload-submit" class="button primary" type="submit" disabled>Upload video/);
-
-  const settings = markup.match(/<details id="clipping-settings-disclosure"([^>]*)>/);
-  assert.ok(settings);
-  assert.doesNotMatch(settings[1], /\bopen\b/);
-  const settingsStart = markup.indexOf(settings[0]);
-  const settingsEnd = markup.indexOf('</details>\n        </section>', settingsStart);
-  assert.ok(settingsEnd > settingsStart, 'More settings contains the advanced controls');
-  const advanced = markup.slice(settingsStart, settingsEnd);
-  for (const id of ['clipping-worker-form', 'clipping-job-budget', 'clipping-batch-budget', 'clipping-create-batch', 'clipping-retention-form']) {
-    assert.ok(advanced.includes(`id="${id}"`), `${id} remains available in More settings`);
-  }
-  for (const id of ['clipping-worker-disclosure', 'clipping-job-settings-disclosure', 'clipping-batch-disclosure', 'clipping-retention-disclosure']) {
-    const disclosure = advanced.match(new RegExp(`<details id="${id}"([^>]*)>`));
-    assert.ok(disclosure, `${id} is a native disclosure`);
-    assert.doesNotMatch(disclosure[1], /\bopen\b/, `${id} starts closed`);
-  }
-  assert.match(markup, /href="\/static\/clipping\.css\?v=20261013-quiet-intake"/);
-  assert.match(markup, /src="\/static\/clipping\.js\?v=20261013-quiet-intake"/);
-});
-
-test('dragged media stays a draft until rights are confirmed and Upload video is submitted', async () => {
-  const requests = [];
-  const file = {
-    name: 'sample.mp4', size: 3, type: 'video/mp4',
-    slice(start, end) { return { size: end - start }; }
-  };
-  const app = createUI(async (route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return { max_source_bytes: 100, default_retention_days: 30 };
-    if (route === '/api/clipping/sources') return [];
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/upload') return { source: { id: 'src_drop', status: 'uploading', upload_offset: 0 } };
-    if (route === '/api/clipping/sources/src_drop/upload') return { source: { upload_offset: 3 } };
-    if (route === '/api/clipping/sources/src_drop/finalize') return { source: { id: 'src_drop', status: 'ready' } };
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const pause = app.elements.get('clipping-upload-cancel');
-  assert.equal(pause.hidden, true, 'Pause is hidden when no upload is active');
-
-  const zone = app.elements.get('clipping-drop-zone');
-  const nonMedia = { name: 'notes.txt', size: 12, type: 'text/plain' };
-  const drop = (files) => {
-    let prevented = false;
-    zone.emit('drop', {
-      dataTransfer: { files, types: ['Files'], dropEffect: 'move' },
-      preventDefault() { prevented = true; }
-    });
-    return prevented;
-  };
-  assert.equal(drop([file, { ...file, name: 'second.mov' }]), true, 'file drops do not trigger browser navigation');
-  assert.match(app.elements.get('clipping-upload-error').textContent, /Drop one audio or video file at a time/);
-  assert.equal(drop([nonMedia]), true);
-  assert.match(app.elements.get('clipping-upload-error').textContent, /Choose one audio or video file/);
-  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/upload'), false, 'invalid drops never start an upload');
-
-  zone.emit('dragenter', { preventDefault() {} });
-  assert.equal(zone.classList.contains('is-dragging'), true);
-  const drag = { dataTransfer: { files: [file], types: ['Files'], dropEffect: 'move' }, preventDefault() {} };
-  zone.emit('dragover', drag);
-  assert.equal(drag.dataTransfer.dropEffect, 'copy');
-  assert.equal(drop([file]), true);
-  assert.equal(zone.classList.contains('is-dragging'), false);
-  assert.equal(app.elements.get('clipping-file-name').textContent, 'Selected file: sample.mp4');
-  assert.equal(app.elements.get('clipping-upload-submit').disabled, true, 'a file alone does not enable upload');
-  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/upload'), false, 'dropping only selects a file');
-
-  app.elements.get('clipping-upload-form').emit('submit');
-  assert.match(app.elements.get('clipping-upload-error').textContent, /Confirm that you own or have permission/);
-  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/upload'), false, 'rights attestation is required');
-  const permission = app.elements.get('clipping-upload-permission');
-  permission.checked = true;
-  permission.emit('change');
-  assert.equal(app.elements.get('clipping-upload-submit').disabled, false);
-  app.elements.get('clipping-upload-form').emit('submit');
-  assert.equal(pause.hidden, false, 'Pause appears as soon as an upload starts');
-  for (let attempt = 0; attempt < 50 && !requests.some((entry) => entry.route === '/api/clipping/sources/src_drop/finalize'); attempt++) {
+async function settle() {
+  for (let index = 0; index < 8; index++) {
+    await Promise.resolve();
     await new Promise((resolve) => setImmediate(resolve));
   }
-  const upload = requests.find((entry) => entry.route === '/api/clipping/sources/upload');
-  assert.ok(upload, 'the explicit submit starts the upload');
-  assert.equal(JSON.parse(upload.options.body).rights_attested, true);
-  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/src_drop/finalize'), true);
-  assert.equal(app.elements.get('clipping-file-name').textContent, 'No file selected.');
-  assert.equal(pause.hidden, true, 'a completed upload hides the obsolete Pause action');
+}
 
-  let outsideDropPrevented = false;
-  app.elements.get('clipping-view').emit('drop', {
-    dataTransfer: { files: [nonMedia], types: ['Files'] },
-    preventDefault() { outsideDropPrevented = true; }
-  });
-  assert.equal(outsideDropPrevented, true, 'dropping files elsewhere in Clipping does not navigate away');
-
-  drop([file]);
-  permission.checked = true;
-  permission.emit('change');
-  app.elements.get('clipping-upload-form').emit('submit');
-  assert.equal(pause.hidden, false, 'starting another upload shows Pause again');
-  for (let attempt = 0; attempt < 50 && requests.filter((entry) => entry.route === '/api/clipping/sources/src_drop/finalize').length < 2; attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/src_drop/finalize').length, 2);
-  assert.equal(pause.hidden, true, 'the next completion hides Pause too');
-});
-
-test('native picker selection preserves the selected file without assigning its protected value', async () => {
-  const app = createUI(async (route) => {
-    if (route === '/api/clipping/config') return { max_source_bytes: 100 };
-    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-
-  const file = { name: 'picked.mp4', size: 3, type: 'video/mp4' };
-  const picker = app.elements.get('clipping-file');
-  picker.files = [file];
-  // Simulate the browser-populated value after a user chooses a native file.
-  picker._value = 'C:\\fakepath\\picked.mp4';
-  picker.emit('change');
-
-  assert.equal(picker.files[0], file, 'the native picker retains its selected file');
-  assert.equal(picker.value, 'C:\\fakepath\\picked.mp4');
-  assert.equal(app.elements.get('clipping-file-name').textContent, 'Selected file: picked.mp4');
-  assert.equal(app.elements.get('clipping-upload-submit').disabled, true, 'rights confirmation remains required');
-});
-
-test('active upload blocks a second file and stop clears the pending drop draft', async () => {
-  let resolveUploadInit;
-  let uploadSignal;
-  const requests = [];
-  const app = createUI((route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return Promise.resolve({ max_source_bytes: 100 });
-    if (route === '/api/clipping/sources') return Promise.resolve([]);
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return Promise.resolve([]);
-    if (route === '/api/clipping/sources/upload') {
-      uploadSignal = options.signal;
-      return new Promise((resolve) => { resolveUploadInit = resolve; });
-    }
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-
-  const zone = app.elements.get('clipping-drop-zone');
-  const first = { name: 'first.mp4', size: 8, type: 'video/mp4', slice() { return { size: 8 }; } };
-  const second = { name: 'second.mov', size: 8, type: 'video/quicktime', slice() { return { size: 8 }; } };
-  const drop = (file) => zone.emit('drop', { dataTransfer: { files: [file], types: ['Files'] } });
-  drop(first);
-  const permission = app.elements.get('clipping-upload-permission');
-  permission.checked = true;
-  permission.emit('change');
-  app.elements.get('clipping-upload-form').emit('submit');
-  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/upload').length, 1);
-  assert.ok(uploadSignal);
-
-  let prevented = false;
-  zone.emit('drop', {
-    dataTransfer: { files: [second], types: ['Files'] },
-    preventDefault() { prevented = true; }
-  });
-  assert.equal(prevented, true);
-  assert.match(app.elements.get('clipping-upload-error').textContent, /An upload is already active/);
-  assert.equal(app.elements.get('clipping-file-name').textContent, 'Selected file: first.mp4');
-  app.elements.get('clipping-upload-form').emit('submit');
-  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/upload').length, 1, 'an active upload cannot be duplicated');
-
-  zone.emit('dragenter', { preventDefault() {} });
-  assert.equal(zone.classList.contains('is-dragging'), true);
-  app.api.stop(true);
-  assert.equal(uploadSignal.aborted, true, 'stopping aborts the active upload request');
-  assert.equal(zone.classList.contains('is-dragging'), false);
-  assert.equal(app.elements.get('clipping-file-name').textContent, 'No file selected.');
-  assert.equal(permission.checked, false);
-  assert.equal(app.elements.get('clipping-upload-submit').disabled, true);
-  drop(second);
-  assert.equal(app.elements.get('clipping-file-name').textContent, 'No file selected.', 'a late drop cannot restore a draft after stop');
-
-  resolveUploadInit({ source: { id: 'src_stopped', upload_offset: 0 } });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(requests.some((entry) => entry.route.endsWith('/upload') && entry.route !== '/api/clipping/sources/upload'), false, 'a stopped lifecycle cannot advance to a media chunk');
-});
-
-test('resume actions stay disabled during an active transfer and return after pause', async () => {
-  let sourceListReads = 0;
-  let chunkSignal;
-  const oldSource = { id: 'src_old', status: 'uploading', original_name: 'old.mp4', declared_size_bytes: 8, upload_offset: 0 };
-  const activeSource = { id: 'src_active', status: 'uploading', original_name: 'first.mp4', declared_size_bytes: 8, upload_offset: 0 };
-  const app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { max_source_bytes: 100 };
-    if (route === '/api/clipping/sources') {
-      sourceListReads++;
-      return sourceListReads === 1 ? [oldSource] : [oldSource, activeSource];
-    }
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/upload') return { source: activeSource };
-    if (route === '/api/clipping/sources/src_active/upload') {
-      chunkSignal = options.signal;
-      return new Promise((_resolve, reject) => {
-        options.signal.addEventListener('abort', () => {
-          const error = new Error('Upload paused');
-          error.name = 'AbortError';
-          reject(error);
-        }, { once: true });
-      });
-    }
-    if (route === '/api/clipping/sources/src_old/upload') throw new Error('Connection interrupted');
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const sources = app.elements.get('clipping-sources');
-  const resumeButtons = () => sources.querySelectorAll('button').filter((button) => button.textContent === 'Resume upload');
-  assert.equal(resumeButtons().length, 1);
-  assert.equal(resumeButtons()[0].disabled, false);
-
-  const file = { name: 'first.mp4', size: 8, type: 'video/mp4', slice() { return { size: 8 }; } };
-  app.elements.get('clipping-drop-zone').emit('drop', { dataTransfer: { files: [file], types: ['Files'] } });
-  const permission = app.elements.get('clipping-upload-permission');
-  permission.checked = true;
-  permission.emit('change');
-  app.elements.get('clipping-upload-form').emit('submit');
-  for (let attempt = 0; attempt < 50 && !chunkSignal; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(chunkSignal, 'the first upload has reached its media transfer');
-  const pause = app.elements.get('clipping-upload-cancel');
-  assert.equal(pause.hidden, false, 'Pause is visible during an active transfer');
-  assert.equal(resumeButtons().length, 2);
-  assert.equal(resumeButtons().every((button) => button.disabled), true, 'all saved uploads are unavailable while one transfer is active');
-
-  pause.emit('click');
-  assert.equal(chunkSignal.aborted, true, 'Pause aborts the active media transfer');
-  assert.equal(pause.hidden, true, 'Pause disappears when the transfer is paused');
-  assert.equal(resumeButtons()[0].disabled, false, 'the saved source can resume as soon as the active transfer is paused');
-  for (let attempt = 0; attempt < 50 && sourceListReads < 3; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(resumeButtons().length, 2);
-  assert.equal(resumeButtons().every((button) => !button.disabled), true, 'refreshed uploading sources expose their Resume controls again');
-
-  resumeButtons()[0].click();
-  const original = { name: oldSource.original_name, size: oldSource.declared_size_bytes, type: 'video/mp4', slice() { return { size: 8 }; } };
-  app.elements.get('clipping-resume-file').files = [original];
-  app.elements.get('clipping-resume-file').emit('change');
-  assert.equal(pause.hidden, false, 'resuming a saved upload shows Pause again');
-  for (let attempt = 0; attempt < 50 && !app.elements.get('clipping-upload-error').textContent; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  assert.match(app.elements.get('clipping-upload-error').textContent, /Connection interrupted/);
-  assert.equal(pause.hidden, true, 'a failed transfer hides Pause once it is idle');
-  for (let attempt = 0; attempt < 50 && sourceListReads < 4; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(resumeButtons().length, 2);
-  assert.equal(resumeButtons().every((button) => !button.disabled), true, 'failed transfers also restore Resume controls for saved uploading sources');
-});
-
-test('source rows show one status and keep metadata, batch controls and removal in Details', async () => {
-  let sources = [{ id: 'src_visible', status: 'ready', original_name: 'ready.mp4', size_bytes: 128, duration_ms: 30_000 }];
-  const app = createUI(async (route) => {
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/sources') return sources;
-    if (route === '/api/clipping/jobs') return [{ id: 'job_visible', source_id: 'src_visible', status: 'running', progress: 0.5, spent_micro_usd: 250_000, budget_micro_usd: 1_000_000 }];
-    if (route === '/api/clipping/batches') return [{ id: 'batch_visible', source_ids: ['src_visible'], status: 'running', spent_micro_usd: 300_000, budget_micro_usd: 1_500_000 }];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  assert.equal(app.elements.get('clipping-work-grid').hidden, true, 'no work is shown before data exists');
-  await app.api.start();
-  assert.equal(app.elements.get('clipping-work-grid').hidden, false);
-  assert.equal(app.elements.get('clipping-sources-panel').hidden, false);
-  assert.equal(app.elements.get('clipping-jobs-section').hidden, false);
-  assert.equal(app.elements.get('clipping-batches-section').hidden, false);
-  assert.match(treeText(app.elements.get('clipping-sources')), /Start analysis/);
-  assert.match(treeText(app.elements.get('clipping-sources')), /Remove/);
-  assert.equal(app.elements.get('clipping-source-summary').textContent, '1 source');
-  const sourceRow = app.elements.get('clipping-sources').children[0];
-  const sourceStatuses = [];
-  const collectStatuses = (node) => {
-    if (node.classList?.contains('clipping-source-status')) sourceStatuses.push(node);
-    node.children.forEach(collectStatuses);
+function defaultHandler(data) {
+  const state = Object.assign({
+    config: { max_source_bytes: 20 * 1024 * 1024 * 1024, max_duration_ms: 4 * 60 * 60 * 1000 },
+    worker: { configured: false, enabled: false, endpoint_host: "", pipeline_revision: "", max_compute_seconds: 43200 },
+    sources: [],
+    jobs: []
+  }, data || {});
+  return async (endpoint) => {
+    if (endpoint === "/api/clipping/config") return state.config;
+    if (endpoint === "/api/clipping/config/worker") return state.worker;
+    if (endpoint === "/api/clipping/sources") return { sources: state.sources };
+    if (endpoint === "/api/clipping/jobs") return { jobs: state.jobs };
+    throw new Error("Unexpected request to " + endpoint);
   };
-  collectStatuses(sourceRow);
-  assert.equal(sourceStatuses.length, 1, 'each source has one visible state label');
-  assert.equal(sourceStatuses[0].textContent, 'Ready for analysis');
-  assert.equal(sourceStatuses[0].dataset.state, 'ready');
-  assert.match(treeText(app.elements.get('clipping-jobs')), /Analysis in progress/);
-  assert.match(treeText(app.elements.get('clipping-batches')), /Analysis in progress/);
+}
 
-  const jobCost = findNode(app.elements.get('clipping-jobs'), (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Cost details');
-  const batchCost = findNode(app.elements.get('clipping-batches'), (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Cost details');
-  assert.ok(jobCost && batchCost);
-  assert.equal(jobCost.open, false);
-  assert.equal(batchCost.open, false);
-  assert.match(treeText(jobCost), /\$0\.25 of \$1\.00/);
-  assert.match(treeText(batchCost), /\$0\.30 of \$1\.50/);
-
-  const sourceDetails = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Details');
-  assert.ok(sourceDetails);
-  assert.equal(sourceDetails.open, false);
-  assert.match(treeText(sourceDetails), /Duration[\s\S]*File size[\s\S]*Add to batch[\s\S]*Content type[\s\S]*Remove/);
-  assert.equal(sourceRow.children[0].children.some((node) => node.classList?.contains('clipping-row-meta')), false,
-    'duration and size are not repeated beside the source status');
-
-  sourceDetails.open = true;
-  sourceDetails.emit('toggle');
-  const profile = findNode(sourceDetails, (node) => node.tagName === 'select');
-  profile.focus();
-  sources = [...sources, { id: 'src_second', status: 'ready', original_name: 'second.mp4' }];
-  app.api.handleEvent('clipping_source', { data: JSON.stringify({ id: 'src_second', source: sources[1] }) });
-  await new Promise((resolve) => setImmediate(resolve));
-  const refreshedRow = app.elements.get('clipping-sources').children.find((node) => node.dataset.sourceId === 'src_visible');
-  const refreshedDetails = findNode(refreshedRow, (node) => node.tagName === 'details' && node.children[0]?.textContent === 'Details');
-  const refreshedProfile = findNode(refreshedDetails, (node) => node.tagName === 'select');
-  assert.equal(refreshedDetails.open, true, 'an SSE source refresh keeps the user-opened disclosure open');
-  assert.equal(app.document.activeElement, refreshedProfile, 'focus stays on the same profile control after the row is rebuilt');
-});
-
-test('source list errors remain visible when the server has no saved sources', async () => {
-  const app = createUI(async (route) => {
-    if (route === '/api/clipping/config') return {};
-    if (route === '/api/clipping/sources') throw new Error('Source list unavailable');
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  assert.equal(app.elements.get('clipping-work-grid').hidden, false);
-  assert.equal(app.elements.get('clipping-sources-panel').hidden, false);
-  assert.match(app.elements.get('clipping-sources-error').textContent, /Source list unavailable/);
-  assert.equal(app.elements.get('clipping-jobs-panel').hidden, true);
-});
-
-test('invalid advanced controls open their closed disclosures before focus moves', async () => {
-  const app = createUI(async (route) => {
-    if (route === '/api/clipping/config') return {};
-    if (route === '/api/clipping/sources') return [{ id: 'src_focus', status: 'ready', original_name: 'focus.mp4' }];
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-
-  const startAnalysis = app.elements.get('clipping-sources').querySelectorAll('button').find((button) => button.textContent === 'Start analysis');
-  const settings = app.elements.get('clipping-settings-disclosure');
-  const jobOptions = app.elements.get('clipping-job-settings-disclosure');
-  app.elements.get('clipping-job-budget').value = '0';
-  startAnalysis.click();
-  assert.equal(settings.open, true);
-  assert.equal(jobOptions.open, true);
-  assert.equal(app.elements.get('clipping-job-budget').focused, true);
-  assert.match(app.elements.get('clipping-sources-error').textContent, /per-job budget/);
-
-  settings.open = false;
-  jobOptions.open = false;
-  app.elements.get('clipping-job-budget').value = '1.00';
-  app.elements.get('clipping-job-min-seconds').value = '180';
-  app.elements.get('clipping-job-max-seconds').value = '15';
-  startAnalysis.click();
-  assert.equal(settings.open, true);
-  assert.equal(jobOptions.open, true);
-  assert.equal(app.elements.get('clipping-job-min-seconds').focused, true);
-
-  settings.open = false;
-  const batchDisclosure = app.elements.get('clipping-batch-disclosure');
-  const batchSelect = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'input' && node.type === 'checkbox');
-  batchSelect.checked = true;
-  batchSelect.emit('change');
-  app.elements.get('clipping-batch-min-seconds').value = '180';
-  app.elements.get('clipping-batch-max-seconds').value = '15';
-  app.elements.get('clipping-create-batch').click();
-  assert.equal(settings.open, true);
-  assert.equal(batchDisclosure.open, true);
-  assert.equal(app.elements.get('clipping-batch-min-seconds').focused, true);
-
-  settings.open = false;
-  batchDisclosure.open = false;
-  app.elements.get('clipping-worker-form').emit('submit');
-  assert.equal(settings.open, true);
-  assert.equal(app.elements.get('clipping-worker-disclosure').open, true);
-  assert.equal(app.elements.get('clipping-worker-endpoint').focused, true);
-
-  settings.open = false;
-  app.elements.get('clipping-retention-days').value = '0';
-  app.elements.get('clipping-retention-form').emit('submit');
-  assert.equal(settings.open, true);
-  assert.equal(app.elements.get('clipping-retention-disclosure').open, true);
-  assert.equal(app.elements.get('clipping-retention-days').focused, true);
-});
-
-test('source names and errors render as inert text', async () => {
-  const maliciousName = '<img src=x onerror=alert(1)>';
-  const maliciousError = '<script>alert(1)</script>';
-  const app = createUI(async (route) => {
-    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
-    if (route === '/api/clipping/sources') return [{ id: 'src_1', status: 'failed', original_name: maliciousName, error: maliciousError }];
-    if (route === '/api/clipping/jobs') return [];
-    if (route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const rendered = treeText(app.elements.get('clipping-sources'));
-  assert.match(rendered, /<img src=x onerror=alert\(1\)>/);
-  assert.match(rendered, /<script>alert\(1\)<\/script>/);
-  assert.equal(treeTags(app.elements.get('clipping-sources')).includes('img'), false);
-  assert.equal(treeTags(app.elements.get('clipping-sources')).includes('script'), false);
-});
-
-test('failed YouTube sources turn durable reason codes into actionable original-file fallbacks', async () => {
-  const failures = [
-    'youtube_import_unavailable',
-    'youtube_video_unavailable',
-    'youtube_format_unavailable',
-    'youtube_duration_limit_exceeded',
-    'youtube_size_limit_exceeded',
-    'youtube_media_invalid'
-  ];
-  const recoveryFailure = 'Import attempt limit reached';
-  const app = createUI(async (route) => {
-    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
-    if (route === '/api/clipping/sources') return [...failures, recoveryFailure].map((error, index) => ({
-      id: `src_youtube_failed_${index}`,
-      kind: 'youtube_original_file',
-      status: 'failed',
-      original_name: 'YouTube video',
-      error
-    }));
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const rendered = treeText(app.elements.get('clipping-sources'));
-  assert.match(rendered, /This YouTube import could not be completed by the available public importer/);
-  assert.match(rendered, /This YouTube video could not be fetched through its public link; it may require sign-in or be restricted/);
-  assert.match(rendered, /No supported audio and video format is available/);
-  assert.match(rendered, /exceeds the four-hour limit/);
-  assert.match(rendered, /exceeds the 20 GiB limit/);
-  assert.match(rendered, /This source is not a supported video/);
-  assert.match(rendered, /This public YouTube import could not be completed/);
-  assert.equal((rendered.match(/Upload an original video file you have permission to reuse/g) || []).length, failures.length + 1);
-  assert.doesNotMatch(rendered, /Import attempt limit reached/);
-  for (const failure of failures) assert.doesNotMatch(rendered, new RegExp(failure));
-});
-
-test('a late source-list response cannot repopulate the clipping view after logout', async () => {
-  let resolveSources;
-  let sourceSignal;
-  const app = createUI((route, options = {}) => {
-    if (route === '/api/clipping/config') return Promise.resolve({ worker_available: false });
-    if (route === '/api/clipping/sources') return new Promise((resolve) => {
-      resolveSources = resolve;
-      sourceSignal = options.signal;
-    });
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return Promise.resolve([]);
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  const pending = app.api.start();
-  app.api.stop(true);
-  assert.equal(sourceSignal.aborted, true, 'logout aborts the pending authenticated source request');
-  resolveSources([{ id: 'src_late', status: 'ready', original_name: 'private video.mp4' }]);
-  await pending;
-  assert.doesNotMatch(treeText(app.elements.get('clipping-sources')), /private video/);
-});
-
-test('logout aborts an in-flight job submission without painting an old-session error', async () => {
-  let rejectJob;
-  let jobSignal;
-  const app = createUI((route, options = {}) => {
-    if (route === '/api/clipping/config') return Promise.resolve({ worker_available: false });
-    if (route === '/api/clipping/sources') return Promise.resolve([{ id: 'src_ready', status: 'ready', original_name: 'source.mp4' }]);
-    if (route === '/api/clipping/jobs' && options.method === 'POST') {
-      jobSignal = options.signal;
-      return new Promise((_resolve, reject) => { rejectJob = reject; });
-    }
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return Promise.resolve([]);
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  app.elements.get('clipping-sources').querySelectorAll('button').find((node) => node.textContent === 'Start analysis').click();
-  assert.ok(jobSignal);
-  app.api.stop(true);
-  assert.equal(jobSignal.aborted, true);
-  const aborted = new Error('Request aborted');
-  aborted.name = 'AbortError';
-  rejectJob(aborted);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(app.elements.get('clipping-sources-error').textContent, '');
-});
-
-test('the authenticated dashboard opens Clipping from navigation and refreshes it on SSE reconnect/events', () => {
-  const app = createDashboardNavigation();
-  app.bindEvents();
-  const clippingNav = app.navItems.find((item) => item.dataset.view === 'clipping');
-  clippingNav.emit('click');
-  assert.equal(app.views.find((view) => view.dataset.page === 'clipping').classList.contains('active'), true);
-  assert.equal(clippingNav.getAttribute('aria-current'), 'page');
-  assert.equal(app.elements.pageTitle.textContent, 'Clipping');
-  assert.equal(app.clipping.refreshCount, 1);
-
-  app.state.authenticated = true;
-  app.state.mustChangePassword = true;
-  app.startJobEventStream();
-  assert.equal(app.EventSourceStub.instances.length, 0, 'the password gate prevents opening the authenticated event stream');
-  app.state.mustChangePassword = false;
-  app.startJobEventStream();
-  assert.equal(app.EventSourceStub.instances.length, 1);
-  const source = app.EventSourceStub.instances[0];
-  source.emit('open');
-  source.emit('clipping_source', { data: JSON.stringify({ id: 'clipsrc_1', source: { id: 'clipsrc_1' } }) });
-  source.emit('clipping_job', { data: JSON.stringify({ id: 'clipjob_1', job: { id: 'clipjob_1' } }) });
-  assert.equal(app.clipping.refreshCount, 2, 'reopening the stream refreshes all clipping records');
-  assert.deepEqual(app.clipping.events.map((event) => event.kind), ['clipping_source', 'clipping_job']);
-});
-
-test('Drive and Dropbox public imports require consent and send the permission attestation to the authenticated API', async () => {
-  const requests = [];
-  const app = createUI(async (route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
-    if (route === '/api/clipping/sources') return [];
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/import') {
-      return { id: 'src_import', status: 'importing' };
-    }
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const link = app.elements.get('clipping-link');
-  const permission = app.elements.get('clipping-link-permission-check');
-  const submit = app.elements.get('clipping-link-submit');
-  link.value = 'https://drive.google.com/file/d/fixture/view';
-  link.emit('input');
-  assert.equal(submit.disabled, true);
-  permission.checked = true;
-  permission.emit('change');
-  assert.equal(submit.disabled, false);
-  await app.elements.get('clipping-link-form').emit('submit')[0];
-  const request = requests.find((entry) => entry.route === '/api/clipping/sources/import');
-  assert.ok(request);
-  assert.deepEqual(JSON.parse(request.options.body), { url: 'https://drive.google.com/file/d/fixture/view', rights_attested: true });
-
-  link.value = 'https://videos.example.com/clip.mp4';
-  link.emit('input');
-  permission.checked = true;
-  permission.emit('change');
-  await app.elements.get('clipping-link-form').emit('submit')[0];
-  assert.match(app.elements.get('clipping-link-error').textContent, /Use a public Google Drive or Dropbox/);
-  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/import').length, 1, 'unsupported direct links never reach the API');
-});
-
-test('YouTube imports accept supported single-video links, require rights attestation, and show safe backend fallbacks', async () => {
-  const requests = [];
-  const fallback = 'This public YouTube video is unavailable without sign-in. Upload an original file you have permission to reuse.';
-  const app = createUI(async (route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
-    if (route === '/api/clipping/sources') return [];
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/import') {
-      const payload = JSON.parse(options.body);
-      if (payload.url.includes('/watch?')) throw new Error(fallback);
-      return { source: { id: 'src_youtube', status: 'importing', kind: 'youtube_original_file', rights_attested: true } };
-    }
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const link = app.elements.get('clipping-link');
-  const permission = app.elements.get('clipping-link-permission-check');
-  const submit = app.elements.get('clipping-link-submit');
-  const supportedLinks = [
-    'https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=tracking',
-    'https://m.youtube.com/shorts/abcdefghijk',
-    'https://www.youtube-nocookie.com/embed/abcdefghijk',
-    'https://youtu.be/abcdefghijk?feature=share'
-  ];
-
-  link.value = supportedLinks[0];
-  link.emit('input');
-  assert.equal(permission.checked, false, 'changing a YouTube URL requires a fresh permission confirmation');
-  assert.match(app.elements.get('clipping-link-permission-copy').textContent, /permission to reuse this YouTube footage/);
-  assert.equal(app.elements.get('clipping-link-help').hidden, false);
-  assert.match(app.elements.get('clipping-link-help').textContent, /one HTTPS watch, shorts, embed, or youtu\.be video/);
-  assert.match(app.elements.get('clipping-link-help').textContent, /without sign-in/);
-  assert.match(app.elements.get('clipping-link-help').textContent, /original-file upload/);
-  await app.elements.get('clipping-link-form').emit('submit')[0];
-  assert.match(app.elements.get('clipping-link-error').textContent, /Confirm that you have permission/);
-  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/import').length, 0, 'an unattested YouTube import never reaches the API');
-  permission.checked = true;
-  permission.emit('change');
-  await app.elements.get('clipping-link-form').emit('submit')[0];
-  assert.equal(app.elements.get('clipping-link-error').textContent, fallback, 'the UI preserves the API’s sanitized upload fallback');
-
-  for (const supported of supportedLinks.slice(1)) {
-    link.value = supported;
-    link.emit('input');
-    assert.equal(permission.checked, false, 'changing a YouTube URL requires a fresh permission confirmation');
-    assert.match(app.elements.get('clipping-link-help').textContent, /restricted videos, and unsupported formats require an original-file upload/);
-    permission.checked = true;
-    permission.emit('change');
-    await app.elements.get('clipping-link-form').emit('submit')[0];
+test("YouTube link parsing accepts one public video and rejects unsupported or ambiguous links", () => {
+  for (const url of [
+    "https://www.youtube.com/watch?v=abcdefghijk",
+    "youtu.be/abcdefghijk",
+    "youtube.com/shorts/abcdefghijk",
+    "https://m.youtube.com/embed/abcdefghijk",
+    "abcdefghijk"
+  ]) {
+    assert.equal(pure.youtubeVideoID(url), "abcdefghijk");
   }
-
-  const imports = requests.filter((entry) => entry.route === '/api/clipping/sources/import');
-  assert.equal(imports.length, supportedLinks.length);
-  for (let index = 0; index < imports.length; index++) {
-    assert.deepEqual(JSON.parse(imports[index].options.body), { url: supportedLinks[index], rights_attested: true });
+  for (const url of [
+    "https://drive.google.com/file/d/abc/view",
+    "https://dropbox.com/s/abc/video.mp4",
+    "https://youtube.com/playlist?list=PL123",
+    "https://youtube.com/watch?v=abcdefghijk&v=mnopqrstuvw",
+    "https://attacker.example/watch?v=abcdefghijk",
+    "https://user:password@youtube.com/watch?v=abcdefghijk"
+  ]) {
+    assert.equal(pure.youtubeVideoID(url), "");
   }
-
-  const invalidLinks = [
-    'https://www.youtube.com/playlist?list=PL1234567890',
-    'https://www.youtube.com/watch?v=abcdefghijk&PlAyLiSt=PL1234567890',
-    'https://www.youtube.com/watch?v=abcdefghijk&playlist=PL1234567890',
-    'https://www.youtube.com/watch?v=abcdefghijk&playlist_id=PL1234567890',
-    'https://www.youtube.com/watch?v=abcdefghijk&video_ids=abcdefghijk,12345678901',
-    'https://www.youtube.com/watch?v=abcdefghijk&start_radio=1',
-    'https://www.youtube.com/watch?v=abcdefghijk&INDEX=2',
-    'https://www.youtube.com/live/abcdefghijk',
-    'https://youtu.be/abcdefghijk/extra'
-  ];
-  for (const invalid of invalidLinks) {
-    link.value = invalid;
-    link.emit('input');
-    permission.checked = true;
-    permission.emit('change');
-    await app.elements.get('clipping-link-form').emit('submit')[0];
-    assert.match(app.elements.get('clipping-link-error').textContent, /one HTTPS public YouTube|Playlists and live/);
-  }
-  assert.equal(requests.filter((entry) => entry.route === '/api/clipping/sources/import').length, supportedLinks.length, 'playlist, live, and malformed YouTube links never reach the API');
-  assert.match(source, /Public YouTube import supports one HTTPS watch, shorts, embed, or youtu\.be video/);
-  assert.match(source, /restricted videos, and unsupported formats require an original-file upload/);
+  assert.equal(pure.safeID("../source"), "");
+  assert.equal(pure.formatDuration(3661000), "1:01:01");
 });
 
-test('console tracing begins on Import link click and reports native and scripted validation failures safely', async () => {
-  const requests = [];
-  const app = createUI(async (route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error('Unexpected request');
-  });
-  await app.api.start();
-  assert.equal(app.logs.length, 0, 'initial source/job history does not create console output');
-
-  const form = app.elements.get('clipping-link-form');
-  const link = app.elements.get('clipping-link');
-  const permission = app.elements.get('clipping-link-permission-check');
-  const submit = app.elements.get('clipping-link-submit');
-  link.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&token=do-not-log-this-url';
-  link.emit('input');
-  permission.checked = true;
-  permission.emit('change');
-  submit.click();
-  form.emit('invalid', { target: link });
-  assert.match(traceText(app.logs), /\[FrameVault Clipping\]/);
-  assert.match(traceText(app.logs), /Import link clicked/);
-  assert.match(traceText(app.logs), /Import validation failed[\s\S]*reason=invalid_link/);
-
-  link.value = 'https://not-supported.example/private?api_key=must-not-appear';
-  link.emit('input');
-  permission.checked = true;
-  permission.emit('change');
-  await form.emit('submit')[0];
-  assert.match(traceText(app.logs), /reason=unsupported_link/);
-  assert.equal(requests.some((entry) => entry.route === '/api/clipping/sources/import'), false);
-  assert.doesNotMatch(traceText(app.logs), /youtube\.com|not-supported|do-not-log-this-url|api_key|must-not-appear/);
-  for (const entry of app.logs) for (const value of entry) assert.equal(typeof value, 'string', 'console arguments are fixed strings and safe scalar fields');
-});
-
-test('import request failures are logged with only a fixed reason and numeric HTTP status', async () => {
-  const secretMessage = 'https://media.example/private?signature=secret-value transcript-fragment';
-  const app = createUI(async (route) => {
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/import') {
-      const error = new Error(secretMessage);
-      error.status = 502;
-      throw error;
+test("YouTube import requires rights confirmation, sends only the import contract, and shows live source progress", async () => {
+  let sources = [];
+  const handler = async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return { max_source_bytes: 20 * 1024 ** 3, max_duration_ms: 4 * 60 * 60 * 1000 };
+    if (endpoint === "/api/clipping/config/worker") return { configured: false, enabled: false, max_compute_seconds: 43200 };
+    if (endpoint === "/api/clipping/sources") return { sources };
+    if (endpoint === "/api/clipping/jobs") return { jobs: [] };
+    if (endpoint === "/api/clipping/sources/import") {
+      const body = JSON.parse(options.body);
+      assert.deepEqual(body, { url: "https://youtu.be/abcdefghijk", rights_attested: true });
+      assert.equal(options.method, "POST");
+      const imported = { id: "clipsrc_1", kind: "youtube_original_file", status: "importing", title: "Example video", progress: 0.25 };
+      sources = [imported];
+      return { source: imported };
     }
-    throw new Error('Unexpected request');
-  });
-  await app.api.start();
-  const link = app.elements.get('clipping-link');
-  link.value = 'https://drive.google.com/file/d/sensitive-source/view?secret=never-log';
-  link.emit('input');
-  app.elements.get('clipping-link-permission-check').checked = true;
-  app.elements.get('clipping-link-permission-check').emit('change');
-  await app.elements.get('clipping-link-form').emit('submit')[0];
-  assert.match(traceText(app.logs), /Import request failed[\s\S]*http=502[\s\S]*reason=import_failed/);
-  assert.doesNotMatch(traceText(app.logs), /media\.example|signature|secret-value|transcript-fragment|sensitive-source|never-log/);
-});
-
-test('source diagnostics replay once across SSE, import response, and list refresh; analysis logs observed states and persisted candidate evidence', async () => {
-  const source = {
-    id: 'clipsrc_trace1', status: 'ready',
-    diagnostics: [
-      { sequence: 1, stage: 'source_url_validation', status: 'started', at: 100 },
-      { sequence: 2, stage: 'source_url_validation', status: 'completed', at: 101 },
-      { sequence: 3, stage: 'source_reservation', status: 'completed', at: 102 },
-      { sequence: 4, stage: 'import_dispatch', status: 'started', at: 103 },
-      { sequence: 5, stage: 'import_dispatch', status: 'completed', at: 104 },
-      { sequence: 6, stage: 'media_download', status: 'completed', at: 105 },
-      { sequence: 7, stage: 'media_probe', status: 'completed', at: 106 },
-      { sequence: 8, stage: 'media_hash', status: 'completed', at: 107 },
-      { sequence: 9, stage: 'source_ready', status: 'completed', at: 108 }
-    ]
+    throw new Error("Unexpected request to " + endpoint);
   };
-  let job = null;
-  let jobDetail = null;
-  let detailRequests = 0;
-  let app;
-  app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/sources') return [source];
-    if (route === '/api/clipping/jobs' && !options.method) return job ? [job] : [];
-    if (route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/import') {
-      app.api.handleEvent('clipping_source', { data: JSON.stringify({ id: source.id, source }) });
-      return { source };
+  const ui = createUI(handler);
+  await ui.api.start();
+  assert.match(ui.elements.get("clipping-import-limits").textContent, /4:00:00.*20 GiB/);
+
+  ui.elements.get("clipping-link").value = "https://youtu.be/abcdefghijk";
+  ui.elements.get("clipping-link").emit("input");
+  assert.equal(ui.elements.get("clipping-link-submit").disabled, true);
+  ui.elements.get("clipping-link-permission-check").checked = true;
+  ui.elements.get("clipping-link-permission-check").emit("change");
+  assert.equal(ui.elements.get("clipping-link-submit").disabled, false);
+  ui.elements.get("clipping-link-form").emit("submit");
+  await settle();
+
+  const importCall = ui.requests.find((call) => call.endpoint === "/api/clipping/sources/import");
+  assert.ok(importCall);
+  assert.equal(ui.elements.get("clipping-link-permission-check").checked, false);
+  assert.equal(ui.elements.get("clipping-link-submit").disabled, true);
+  assert.match(treeText(ui.elements.get("clipping-sources")), /Example video/);
+  assert.match(treeText(ui.elements.get("clipping-sources")), /25%/);
+  assert.match(ui.elements.get("clipping-workflow-status").textContent, /Import accepted/);
+});
+
+test("failed import displays the redacted backend message and keeps the link available for correction", async () => {
+  const handler = async (endpoint) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: false, enabled: false };
+    if (endpoint === "/api/clipping/sources") return { sources: [] };
+    if (endpoint === "/api/clipping/jobs") return { jobs: [] };
+    if (endpoint === "/api/clipping/sources/import") throw new Error("This video is unavailable without signing in.");
+    throw new Error("Unexpected request to " + endpoint);
+  };
+  const ui = createUI(handler);
+  await ui.api.start();
+  ui.elements.get("clipping-link").value = "https://www.youtube.com/watch?v=abcdefghijk";
+  ui.elements.get("clipping-link-permission-check").checked = true;
+  ui.elements.get("clipping-link-form").emit("submit");
+  await settle();
+  assert.equal(ui.elements.get("clipping-link-error").textContent, "This video is unavailable without signing in.");
+  assert.equal(ui.elements.get("clipping-link").value, "https://www.youtube.com/watch?v=abcdefghijk");
+  assert.equal(ui.elements.get("clipping-link").disabled, false);
+  assert.equal(ui.document.activeElement, ui.elements.get("clipping-link"));
+});
+
+test("ready sources expose a bounded analysis profile and queue a budget-free Modal job", async () => {
+  let jobs = [];
+  const source = { id: "clipsrc_ready", kind: "youtube_original_file", status: "ready", title: "Ready video", duration_ms: 60000 };
+  const handler = async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: false, enabled: false, max_compute_seconds: 43200 };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs") return { jobs };
+    if (endpoint === "/api/clipping/jobs" && options.method === "POST") return {};
+    if (endpoint === "/api/clipping/jobs" && options.method === "POST") return {};
+    throw new Error("Unexpected request to " + endpoint);
+  };
+  let started = false;
+  const ui = createUI(async (endpoint, options, requests) => {
+    if (endpoint === "/api/clipping/jobs" && options.method === "POST") {
+      started = true;
+      const body = JSON.parse(options.body);
+      assert.deepEqual(body, { source_id: "clipsrc_ready", content_type: "general" });
+      assert.equal(Object.keys(options.headers || {}).includes("Idempotency-Key"), true);
+      assert.equal(JSON.stringify(body).includes("budget"), false);
+      jobs = [{ id: "clipjob_1", source_id: "clipsrc_ready", content_type: "general", status: "queued", progress: 0 }];
+      return { job: jobs[0] };
     }
-    if (route === '/api/clipping/jobs' && options.method === 'POST') {
-      job = {
-        id: 'clipjob_trace1', source_id: source.id, status: 'queued',
-        stages: [{ name: 'analysis', status: 'queued' }]
-      };
-      return { job };
-    }
-    if (route === '/api/clipping/jobs/clipjob_trace1') {
-      detailRequests++;
-      return { job: jobDetail || job };
-    }
-    throw new Error('Unexpected request');
+    return handler(endpoint, options, requests);
   });
-  await app.api.start();
-  assert.equal(app.logs.length, 0, 'source history is silent until the user starts an import');
-  const link = app.elements.get('clipping-link');
-  link.value = 'https://drive.google.com/file/d/trace/view';
-  link.emit('input');
-  app.elements.get('clipping-link-permission-check').checked = true;
-  app.elements.get('clipping-link-permission-check').emit('change');
-  const submit = app.elements.get('clipping-link-submit');
-  submit.click();
-  await app.elements.get('clipping-link-form').emit('submit')[0];
-
-  let renderedTrace = traceText(app.logs);
-  assert.match(renderedTrace, /Import step Source URL validation: started/);
-  assert.match(renderedTrace, /Import step Metadata extraction|Import step Media download/);
-  assert.match(renderedTrace, /Source ready; waiting for manual analysis/);
-  assert.equal((renderedTrace.match(/Source ready; waiting for manual analysis/g) || []).length, 1, 'replayed sequence 9 logs once');
-  assert.doesNotMatch(renderedTrace, /Whisper|transcription substep|transcript text/);
-
-  app.elements.get('clipping-job-budget').value = '1.00';
-  const analyze = app.elements.get('clipping-sources').querySelectorAll('button').find((button) => button.textContent === 'Start analysis');
+  await ui.api.start();
+  const analyze = findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "button" && node.textContent === "Analyze");
   assert.ok(analyze);
   analyze.click();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.match(traceText(app.logs), /Analysis request started/);
-  assert.match(traceText(app.logs), /Analysis status observed: queued/);
+  await settle();
+  assert.equal(started, true);
+  assert.match(treeText(ui.elements.get("clipping-jobs")), /Waiting for Modal worker setup/);
+  assert.equal(ui.document.activeElement, ui.elements.get("clipping-analysis-heading"));
+});
 
-  for (const status of ['running', 'paused_budget', 'canceled', 'completed']) {
-    job = { ...job, status, stages: [{ name: 'analysis', status }] };
-    jobDetail = status === 'completed' ? {
-      ...job,
-      artifacts: [{
-        type: 'clipping.analysis',
-        payload_json: JSON.stringify({
-          analysis_version: 'framevault.clipping.analysis.v2',
-          transcript: { segments: [{ text: 'transcript-secret-do-not-log' }] },
-          candidates: [{ id: 'candidate_1', title: 'candidate-title-do-not-log' }, { id: 'candidate_2' }]
-        })
+test("source SSE refresh preserves focus on a control that remains in the updated row", async () => {
+  const source = { id: "clipsrc_focus", kind: "youtube_original_file", status: "ready", title: "Focus video" };
+  const ui = createUI(defaultHandler({ sources: [source] }));
+  await ui.api.start();
+  const select = findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "select");
+  assert.ok(select);
+  select.focus();
+  ui.api.handleEvent("clipping_source", { data: JSON.stringify({ id: "clipsrc_focus", status: "ready" }) });
+  await settle();
+  assert.equal(ui.document.activeElement.dataset.clippingFocusKey, "content-type");
+  assert.equal(ui.document.activeElement.getAttribute("aria-label"), "Analysis type for Focus video");
+});
+
+test("saved results show persisted transcript, context, candidate evidence, and remain open through job events", async () => {
+  const job = { id: "clipjob_done", source_id: "clipsrc_done", content_type: "podcast", status: "completed", progress: 1 };
+  const source = { id: "clipsrc_done", kind: "youtube_original_file", status: "ready", title: "Finished conversation" };
+  const artifact = {
+    type: "ai-clip.analysis",
+    schema_version: "v1",
+    version: 1,
+    payload_json: JSON.stringify({ payload: {
+      content_type: "podcast",
+      transcript: { available: true, original_script: true, segments: [{ start_ms: 1000, end_ms: 2400, text: "<b>Hello there</b>", confidence: 0.8 }] },
+      context: { summary: "The host explains a surprising result.", topics: [{ start_ms: 5000, end_ms: 9000, label: "Unexpected result", keywords: ["test"] }] },
+      audio_events: [{ start_ms: 10000, end_ms: 12000, kind: "pause", evidence: "long silence" }],
+      candidates: [{
+        rank: 1, title: "A surprising result", start_ms: 5000, end_ms: 18000, duration_ms: 13000,
+        hook: "The result changes the conversation.", editorial_score: { total: 0.72, components: { context: 0.8 } },
+        confidence: 0.6, evidence: [{ kind: "transcript", start_ms: 6000, end_ms: 9000, text: "That was unexpected." }]
       }]
-    } : null;
-    app.api.handleEvent('clipping_job', { data: JSON.stringify({ id: job.id, job }) });
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  renderedTrace = traceText(app.logs);
-  for (const status of ['running', 'paused', 'canceled', 'completed']) assert.match(renderedTrace, new RegExp(`Analysis status observed: ${status}`));
-  assert.match(renderedTrace, /Candidate availability observed[\s\S]*count=2/);
-  assert.equal(detailRequests, 1, 'a completed summary without artifacts triggers one authenticated detail fetch');
-  assert.doesNotMatch(renderedTrace, /transcript-secret-do-not-log|candidate-title-do-not-log|trace\/view/);
-});
-
-test('YouTube diagnostics identify combined or split selection, track stages, and safe failures without leaking media data', async () => {
-  const combined = {
-    id: 'clipsrc_combined_trace', kind: 'youtube_original_file', status: 'ready',
-    title: 'private metadata title', original_name: 'private-filename.mp4',
-    diagnostics: [
-      { sequence: 1, stage: 'format_selection', status: 'completed', code: 'combined_tracks_selected' },
-      { sequence: 2, stage: 'media_download', status: 'completed' },
-      { sequence: 3, stage: 'source_ready', status: 'completed' }
-    ]
+    } })
   };
-  const separate = {
-    id: 'clipsrc_split_trace', kind: 'youtube_original_file', status: 'ready',
-    media_url: 'https://cdn.example/private?signature=must-not-log',
-    diagnostics: [
-      { sequence: 1, stage: 'format_selection', status: 'completed', code: 'separate_tracks_selected' },
-      { sequence: 2, stage: 'format_selection', status: 'completed', code: 'original_audio_selected' },
-      { sequence: 3, stage: 'video_track_download', status: 'started', format_id: 'private-video-format' },
-      { sequence: 4, stage: 'video_track_download', status: 'failed', code: 'video_track_download_failed' },
-      { sequence: 5, stage: 'video_track_download', status: 'retrying', code: 'retry_scheduled' },
-      { sequence: 6, stage: 'video_track_download', status: 'completed' },
-      { sequence: 7, stage: 'audio_track_download', status: 'started' },
-      { sequence: 8, stage: 'audio_track_download', status: 'completed' },
-      { sequence: 9, stage: 'track_mux', status: 'started' },
-      { sequence: 10, stage: 'track_mux', status: 'completed' },
-      { sequence: 11, stage: 'merged_validation', status: 'started' },
-      { sequence: 12, stage: 'merged_validation', status: 'completed' },
-      { sequence: 13, stage: 'source_ready', status: 'completed' }
-    ]
+  let resultCalls = 0;
+  const handler = async (endpoint) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: true, enabled: true, endpoint_host: "worker.modal.run", pipeline_revision: "rev1" };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs") return { jobs: [job] };
+    if (endpoint === "/api/clipping/jobs/clipjob_done/results") {
+      resultCalls++;
+      return { job_id: "clipjob_done", source_id: "clipsrc_done", artifacts: [artifact] };
+    }
+    throw new Error("Unexpected request to " + endpoint);
   };
-  const failed = {
-    id: 'clipsrc_split_failed_trace', kind: 'youtube_original_file', status: 'failed',
-    error: 'raw extractor stderr with https://private.example/?token=never-log',
-    diagnostics: [
-      { sequence: 1, stage: 'format_selection', status: 'failed', code: 'original_audio_unavailable' },
-      { sequence: 2, stage: 'video_track_download', status: 'failed', code: 'track_size_limit_exceeded' },
-      { sequence: 3, stage: 'video_track_download', status: 'failed', code: 'video_track_download_failed' },
-      { sequence: 4, stage: 'audio_track_download', status: 'failed', code: 'audio_track_download_failed' },
-      { sequence: 5, stage: 'video_track_download', status: 'failed', code: 'track_content_invalid' },
-      { sequence: 6, stage: 'track_mux', status: 'failed', code: 'track_mux_failed' },
-      { sequence: 7, stage: 'track_mux', status: 'failed', code: 'track_mux_timeout' },
-      { sequence: 8, stage: 'track_mux', status: 'failed', code: 'mux_output_size_limit_exceeded' },
-      { sequence: 9, stage: 'merged_validation', status: 'failed', code: 'av_stream_missing' },
-      { sequence: 10, stage: 'merged_validation', status: 'failed', code: 'av_timing_mismatch' },
-      { sequence: 11, stage: 'merged_validation', status: 'failed', code: 'signature=https://private.example/?token=must-not-log' },
-      { sequence: 12, stage: 'video_track_download', status: 'failed', code: 'track_request_failed', detail: 'https://private.example/request?token=must-not-log' },
-      { sequence: 13, stage: 'video_track_download', status: 'retrying', code: 'track_http_retryable' },
-      { sequence: 14, stage: 'audio_track_download', status: 'failed', code: 'track_access_denied' },
-      { sequence: 15, stage: 'audio_track_download', status: 'failed', code: 'track_body_incomplete' },
-      { sequence: 16, stage: 'video_track_download', status: 'failed', code: 'track_storage_failed' },
-      { sequence: 17, stage: 'audio_track_download', status: 'failed', code: 'track_transfer_aborted' }
-    ]
+  const ui = createUI(handler);
+  await ui.api.start();
+  const toggle = findNode(ui.elements.get("clipping-jobs"), (node) => node.tagName === "button" && node.textContent === "View saved analysis");
+  assert.ok(toggle);
+  toggle.focus();
+  toggle.click();
+  await settle();
+  assert.equal(ui.document.activeElement.dataset.clippingFocusKey, "results");
+  let text = treeText(ui.elements.get("clipping-jobs"));
+  assert.match(text, /Saved analysis/);
+  assert.doesNotMatch(text, /framevault\.clipping|ai-clip\.analysis/);
+  assert.doesNotMatch(text, /Transcript status: complete/);
+  assert.match(text, /Original-script transcript/);
+  assert.match(text, /The host explains a surprising result/);
+  assert.match(text, /A surprising result/);
+  assert.match(text, /That was unexpected/);
+  assert.match(text, /Scores are heuristic editorial rankings/);
+  assert.equal(text.includes("<b>Hello there</b>"), true);
+  assert.equal(treeText(ui.elements.get("clipping-jobs")).includes("clipping-cost"), false);
+
+  ui.api.handleEvent("clipping_job", { data: JSON.stringify({ job: Object.assign({}, job, { progress: 1 }) }) });
+  await settle();
+  text = treeText(ui.elements.get("clipping-jobs"));
+  assert.match(text, /A surprising result/);
+  assert.equal(resultCalls, 2);
+  assert.equal(ui.document.activeElement.dataset.clippingFocusKey, "results");
+});
+
+test("worker setup uses only the simplified secret-safe worker fields and a bounded time limit", async () => {
+  let worker = { configured: false, enabled: false, max_compute_seconds: 43200 };
+  let saved;
+  const handler = async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker" && options.method === "PUT") {
+      saved = JSON.parse(options.body);
+      worker = { configured: true, enabled: saved.enabled, endpoint_host: "worker.modal.run", pipeline_revision: saved.pipeline_revision, max_compute_seconds: saved.max_compute_seconds };
+      return { worker };
+    }
+    if (endpoint === "/api/clipping/config/worker") return worker;
+    if (endpoint === "/api/clipping/sources") return { sources: [] };
+    if (endpoint === "/api/clipping/jobs") return { jobs: [] };
+    throw new Error("Unexpected request to " + endpoint);
   };
-  const fixtures = [combined, separate, failed];
-  const sources = [];
-  let app;
-  app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/sources') return sources;
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/import') {
-      const source = fixtures.shift();
-      assert.ok(source, 'the test provides one diagnostic fixture for each import');
-      sources.push(source);
-      return { source };
-    }
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  assert.equal(app.logs.length, 0, 'pre-existing YouTube diagnostics stay silent on initial load');
+  const ui = createUI(handler);
+  await ui.api.start();
+  const form = ui.elements.get("clipping-worker-form");
+  ui.elements.get("clipping-worker-endpoint").value = "https://worker.modal.run/dispatch";
+  ui.elements.get("clipping-worker-pipeline-revision").value = "m3-test-v1";
+  ui.elements.get("clipping-worker-max-compute").value = "45";
+  ui.elements.get("clipping-worker-enabled").checked = true;
+  form.emit("submit");
+  await settle();
+  assert.match(ui.elements.get("clipping-worker-error").textContent, /token for initial setup/);
+  assert.equal(saved, undefined);
 
-  const form = app.elements.get('clipping-link-form');
-  const link = app.elements.get('clipping-link');
-  const permission = app.elements.get('clipping-link-permission-check');
-  const importFixture = async () => {
-    link.value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&token=do-not-log-this-url';
-    link.emit('input');
-    permission.checked = true;
-    permission.emit('change');
-    app.elements.get('clipping-link-submit').click();
-    await form.emit('submit')[0];
-    const source = sources.at(-1);
-    const event = { data: JSON.stringify({ id: source.id, source }) };
-    app.api.handleEvent('clipping_source', event);
-    app.api.handleEvent('clipping_source', event);
-    await app.api.refresh();
-    await new Promise((resolve) => setImmediate(resolve));
-  };
-
-  await importFixture();
-  await importFixture();
-  await importFixture();
-
-  const output = traceText(app.logs);
-  assert.match(output, /Import step Format selection: completed[\s\S]*selection=combined_tracks_selected/);
-  assert.match(output, /Import step Media download: completed/);
-  assert.match(output, /Import step Format selection: completed[\s\S]*selection=separate_tracks_selected/);
-  assert.match(output, /Import step Format selection: completed[\s\S]*selection=original_audio_selected/);
-  for (const stage of ['Video track download', 'Audio track download', 'Track mux', 'Merged media validation']) {
-    assert.match(output, new RegExp(`Import step ${stage}: started`));
-    assert.match(output, new RegExp(`Import step ${stage}: completed`));
-  }
-  for (const code of [
-    'original_audio_unavailable', 'track_size_limit_exceeded', 'video_track_download_failed', 'audio_track_download_failed',
-    'track_content_invalid', 'track_request_failed', 'track_http_retryable', 'track_access_denied', 'track_body_incomplete',
-    'track_storage_failed', 'track_transfer_aborted', 'track_mux_failed', 'track_mux_timeout', 'mux_output_size_limit_exceeded',
-    'av_stream_missing', 'av_timing_mismatch'
-  ]) assert.match(output, new RegExp(`reason=${code}`), `the safe failure code ${code} is retained`);
-  assert.match(output, /Import step Merged media validation: failed[\s\S]*reason=source_unavailable/);
-  assert.equal(app.logs.filter((entry) => entry.includes('source=clipsrc_split_trace') && entry.includes('sequence=1')).length, 1,
-    'duplicate SSE and list snapshots are deduplicated by sequence');
-  assert.equal(app.logs.filter((entry) => entry.includes('source=clipsrc_split_trace') && entry.includes('sequence=6')).length, 1,
-    'completed track diagnostics are logged once');
-  assert.match(output, /Import step Video track download: retrying[\s\S]*reason=retry_scheduled/);
-  assert.doesNotMatch(output, /youtube\.com|do-not-log-this-url|cdn\.example|signature=|private-format|private metadata|private-filename|extractor stderr|private\.example|must-not-log/);
-  for (const entry of app.logs) for (const value of entry) assert.equal(typeof value, 'string', 'console arguments remain fixed strings and safe scalar fields');
-});
-
-test('separate imports keep source failures and safe reasons correlated to their own action', async () => {
-  const sources = [];
-  let importNumber = 0;
-  let app;
-  app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/sources') return sources;
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/import') {
-      importNumber++;
-      const source = importNumber === 1
-        ? { id: 'clipsrc_first', status: 'ready', diagnostics: [{ sequence: 1, stage: 'source_ready', status: 'completed' }] }
-        : { id: 'clipsrc_second', status: 'failed', error: 'private-token=https://secret.invalid', diagnostics: [{ sequence: 1, stage: 'media_download', status: 'failed', code: 'download_timeout' }] };
-      sources.push(source);
-      app.api.handleEvent('clipping_source', { data: JSON.stringify({ id: source.id, source }) });
-      return { source };
-    }
-    throw new Error('Unexpected request');
-  });
-  await app.api.start();
-  const form = app.elements.get('clipping-link-form');
-  const link = app.elements.get('clipping-link');
-  const permission = app.elements.get('clipping-link-permission-check');
-  const importOne = async (url) => {
-    link.value = url;
-    link.emit('input');
-    permission.checked = true;
-    permission.emit('change');
-    app.elements.get('clipping-link-submit').click();
-    await form.emit('submit')[0];
-  };
-  await importOne('https://drive.google.com/file/d/first/view');
-  await importOne('https://dropbox.com/s/second/private');
-  const output = traceText(app.logs);
-  assert.match(output, /source=clipsrc_first/);
-  assert.match(output, /source=clipsrc_second/);
-  assert.match(output, /Import step Media download: failed[\s\S]*source=clipsrc_second[\s\S]*reason=download_timeout/);
-  assert.equal((output.match(/Source ready; waiting for manual analysis/g) || []).length, 1);
-  assert.doesNotMatch(output, /first\/view|second\/private|private-token|secret\.invalid/);
-  const actionIDs = [...output.matchAll(/action=(\d+)/g)].map((match) => match[1]);
-  assert.ok(new Set(actionIDs).size >= 2, 'each import receives its own action correlation ID');
-});
-
-test('completed job summaries fetch saved details once and safely report detail-fetch failures', async () => {
-  const source = { id: 'clipsrc_details', status: 'ready', duration_ms: 30_000 };
-  let job = null;
-  let detailRequests = 0;
-  const app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/sources') return [source];
-    if (route === '/api/clipping/jobs' && !options.method) return job ? [job] : [];
-    if (route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/jobs' && options.method === 'POST') {
-      job = { id: 'clipjob_details', source_id: source.id, status: 'queued', stages: [{ name: 'analysis', status: 'queued' }] };
-      return { job };
-    }
-    if (route === '/api/clipping/jobs/clipjob_details') {
-      detailRequests++;
-      const error = new Error('secret=bearer-private transcript=private text');
-      error.status = 503;
-      throw error;
-    }
-    throw new Error('Unexpected request');
-  });
-  await app.api.start();
-  app.elements.get('clipping-job-budget').value = '1.00';
-  app.elements.get('clipping-sources').querySelectorAll('button').find((button) => button.textContent === 'Start analysis').click();
-  await new Promise((resolve) => setImmediate(resolve));
-  job = { ...job, status: 'completed', stages: [{ name: 'analysis', status: 'completed' }] };
-  const event = { data: JSON.stringify({ id: job.id, job }) };
-  app.api.handleEvent('clipping_job', event);
-  app.api.handleEvent('clipping_job', event);
-  await new Promise((resolve) => setImmediate(resolve));
-
-  const output = traceText(app.logs);
-  assert.equal(detailRequests, 1, 'duplicate completion snapshots do not start duplicate detail fetches');
-  assert.match(output, /Analysis result details unavailable[\s\S]*http=503[\s\S]*reason=analysis_failed/);
-  assert.doesNotMatch(output, /bearer-private|transcript=private text/);
-});
-
-test('logout clears trace state and a late import rejection cannot mutate a new session action', async () => {
-  const imports = [];
-  let sourceSnapshot = { id: 'clipsrc_old', status: 'ready', diagnostics: [{ sequence: 1, stage: 'source_ready', status: 'completed' }] };
-  const app = createUI((route, options = {}) => {
-    if (route === '/api/clipping/config') return Promise.resolve({ worker_available: false });
-    if (route === '/api/clipping/sources') return Promise.resolve(sourceSnapshot ? [sourceSnapshot] : []);
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return Promise.resolve([]);
-    if (route === '/api/clipping/sources/import') return new Promise((resolve, reject) => { imports.push({ resolve, reject }); });
-    throw new Error('Unexpected request');
-  });
-  await app.api.start();
-  assert.equal(app.logs.length, 0, 'pre-existing import history stays silent on initial load');
-  const beginImport = (url) => {
-    app.elements.get('clipping-link').value = url;
-    app.elements.get('clipping-link').emit('input');
-    app.elements.get('clipping-link-permission-check').checked = true;
-    app.elements.get('clipping-link-permission-check').emit('change');
-    app.elements.get('clipping-link-submit').click();
-    return app.elements.get('clipping-link-form').emit('submit')[0];
-  };
-  const oldPending = beginImport('https://drive.google.com/file/d/old/view?token=late-secret');
-  app.api.stop(true);
-  sourceSnapshot = null;
-  await app.api.start();
-  const newPending = beginImport('https://dropbox.com/s/new/current?token=current-secret');
-  assert.equal(imports.length, 2);
-
-  sourceSnapshot = { id: 'clipsrc_current', status: 'importing', diagnostics: [{ sequence: 1, stage: 'media_download', status: 'started' }] };
-  app.api.handleEvent('clipping_source', { data: JSON.stringify({ id: sourceSnapshot.id, source: sourceSnapshot }) });
-  imports[0].reject(new Error('late token=late-secret https://late.secret.invalid/private'));
-  await oldPending;
-  imports[1].resolve({});
-  await newPending;
-
-  const output = traceText(app.logs);
-  assert.doesNotMatch(output, /clipsrc_old|late-secret|current-secret|late\.secret\.invalid|\/private/);
-  assert.match(output, /Import step Media download: started[\s\S]*source=clipsrc_current/);
-  const clickActionIDs = app.logs
-    .filter((entry) => entry.includes('Import link clicked'))
-    .map((entry) => entry.find((value) => value.startsWith('action='))?.slice('action='.length));
-  assert.equal(clickActionIDs.length, 2);
-  assert.notEqual(clickActionIDs[0], clickActionIDs[1], 'late work cannot collide with an action in a later lifecycle');
-});
-
-test('individual and batch submissions send exact microUSD limits and stable idempotency keys', async () => {
-  const submissions = [];
-  let failFirstJob = true;
-  const app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
-    if (route === '/api/clipping/sources') return [{ id: 'src_ready', status: 'ready', original_name: 'source.mp4', duration_ms: 12_000, media_url: '/api/clipping/sources/src_ready/media' }];
-    if (route === '/api/clipping/jobs' && !options.method) return [];
-    if (route === '/api/clipping/batches' && !options.method) return [];
-    if (route === '/api/clipping/jobs' && options.method === 'POST') {
-      submissions.push({ route, options });
-      if (failFirstJob) {
-        failFirstJob = false;
-        throw new Error('Connection interrupted');
-      }
-      return { id: 'job_1', status: 'queued' };
-    }
-    if (route === '/api/clipping/batches' && options.method === 'POST') {
-      submissions.push({ route, options });
-      return { id: 'batch_1', status: 'queued' };
-    }
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  assert.match(treeText(app.elements.get('clipping-sources')), /Media[\s\S]*Available/);
-  const sourceButtons = app.elements.get('clipping-sources').querySelectorAll('button');
-  const startButton = sourceButtons.find((node) => node.textContent === 'Start analysis');
-  const sourceType = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'select');
-  sourceType.value = 'podcast';
-  sourceType.emit('change');
-  app.elements.get('clipping-job-budget').value = '1.25';
-  app.elements.get('clipping-job-min-seconds').value = '20';
-  app.elements.get('clipping-job-max-seconds').value = '90';
-  app.elements.get('clipping-job-candidate-limit').value = '8';
-  startButton.click();
-  for (let attempt = 0; attempt < 30 && submissions.length < 1; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  for (let attempt = 0; attempt < 30 && !app.elements.get('clipping-sources-error').textContent; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  startButton.click();
-  for (let attempt = 0; attempt < 30 && submissions.length < 2; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(JSON.parse(submissions[0].options.body), {
-    source_id: 'src_ready', budget_micro_usd: 1_250_000, content_type: 'podcast',
-    min_clip_seconds: 20, max_clip_seconds: 90, candidate_limit: 8
-  });
-  assert.equal(submissions[0].options.headers['Idempotency-Key'], submissions[1].options.headers['Idempotency-Key']);
-
-  const batchCheck = findNode(app.elements.get('clipping-sources'), (node) => node.tagName === 'input' && node.type === 'checkbox');
-  assert.ok(batchCheck, 'batch selection stays available in the source Details disclosure');
-  batchCheck.checked = true;
-  batchCheck.emit('change');
-  app.elements.get('clipping-batch-job-budget').value = '1.25';
-  app.elements.get('clipping-batch-budget').value = '1.24';
-  app.elements.get('clipping-batch-content-type').value = 'gaming';
-  app.elements.get('clipping-batch-min-seconds').value = '30';
-  app.elements.get('clipping-batch-max-seconds').value = '120';
-  app.elements.get('clipping-batch-candidate-limit').value = '9';
-  app.elements.get('clipping-batch-budget').emit('input');
-  assert.equal(app.elements.get('clipping-create-batch').disabled, true);
-  app.elements.get('clipping-batch-budget').value = '1.25';
-  app.elements.get('clipping-batch-budget').emit('input');
-  assert.equal(app.elements.get('clipping-create-batch').disabled, false);
-  app.elements.get('clipping-create-batch').click();
-  for (let attempt = 0; attempt < 30 && submissions.length < 3; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  const batch = submissions[2];
-  assert.equal(batch.route, '/api/clipping/batches');
-  assert.deepEqual(JSON.parse(batch.options.body), {
-    source_ids: ['src_ready'], per_job_budget_micro_usd: 1_250_000, budget_micro_usd: 1_250_000,
-    content_type: 'gaming', min_clip_seconds: 30, max_clip_seconds: 120, candidate_limit: 9
-  });
-  assert.ok(batch.options.headers['Idempotency-Key']);
-});
-
-test('source removal, job and batch cancellation, and retention settings use their authenticated routes', async () => {
-  const requests = [];
-  const app = createUI(async (route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30, retention_configurable: true };
-    if (route === '/api/clipping/config/retention' && options.method === 'PUT') return { retention_days: JSON.parse(options.body).retention_days };
-    if (route === '/api/clipping/sources') return [{ id: 'src_ready', status: 'ready', original_name: 'source.mp4', duration_ms: 12_000 }];
-    if (route === '/api/clipping/sources/src_ready' && options.method === 'DELETE') return null;
-    if (route === '/api/clipping/jobs' && !options.method) return [{ id: 'job_live', source_id: 'src_ready', status: 'running', progress: 0.25, budget_micro_usd: 1_000_000, spent_micro_usd: 250_000 }];
-    if (route === '/api/clipping/jobs/job_live/cancel') return { id: 'job_live', status: 'canceled' };
-    if (route === '/api/clipping/batches' && !options.method) return [{ id: 'batch_live', source_ids: ['src_ready'], status: 'running', progress: 0.25, budget_micro_usd: 1_000_000, spent_micro_usd: 250_000 }];
-    if (route === '/api/clipping/batches/batch_live/cancel') return { id: 'batch_live', status: 'canceled' };
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  app.elements.get('clipping-retention-days').value = '60';
-  await app.elements.get('clipping-retention-form').emit('submit')[0];
-  const retention = requests.find((entry) => entry.route === '/api/clipping/config/retention');
-  assert.equal(retention.options.method, 'PUT');
-  assert.deepEqual(JSON.parse(retention.options.body), { retention_days: 60 });
-
-  const remove = app.elements.get('clipping-sources').querySelectorAll('button').find((node) => node.textContent === 'Remove');
-  remove.click();
-  const cancelJob = app.elements.get('clipping-jobs').querySelectorAll('button').find((node) => node.textContent === 'Cancel job');
-  cancelJob.click();
-  const cancelBatch = app.elements.get('clipping-batches').querySelectorAll('button').find((node) => node.textContent === 'Cancel batch');
-  cancelBatch.click();
-  for (let attempt = 0; attempt < 30 && requests.filter((entry) => entry.route.endsWith('/cancel')).length < 2; attempt++) await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(requests.some((entry) => entry.route === '/api/clipping/sources/src_ready' && entry.options.method === 'DELETE'));
-  assert.ok(requests.some((entry) => entry.route === '/api/clipping/jobs/job_live/cancel'));
-  assert.ok(requests.some((entry) => entry.route === '/api/clipping/batches/batch_live/cancel'));
-});
-
-test('paused jobs use neutral copy and identify an unresolved attempt without hiding the saved reason', async () => {
-  const app = createUI(async (route) => {
-    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
-    if (route === '/api/clipping/sources') return [];
-    if (route === '/api/clipping/jobs') return [{
-      id: 'job_paused', source_id: 'src_missing', status: 'paused_budget', budget_micro_usd: 1_000_000,
-      spent_micro_usd: 100_000, error: 'Dispatch outcome is unknown; budget remains reserved.',
-      stages: [{ name: 'analysis', status: 'uncertain' }]
-    }, {
-      id: 'job_budget', source_id: 'src_other', status: 'paused_budget', budget_micro_usd: 1_000_000,
-      spent_micro_usd: 1_000_000, error: 'Budget limit reached', stages: [{ name: 'analysis', status: 'paused_budget' }]
-    }];
-    if (route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const rendered = treeText(app.elements.get('clipping-jobs'));
-  assert.match(rendered, /Waiting for the previous attempt to be resolved/);
-  assert.match(rendered, /The previous attempt has not reported its result yet/);
-  assert.match(rendered, /Analysis paused/);
-  assert.match(rendered, /job paused after reaching its budget limit/);
-  assert.doesNotMatch(rendered, /Dispatch outcome/);
-});
-
-test('interrupted uploads resume from the saved offset and send chunks within the limit', async () => {
-  const chunkBytes = 16 * 1024 * 1024;
-  const fileSize = chunkBytes + 1;
-  let savedOffset = 0;
-  let failSecondChunk = true;
-  let uploadInit;
-  const chunks = [];
-  let releaseFinalize;
-  const finalized = new Promise((resolve) => { releaseFinalize = resolve; });
-  const app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { worker_available: false, max_upload_chunk_bytes: chunkBytes * 2, max_source_bytes: fileSize + 1 };
-    if (route === '/api/clipping/sources') return [{ id: 'src_upload', status: 'uploading', original_name: 'long.mp4', declared_size_bytes: fileSize, upload_offset: savedOffset }];
-    if (route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/sources/upload') {
-      uploadInit = JSON.parse(options.body);
-      return { id: 'src_upload', status: 'uploading', original_name: 'long.mp4', declared_size_bytes: fileSize, upload_offset: 0 };
-    }
-    if (route === '/api/clipping/sources/src_upload/upload') {
-      const size = options.body.size;
-      const offset = Number(options.headers['Upload-Offset']);
-      chunks.push({ size, offset });
-      if (failSecondChunk && offset === chunkBytes) {
-        failSecondChunk = false;
-        throw new Error('Connection interrupted');
-      }
-      savedOffset = offset + size;
-      return { upload_offset: savedOffset };
-    }
-    if (route === '/api/clipping/sources/src_upload/finalize') {
-      releaseFinalize();
-      return { id: 'src_upload', status: 'ready' };
-    }
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-
-  const file = {
-    name: 'long.mp4',
-    size: fileSize,
-    type: 'video/mp4',
-    slice(start, end) {
-      assert.ok(end - start <= chunkBytes, 'no chunk exceeds 16 MiB');
-      return { size: end - start };
-    }
-  };
-  const uploadFile = app.elements.get('clipping-file');
-  assert.equal(treeText(app.elements.get('clipping-upload-form')).includes('Matching name and size do not verify its contents.'), false, 'the normal upload form has no resume warning');
-  uploadFile.files = [file];
-  app.elements.get('clipping-upload-permission').checked = true;
-  app.elements.get('clipping-upload-form').emit('submit');
-  for (let attempt = 0; attempt < 50 && !app.elements.get('clipping-upload-error').textContent; attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.match(app.elements.get('clipping-upload-error').textContent, /Connection interrupted/);
-  assert.equal(uploadInit.rights_attested, true);
-  assert.equal(savedOffset, chunkBytes);
-  for (let attempt = 0; attempt < 20 && !app.elements.get('clipping-sources').querySelectorAll('button').some((node) => node.textContent === 'Resume upload'); attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-
-  const resumeButton = app.elements.get('clipping-sources').querySelectorAll('button').find((node) => node.textContent === 'Resume upload');
-  assert.ok(resumeButton, 'an interrupted source has a resume control');
-  resumeButton.click();
-  const resumeHelp = app.elements.get('clipping-upload-form').children.find((node) => node.textContent.includes('Matching name and size do not verify its contents.'));
-  assert.ok(resumeHelp && !resumeHelp.hidden, 'choosing Resume explains that the exact original file is needed');
-  const resumeFile = app.elements.get('clipping-resume-file');
-  assert.equal(resumeFile.clicked, true);
-  resumeFile.files = [file];
-  resumeFile.emit('change');
-  await finalized;
-  for (let attempt = 0; attempt < 20 && !resumeHelp.hidden; attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.equal(resumeHelp.hidden, true, 'the resume-only note hides when the upload completes');
-  for (let attempt = 0; attempt < 20 && app.elements.get('clipping-upload-progress').hidden; attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.deepEqual(chunks.map((chunk) => chunk.size), [chunkBytes, 1, 1]);
-  assert.deepEqual(chunks.map((chunk) => chunk.offset), [0, chunkBytes, chunkBytes]);
-});
-
-test('Modal worker settings require a token at setup and display only secret-free, config-only status', async () => {
-  const requests = [];
-  const secret = 'never-render-this-bearer-token';
-  const app = createUI(async (route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return { worker_available: false, default_retention_days: 30 };
-    if (route === '/api/clipping/config/worker' && !options.method) {
-      return {
-        configured: true,
-        enabled: false,
-        endpoint_host: 'clip-worker.modal.run',
-        provider: 'openai-compatible',
-        model: 'analysis-model-v2',
-        pipeline_revision: 'm3-2026-10-09-v1',
-        rate_micro_usd_per_second: 3,
-        readiness: 'configured_not_live_checked',
-        capabilities: {
-          full_timeline_asr: true,
-          original_script: true,
-          audio_events: true,
-          scene_motion_events: false,
-          candidate_selection: true
-        },
-        billing_basis: 'operator_estimate_per_compute_second',
-        bearer_token: secret
-      };
-    }
-    if (route === '/api/clipping/config/worker' && options.method === 'PUT') return { configured: true, enabled: JSON.parse(options.body).enabled };
-    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const status = treeText(app.elements.get('clipping-worker-status')) + treeText(app.elements.get('clipping-worker-metadata'));
-  assert.match(status, /configured, not live checked/);
-  assert.match(status, /clip-worker\.modal\.run/);
-  assert.match(status, /analysis-model-v2/);
-  assert.match(status, /m3-2026-10-09-v1/);
-  assert.match(status, /Full-timeline ASR/);
-  assert.match(status, /Original-script transcript/);
-  assert.match(status, /Candidate selection/);
-  assert.doesNotMatch(status, /Scene and motion events/, 'disabled capabilities are not advertised as enabled');
-  assert.doesNotMatch(status, new RegExp(secret));
-  assert.equal(app.elements.get('clipping-worker-token').value, '', 'a secret returned by a broken server is never copied into the password field');
-  assert.equal(app.elements.get('clipping-worker-enabled').checked, false, 'a configured worker stays disabled by default');
-  assert.equal(app.elements.get('clipping-callback-origin').textContent, 'http://localhost', 'Modal callback origin matches the current dashboard origin');
-
-  const endpoint = app.elements.get('clipping-worker-endpoint');
-  const token = app.elements.get('clipping-worker-token');
-  const revision = app.elements.get('clipping-worker-pipeline-revision');
-  const rate = app.elements.get('clipping-worker-rate');
-  endpoint.value = 'https://clip-worker.modal.run/dispatch';
-  assert.equal(revision.value, 'm3-2026-10-09-v1');
-  rate.value = '0.000004';
-  app.elements.get('clipping-worker-enabled').checked = true;
-  await app.elements.get('clipping-worker-form').emit('submit')[0];
-  const update = requests.find((request) => request.route === '/api/clipping/config/worker' && request.options.method === 'PUT');
-  assert.ok(update, 'worker settings use the authenticated same-origin configuration route');
-  assert.deepEqual(JSON.parse(update.options.body), {
+  ui.elements.get("clipping-worker-token").value = "a".repeat(64);
+  form.emit("submit");
+  await settle();
+  assert.deepEqual(saved, {
     enabled: true,
-    endpoint: 'https://clip-worker.modal.run/dispatch',
-    bearer_token: '',
-    rate_micro_usd_per_second: 4,
-    pipeline_revision: 'm3-2026-10-09-v1'
-  }, 'a blank bearer preserves an existing configured secret');
-  assert.equal(token.value, '');
-  assert.ok(requests.every((request) => request.route.startsWith('/api/')), 'the browser never calls the Modal endpoint directly');
-  assert.match(markup, /FRAMEVAULT_CLIPPING_WORKER_SHARED_SECRET=-/);
-  assert.doesNotMatch(markup, /FRAMEVAULT_CLIPPING_WORKER_SHARED_SECRET=.*your-random-worker-token/);
-  assert.match(markup, /three separate least-privilege Modal secrets/);
-  assert.match(markup, /runtime and model-prewarm secrets omit the dispatch bearer/);
-  assert.match(markup, /FRAMEVAULT_CALLBACK_ORIGIN/);
-  assert.match(markup, /FRAMEVAULT_PIPELINE_REVISION/);
-  assert.match(markup, /FRAMEVAULT_WHISPER_MODEL_REVISION/);
-  assert.match(markup, /immutable 40-character lowercase Hugging Face commit/);
-  assert.match(markup, /Change the pipeline revision whenever the model commit, worker, runtime, or analysis algorithm changes/);
-  assert.match(markup, /Must exactly match/);
-  assert.match(markup, /worker rejects media or callback transfer URLs outside it/);
-  assert.match(markup, /worker rejects media or callback transfer URLs outside it/);
-  assert.match(markup, /modal run workers\/modal\/clipping_m3_worker\.py::app\.clipping_model_prewarm_task/);
-  assert.match(markup, /worker URL ending in/);
-  assert.match(markup, /provider charges/);
-});
-
-test('initial Modal worker setup requires a bearer and keeps the worker disabled by default', async () => {
-  const writes = [];
-  const app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/config/worker' && !options.method) return { configured: false, enabled: false, readiness: 'not_configured' };
-    if (route === '/api/clipping/config/worker' && options.method === 'PUT') {
-      writes.push(JSON.parse(options.body));
-      return { configured: true, enabled: false };
-    }
-    if (route === '/api/clipping/sources' || route === '/api/clipping/jobs' || route === '/api/clipping/batches') return [];
-    throw new Error(`Unexpected request: ${route}`);
+    endpoint: "https://worker.modal.run/dispatch",
+    bearer_token: "a".repeat(64),
+    pipeline_revision: "m3-test-v1",
+    max_compute_seconds: 2700
   });
-  await app.api.start();
-  assert.equal(app.elements.get('clipping-worker-enabled').checked, false);
-  app.elements.get('clipping-worker-endpoint').value = 'https://clip-worker.modal.run/dispatch';
-  app.elements.get('clipping-worker-rate').value = '0.000001';
-  await app.elements.get('clipping-worker-form').emit('submit')[0];
-  assert.equal(writes.length, 0, 'initial setup cannot be saved without a pipeline revision');
-  assert.match(app.elements.get('clipping-worker-error').textContent, /pipeline revision/);
-  app.elements.get('clipping-worker-pipeline-revision').value = 'm3 test revision';
-  await app.elements.get('clipping-worker-form').emit('submit')[0];
-  assert.equal(writes.length, 0, 'pipeline revisions reject characters outside the configured identifier alphabet');
-  assert.match(app.elements.get('clipping-worker-error').textContent, /1–64 letters/);
-  app.elements.get('clipping-worker-pipeline-revision').value = 'r'.repeat(65);
-  await app.elements.get('clipping-worker-form').emit('submit')[0];
-  assert.equal(writes.length, 0, 'pipeline revisions longer than 64 characters are rejected');
-  app.elements.get('clipping-worker-pipeline-revision').value = 'm3-test-revision';
-  await app.elements.get('clipping-worker-form').emit('submit')[0];
-  assert.equal(writes.length, 0, 'initial setup still requires a bearer token');
-  assert.match(app.elements.get('clipping-worker-error').textContent, /required for initial setup/);
-  app.elements.get('clipping-worker-token').value = 'too-short';
-  await app.elements.get('clipping-worker-form').emit('submit')[0];
-  assert.equal(writes.length, 0, 'a short bearer token is rejected before POST');
-  assert.match(app.elements.get('clipping-worker-error').textContent, /exactly 64 lowercase hexadecimal characters/);
-  app.elements.get('clipping-worker-token').value = 'a'.repeat(64);
-  await app.elements.get('clipping-worker-form').emit('submit')[0];
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].enabled, false);
-  assert.equal(writes[0].bearer_token, 'a'.repeat(64));
-  assert.equal(writes[0].pipeline_revision, 'm3-test-revision');
-  assert.equal(app.elements.get('clipping-worker-token').value, '', 'the token field clears after saving');
+  assert.equal(Object.hasOwn(saved, "rate_micro_usd_per_second"), false);
+  assert.equal(Object.hasOwn(saved, "budget_micro_usd"), false);
+  assert.equal(ui.elements.get("clipping-worker-token").value, "");
+  assert.match(ui.elements.get("clipping-worker-status").textContent, /configured, not live checked/);
+  assert.equal(ui.elements.get("clipping-worker-status").textContent.includes("a".repeat(64)), false);
 });
 
-test('saved analysis artifacts render original timestamps, events, context, candidates, evidence, and versions as text', async () => {
-  const requests = [];
-  const candidate = {
-    id: 'candidate_1', rank: 1, start_ms: 1_250, end_ms: 8_500, duration_ms: 7_250,
-    title_variants: ['Alternate title', '<script>title</script>'], hook: 'A surprising reveal',
-    editorial_score: 19,
-    scores: { hook: 5, emotional_impact: 4, retention_potential: 4, shareability: 3, standalone_context: 3 },
-    confidence: 0.62, confidence_label: 'medium',
-    evidence: [{ kind: 'spoken_line', start_ms: 2_000, end_ms: 3_000, text: '<svg onload=alert(1)>', detail: 'A source-backed quote' }]
+test("logout invalidates a pending source response and clears the clipping workspace", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const handler = async (endpoint) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: false, enabled: false };
+    if (endpoint === "/api/clipping/sources") return pending;
+    if (endpoint === "/api/clipping/jobs") return { jobs: [] };
+    return {};
   };
-  const savedJob = {
-    id: 'clipjob_1', source_id: 'clipsrc_1', status: 'completed', content_type: 'podcast',
-    min_clip_seconds: 15, max_clip_seconds: 60, candidate_limit: 7,
-    artifacts: [{
-      type: 'clipping.analysis', schema_version: '2', version: 1,
-      source_duration_ms: 60_000, time_ranges: [{ start_ms: 1_250, end_ms: 8_500 }],
-      payload_json: JSON.stringify({
-        analysis_version: 'analysis-v2', content_type: 'podcast',
-        model_versions: { asr: 'transcriber-v3' }, algorithm_versions: { selection: 'ranker-v2' },
-        prompt_versions: { context: 'context-prompt-v5' },
-        language: { code: 'hi', probability: 0.91, script: 'Devanagari' },
-        cost_basis: 'operator_rate', cost_estimate_micro_usd: 2_000,
-        rate_micro_usd_per_second: 4, compute_seconds: 500,
-        transcript: { original_script: true, segments: [{ start_ms: 1_250, end_ms: 3_500, text: '<img src=x onerror=alert(1)>', confidence: 0.71, speaker_id: 'speaker_1' }] },
-        context: {
-          summary: '<script>global story</script>',
-          topics: [{ start_ms: 2_000, end_ms: 5_000, label: 'The reveal', keywords: ['reveal', 'reaction'] }],
-          timeline: [{ start_ms: 5_000, end_ms: 8_500, summary: 'The point resolves', keywords: ['payoff'] }]
-        },
-        audio_events: [{ start_ms: 3_000, end_ms: 4_000, kind: 'laughter', score: 0.8, evidence: 'Audience laughter' }],
-        visual_events: [{ start_ms: 4_000, end_ms: 6_000, kind: 'scene_change', score: 0.7, evidence: 'Camera cuts to host' }],
-        candidates: [candidate]
-      })
-    }]
-  };
-  const app = createUI(async (route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/config/worker') return { configured: false, enabled: false };
-    if (route === '/api/clipping/sources') return [{ id: 'clipsrc_1', status: 'ready', original_name: 'episode.mp4' }];
-    if (route === '/api/clipping/jobs' && !options.method) return [savedJob];
-    if (route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/jobs/clipjob_1' && !options.method) return { job: savedJob };
-    if (route === '/api/clipping/jobs/clipjob_1/selection' && options.method === 'POST') return { job: savedJob };
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const view = app.elements.get('clipping-jobs').querySelectorAll('button').find((node) => node.textContent === 'View saved analysis');
-  assert.ok(view);
-  view.click();
-  for (let attempt = 0; attempt < 30 && !treeText(app.elements.get('clipping-jobs')).includes('Original-script transcript'); attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  const rendered = treeText(app.elements.get('clipping-jobs'));
-  for (const expected of [
-    'Original-script transcript', '00:01.250–00:03.500', '<img src=x onerror=alert(1)>',
-    'Global context', '<script>global story</script>', 'Audio events', 'Audience laughter',
-    'Visual events', 'Camera cuts to host', 'Selected clip candidates', 'A surprising reveal',
-    'Alternate title', '<script>title</script>', 'Score components', 'hook', 'retention_potential',
-    'Confidence 0.62 (medium) · uncalibrated', '<svg onload=alert(1)>',
-    'transcriber-v3', 'context-prompt-v5', 'analysis-v2', 'Worker cost estimate', 'not a provider quote'
-  ]) assert.ok(rendered.includes(expected), `saved analysis should render ${expected}`);
-  const tags = treeTags(app.elements.get('clipping-jobs'));
-  assert.equal(tags.includes('img'), false, 'stored transcript text is inert');
-  assert.equal(tags.includes('script'), false, 'stored context and title text are inert');
-  assert.equal(tags.includes('svg'), false, 'stored evidence text is inert');
-  const detailsRequest = requests.find((request) => request.route === '/api/clipping/jobs/clipjob_1');
-  assert.ok(detailsRequest, 'details use a safe same-origin job ID route');
-
-  let selectionForm = findNode(app.elements.get('clipping-jobs'), (node) => node.className === 'clipping-selection-form');
-  for (let attempt = 0; attempt < 30 && !selectionForm; attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-    selectionForm = findNode(app.elements.get('clipping-jobs'), (node) => node.className === 'clipping-selection-form');
-  }
-  assert.ok(selectionForm, 'completed jobs expose saved selection controls after loading their detail');
-  const selectionInputs = selectionForm.children.filter((node) => node.tagName === 'label').map((label) => label.children[0]);
-  selectionInputs[0].value = 'comedy';
-  selectionInputs[1].value = '15';
-  selectionInputs[2].value = '45';
-  selectionInputs[3].value = '7';
-  selectionForm.querySelectorAll('button');
-  const update = selectionForm.children.find((node) => node.tagName === 'button' && node.textContent === 'Update selection');
-  update.click();
-  const selectionRequest = requests.find((request) => request.route === '/api/clipping/jobs/clipjob_1/selection');
-  assert.ok(selectionRequest, 'saved selection updates use the authenticated same-origin API');
-  assert.deepEqual(JSON.parse(selectionRequest.options.body), {
-    content_type: 'comedy', min_clip_seconds: 15, max_clip_seconds: 45, candidate_limit: 7
-  });
+  const ui = createUI(handler);
+  const start = ui.api.start();
+  ui.api.stop(true);
+  release({ sources: [{ id: "clipsrc_old", status: "ready", title: "Old session video" }] });
+  await start;
+  await settle();
+  assert.doesNotMatch(treeText(ui.elements.get("clipping-sources")), /Old session video/);
+  assert.equal(ui.elements.get("clipping-source-count").textContent, "0");
 });
 
-test('video-only artifacts show persisted transcript availability without inventing transcript text', async () => {
-  const job = {
-    id: 'clipjob_video_only', source_id: 'clipsrc_video_only', status: 'completed',
-    artifacts: [{
-      type: 'clipping.analysis', schema_version: '2', version: 1,
-      payload_json: JSON.stringify({
-        transcript: { available: false, status: 'unavailable_no_audio_stream', original_script: true, segments: [] },
-        audio_analysis_status: 'skipped_no_audio_stream',
-        media_streams: { has_audio: false, has_video: true }
-      })
-    }]
-  };
-  const app = createUI(async (route, options = {}) => {
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/config/worker') return { configured: false, enabled: false };
-    if (route === '/api/clipping/sources') return [];
-    if (route === '/api/clipping/jobs' && !options.method) return [job];
-    if (route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/jobs/clipjob_video_only' && !options.method) return { job };
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const view = app.elements.get('clipping-jobs').querySelectorAll('button').find((node) => node.textContent === 'View saved analysis');
-  assert.ok(view);
-  view.click();
-  for (let attempt = 0; attempt < 30 && !treeText(app.elements.get('clipping-jobs')).includes('Transcript availability'); attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  const rendered = treeText(app.elements.get('clipping-jobs'));
-  assert.match(rendered, /No audio stream; audio analysis and transcription were skipped/);
-  assert.equal(treeTags(app.elements.get('clipping-jobs')).includes('ol'), false, 'no transcript segments are fabricated when none were persisted');
-  assert.doesNotMatch(rendered, /Original-script transcript/);
-});
-
-test('uncertain worker attempts show separate estimate and hold and require a reference for zero invoice actual', async () => {
-  const requests = [];
-  const stages = [
-    {
-      name: 'analysis', status: 'uncertain', attempt_id: 'attempt_uncertain',
-      estimated_micro_usd: 0, actual_micro_usd: 0, reserved_micro_usd: 1_000_000, cost_reconciled: false
-    },
-    {
-      name: 'analysis-reconciled', status: 'completed', attempt_id: 'attempt_reconciled',
-      estimated_micro_usd: 700_000, actual_micro_usd: 500_000, reserved_micro_usd: 900_000, cost_reconciled: true
-    },
-    {
-      name: 'analysis-no-attempt', status: 'queued', estimated_micro_usd: 0,
-      actual_micro_usd: 0, reserved_micro_usd: 0, cost_reconciled: false
-    }
-  ];
-  const job = { id: 'clipjob_cost', source_id: 'clipsrc_cost', status: 'paused_budget', stages, artifacts: [] };
-  const app = createUI(async (route, options = {}) => {
-    requests.push({ route, options });
-    if (route === '/api/clipping/config') return { worker_available: false };
-    if (route === '/api/clipping/config/worker') return { configured: false, enabled: false };
-    if (route === '/api/clipping/sources') return [];
-    if (route === '/api/clipping/jobs' && !options.method) return [job];
-    if (route === '/api/clipping/batches') return [];
-    if (route === '/api/clipping/jobs/clipjob_cost' && !options.method) return { job };
-    if (route === '/api/clipping/jobs/clipjob_cost/reconcile-cost' && options.method === 'POST') {
-      const input = JSON.parse(options.body);
-      const stage = stages.find((candidate) => candidate.attempt_id === input.attempt_id);
-      stage.actual_micro_usd = input.actual_cost_micro_usd;
-      stage.cost_reconciled = true;
-      return { job };
-    }
-    throw new Error(`Unexpected request: ${route}`);
-  });
-  await app.api.start();
-  const view = app.elements.get('clipping-jobs').querySelectorAll('button').find((node) => node.textContent === 'View job details');
-  assert.ok(view, 'uncertain attempted jobs can open details without artifacts');
-  view.click();
-  for (let attempt = 0; attempt < 30 && !treeText(app.elements.get('clipping-jobs')).includes('Entered invoice actual cost (USD)'); attempt++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  const rendered = treeText(app.elements.get('clipping-jobs'));
-  assert.match(rendered, /Estimate\n\$0\.00/);
-  assert.match(rendered, /Recorded actual\nNot recorded/);
-  assert.match(rendered, /Remaining reserved hold\n\$1\.00/);
-  assert.match(rendered, /Not reconciled/);
-  assert.match(rendered, /Entered invoice actual cost \(USD\)/);
-  assert.match(rendered, /Modal invoice/);
-
-  const reconciliationForm = findNode(app.elements.get('clipping-jobs'), (node) => node.className === 'clipping-cost-reconciliation');
-  assert.ok(reconciliationForm);
-  const fields = reconciliationForm.children.filter((node) => node.tagName === 'label').map((label) => label.children[0]);
-  const amount = fields[0];
-  const reference = fields[1];
-  const submit = reconciliationForm.children.find((node) => node.tagName === 'button');
-  assert.equal(amount.min, '0');
-  assert.equal(amount.required, true);
-  assert.equal(reference.required, true);
-  assert.equal(reference.maxLength, 256);
-  assert.match(treeText(reference.parent), /maximum 256 UTF-8 bytes/);
-  submit.click();
-  assert.equal(requests.some((request) => request.route.endsWith('/reconcile-cost')), false, 'a blank amount and reference are rejected');
-  assert.match(treeText(reconciliationForm), /nonnegative invoice amount/);
-  amount.value = '0';
-  submit.click();
-  assert.equal(requests.some((request) => request.route.endsWith('/reconcile-cost')), false, 'zero actual still requires a reference');
-  assert.match(treeText(reconciliationForm), /reconciliation reference/);
-  reference.value = `${'é'.repeat(128)}a`;
-  submit.click();
-  assert.equal(requests.some((request) => request.route.endsWith('/reconcile-cost')), false, 'references over 256 UTF-8 bytes are rejected even when under 256 JS code units');
-  assert.match(treeText(reconciliationForm), /at most 256 UTF-8 bytes/);
-  reference.value = '😀'.repeat(64);
-  submit.click();
-  const request = requests.find((entry) => entry.route === '/api/clipping/jobs/clipjob_cost/reconcile-cost');
-  assert.ok(request, 'manual cost reconciliation uses the safe same-origin job route');
-  assert.deepEqual(JSON.parse(request.options.body), {
-    attempt_id: 'attempt_uncertain', actual_cost_micro_usd: 0,
-    reconciliation_reference: '😀'.repeat(64)
-  });
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const stageSection = findNode(app.elements.get('clipping-jobs'), (node) => node.className?.includes('clipping-stage-section'));
-    const cards = stageSection?.children.filter((node) => node.tagName === 'article') || [];
-    if (cards[0] && /Recorded actual\n\$0\.00/.test(treeText(cards[0]))) break;
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  const stageSection = findNode(app.elements.get('clipping-jobs'), (node) => node.className?.includes('clipping-stage-section'));
-  assert.ok(stageSection, treeText(app.elements.get('clipping-jobs')));
-  const firstStageCard = stageSection.children.find((node) => node.tagName === 'article');
-  assert.match(treeText(firstStageCard), /Recorded actual\n\$0\.00/, 'zero is shown only after explicit operator reconciliation');
-  assert.match(treeText(firstStageCard), /Cost reconciliation\nReconciled/);
+test("Clipping contains only YouTube import and read-only analysis UI and uses authenticated event refreshes", () => {
+  const start = markup.indexOf('<section id="clipping-view"');
+  const end = markup.indexOf('<section class="view" data-page="vault"', start);
+  const clippingMarkup = markup.slice(start, end);
+  assert.doesNotMatch(clippingMarkup, /type="file"|clipping-batch|batch|budget|retention|invoice|reconcil|Google Drive|Dropbox|export|publishing|candidate editor/i);
+  assert.doesNotMatch(source, /\/api\/clipping\/(batches|sources\/upload|config\/retention)|reconcile-cost|\/selection|\/cancel|\/retry|budget_micro_usd|rate_micro_usd_per_second/i);
+  assert.doesNotMatch(styles, /upload|batch|budget|retention|invoice|reconcil/i);
+  assert.match(markup, /\/static\/clipping\.js\?v=20261014-youtube-modal-simple/);
+  assert.match(markup, /\/static\/clipping\.css\?v=20261014-youtube-modal-simple/);
+  assert.doesNotMatch(clippingMarkup, /\/docs\/clipping/);
+  assert.doesNotMatch(source, /setInterval|setTimeout|fetch\s*\(/);
+  assert.match(dashboardSource, /source\.addEventListener\("clipping_source"/);
+  assert.match(dashboardSource, /source\.addEventListener\("clipping_job"/);
+  assert.match(dashboardSource, /credentials:\s*"same-origin"/);
+  assert.match(source, /\/api\/clipping\/jobs\/" \+ encodeURIComponent\(id\) \+ "\/results"/);
 });
