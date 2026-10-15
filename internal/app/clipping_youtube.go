@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/url"
 	"os"
@@ -150,6 +151,7 @@ func (a *ClippingAcquisition) importYouTubeToDisk(ctx context.Context, source Cl
 
 	trace.start(ClippingDiagnosticStageDownload)
 	maxBytes := clippingImportSizeLimit(source.Kind, a.youtubeMaxBytes)
+	slog.Info("clipping youtube download preparation complete", "source_id", source.ID, "max_bytes", maxBytes)
 	if err := a.runYouTubeDownloader(ctx, source.ID, canonicalURL, workDir, maxBytes); err != nil {
 		trace.finish(ClippingDiagnosticFailed, err)
 		return err
@@ -194,6 +196,7 @@ func (a *ClippingAcquisition) importYouTubeToDisk(ctx context.Context, source Cl
 		}
 		return probeErr
 	}
+	slog.Info("clipping youtube media probed", "source_id", source.ID, "bytes", info.Size(), "duration_ms", media.DurationMS, "video_codec", media.VideoCodec, "audio_codec", media.AudioCodec, "audio_streams", media.AudioStreams)
 	if err := validateYouTubeProbeExpectation(expectation, media); err != nil {
 		return withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "The public video did not produce a valid MP4 with both video and audio; check that the video is public and try again")}, "format_unavailable")
 	}
@@ -237,6 +240,7 @@ func (a *ClippingAcquisition) importYouTubeToDisk(ctx context.Context, source Cl
 		return completeErr
 	}
 	trace.complete()
+	slog.Info("clipping youtube media staged", "source_id", source.ID, "bytes", info.Size())
 	return nil
 }
 
@@ -250,6 +254,7 @@ func (a *ClippingAcquisition) runYouTubeDownloader(ctx context.Context, sourceID
 		python = findYouTubeExecutable(clippingYouTubePythonPaths)
 	}
 	if executable == "" || python == "" {
+		slog.Warn("clipping youtube runtime missing", "source_id", sourceID, "yt_dlp_present", executable != "", "python_present", python != "")
 		return withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube downloader is unavailable in this runtime; contact the service operator")}, "runtime_unavailable")
 	}
 	runtimeSpec := a.youtubeRuntime
@@ -258,9 +263,11 @@ func (a *ClippingAcquisition) runYouTubeDownloader(ctx context.Context, sourceID
 	}
 	runtimeName, runtimePath, hasRuntimePath := strings.Cut(runtimeSpec, ":")
 	if !hasRuntimePath || runtimeName != "deno" || runtimePath == "" {
+		slog.Warn("clipping youtube runtime invalid", "source_id", sourceID, "reason_code", "runtime_unavailable")
 		return withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube downloader is unavailable in this runtime; contact the service operator")}, "runtime_unavailable")
 	}
 	if _, err := exec.LookPath(runtimePath); err != nil {
+		slog.Warn("clipping youtube Deno missing", "source_id", sourceID, "reason_code", "runtime_unavailable")
 		return withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_import_unavailable", "The YouTube JavaScript runtime is unavailable; contact the service operator")}, "runtime_unavailable")
 	}
 	if maxBytes <= 0 {
@@ -278,16 +285,21 @@ func (a *ClippingAcquisition) runYouTubeDownloader(ctx context.Context, sourceID
 	defer cancel()
 	command := exec.CommandContext(runCtx, python, commandArgs...)
 	command.Env = youtubeDownloaderEnvironment(cacheDir)
-	command.Stderr = io.Discard
+	diagnosticStderr := &youtubeDiagnosticStderr{}
+	command.Stderr = diagnosticStderr
 	command.WaitDelay = 2 * time.Second
 	configureYouTubeSubprocess(command)
 	output := &youtubeDownloaderOutputWriter{}
 	command.Stdout = output
+	startedAt := time.Now()
 	if err := command.Start(); err != nil {
+		slog.Warn("clipping youtube downloader could not start", "source_id", sourceID, "reason_code", "extractor_exit_failure")
 		return withClippingDiagnosticCode(fmt.Errorf("%w: start YouTube downloader", errClippingImportRetryable), "extractor_exit_failure")
 	}
+	slog.Info("clipping youtube downloader started", "source_id", sourceID, "max_bytes", maxBytes, "runtime", "deno")
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- command.Wait() }()
+	lastProgressLog := time.Now()
 	ticker := time.NewTicker(clippingYouTubeWorkspacePollInterval)
 	defer ticker.Stop()
 	for {
@@ -295,8 +307,10 @@ func (a *ClippingAcquisition) runYouTubeDownloader(ctx context.Context, sourceID
 		case <-ctx.Done():
 			cancel()
 			<-waitDone
+			slog.Warn("clipping youtube downloader interrupted", "source_id", sourceID, "reason_code", clippingDiagnosticCode(ClippingDiagnosticStageDownload, ctx.Err()), "elapsed_ms", time.Since(startedAt).Milliseconds())
 			return ctx.Err()
 		case runErr := <-waitDone:
+			slog.Info("clipping youtube downloader exited", "source_id", sourceID, "exit_code", youtubeDownloaderExitCode(runErr), "stderr_category", classifyYouTubeDownloaderStderr(diagnosticStderr.tail), "output_limit_hit", output.exceeded, "elapsed_ms", time.Since(startedAt).Milliseconds())
 			if output.exceeded {
 				return withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "The public video returned an invalid downloader response; check the video link and try again")}, "extractor_output_limit")
 			}
@@ -338,6 +352,10 @@ func (a *ClippingAcquisition) runYouTubeDownloader(ctx context.Context, sourceID
 				cancel()
 				<-waitDone
 				return youtubeSizeLimitFailure()
+			}
+			if time.Since(lastProgressLog) >= 30*time.Second {
+				slog.Info("clipping youtube download progress", "source_id", sourceID, "workspace_bytes", used, "output_bytes", outputBytes, "workspace_entries", entries, "elapsed_ms", time.Since(startedAt).Milliseconds())
+				lastProgressLog = time.Now()
 			}
 		}
 	}
