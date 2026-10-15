@@ -132,6 +132,7 @@
     config: null,
     worker: null,
     sources: [],
+    sourceConsoleStatuses: new Map(),
     jobs: [],
     contentTypes: new Map(),
     pendingSourceIDs: new Set(),
@@ -751,7 +752,14 @@
       const records = Array.isArray(response) ? response : response && Array.isArray(response[recordName]) ? response[recordName] : [];
       if (kind === "sources") {
         for (const source of records) {
-          if (String(source && source.status || "").toLowerCase() === "deleted") markSourceDeleted(source.id);
+          const id = safeID(source && source.id);
+          const status = String(source && source.status || "").toLowerCase();
+          if (id && state.sourceConsoleStatuses.get(id) !== status) {
+            const reason = String(source && source.error || "");
+            console.info("[clipper/youtube-import] source status", { source_id: id, status, reason_code: /^[a-z0-9_]{1,100}$/.test(reason) ? reason : "" });
+            state.sourceConsoleStatuses.set(id, status);
+          }
+          if (status === "deleted") markSourceDeleted(source.id);
         }
         state.sources = records.filter((source) => !state.deletedSourceIDs.has(safeID(source && source.id))
           && String(source && source.status || "").toLowerCase() !== "deleted");
@@ -774,6 +782,7 @@
       render();
     } catch (error) {
       if (!current(lifecycle) || sequence !== state.requestSequence[kind] || error.name === "AbortError") return;
+      if (kind === "sources") console.warn("[clipper/youtube-import] source refresh failed", { error_type: error && error.name || "unknown" });
       errorNode.textContent = error.message || "Could not load clipping information.";
       if (notifyError) toastError(error, errorNode.textContent);
     }
@@ -1028,6 +1037,7 @@
     ui.importForm.setAttribute("aria-busy", "true");
     ui.importStatus.textContent = "The public YouTube link was accepted. Preparing the video…";
     let restoreLinkFocus = false;
+    console.info("[clipper/youtube-import] submitting import request");
     try {
       const response = await api("/api/clipping/sources/import", {
         method: "POST",
@@ -1036,6 +1046,7 @@
       if (!current(lifecycle)) return;
       const source = response && response.source;
       const id = safeID(source && source.id);
+      console.info("[clipper/youtube-import] import accepted", { source_id: id, status: String(source && source.status || "") });
       if (id && !state.sources.some((item) => safeID(item && item.id) === id)) state.sources.unshift(source);
       ui.link.value = "";
       ui.permission.checked = false;
@@ -1045,6 +1056,7 @@
       renderSources();
     } catch (error) {
       if (!current(lifecycle)) return;
+      console.warn("[clipper/youtube-import] import request failed", { error_type: error && error.name || "unknown", http_status: Number.isInteger(error && error.status) ? error.status : null });
       ui.importError.textContent = toastError(error, "The YouTube video could not be imported.");
       ui.importStatus.textContent = "";
       restoreLinkFocus = true;
@@ -1207,6 +1219,7 @@
       state.config = null;
       state.worker = null;
       state.sources = [];
+      state.sourceConsoleStatuses.clear();
       state.jobs = [];
       state.contentTypes.clear();
       state.pendingSourceIDs.clear();
