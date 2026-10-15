@@ -1556,6 +1556,28 @@ def _add_worker_source_files(image: Any) -> Any:
     )
 
 
+def _add_rust_scene_image(image: Any) -> Any:
+    """Compile the self-contained Rust analyzer in the GPU image at deployment.
+
+    When Modal imports the flattened worker inside a running container the
+    repository source tree may be absent; the image is already built then.
+    """
+    rust_dir = Path(__file__).resolve().parent / "scene-analyzer"
+    if not rust_dir.is_dir():
+        return image
+    return (
+        image.add_local_dir(
+            str(rust_dir),
+            remote_path="/build/framevault-scene-analyzer",
+            copy=True,
+        )
+        .run_commands(
+            "cd /build/framevault-scene-analyzer && cargo build --offline --release",
+            "install -m 0755 /build/framevault-scene-analyzer/target/release/framevault-scene-analyzer /usr/local/bin/framevault-scene-analyzer",
+        )
+    )
+
+
 def _install_modal_app() -> Any:
     """Create Modal registrations using only module-global handlers."""
 
@@ -1584,21 +1606,12 @@ def _install_modal_app() -> Any:
         required_keys=[WORKER_MODEL_REVISION_KEY],
     )
     gpu_image = _add_worker_source_files(
-        modal.Image.from_registry(GPU_CUDA_IMAGE, add_python="3.11")
-        .entrypoint([])
-        .apt_install("ffmpeg", "rustc", "cargo")
-        .pip_install(*CLIPPING_IMAGE_PACKAGES)
-        # Bake the Rust source into the image before compiling. No network crates.
-        .add_local_dir(
-            str(Path(__file__).resolve().parent / "scene-analyzer"),
-            remote_path="/build/framevault-scene-analyzer",
-            copy=True,
-        )
-        .run_commands(
-            "cd /build/framevault-scene-analyzer && cargo build --offline --release",
-            "install -m 0755 /build/framevault-scene-analyzer/target/release/framevault-scene-analyzer /usr/local/bin/framevault-scene-analyzer",
-        )
-        .env({
+        _add_rust_scene_image(
+            modal.Image.from_registry(GPU_CUDA_IMAGE, add_python="3.11")
+            .entrypoint([])
+            .apt_install("ffmpeg", "rustc", "cargo")
+            .pip_install(*CLIPPING_IMAGE_PACKAGES)
+        ).env({
             "FRAMEVAULT_WHISPER_DEVICE": "cuda",
             "FRAMEVAULT_WHISPER_CACHE": MODEL_CACHE_DIR,
             "FRAMEVAULT_SCENE_ENGINE": "rust",
