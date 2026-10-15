@@ -24,6 +24,7 @@ import shutil
 import statistics
 import subprocess
 import threading
+import time
 import unicodedata
 from bisect import bisect_left, bisect_right
 from collections import Counter, deque
@@ -661,6 +662,8 @@ def analyze_source(
     if not isinstance(has_audio_stream, bool):
         raise AnalysisError("audio stream metadata is invalid")
     cancel_check()
+    stage_started = time.monotonic()
+    logging.getLogger("framevault.clipping").info("clipping_analysis_phase_start phase=transcription")
     use_default_transcriber = transcriber is None and has_audio_stream
     if has_audio_stream:
         transcriber = transcriber or transcribe_faster_whisper
@@ -676,7 +679,13 @@ def analyze_source(
     if not isinstance(transcript_result, Mapping):
         raise AnalysisError("transcriber returned an invalid result")
     segments = normalize_segments(transcript_result.get("segments", []), source_duration_ms)
+    logging.getLogger("framevault.clipping").info(
+        "clipping_analysis_phase_complete phase=transcription elapsed_ms=%d segments=%d",
+        int((time.monotonic() - stage_started) * 1000), len(segments),
+    )
     cancel_check()
+    stage_started = time.monotonic()
+    logging.getLogger("framevault.clipping").info("clipping_analysis_phase_start phase=audio_scan")
     if not has_audio_stream:
         audio_scan = {
             "events": [],
@@ -687,7 +696,13 @@ def analyze_source(
         audio_scan = scan_audio_events(media_path, segments, source_duration_ms, cancel_check=cancel_check)
     else:
         audio_scan = audio_scanner(media_path, segments, source_duration_ms, cancel_check=cancel_check)
+    logging.getLogger("framevault.clipping").info(
+        "clipping_analysis_phase_complete phase=audio_scan elapsed_ms=%d",
+        int((time.monotonic() - stage_started) * 1000),
+    )
     cancel_check()
+    stage_started = time.monotonic()
+    logging.getLogger("framevault.clipping").info("clipping_analysis_phase_start phase=visual_scan")
     if visual_scanner is None:
         visual_scan = scan_visual_events(media_path, source_duration_ms, cancel_check=cancel_check)
     else:
@@ -697,6 +712,12 @@ def analyze_source(
 
     audio_events = _bounded_events(audio_scan.get("events", []), source_duration_ms, MAX_AUDIO_EVENTS)
     visual_events = _bounded_events(visual_scan.get("events", []), source_duration_ms, MAX_VISUAL_EVENTS)
+    logging.getLogger("framevault.clipping").info(
+        "clipping_analysis_phase_complete phase=visual_scan elapsed_ms=%d visual_events=%d",
+        int((time.monotonic() - stage_started) * 1000), len(visual_events),
+    )
+    stage_started = time.monotonic()
+    logging.getLogger("framevault.clipping").info("clipping_analysis_phase_start phase=candidate_inspection")
     candidate_inspections = inspect_candidate_windows(
         media_path,
         source_duration_ms=source_duration_ms,
@@ -709,6 +730,10 @@ def analyze_source(
         visual_events=visual_events,
         inspector=candidate_inspector,
         cancel_check=cancel_check,
+    )
+    logging.getLogger("framevault.clipping").info(
+        "clipping_analysis_phase_complete phase=candidate_inspection elapsed_ms=%d inspected_windows=%d",
+        int((time.monotonic() - stage_started) * 1000), len(candidate_inspections),
     )
     runtime_manifest = dict(runtime_manifest or analysis_runtime_manifest(
         include_model=use_default_transcriber,
