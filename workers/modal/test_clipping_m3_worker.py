@@ -1612,6 +1612,63 @@ class ClippingM3WorkerTests(unittest.TestCase):
         finally:
             sys.modules.pop(module_name, None)
 
+    def test_process_dispatch_with_remote_ledger_persists_success_and_failure(self):
+        # Production uses RemoteDispatchLedger, not the local SQLite adapter.
+        # This checks the execute_stage(..., now=...) call which the old
+        # remote complete() signature rejected with TypeError.
+        now = int(time.time())
+        payload = dispatch_payload(
+            expires_at=now + 3600,
+            callback_expires_at=now + 3600 + MAX_CALLBACK_GRACE_SECONDS,
+        )
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
+                local = SQLiteDispatchLedger(Path(directory) / "ledger.sqlite3")
+                actions = []
+                sent = []
+                try:
+                    def rpc(operation, request):
+                        actions.append((operation, request))
+                        return ledger_rpc_operation(
+                            local, operation, request,
+                            expected_origin="https://framevault.dev",
+                            expected_pipeline_revision="framevault_m3_worker_v1",
+                        )
+
+                    def client(dispatch, _media_token):
+                        if fail:
+                            raise ValueError("hidden fixture failure")
+                        payload_core = build_source_core_payload(
+                            source_analysis(dispatch),
+                            compute_seconds=2,
+                            rate_micro_usd_per_second=dispatch.rate_micro_usd_per_second,
+                        )
+                        return StageResult({
+                            "type": "clipping.analysis",
+                            "schema_version": "2",
+                            "version": 1,
+                            "source_duration_ms": dispatch.source_duration_ms,
+                            "time_ranges": [],
+                            "payload": payload_core,
+                        }, payload_core["cost_estimate_micro_usd"], COMPUTE_COST_BASIS)
+
+                    accepted = process_dispatch(
+                        payload, MEDIA_CAP, CALLBACK_CAP,
+                        ledger=RemoteDispatchLedger(rpc),
+                        analysis_client=client,
+                        callback_sender=lambda _url, _token, result: sent.append(result) or True,
+                        now=now,
+                    )
+                    self.assertTrue(accepted)
+                    self.assertEqual(len(sent), 1)
+                    self.assertEqual(sent[0]["status"], "failed" if fail else "completed")
+                    self.assertEqual([operation for operation, _ in actions], [
+                        "claim", "complete", "mark_delivered",
+                    ])
+                    self.assertEqual(actions[1][1]["now"], now)
+                finally:
+                    local.close()
+
     def test_remote_ledger_rpc_replay_and_delivery_follow_serialized_operation_order(self):
         now = int(time.time())
         payload = dispatch_payload(
