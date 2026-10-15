@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"hash"
 	"io"
 	"math"
@@ -219,6 +220,7 @@ func (a *ClippingAcquisition) CreatePublicImport(ctx context.Context, rightsAtte
 	} else {
 		a.store.PublishClippingSource(source.ID)
 	}
+	slog.Info("clipping youtube import queued", "source_id", source.ID, "status", source.Status)
 	return source, nil
 }
 
@@ -267,6 +269,7 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 		return true, claimErr
 	}
 	trace := newClippingDiagnosticTrace(a, claimed.ID)
+	slog.Info("clipping youtube import claimed", "source_id", claimed.ID, "attempt", claimed.ImportAttempts, "kind", claimed.Kind)
 	trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticStarted, "")
 	if claimed.Kind != ClippingSourceYouTube {
 		a.store.clippingMu.Unlock()
@@ -404,6 +407,7 @@ func (a *ClippingAcquisition) retryClippingImport(source ClippingSource, trace *
 		status = ClippingDiagnosticFailed
 		code = clippingDiagnosticCode(trace.activeStage, cause)
 	}
+	slog.Warn("clipping youtube import retry decision", "source_id", source.ID, "attempt", source.ImportAttempts, "status", status, "reason_code", clippingDiagnosticCode(trace.activeStage, cause))
 	trace.finish(status, cause)
 	trace.record(ClippingDiagnosticStageDispatch, status, code)
 	return a.retryImport(source, cause)
