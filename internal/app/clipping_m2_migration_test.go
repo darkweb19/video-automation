@@ -14,7 +14,7 @@ import (
 )
 
 // This fixture models the M2 clipping tables before M3 added selection,
-// estimate, and callback-accounting columns. The records intentionally exist
+// estimate, and callback-state columns. The records intentionally exist
 // before OpenStore runs so the test covers SQLite's additive-column defaults.
 const clippingM2SchemaWithoutM3Columns = `
 CREATE TABLE clipping_sources (
@@ -111,7 +111,7 @@ CREATE TABLE clipping_artifacts (
 );
 `
 
-func TestClippingM2SchemaAdditivelyMigratesAndAcceptsV1Callback(t *testing.T) {
+func TestClippingM2SchemaAdditivelyMigratesAndExpiresUnsupportedV1Attempt(t *testing.T) {
 	dataDir := t.TempDir()
 	legacyLease := strings.Repeat("d", 64)
 	sourceID := "clipsrc_m2_migration"
@@ -152,14 +152,14 @@ func TestClippingM2SchemaAdditivelyMigratesAndAcceptsV1Callback(t *testing.T) {
 	}
 	_, err = legacyDB.Exec(`INSERT INTO clipping_batches(
 		id,idempotency_key,request_hash,status,budget_limit_micro_usd,reserved_micro_usd,created_at,updated_at
-	) VALUES(?,?,?,?,?,?,?,?)`, batchID, "m2-migration-request", strings.Repeat("c", 64), "running", 5_000, 100, now, now)
+	) VALUES(?,?,?,?,?,?,?,?)`, batchID, "m2-migration-request", strings.Repeat("c", 64), "paused_budget", 5_000, 100, now, now)
 	if err != nil {
 		_ = legacyDB.Close()
 		t.Fatalf("seed M2 batch: %v", err)
 	}
 	_, err = legacyDB.Exec(`INSERT INTO clipping_jobs(
 		id,batch_id,source_id,status,budget_limit_micro_usd,reserved_micro_usd,created_at,updated_at
-	) VALUES(?,?,?,?,?,?,?,?)`, jobID, batchID, sourceID, "running", 2_000, 100, now, now)
+	) VALUES(?,?,?,?,?,?,?,?)`, jobID, batchID, sourceID, "paused_budget", 2_000, 100, now, now)
 	if err != nil {
 		_ = legacyDB.Close()
 		t.Fatalf("seed M2 job: %v", err)
@@ -168,7 +168,7 @@ func TestClippingM2SchemaAdditivelyMigratesAndAcceptsV1Callback(t *testing.T) {
 	leaseUntil := now + 3600
 	_, err = legacyDB.Exec(`INSERT INTO clipping_stages(
 		job_id,name,status,idempotency_key,attempt_id,attempt,lease_expires_at,reserved_micro_usd,created_at,updated_at
-	) VALUES(?,?,'running',?,?,1,?,100,?,?)`, jobID, stageName, stageKey, attemptID, leaseUntil, now, now)
+	) VALUES(?,?,'paused_budget',?,?,1,?,100,?,?)`, jobID, stageName, stageKey, attemptID, leaseUntil, now, now)
 	if err != nil {
 		_ = legacyDB.Close()
 		t.Fatalf("seed M2 stage: %v", err)
@@ -213,16 +213,20 @@ func TestClippingM2SchemaAdditivelyMigratesAndAcceptsV1Callback(t *testing.T) {
 	}
 	var attemptEstimate, attemptReconciled, operatorRate, maxCompute, callbackReceived int64
 	var reference, callbackDigest string
+	var pipelineRevision string
 	if err := store.db.QueryRow(`SELECT estimated_micro_usd,cost_reconciled,operator_rate_micro_usd_per_second,
-		max_compute_seconds,reconciliation_reference,callback_received_at,callback_digest
+		max_compute_seconds,pipeline_revision,reconciliation_reference,callback_received_at,callback_digest
 		FROM clipping_stage_attempts WHERE attempt_id=?`, attemptID).Scan(
-		&attemptEstimate, &attemptReconciled, &operatorRate, &maxCompute, &reference, &callbackReceived, &callbackDigest,
+		&attemptEstimate, &attemptReconciled, &operatorRate, &maxCompute, &pipelineRevision, &reference, &callbackReceived, &callbackDigest,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if attemptEstimate != 0 || attemptReconciled != 1 || operatorRate != 0 || maxCompute != 0 || reference != "" || callbackReceived != 0 || callbackDigest != "" {
-		t.Fatalf("M3 defaults on old attempt: estimate=%d reconciled=%d rate=%d max=%d reference=%q callback_at=%d digest=%q",
-			attemptEstimate, attemptReconciled, operatorRate, maxCompute, reference, callbackReceived, callbackDigest)
+	if attemptEstimate != 0 || attemptReconciled != 1 || operatorRate != 0 || maxCompute != 0 || pipelineRevision != "" || reference != "" || callbackReceived != 0 || callbackDigest != "" {
+		t.Fatalf("M3 defaults on old attempt: estimate=%d reconciled=%d rate=%d max=%d revision=%q reference=%q callback_at=%d digest=%q",
+			attemptEstimate, attemptReconciled, operatorRate, maxCompute, pipelineRevision, reference, callbackReceived, callbackDigest)
+	}
+	if stage := stages[0]; stage.Status != ClippingStageUncertain {
+		t.Fatalf("legacy unknown attempt must wait through its callback window, got stage=%+v", stage)
 	}
 
 	security, err := NewSecurity(store)
@@ -261,27 +265,51 @@ func TestClippingM2SchemaAdditivelyMigratesAndAcceptsV1Callback(t *testing.T) {
 	if err != nil || stillRunning.Status != ClippingJobRunning || stillRunning.ReservedMicroUSD != 100 || stillRunning.SpentMicroUSD != 0 {
 		t.Fatalf("rejected v1 payload changed the M2 attempt: job=%+v error=%v", stillRunning, err)
 	}
-	if response := clippingM2CallbackRequest(handler, jobID, attemptID, callbackToken, callback); response.Code != http.StatusNoContent {
-		t.Fatalf("legacy v1 callback after additive migration: status=%d body=%s", response.Code, response.Body.String())
+	if response := clippingM2CallbackRequest(handler, jobID, attemptID, callbackToken, callback); response.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported v1 callback after additive migration: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if response := clippingM2CallbackRequest(handler, jobID, attemptID, callbackToken, callback); response.Code != http.StatusNoContent {
-		t.Fatalf("duplicate legacy v1 callback: status=%d body=%s", response.Code, response.Body.String())
+	stillRunning, err = store.ClippingJob(jobID)
+	if err != nil || stillRunning.Status != ClippingJobRunning || stillRunning.ReservedMicroUSD != 100 || stillRunning.SpentMicroUSD != 0 {
+		t.Fatalf("rejected legacy callback changed the M2 attempt: job=%+v error=%v", stillRunning, err)
 	}
-	settledJob, err := store.ClippingJob(jobID)
-	if err != nil || settledJob.Status != ClippingJobCompleted || settledJob.ReservedMicroUSD != 0 || settledJob.SpentMicroUSD != 42 {
-		t.Fatalf("legacy v1 settlement job=%+v error=%v", settledJob, err)
+
+	// Old attempts retain their capability through the persisted expiry window.
+	// Move only this fixture's lease boundary into the past, then prove recovery
+	// releases its legacy hold without accepting or redispatching v1 work.
+	expiredLease := now - int64(clippingCallbackCapabilityGrace.Seconds()) - 2
+	if _, err := store.db.Exec(`UPDATE clipping_stage_attempts SET lease_expires_at=? WHERE attempt_id=?`, expiredLease, attemptID); err != nil {
+		t.Fatal(err)
 	}
-	settledBatch, err := store.ClippingBatch(batchID)
-	if err != nil || settledBatch.ReservedMicroUSD != 0 || settledBatch.SpentMicroUSD != 42 {
-		t.Fatalf("legacy v1 settlement batch=%+v error=%v", settledBatch, err)
+	if _, err := store.db.Exec(`UPDATE clipping_capability_expiry_index SET expires_at=? WHERE job_id=? AND attempt_id=?`, now-2, jobID, attemptID); err != nil {
+		t.Fatal(err)
 	}
-	settledStages, err := store.ClippingStages(jobID)
-	if err != nil || len(settledStages) != 1 || settledStages[0].Status != ClippingStageCompleted || settledStages[0].ActualMicroUSD != 42 {
-		t.Fatalf("legacy v1 settlement stage=%+v error=%v", settledStages, err)
+	if _, err := store.db.Exec(`UPDATE clipping_stages SET lease_expires_at=? WHERE job_id=? AND name=?`, expiredLease, jobID, stageName); err != nil {
+		t.Fatal(err)
 	}
-	artifacts, err := store.ClippingArtifacts(jobID)
-	if err != nil || len(artifacts) != 1 || artifacts[0].SchemaVersion != "1" || artifacts[0].PayloadJSON != `{"fixture":"legacy-v1"}` {
-		t.Fatalf("legacy v1 artifact after migration=%+v error=%v", artifacts, err)
+	if err := store.RecoverExpiredClippingStages(now); err != nil {
+		t.Fatalf("expire legacy attempt after callback window: %v", err)
+	}
+	failedJob, err := store.ClippingJob(jobID)
+	if err != nil || failedJob.Status != ClippingJobFailed || failedJob.ReservedMicroUSD != 0 || failedJob.SpentMicroUSD != 0 {
+		t.Fatalf("expired legacy attempt state=%+v error=%v", failedJob, err)
+	}
+	var settledAt, callbackAt, reserved int64
+	if err := store.db.QueryRow(`SELECT settled_at,callback_received_at,reserved_micro_usd FROM clipping_stage_attempts WHERE attempt_id=?`, attemptID).
+		Scan(&settledAt, &callbackAt, &reserved); err != nil {
+		t.Fatal(err)
+	}
+	if settledAt == 0 || callbackAt != 0 || reserved != 0 {
+		t.Fatalf("expired legacy attempt was not safely released: settled=%d callback=%d reserved=%d", settledAt, callbackAt, reserved)
+	}
+	if _, err := store.RetryClippingStage(jobID, stageName); err != nil {
+		t.Fatalf("explicit retry after callback capability expiry: %v", err)
+	}
+	retried, err := store.ClippingJob(jobID)
+	if err != nil || retried.Status != ClippingJobQueued || retried.SpentMicroUSD != 0 {
+		t.Fatalf("explicit retry state=%+v error=%v", retried, err)
+	}
+	if response := clippingM2CallbackRequest(handler, jobID, attemptID, callbackToken, callback); response.Code != http.StatusUnauthorized {
+		t.Fatalf("legacy callback replay after explicit retry: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

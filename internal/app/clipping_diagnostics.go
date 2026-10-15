@@ -12,13 +12,8 @@ const (
 	ClippingDiagnosticStageURLValidation  = "source_url_validation"
 	ClippingDiagnosticStageReservation    = "source_reservation"
 	ClippingDiagnosticStageDispatch       = "import_dispatch"
-	ClippingDiagnosticStageMetadata       = "metadata_extraction"
-	ClippingDiagnosticStageFormat         = "format_selection"
 	ClippingDiagnosticStageDownload       = "media_download"
-	ClippingDiagnosticStageVideoDownload  = "video_track_download"
-	ClippingDiagnosticStageAudioDownload  = "audio_track_download"
-	ClippingDiagnosticStageTrackMux       = "track_mux"
-	ClippingDiagnosticStageMergedValidate = "merged_validation"
+	ClippingDiagnosticStageOutputValidate = "download_output_validation"
 	ClippingDiagnosticStageProbe          = "media_probe"
 	ClippingDiagnosticStageHash           = "media_hash"
 	ClippingDiagnosticStageReady          = "source_ready"
@@ -28,66 +23,41 @@ var clippingDiagnosticStages = map[string]struct{}{
 	ClippingDiagnosticStageURLValidation:  {},
 	ClippingDiagnosticStageReservation:    {},
 	ClippingDiagnosticStageDispatch:       {},
-	ClippingDiagnosticStageMetadata:       {},
-	ClippingDiagnosticStageFormat:         {},
 	ClippingDiagnosticStageDownload:       {},
-	ClippingDiagnosticStageVideoDownload:  {},
-	ClippingDiagnosticStageAudioDownload:  {},
-	ClippingDiagnosticStageTrackMux:       {},
-	ClippingDiagnosticStageMergedValidate: {},
+	ClippingDiagnosticStageOutputValidate: {},
 	ClippingDiagnosticStageProbe:          {},
 	ClippingDiagnosticStageHash:           {},
 	ClippingDiagnosticStageReady:          {},
 }
 
 var clippingDiagnosticCodes = map[string]struct{}{
-	"invalid_url":                    {},
-	"unsupported_source":             {},
-	"unsafe_destination":             {},
-	"runtime_unavailable":            {},
-	"extractor_proxy_failure":        {},
-	"extractor_timeout":              {},
-	"extractor_exit_failure":         {},
-	"extractor_output_limit":         {},
-	"metadata_invalid":               {},
-	"format_unavailable":             {},
-	"combined_tracks_selected":       {},
-	"separate_tracks_selected":       {},
-	"original_audio_selected":        {},
-	"original_audio_unavailable":     {},
-	"video_track_download_failed":    {},
-	"audio_track_download_failed":    {},
-	"track_request_failed":           {},
-	"track_http_retryable":           {},
-	"track_access_denied":            {},
-	"track_body_incomplete":          {},
-	"track_storage_failed":           {},
-	"track_transfer_aborted":         {},
-	"track_size_limit_exceeded":      {},
-	"track_content_invalid":          {},
-	"track_mux_failed":               {},
-	"track_mux_timeout":              {},
-	"mux_output_size_limit_exceeded": {},
-	"av_stream_missing":              {},
-	"av_timing_mismatch":             {},
-	"video_unavailable":              {},
-	"duration_limit_exceeded":        {},
-	"size_limit_exceeded":            {},
-	"provider_denied_download":       {},
-	"non_media_response":             {},
-	"partial_response_rejected":      {},
-	"download_failed":                {},
-	"probe_runtime_unavailable":      {},
-	"probe_timeout":                  {},
-	"media_invalid":                  {},
-	"probe_failed":                   {},
-	"hash_failed":                    {},
-	"hash_timeout":                   {},
-	"import_canceled":                {},
-	"import_timeout":                 {},
-	"retry_scheduled":                {},
-	"source_unavailable":             {},
-	"download_timeout":               {},
+	"invalid_url":               {},
+	"unsupported_source":        {},
+	"unsafe_destination":        {},
+	"runtime_unavailable":       {},
+	"extractor_exit_failure":    {},
+	"extractor_output_limit":    {},
+	"format_unavailable":        {},
+	"av_stream_missing":         {},
+	"av_timing_mismatch":        {},
+	"video_unavailable":         {},
+	"duration_limit_exceeded":   {},
+	"size_limit_exceeded":       {},
+	"provider_denied_download":  {},
+	"non_media_response":        {},
+	"partial_response_rejected": {},
+	"download_failed":           {},
+	"probe_runtime_unavailable": {},
+	"probe_timeout":             {},
+	"media_invalid":             {},
+	"probe_failed":              {},
+	"hash_failed":               {},
+	"hash_timeout":              {},
+	"import_canceled":           {},
+	"import_timeout":            {},
+	"retry_scheduled":           {},
+	"source_unavailable":        {},
+	"download_timeout":          {},
 }
 
 // AppendClippingSourceDiagnostic persists one safe, monotonic source trace
@@ -212,20 +182,12 @@ func clippingDiagnosticCode(stage string, err error) string {
 			return "import_canceled"
 		}
 		switch stage {
-		case ClippingDiagnosticStageMetadata:
-			return "extractor_timeout"
 		case ClippingDiagnosticStageProbe:
 			return "probe_timeout"
 		case ClippingDiagnosticStageHash:
 			return "hash_timeout"
 		case ClippingDiagnosticStageDownload:
 			return "download_timeout"
-		case ClippingDiagnosticStageVideoDownload:
-			return "video_track_download_failed"
-		case ClippingDiagnosticStageAudioDownload:
-			return "audio_track_download_failed"
-		case ClippingDiagnosticStageTrackMux:
-			return "track_mux_timeout"
 		default:
 			return "import_timeout"
 		}
@@ -254,7 +216,7 @@ func clippingDiagnosticCode(stage string, err error) string {
 	var outcome *ClippingAcquisitionError
 	if errors.As(err, &outcome) {
 		switch outcome.Reason {
-		case "unsupported_source_host", "unsupported_youtube_url_shape", "unsupported_dropbox_link_shape":
+		case "unsupported_source_host", "unsupported_youtube_url_shape":
 			return "unsupported_source"
 		case "unsafe_dns_answer", "redirect_provider_mismatch", "ip_literal_forbidden":
 			return "unsafe_destination"
@@ -262,8 +224,6 @@ func clippingDiagnosticCode(stage string, err error) string {
 			return "invalid_url"
 		case "youtube_format_unavailable":
 			return "format_unavailable"
-		case "youtube_original_audio_unavailable":
-			return "original_audio_unavailable"
 		case "youtube_import_unavailable":
 			return "runtime_unavailable"
 		case "youtube_video_unavailable":
@@ -276,7 +236,7 @@ func clippingDiagnosticCode(stage string, err error) string {
 			return "provider_denied_download"
 		case "partial_response_not_accepted":
 			return "partial_response_rejected"
-		case "non_media_response", "drive_viewer_page_requires_original_file", "original_file_required":
+		case "non_media_response":
 			return "non_media_response"
 		}
 	}

@@ -12,22 +12,35 @@ import (
 
 func clippingRevisionTestSource(t *testing.T, store *Store, name, content string, durationMS int64) ClippingSource {
 	t.Helper()
+	data := []byte(content)
+	digest := sha256.Sum256(data)
+	digestHex := hex.EncodeToString(digest[:])
 	source, err := store.CreateClippingSource(ClippingSourceCreate{
-		Kind: ClippingSourceUpload, OriginalName: name, MediaType: "video/mp4",
-		DeclaredSizeBytes: int64(len(content)), RightsAttested: true,
-		RetainUntil: time.Now().Add(48 * time.Hour).Unix(),
+		Kind: ClippingSourceYouTube, OriginalName: name, MediaType: "video/mp4",
+		DeclaredSizeBytes: int64(len(data)), SourceURL: "https://www.youtube.com/watch?v=abcdefghijk",
+		RightsAttested: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(source.StoragePath, []byte(content), 0o600); err != nil {
+	if err := store.SetClippingSourceImportExpectation(source.ID, youtubeImportExpectation{
+		Version: clippingYouTubeExpectationVersion, SeparateTracks: true,
+	}); err != nil {
+		t.Fatalf("set YouTube import expectation: %v", err)
+	}
+	if err := store.CompleteClippingSourceTrackWorkspace(source.ID); err != nil {
+		t.Fatalf("complete YouTube source workspace: %v", err)
+	}
+	if err := store.SetClippingSourceImportFinalExpectation(source.ID, int64(len(data)), digestHex); err != nil {
+		t.Fatalf("set YouTube source digest expectation: %v", err)
+	}
+	if err := os.WriteFile(source.StoragePath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceUploading, int64(len(content)), int64(len(content))); err != nil {
+	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceImporting, 0, int64(len(data))); err != nil {
 		t.Fatal(err)
 	}
-	digest := sha256.Sum256([]byte(content))
-	if err := store.MarkClippingSourceReady(source.ID, int64(len(content)), durationMS, hex.EncodeToString(digest[:])); err != nil {
+	if err := store.MarkClippingSourceReady(source.ID, int64(len(data)), durationMS, digestHex); err != nil {
 		t.Fatal(err)
 	}
 	ready, err := store.ClippingSource(source.ID)
@@ -41,42 +54,24 @@ func clippingSetTestPipelineRevision(t *testing.T, store *Store, security *Secur
 	t.Helper()
 	_, err := saveClippingWorkerConfig(store, security, clippingWorkerConfigInput{
 		Enabled: false, Endpoint: "https://worker.modal.run:443/dispatch",
-		BearerToken: strings.Repeat("a", 64), RateMicroUSDPerSecond: 25,
+		BearerToken: strings.Repeat("a", 64), MaxComputeSeconds: 120,
 		PipelineRevision: revision,
 	})
 	if err != nil {
-		t.Fatalf("save operator pipeline revision %q: %v", revision, err)
+		t.Fatalf("save pipeline revision %q: %v", revision, err)
 	}
 }
 
 func clippingPublishAnalysisAtRevision(t *testing.T, store *Store, job ClippingJob, source ClippingSource, revision string) string {
 	t.Helper()
-	claimedSource, err := store.ClaimClippingAnalysisSource(job.ID)
-	if err != nil || !claimedSource {
-		t.Fatalf("claim analysis source at %s: claimed=%v error=%v", revision, claimedSource, err)
-	}
-	stage, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 2_000, time.Minute)
-	if err != nil || !claimed {
-		t.Fatalf("claim analysis stage at %s: stage=%+v claimed=%v error=%v", revision, stage, claimed, err)
-	}
-	if err := store.SetClippingAnalysisClaimAttempt(job.ID, stage.AttemptID); err != nil {
-		t.Fatalf("bind source claim to attempt: %v", err)
-	}
-	if err := store.SetClippingAttemptPipelineRevision(job.ID, ClippingStageAnalysis, stage.AttemptID, stage.LeaseToken, revision); err != nil {
-		t.Fatalf("pin attempt pipeline revision: %v", err)
-	}
-	if err := store.SetClippingAttemptEstimateTerms(job.ID, ClippingStageAnalysis, stage.AttemptID, stage.LeaseToken, 25, 20); err != nil {
-		t.Fatalf("record attempt estimate terms: %v", err)
-	}
+	stage := clippingM3ClaimAttempt(t, store, job.ID)
 	core := clippingM3CoreForSource(source)
 	core.PipelineRevision = revision
 	core.AlgorithmVersions["pipeline_revision"] = revision
-	_, duplicate, published, err := store.CompleteClippingStageEstimate(
-		job.ID, ClippingStageAnalysis, stage.AttemptID, stage.LeaseToken, 250, 10,
-		clippingM3CallbackArtifact(job.ID, source.DurationMS), core,
-	)
-	if err != nil || duplicate || !published {
-		t.Fatalf("publish analysis at %s: duplicate=%v published=%v error=%v", revision, duplicate, published, err)
+	const callbackDigest = "abababababababababababababababababababababababababababababababab"
+	completed, duplicate, published, err := clippingM3Complete(t, store, job, stage, source, core, callbackDigest)
+	if err != nil || duplicate || !published || completed.Status != ClippingStageCompleted {
+		t.Fatalf("publish analysis at revision %s: stage=%+v duplicate=%v published=%v error=%v", revision, completed, duplicate, published, err)
 	}
 	return stage.AttemptID
 }
@@ -87,50 +82,31 @@ func TestClippingPipelineRevisionInvalidatesFutureReuseButKeepsCompletedRevision
 	if err != nil {
 		t.Fatal(err)
 	}
-	const oldRevision = "m3-operator-rev-a"
-	const newRevision = "m3-operator-rev-b"
+	const oldRevision = "simple-pipeline-rev-a"
+	const newRevision = "simple-pipeline-rev-b"
 	clippingSetTestPipelineRevision(t, store, security, oldRevision)
 	source := clippingRevisionTestSource(t, store, "source-a.mp4", "source A with distinct deterministic bytes", clippingM3FixtureDurationMS)
 	otherSource := clippingRevisionTestSource(t, store, "source-b.mp4", "source B has different bytes", clippingM3FixtureDurationMS)
 	if source.SHA256 == otherSource.SHA256 {
 		t.Fatal("source fixture hashes must differ")
 	}
-	batch, jobs, duplicate, err := store.CreateClippingBatch(ClippingBatchCreate{
-		IdempotencyKey: "pipeline-revision-cache-reuse", BudgetLimitMicroUSD: 30_000,
-		Jobs: []ClippingJobCreate{
-			{SourceID: source.ID, BudgetLimitMicroUSD: 10_000, ContentType: "general", MinClipSeconds: 15, MaxClipSeconds: 30, CandidateLimit: 10},
-			{SourceID: source.ID, BudgetLimitMicroUSD: 10_000, ContentType: "comedy", MinClipSeconds: 100, MaxClipSeconds: 180, CandidateLimit: 10},
-			{SourceID: otherSource.ID, BudgetLimitMicroUSD: 10_000, ContentType: "general", MinClipSeconds: 15, MaxClipSeconds: 30, CandidateLimit: 10},
-		},
-	})
-	if err != nil || duplicate || len(jobs) != 3 {
-		t.Fatalf("create revision test jobs: batch=%+v jobs=%+v duplicate=%v error=%v", batch, jobs, duplicate, err)
-	}
-	completedJob, futureSameSourceJob, differentSHAJob := jobs[0], jobs[1], jobs[2]
-	attemptID := clippingPublishAnalysisAtRevision(t, store, completedJob, source, oldRevision)
-	if attemptID == "" {
-		t.Fatal("completed analysis has no attempt")
-	}
+	completedJob := clippingM3CreateJob(t, store, source.ID, "simple-revision-completed")
+	futureSameSourceJob := clippingM3CreateJob(t, store, source.ID, "simple-revision-future")
+	differentSHAJob := clippingM3CreateJob(t, store, otherSource.ID, "simple-revision-different-source")
+	clippingPublishAnalysisAtRevision(t, store, completedJob, source, oldRevision)
 	loaded, found, err := store.LoadClippingAnalysisCache(source.ID)
 	if err != nil || !found || loaded.PipelineRevision != oldRevision {
 		t.Fatalf("load old-revision analysis cache: found=%v revision=%q error=%v", found, loaded.PipelineRevision, err)
 	}
-	// A new pipeline may invalidate completed analysis reuse only after the
-	// prior invoice is reconciled and its callback capability window closes.
-	expiredLease := time.Now().Unix() - int64(clippingCallbackAccountingGrace.Seconds()) - 2
-	if _, err := store.db.Exec(`UPDATE clipping_stage_attempts SET lease_expires_at=? WHERE attempt_id=?`, expiredLease, attemptID); err != nil {
-		t.Fatal(err)
-	}
-	if _, duplicate, err := store.ReconcileClippingStageCost(completedJob.ID, attemptID, 250, "pipeline-revision-invoice"); err != nil || duplicate {
-		t.Fatalf("reconcile completed old-revision attempt: duplicate=%v error=%v", duplicate, err)
+	completedArtifacts, err := store.ClippingArtifacts(completedJob.ID)
+	if err != nil || len(completedArtifacts) != 1 || clippingRevisionArtifactRevision(t, completedArtifacts[0]) != oldRevision {
+		t.Fatalf("completed result lost its pinned pipeline revision: artifacts=%+v error=%v", completedArtifacts, err)
 	}
 
-	// Simulate a stale cache entry accidentally associated with another source
-	// ID. The source hash guard must reject it even when its pipeline revision
-	// and duration match the cached core.
+	// An accidentally copied cache row must still fail the source digest check.
 	if _, err := store.db.Exec(`INSERT INTO clipping_analysis_cache(
-		source_id,source_sha256,pipeline_key,pipeline_revision,source_duration_ms,payload_json,created_at
-	) SELECT ?,source_sha256,pipeline_key,pipeline_revision,source_duration_ms,payload_json,created_at
+		source_id,source_sha256,pipeline_key,pipeline_revision,source_duration_ms,payload_json,compute_seconds,created_at
+	) SELECT ?,source_sha256,pipeline_key,pipeline_revision,source_duration_ms,payload_json,compute_seconds,created_at
 	FROM clipping_analysis_cache WHERE source_id=? AND pipeline_revision=?`, otherSource.ID, source.ID, oldRevision); err != nil {
 		t.Fatalf("seed cross-source stale cache row: %v", err)
 	}
@@ -143,57 +119,48 @@ func TestClippingPipelineRevisionInvalidatesFutureReuseButKeepsCompletedRevision
 
 	clippingSetTestPipelineRevision(t, store, security, newRevision)
 	if current, err := store.ClippingAnalysisPipelineRevision(); err != nil || current != newRevision {
-		t.Fatalf("operator revision change: revision=%q error=%v", current, err)
+		t.Fatalf("pipeline revision update: revision=%q error=%v", current, err)
 	}
 	if completed, err := store.TryCompleteClippingJobFromAnalysisCache(futureSameSourceJob.ID); err != nil || completed {
 		t.Fatalf("future job reused old-revision cache: completed=%v error=%v", completed, err)
 	}
-	claimedForNewRevision, err := store.ClaimClippingAnalysisSource(futureSameSourceJob.ID)
-	if err != nil || !claimedForNewRevision {
-		t.Fatalf("future same-source job could not claim new revision analysis: claimed=%v error=%v", claimedForNewRevision, err)
+	if claimed, err := store.ClaimClippingAnalysisSource(futureSameSourceJob.ID); err != nil || !claimed {
+		t.Fatalf("future job could not claim analysis for the new revision: claimed=%v error=%v", claimed, err)
 	}
 	if _, found, err := store.LoadClippingAnalysisCache(source.ID); err != nil || found {
 		t.Fatalf("current revision loaded stale cache: found=%v error=%v", found, err)
 	}
-
-	updatedJob, updatedArtifact, err := store.UpdateClippingJobSelection(completedJob.ID, ClippingJobCreate{
-		SourceID: source.ID, ContentType: "comedy", MinClipSeconds: 100, MaxClipSeconds: 180, CandidateLimit: 10,
-	})
-	if err != nil || updatedJob.MinClipSeconds != 100 || updatedJob.MaxClipSeconds != 180 || updatedJob.ContentType != "comedy" {
-		t.Fatalf("completed-job edit did not use its persisted revision: job=%+v error=%v", updatedJob, err)
-	}
-	artifactRevision := clippingRevisionArtifactRevision(t, updatedArtifact)
-	if artifactRevision != oldRevision {
-		t.Fatalf("completed job edit rewrote pipeline revision: got=%q want=%q", artifactRevision, oldRevision)
+	completedArtifacts, err = store.ClippingArtifacts(completedJob.ID)
+	if err != nil || len(completedArtifacts) != 1 || clippingRevisionArtifactRevision(t, completedArtifacts[0]) != oldRevision {
+		t.Fatalf("revision update rewrote completed result provenance: artifacts=%+v error=%v", completedArtifacts, err)
 	}
 }
 
-func TestClippingStageDispatchCallbackExpiryRespectsSourceRetention(t *testing.T) {
+func TestClippingStageDispatchCallbackExpiryUsesCapabilityGrace(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
+	jobID := "clipjob_0123456789abcdef0123456789abcdef"
+	batchID := "clipbatch_0123456789abcdef0123456789abcdef"
+	sourceID := "clipsrc_0123456789abcdef0123456789abcdef"
 	job := ClippingJob{
-		ID: "clipjob_dispatch_retention", BatchID: "clipbatch_dispatch_retention", SourceID: "clipsrc_dispatch_retention",
+		ID: jobID, BatchID: batchID, SourceID: sourceID,
 		ContentType: "general", MinClipSeconds: 15, MaxClipSeconds: 180, CandidateLimit: 10, Status: ClippingJobRunning,
 	}
 	stage := ClippingStage{
 		JobID: job.ID, Name: ClippingStageAnalysis, Status: ClippingStageRunning,
-		IdempotencyKey: job.ID + ":" + ClippingStageAnalysis, AttemptID: "clipatt_dispatch_retention",
+		IdempotencyKey: job.ID + ":" + ClippingStageAnalysis, AttemptID: "clipatt_0123456789abcdef0123456789abcdef",
 		LeaseExpiresAt: now.Add(time.Hour).Unix(),
 	}
 	source := ClippingSource{
 		ID: job.SourceID, Status: ClippingSourceReady, RightsAttested: true,
-		DurationMS: 60_000, SHA256: strings.Repeat("a", 64), RetainUntil: now.Add(12 * time.Hour).Unix(),
+		DurationMS: 60_000, SHA256: strings.Repeat("a", 64),
 	}
 	dispatch, err := buildClippingStageDispatch(job, stage, source, "https://worker.example", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dispatch.CallbackExpiresAt != source.RetainUntil {
-		t.Fatalf("callback expiry=%d, want source retention cap %d", dispatch.CallbackExpiresAt, source.RetainUntil)
-	}
-
-	source.RetainUntil = now.Unix()
-	if _, err := buildClippingStageDispatch(job, stage, source, "https://worker.example", now); err == nil {
-		t.Fatal("dispatch accepted a source with no valid callback window before retention expires")
+	wantExpiry := stage.LeaseExpiresAt + int64(clippingCallbackCapabilityGrace.Seconds())
+	if dispatch.CallbackExpiresAt != wantExpiry {
+		t.Fatalf("callback expiry=%d, want capability grace boundary %d", dispatch.CallbackExpiresAt, wantExpiry)
 	}
 }
 

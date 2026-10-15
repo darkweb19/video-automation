@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -37,19 +36,13 @@ func makeReadyClippingSource(t *testing.T, store *Store, durationMS int64) Clipp
 	return ready
 }
 
-func makeClippingBatch(t *testing.T, store *Store, sourceIDs []string, batchBudget, jobBudget int64, key string) (ClippingBatch, []ClippingJob) {
+func makeClippingJob(t *testing.T, store *Store, sourceID, key string) ClippingJob {
 	t.Helper()
-	jobs := make([]ClippingJobCreate, len(sourceIDs))
-	for index, sourceID := range sourceIDs {
-		jobs[index] = ClippingJobCreate{SourceID: sourceID, BudgetLimitMicroUSD: jobBudget}
-	}
-	batch, created, duplicate, err := store.CreateClippingBatch(ClippingBatchCreate{
-		IdempotencyKey: key, BudgetLimitMicroUSD: batchBudget, Jobs: jobs,
-	})
+	job, duplicate, err := store.CreateClippingJob(ClippingJobCreate{SourceID: sourceID}, key)
 	if err != nil || duplicate {
-		t.Fatalf("create clipping batch: duplicate=%v error=%v", duplicate, err)
+		t.Fatalf("create clipping job: duplicate=%v error=%v", duplicate, err)
 	}
-	return batch, created
+	return job
 }
 
 func clippingTestArtifact(jobID string, durationMS int64) ClippingArtifact {
@@ -83,6 +76,90 @@ func TestClippingMigrationPreservesExistingGeneration(t *testing.T) {
 	}
 	if sources, err := reopened.ClippingSources(); err != nil || len(sources) != 0 {
 		t.Fatalf("new source table should be empty after reopen: sources=%+v error=%v", sources, err)
+	}
+}
+
+func TestClippingLegacyCacheWithoutRuntimeCompletesFromCache(t *testing.T) {
+	store := newTestStore(t)
+	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
+	firstJob := clippingM3CreateJob(t, store, source.ID, "legacy-cache-source-job")
+	secondJob := clippingM3CreateJob(t, store, source.ID, "legacy-cache-reuse-job")
+	stage := clippingM3ClaimAttempt(t, store, firstJob.ID)
+	core := clippingM3CoreForRevision(t, store, source)
+	if _, duplicate, published, err := clippingM3Complete(t, store, firstJob, stage, source, core, strings.Repeat("c", 64)); err != nil || duplicate || !published {
+		t.Fatalf("complete cache source analysis: duplicate=%v published=%v error=%v", duplicate, published, err)
+	}
+	// Before the additive runtime column existed, migrated cache rows receive 0.
+	if _, err := store.db.Exec(`UPDATE clipping_analysis_cache SET compute_seconds=0 WHERE source_id=?`, source.ID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.TryCompleteClippingJobFromAnalysisCache(secondJob.ID)
+	if err != nil || !completed {
+		t.Fatalf("legacy cache with unknown runtime did not complete: completed=%v error=%v", completed, err)
+	}
+	artifacts, err := store.ClippingArtifacts(secondJob.ID)
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("cached artifacts=%+v error=%v", artifacts, err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(artifacts[0].PayloadJSON), &payload); err != nil {
+		t.Fatal(err)
+	}
+	var runtime int64
+	if err := json.Unmarshal(payload["compute_seconds"], &runtime); err != nil || runtime != 0 {
+		t.Fatalf("unknown legacy runtime=%d error=%v", runtime, err)
+	}
+	if string(payload["analysis_reused"]) != "true" {
+		t.Fatalf("cached result lacks reuse marker: %s", artifacts[0].PayloadJSON)
+	}
+	for _, key := range []string{"cost_basis", "cost_estimate_micro_usd", "rate_micro_usd_per_second", "actual_cost_status"} {
+		if _, exists := payload[key]; exists {
+			t.Fatalf("cached result exposed legacy accounting field %q: %s", key, artifacts[0].PayloadJSON)
+		}
+	}
+}
+
+func TestClippingCapabilityCleanupRetainsIssuedExpiryUntilRecovery(t *testing.T) {
+	store := newTestStore(t)
+	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
+	job := clippingM3CreateJob(t, store, source.ID, "capability-expiry-cleanup-job")
+	stage := clippingM3ClaimAttempt(t, store, job.ID)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &dashboardApp{store: store, security: security}
+	expiresAt := time.Now().Unix() + 2
+	if expiresAt >= stage.LeaseExpiresAt {
+		t.Fatalf("test callback expiry %d must precede lease expiry %d", expiresAt, stage.LeaseExpiresAt)
+	}
+	if _, _, err := app.persistClippingDispatchCapabilitiesUntil(stage, expiresAt); err != nil {
+		t.Fatalf("persist callback capabilities: %v", err)
+	}
+	cleaned, err := app.cleanupExpiredClippingCapabilities(expiresAt+1, 10)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("cleanup expired bearer settings: cleaned=%d error=%v", cleaned, err)
+	}
+	var indexedExpiry int64
+	if err := store.db.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&indexedExpiry); err != nil || indexedExpiry != expiresAt {
+		t.Fatalf("cleanup discarded issued callback expiry: indexed=%d expected=%d error=%v", indexedExpiry, expiresAt, err)
+	}
+	if rows, err := store.ExpiredClippingStages(expiresAt+1, 10); err != nil || len(rows) != 1 {
+		t.Fatalf("indexed expiry was not actionable before lease: rows=%+v error=%v", rows, err)
+	}
+	if err := store.RecoverExpiredClippingStages(expiresAt + 1); err != nil {
+		t.Fatalf("recover expired callback attempt: %v", err)
+	}
+	stages, err := store.ClippingStages(job.ID)
+	if err != nil || len(stages) != 1 || stages[0].Status != ClippingStageFailed {
+		t.Fatalf("expired callback attempt state=%+v error=%v", stages, err)
+	}
+	var remaining int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("recovered attempt retained callback expiry index: count=%d error=%v", remaining, err)
+	}
+	if _, err := store.RetryClippingStage(job.ID, ClippingStageAnalysis); err != nil {
+		t.Fatalf("explicit retry after callback expiry: %v", err)
 	}
 }
 
@@ -306,330 +383,35 @@ func TestFailedClippingSourceReleasesReservationOnlyAfterRemoval(t *testing.T) {
 	}
 }
 
-func TestClippingBatchCreationIsAtomicAndIdempotent(t *testing.T) {
+func TestClippingArtifactTimestampsAndRetentionCleanup(t *testing.T) {
 	store := newTestStore(t)
-	ready := makeReadyClippingSource(t, store, 120_000)
-	incomplete, err := store.CreateClippingSource(ClippingSourceCreate{
-		Kind: ClippingSourceUpload, DeclaredSizeBytes: 10, RightsAttested: true,
-	})
+	source := makeReadyClippingSource(t, store, 5_000)
+	job := makeClippingJob(t, store, source.ID, "artifact-retention")
+	invalid := clippingTestArtifact(job.ID, source.DurationMS)
+	invalid.TimeRanges[0].EndMS = source.DurationMS + 1
+	if _, err := validateClippingArtifact(invalid, job.ID, source.DurationMS); !errors.Is(err, ErrClippingInvalidArtifact) {
+		t.Fatalf("out-of-source timestamp error=%v", err)
+	}
+	artifact := clippingTestArtifact(job.ID, source.DurationMS)
+	rangesJSON, err := validateClippingArtifact(artifact, job.ID, source.DurationMS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := ClippingBatchCreate{
-		IdempotencyKey: "batch-request-1", BudgetLimitMicroUSD: 1_000_000,
-		Jobs: []ClippingJobCreate{{SourceID: ready.ID, BudgetLimitMicroUSD: 500_000}},
-	}
-	batch, jobs, duplicate, err := store.CreateClippingBatch(input)
-	if err != nil || duplicate || len(jobs) != 1 {
-		t.Fatalf("batch=%+v jobs=%+v duplicate=%v error=%v", batch, jobs, duplicate, err)
-	}
-	gotBatch, gotJobs, duplicate, err := store.CreateClippingBatch(input)
-	if err != nil || !duplicate || gotBatch.ID != batch.ID || len(gotJobs) != 1 || gotJobs[0].ID != jobs[0].ID {
-		t.Fatalf("idempotent result batch=%+v jobs=%+v duplicate=%v error=%v", gotBatch, gotJobs, duplicate, err)
-	}
-	changed := input
-	changed.Jobs = []ClippingJobCreate{{SourceID: ready.ID, BudgetLimitMicroUSD: 400_000}}
-	if _, _, _, err := store.CreateClippingBatch(changed); !errors.Is(err, ErrClippingIdempotencyConflict) {
-		t.Fatalf("changed request with same key error=%v", err)
-	}
-	invalid := ClippingBatchCreate{
-		IdempotencyKey: "atomic-invalid", BudgetLimitMicroUSD: 1_000_000,
-		Jobs: []ClippingJobCreate{{SourceID: ready.ID, BudgetLimitMicroUSD: 500_000}, {SourceID: incomplete.ID, BudgetLimitMicroUSD: 500_000}},
-	}
-	if _, _, _, err := store.CreateClippingBatch(invalid); err == nil {
-		t.Fatal("batch accepted a non-ready source")
-	}
-	batches, err := store.ClippingBatches()
-	if err != nil || len(batches) != 1 || batches[0].ID != batch.ID {
-		t.Fatalf("failed batch creation left partial rows: batches=%+v error=%v", batches, err)
-	}
-	allJobs, err := store.ClippingJobs("")
-	if err != nil || len(allJobs) != 1 || allJobs[0].BatchID != batch.ID {
-		t.Fatalf("all clipping jobs=%+v error=%v", allJobs, err)
-	}
-}
-
-func TestClippingConcurrentBatchBudgetReservationAndOverrunReconciliation(t *testing.T) {
-	store := newTestStore(t)
-	source := makeReadyClippingSource(t, store, 90_000)
-	batch, jobs := makeClippingBatch(t, store, []string{source.ID, source.ID}, 100, 100, "concurrent-budget")
-	type result struct {
-		stage   ClippingStage
-		claimed bool
-		err     error
-	}
-	results := make(chan result, len(jobs))
-	var wg sync.WaitGroup
-	for _, job := range jobs {
-		wg.Add(1)
-		go func(jobID string) {
-			defer wg.Done()
-			stage, claimed, err := store.ClaimClippingStage(jobID, ClippingStageAnalysis, 70, time.Minute)
-			results <- result{stage: stage, claimed: claimed, err: err}
-		}(job.ID)
-	}
-	wg.Wait()
-	close(results)
-	var winner result
-	var paused int
-	for result := range results {
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-		if result.claimed {
-			winner = result
-		} else if result.stage.Status == ClippingStagePausedBudget {
-			paused++
-		}
-	}
-	if winner.stage.AttemptID == "" || paused != 1 {
-		t.Fatalf("winner=%+v paused=%d", winner, paused)
-	}
-	reservedBatch, err := store.ClippingBatch(batch.ID)
-	if err != nil || reservedBatch.ReservedMicroUSD != 70 || reservedBatch.SpentMicroUSD != 0 {
-		t.Fatalf("batch reservation before settlement=%+v error=%v", reservedBatch, err)
-	}
-	artifact := clippingTestArtifact(winner.stage.JobID, source.DurationMS)
-	finished, duplicate, err := store.CompleteClippingStage(winner.stage.JobID, winner.stage.Name, winner.stage.AttemptID, winner.stage.LeaseToken, 110, artifact)
-	if err != nil || duplicate || finished.Status != ClippingStageCompleted {
-		t.Fatalf("stage settlement=%+v duplicate=%v error=%v", finished, duplicate, err)
-	}
-	settled, err := store.ClippingBatch(batch.ID)
-	if err != nil || settled.ReservedMicroUSD != 0 || settled.SpentMicroUSD != 110 {
-		t.Fatalf("overrun was not reconciled: batch=%+v error=%v", settled, err)
-	}
-	other := jobs[0]
-	if other.ID == winner.stage.JobID {
-		other = jobs[1]
-	}
-	pausedStage, claimed, err := store.ClaimClippingStage(other.ID, ClippingStageAnalysis, 1, time.Minute)
-	if err != nil || claimed || pausedStage.Status != ClippingStagePausedBudget {
-		t.Fatalf("overrun did not block subsequent reservation: stage=%+v claimed=%v error=%v", pausedStage, claimed, err)
-	}
-}
-
-func TestClippingExpiredStageHoldsBudgetUntilLateSettlement(t *testing.T) {
-	store := newTestStore(t)
-	source := makeReadyClippingSource(t, store, 60_000)
-	batch, jobs := makeClippingBatch(t, store, []string{source.ID}, 100, 100, "expired-dispatch")
-	job := jobs[0]
-	claimed, didClaim, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 80, time.Minute)
-	if err != nil || !didClaim {
-		t.Fatalf("claim=%+v claimed=%v error=%v", claimed, didClaim, err)
-	}
-	expiredAt := time.Now().Unix() - 1
-	if _, err := store.db.Exec(`UPDATE clipping_stages SET lease_expires_at=? WHERE job_id=? AND name=?`, expiredAt, job.ID, ClippingStageAnalysis); err != nil {
+	tx, err := store.db.Begin()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`UPDATE clipping_stage_attempts SET lease_expires_at=? WHERE attempt_id=?`, expiredAt, claimed.AttemptID); err != nil {
+	if err := insertClippingArtifact(tx, artifact, rangesJSON, time.Now().Unix()); err != nil {
+		_ = tx.Rollback()
 		t.Fatal(err)
 	}
-	preRecovery, err := store.ExpiredClippingStages(time.Now().Unix(), 10)
-	if err != nil || len(preRecovery) != 1 || preRecovery[0].Status != ClippingStageRunning {
-		t.Fatalf("expired stage query before recovery=%+v error=%v", preRecovery, err)
-	}
-	if err := store.RecoverExpiredClippingStages(time.Now().Unix()); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
-	}
-	postRecovery, err := store.ExpiredClippingStages(time.Now().Unix(), 10)
-	if err != nil || len(postRecovery) != 1 || postRecovery[0].Status != ClippingStageUncertain {
-		t.Fatalf("uncertain stage query after recovery=%+v error=%v", postRecovery, err)
-	}
-	uncertain, err := store.ClippingStages(job.ID)
-	if err != nil || len(uncertain) != 1 || uncertain[0].Status != ClippingStageUncertain || uncertain[0].ReservedMicroUSD != 80 || uncertain[0].AttemptID != claimed.AttemptID {
-		t.Fatalf("uncertain stage=%+v error=%v", uncertain, err)
-	}
-	pausedJob, err := store.ClippingJob(job.ID)
-	if err != nil || pausedJob.Status != ClippingJobPausedBudget || pausedJob.ReservedMicroUSD != 80 {
-		t.Fatalf("expired job reservation=%+v error=%v", pausedJob, err)
-	}
-	if _, claimedAgain, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 1, time.Minute); err != nil || claimedAgain {
-		t.Fatalf("uncertain work was redispatched: claimed=%v error=%v", claimedAgain, err)
-	}
-	if _, err := store.RetryClippingStage(job.ID, ClippingStageAnalysis); err == nil {
-		t.Fatal("uncertain work was retried before cost settlement")
-	}
-	_, duplicate, err := store.CompleteClippingStage(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 50, clippingTestArtifact(job.ID, source.DurationMS))
-	if !errors.Is(err, ErrClippingStaleAttempt) || duplicate {
-		t.Fatalf("late result should settle without completing: duplicate=%v error=%v", duplicate, err)
-	}
-	settledJob, err := store.ClippingJob(job.ID)
-	if err != nil || settledJob.Status != ClippingJobFailed || settledJob.SpentMicroUSD != 50 || settledJob.ReservedMicroUSD != 0 {
-		t.Fatalf("late actual cost reconciliation job=%+v error=%v", settledJob, err)
-	}
-	settledBatch, err := store.ClippingBatch(batch.ID)
-	if err != nil || settledBatch.SpentMicroUSD != 50 || settledBatch.ReservedMicroUSD != 0 {
-		t.Fatalf("late actual cost reconciliation batch=%+v error=%v", settledBatch, err)
-	}
-	artifacts, err := store.ClippingArtifacts(job.ID)
-	if err != nil || len(artifacts) != 0 {
-		t.Fatalf("stale result persisted analysis artifact: %+v error=%v", artifacts, err)
-	}
-	_, duplicate, err = store.CompleteClippingStage(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 90, clippingTestArtifact(job.ID, source.DurationMS))
-	if err != nil || !duplicate {
-		t.Fatalf("duplicate late callback should be idempotent: duplicate=%v error=%v", duplicate, err)
-	}
-	settledBatch, err = store.ClippingBatch(batch.ID)
-	if err != nil || settledBatch.SpentMicroUSD != 50 {
-		t.Fatalf("duplicate late callback charged again: batch=%+v error=%v", settledBatch, err)
-	}
-	retried, err := store.RetryClippingStage(job.ID, ClippingStageAnalysis)
-	if err != nil || retried.Status != ClippingStageQueued {
-		t.Fatalf("settled failure was not explicitly retryable: stage=%+v error=%v", retried, err)
-	}
-	newAttempt, didClaim, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 50, time.Minute)
-	if err != nil || !didClaim || newAttempt.AttemptID == claimed.AttemptID || newAttempt.IdempotencyKey != claimed.IdempotencyKey {
-		t.Fatalf("explicit retry claim=%+v claimed=%v error=%v", newAttempt, didClaim, err)
-	}
-}
-
-func TestClippingConcurrentExpiryAndLateSettlementReconcileOnce(t *testing.T) {
-	store := newTestStore(t)
-	source := makeReadyClippingSource(t, store, 60_000)
-	_, jobs := makeClippingBatch(t, store, []string{source.ID}, 100, 100, "concurrent-expiry-settlement")
-	job := jobs[0]
-	claimed, didClaim, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 80, time.Minute)
-	if err != nil || !didClaim {
-		t.Fatalf("claim=%+v claimed=%v error=%v", claimed, didClaim, err)
-	}
-	expiredAt := time.Now().Unix() - 1
-	if _, err := store.db.Exec(`UPDATE clipping_stages SET lease_expires_at=? WHERE job_id=? AND name=?`, expiredAt, job.ID, ClippingStageAnalysis); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`UPDATE clipping_stage_attempts SET lease_expires_at=? WHERE attempt_id=?`, expiredAt, claimed.AttemptID); err != nil {
-		t.Fatal(err)
-	}
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	var recoverErr error
-	var callbackErr error
-	var duplicate bool
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-start
-		recoverErr = store.RecoverExpiredClippingStages(time.Now().Unix())
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		_, duplicate, callbackErr = store.CompleteClippingStage(
-			job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 50,
-			clippingTestArtifact(job.ID, source.DurationMS),
-		)
-	}()
-	close(start)
-	wg.Wait()
-	if recoverErr != nil {
-		t.Fatalf("recover expired attempt: %v", recoverErr)
-	}
-	if !errors.Is(callbackErr, ErrClippingStaleAttempt) || duplicate {
-		t.Fatalf("late concurrent callback duplicate=%v error=%v", duplicate, callbackErr)
-	}
-	stages, err := store.ClippingStages(job.ID)
-	if err != nil || len(stages) != 1 || stages[0].Status != ClippingStageFailed || stages[0].ReservedMicroUSD != 0 {
-		t.Fatalf("concurrent final stage=%+v error=%v", stages, err)
-	}
-	settledJob, err := store.ClippingJob(job.ID)
-	if err != nil || settledJob.Status != ClippingJobFailed || settledJob.SpentMicroUSD != 50 || settledJob.ReservedMicroUSD != 0 {
-		t.Fatalf("concurrent final job=%+v error=%v", settledJob, err)
-	}
-	settledBatch, err := store.ClippingBatch(settledJob.BatchID)
-	if err != nil || settledBatch.SpentMicroUSD != 50 || settledBatch.ReservedMicroUSD != 0 {
-		t.Fatalf("concurrent final batch=%+v error=%v", settledBatch, err)
-	}
-	artifacts, err := store.ClippingArtifacts(job.ID)
-	if err != nil || len(artifacts) != 0 {
-		t.Fatalf("concurrent stale callback persisted artifact: %+v error=%v", artifacts, err)
-	}
-	_, duplicate, err = store.CompleteClippingStage(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 99, clippingTestArtifact(job.ID, source.DurationMS))
-	if err != nil || !duplicate {
-		t.Fatalf("duplicate late callback duplicate=%v error=%v", duplicate, err)
-	}
-	settledBatch, err = store.ClippingBatch(settledJob.BatchID)
-	if err != nil || settledBatch.SpentMicroUSD != 50 {
-		t.Fatalf("concurrent duplicate callback charged twice: batch=%+v error=%v", settledBatch, err)
-	}
-}
-
-func TestClippingCancellationSettlesActualCostWithoutAdvancing(t *testing.T) {
-	store := newTestStore(t)
-	source := makeReadyClippingSource(t, store, 45_000)
-	_, jobs := makeClippingBatch(t, store, []string{source.ID}, 100, 100, "cancel-running")
-	job := jobs[0]
-	claimed, didClaim, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 80, time.Minute)
-	if err != nil || !didClaim {
-		t.Fatalf("claim=%+v claimed=%v error=%v", claimed, didClaim, err)
 	}
 	if err := store.CancelClippingJob(job.ID); err != nil {
 		t.Fatal(err)
 	}
-	canceled, err := store.ClippingJob(job.ID)
-	if err != nil || canceled.Status != ClippingJobCanceled || canceled.ReservedMicroUSD != 80 {
-		t.Fatalf("cancel released unknown in-flight reserve: job=%+v error=%v", canceled, err)
-	}
-	// Cancellation allows the user to remove source bytes immediately. Keep
-	// only the soft tombstone/audit rows needed to settle a late worker cost.
-	if err := store.TombstoneClippingSource(source.ID); err != nil {
-		t.Fatal(err)
-	}
-	_, duplicate, err := store.CompleteClippingStage(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 55, clippingTestArtifact(job.ID, source.DurationMS))
-	if !errors.Is(err, ErrClippingJobTerminal) || duplicate {
-		t.Fatalf("canceled callback should settle cost without stage completion: duplicate=%v error=%v", duplicate, err)
-	}
-	canceled, err = store.ClippingJob(job.ID)
-	if err != nil || canceled.Status != ClippingJobCanceled || canceled.SpentMicroUSD != 55 || canceled.ReservedMicroUSD != 0 {
-		t.Fatalf("canceled job reconciliation=%+v error=%v", canceled, err)
-	}
-	artifacts, err := store.ClippingArtifacts(job.ID)
-	if err != nil || len(artifacts) != 0 {
-		t.Fatalf("canceled callback created artifact: %+v error=%v", artifacts, err)
-	}
-	_, duplicate, err = store.CompleteClippingStage(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 99, clippingTestArtifact(job.ID, source.DurationMS))
-	if err != nil || !duplicate {
-		t.Fatalf("duplicate canceled callback=%v error=%v", duplicate, err)
-	}
-	canceled, _ = store.ClippingJob(job.ID)
-	if canceled.SpentMicroUSD != 55 {
-		t.Fatalf("duplicate canceled callback charged twice: %+v", canceled)
-	}
-	tombstone, err := store.ClippingSource(source.ID)
-	if err != nil || tombstone.Status != ClippingSourceDeleted || tombstone.SourceURL != "" || tombstone.CleanupComplete || tombstone.ReservedSizeBytes == 0 {
-		t.Fatalf("source tombstone lost accounting or cleanup state: source=%+v error=%v", tombstone, err)
-	}
-	if err := os.RemoveAll(filepath.Dir(tombstone.StoragePath)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.MarkClippingSourceCleaned(source.ID); err != nil {
-		t.Fatal(err)
-	}
-	cleaned, _ := store.ClippingSource(source.ID)
-	jobAfterCleanup, _ := store.ClippingJob(job.ID)
-	if cleaned.ReservedSizeBytes != 0 || !cleaned.CleanupComplete || jobAfterCleanup.SpentMicroUSD != 55 {
-		t.Fatalf("cleanup must release bytes but preserve cost: source=%+v job=%+v", cleaned, jobAfterCleanup)
-	}
-}
-
-func TestClippingArtifactTimestampsAndRetentionCleanup(t *testing.T) {
-	store := newTestStore(t)
-	source := makeReadyClippingSource(t, store, 5_000)
-	batch, jobs := makeClippingBatch(t, store, []string{source.ID}, 100, 100, "artifact-retention")
-	job := jobs[0]
-	claimed, ok, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 30, time.Minute)
-	if err != nil || !ok {
-		t.Fatalf("claim=%+v ok=%v error=%v", claimed, ok, err)
-	}
-	invalid := clippingTestArtifact(job.ID, source.DurationMS)
-	invalid.TimeRanges[0].EndMS = source.DurationMS + 1
-	if _, _, err := store.CompleteClippingStage(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 20, invalid); !errors.Is(err, ErrClippingInvalidArtifact) {
-		t.Fatalf("out-of-source timestamp error=%v", err)
-	}
-	failed, err := store.ClippingJob(job.ID)
-	if err != nil || failed.Status != ClippingJobFailed || failed.SpentMicroUSD != 20 || failed.ReservedMicroUSD != 0 {
-		t.Fatalf("invalid artifact failed to settle actual cost: job=%+v error=%v", failed, err)
-	}
-	if err := store.ApplyClippingRetention(time.Now().Add(-time.Hour).Unix()); err != nil {
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET retain_until=? WHERE id=?`, time.Now().Add(-time.Hour).Unix(), source.ID); err != nil {
 		t.Fatal(err)
 	}
 	expired, err := store.ExpiredClippingSources(time.Now().Unix(), 10)
@@ -642,11 +424,8 @@ func TestClippingArtifactTimestampsAndRetentionCleanup(t *testing.T) {
 	if artifacts, err := store.ClippingArtifacts(job.ID); err != nil || len(artifacts) != 0 {
 		t.Fatalf("source cleanup retained canonical artifact: %+v error=%v", artifacts, err)
 	}
-	if audit, err := store.ClippingJob(job.ID); err != nil || audit.SpentMicroUSD != 20 || audit.Status != ClippingJobFailed {
-		t.Fatalf("source cleanup removed job/cost audit: job=%+v error=%v", audit, err)
-	}
-	if _, err := store.ClippingBatch(batch.ID); err != nil {
-		t.Fatal(err)
+	if audit, err := store.ClippingJob(job.ID); err != nil || audit.Status != ClippingJobCanceled {
+		t.Fatalf("source cleanup removed job audit: job=%+v error=%v", audit, err)
 	}
 }
 
@@ -692,8 +471,8 @@ func TestClippingArtifactLimitIncludesCanonicalEnvelope(t *testing.T) {
 func TestClippingExpiredSourcesRespectLeasesAndActiveJobs(t *testing.T) {
 	store := newTestStore(t)
 	source := makeReadyClippingSource(t, store, 30_000)
-	batch, jobs := makeClippingBatch(t, store, []string{source.ID}, 100, 100, "active-source-retention")
-	if err := store.ApplyClippingRetention(time.Now().Add(-time.Hour).Unix()); err != nil {
+	job := makeClippingJob(t, store, source.ID, "active-source-retention")
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET retain_until=? WHERE id=?`, time.Now().Add(-time.Hour).Unix(), source.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetClippingSourceMediaLease(source.ID, time.Now().Add(time.Hour).Unix()); err != nil {
@@ -711,13 +490,13 @@ func TestClippingExpiredSourcesRespectLeasesAndActiveJobs(t *testing.T) {
 	if err := store.TombstoneClippingSource(source.ID); err == nil {
 		t.Fatal("source referenced by a nonterminal job was tombstoned")
 	}
-	if err := store.CancelClippingBatch(batch.ID); err != nil {
+	if err := store.CancelClippingJob(job.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.TombstoneClippingSource(source.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ClippingJob(jobs[0].ID); err != nil {
+	if _, err := store.ClippingJob(job.ID); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -6,4 +6,4 @@ import "os/exec"
 
 func configureYouTubeSubprocess(*exec.Cmd) {}
 
-func youtubeMuxOutputLimitReached(*exec.Cmd, error) bool { return false }
+func youtubeSubprocessFileLimitReached(*exec.Cmd, error) bool { return false }

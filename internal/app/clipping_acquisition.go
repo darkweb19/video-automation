@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -13,9 +12,7 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"mime"
 	"net"
-	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -28,16 +25,11 @@ import (
 )
 
 const (
-	ClippingUploadChunkBytes           int64 = 16 << 20
-	clippingImportReadBytes                  = int(ClippingUploadChunkBytes)
 	clippingImportMaxDuration                = 12 * time.Hour
 	clippingImportLeaseDuration              = 15 * time.Minute
 	clippingImportLeaseRenewInterval         = 5 * time.Minute
-	clippingImportMaxRedirects               = 5
-	clippingImportResponseTimeout            = 30 * time.Second
 	clippingFreeSpaceFloorBytes              = int64(4 << 30)
-	clippingYouTubeTrackWorkspaceBytes       = MaxClippingSourceBytes
-	clippingYouTubeMuxTimeout                = 3 * time.Hour
+	clippingYouTubeWorkspaceBytes            = 2 * MaxClippingSourceBytes
 	clippingYouTubeDurationToleranceMS int64 = 2_000
 	clippingProbeTimeout                     = 15 * time.Second
 	clippingProbeOutputLimit                 = 64 << 10
@@ -50,14 +42,11 @@ const (
 )
 
 var (
-	ErrClippingUploadChunkTooLarge     = errors.New("upload chunk exceeds 16 MiB")
-	ErrClippingUploadOffset            = errors.New("upload offset does not match the persisted offset")
-	ErrClippingUploadIncomplete        = errors.New("upload is incomplete")
 	ErrClippingRightsNotAttested       = errors.New("explicit rights and processing attestation is required")
 	ErrClippingPlatformUnavailable     = errors.New("native clipping source files require a Linux or Unix host; run the application in Docker/Linux")
-	ErrYouTubeImportUnavailable        = errors.New("YouTube import is unavailable; upload an original file you are permitted to reuse")
+	ErrYouTubeImportUnavailable        = errors.New("YouTube import is unavailable; check the public video link and try again")
 	errClippingInvalidMedia            = errors.New("source is not a supported video with a valid duration and dimensions")
-	errClippingImportRetryable         = errors.New("public media import failed")
+	errClippingImportRetryable         = errors.New("YouTube import failed")
 	errClippingYouTubeAVStreamMissing  = errors.New("YouTube source is missing required audio/video stream timing")
 	errClippingYouTubeAVTimingMismatch = errors.New("YouTube source audio/video timing does not match")
 )
@@ -83,13 +72,8 @@ func clippingOutcome(status, reason, message string) error {
 	return &ClippingAcquisitionError{Status: status, Reason: reason, Message: message}
 }
 
-type clippingIPResolver interface {
-	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
-}
-
-type clippingTransportFactory func(*url.URL, []net.IP) http.RoundTripper
-
 type clippingMediaProbeResult struct {
+	FormatName       string
 	DurationMS       int64
 	Width            int
 	Height           int
@@ -108,6 +92,8 @@ type clippingMediaProbeResult struct {
 
 type clippingMediaProbe func(context.Context, string) (clippingMediaProbeResult, error)
 
+// clippingIPResolver is shared by the Modal dispatcher, which pins outbound
+// worker requests after validating public DNS answers.
 type clippingActiveOperation struct {
 	cancel context.CancelFunc
 	closer io.Closer
@@ -119,22 +105,21 @@ type clippingOperationRegistry struct {
 	operations map[string]clippingActiveOperation
 }
 
-// ClippingAcquisition owns the bounded local and public-link media adapters.
-// Its Store remains the source of truth for source state and upload offsets.
+// ClippingAcquisition owns the bounded YouTube import adapter. Its Store
+// remains the source of truth for source state and import leases.
 type ClippingAcquisition struct {
 	store    *Store
 	security *Security
 
-	resolver                clippingIPResolver
-	transportFactory        clippingTransportFactory
-	probe                   clippingMediaProbe
-	now                     func() time.Time
-	diskAvailable           func(string) (int64, error)
-	leaseRenewEvery         time.Duration
-	youtubeExecutable       string
-	youtubeRuntime          string
-	youtubeMaxBytes         int64
-	youtubeFFmpegExecutable string
+	probe                    clippingMediaProbe
+	now                      func() time.Time
+	diskAvailable            func(string) (int64, error)
+	leaseRenewEvery          time.Duration
+	youtubeExecutable        string
+	youtubePythonExecutable  string
+	youtubeRuntime           string
+	youtubeMaxBytes          int64
+	youtubeWorkspaceMaxBytes int64
 
 	processImportMu sync.Mutex
 	locksMu         sync.Mutex
@@ -148,68 +133,14 @@ type clippingSourceLock struct {
 
 func NewClippingAcquisition(store *Store, security *Security) *ClippingAcquisition {
 	return &ClippingAcquisition{
-		store:            store,
-		security:         security,
-		resolver:         net.DefaultResolver,
-		transportFactory: newPinnedClippingTransport,
-		probe:            probeClippingMedia,
-		now:              time.Now,
-		diskAvailable:    clippingAvailableDiskBytes,
-		leaseRenewEvery:  clippingImportLeaseRenewInterval,
-		sourceLocks:      make(map[string]*clippingSourceLock),
+		store:           store,
+		security:        security,
+		probe:           probeClippingMedia,
+		now:             time.Now,
+		diskAvailable:   clippingAvailableDiskBytes,
+		leaseRenewEvery: clippingImportLeaseRenewInterval,
+		sourceLocks:     make(map[string]*clippingSourceLock),
 	}
-}
-
-// CreateUpload reserves its declared byte size before accepting any body data.
-func (a *ClippingAcquisition) CreateUpload(ctx context.Context, rightsAttested bool, originalName, mediaType string, declaredSize, retainUntil int64) (ClippingSource, error) {
-	if err := ctx.Err(); err != nil {
-		return ClippingSource{}, err
-	}
-	if a == nil || a.store == nil {
-		return ClippingSource{}, errors.New("clipping source storage is unavailable")
-	}
-	if !rightsAttested {
-		return ClippingSource{}, clippingOutcome("authorization_needed", "reuse_rights_not_attested", ErrClippingRightsNotAttested.Error())
-	}
-	if err := clippingFilesystemSupported(); err != nil {
-		return ClippingSource{}, err
-	}
-	if declaredSize <= 0 || declaredSize > MaxClippingSourceBytes {
-		return ClippingSource{}, fmt.Errorf("upload size must be between 1 byte and %d bytes", MaxClippingSourceBytes)
-	}
-	if retainUntil < 0 {
-		return ClippingSource{}, errors.New("retention timestamp cannot be negative")
-	}
-	if mediaType != "" {
-		if parsed, _, err := mime.ParseMediaType(mediaType); err == nil {
-			mediaType = parsed
-		} else {
-			mediaType = "application/octet-stream"
-		}
-	}
-	a.store.clippingMu.Lock()
-	defer a.store.clippingMu.Unlock()
-	if err := a.checkClippingStorageCapacity(declaredSize); err != nil {
-		return ClippingSource{}, err
-	}
-	source, err := a.store.CreateClippingSource(ClippingSourceCreate{
-		Kind:              ClippingSourceUpload,
-		OriginalName:      sanitizeClippingSourceName(originalName),
-		MediaType:         mediaType,
-		DeclaredSizeBytes: declaredSize,
-		RightsAttested:    true,
-		RetainUntil:       retainUntil,
-	})
-	if err != nil {
-		return ClippingSource{}, err
-	}
-	if _, err := a.ensureSourcePaths(source.ID); err != nil {
-		_ = a.store.FailClippingSource(source.ID, "storage_path_unavailable")
-		a.store.PublishClippingSource(source.ID)
-		return ClippingSource{}, err
-	}
-	a.store.PublishClippingSource(source.ID)
-	return source, nil
 }
 
 // CreatePublicImport accepts only HTTPS public links and stores their
@@ -237,6 +168,9 @@ func (a *ClippingAcquisition) CreatePublicImport(ctx context.Context, rightsAtte
 	if err != nil {
 		return ClippingSource{}, err
 	}
+	if kind != ClippingSourceYouTube {
+		return ClippingSource{}, clippingOutcome("unsupported", "unsupported_source_host", "Only public YouTube video links are supported")
+	}
 	// The encrypted value expands by roughly one third. Keep it within the
 	// storage layer's ciphertext field limit before reserving aggregate space.
 	if len(u.String()) > 3000 {
@@ -251,18 +185,14 @@ func (a *ClippingAcquisition) CreatePublicImport(ctx context.Context, rightsAtte
 	if err := a.checkClippingStorageCapacity(MaxClippingSourceBytes); err != nil {
 		return ClippingSource{}, err
 	}
-	originalName := clippingURLName(u)
-	if kind == ClippingSourceYouTube {
-		videoID, ok := youtubeVideoID(u)
-		if !ok {
-			return ClippingSource{}, clippingOutcome("unsupported", "invalid_url", "Enter a supported YouTube video reference")
-		}
-		originalName = "youtube-" + videoID + ".media"
+	videoID, ok := youtubeVideoID(u)
+	if !ok {
+		return ClippingSource{}, clippingOutcome("unsupported", "invalid_url", "Enter a supported YouTube video reference")
 	}
 	source, err := a.store.CreateClippingSource(ClippingSourceCreate{
 		Kind:              kind,
-		OriginalName:      originalName,
-		MediaType:         "application/octet-stream",
+		OriginalName:      "youtube-" + videoID + ".mp4",
+		MediaType:         "video/mp4",
 		DeclaredSizeBytes: MaxClippingSourceBytes,
 		SourceURL:         encryptedURL,
 		RightsAttested:    true,
@@ -289,152 +219,6 @@ func (a *ClippingAcquisition) CreatePublicImport(ctx context.Context, rightsAtte
 		a.store.PublishClippingSource(source.ID)
 	}
 	return source, nil
-}
-
-// UploadChunk appends one persisted, resumable chunk to a source upload.
-// The request body is streamed directly to disk and never accumulated whole.
-func (a *ClippingAcquisition) UploadChunk(ctx context.Context, sourceID string, expectedOffset int64, body io.Reader) (int64, error) {
-	if a == nil || a.store == nil {
-		return 0, errors.New("clipping source storage is unavailable")
-	}
-	if err := clippingFilesystemSupported(); err != nil {
-		return 0, err
-	}
-	if body == nil {
-		return 0, errors.New("upload body is required")
-	}
-	if expectedOffset < 0 {
-		return 0, ErrClippingUploadOffset
-	}
-	if expectedOffset > MaxClippingSourceBytes {
-		return 0, ErrClippingUploadOffset
-	}
-	opCtx, finish, err := a.beginOperation(ctx, sourceID, asCloser(body))
-	if err != nil {
-		return 0, err
-	}
-	defer finish()
-	releaseSource := a.lockSource(sourceID)
-	defer releaseSource()
-	if err := opCtx.Err(); err != nil {
-		return 0, err
-	}
-
-	a.store.clippingMu.Lock()
-	defer a.store.clippingMu.Unlock()
-	source, err := a.store.ClippingSource(sourceID)
-	if err != nil {
-		return 0, err
-	}
-	if source.Status != ClippingSourceUploading {
-		return 0, fmt.Errorf("source is not accepting upload chunks")
-	}
-	if expectedOffset != source.UploadOffset {
-		return source.UploadOffset, ErrClippingUploadOffset
-	}
-	if expectedOffset > source.DeclaredSizeBytes || source.DeclaredSizeBytes > MaxClippingSourceBytes {
-		return source.UploadOffset, errors.New("upload exceeds its reserved size")
-	}
-	paths, err := a.sourcePaths(sourceID)
-	if err != nil {
-		return source.UploadOffset, err
-	}
-	if err := a.checkClippingStorageCapacity(0); err != nil {
-		return source.UploadOffset, err
-	}
-	file, err := openClippingPart(paths.temp)
-	if err != nil {
-		return source.UploadOffset, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return source.UploadOffset, err
-	}
-	if info.Size() < source.UploadOffset {
-		return source.UploadOffset, errors.New("stored upload is shorter than its persisted offset")
-	}
-	if info.Size() > source.UploadOffset {
-		if err := file.Truncate(source.UploadOffset); err != nil {
-			return source.UploadOffset, err
-		}
-		if err := file.Sync(); err != nil {
-			return source.UploadOffset, err
-		}
-	}
-	if _, err := file.Seek(source.UploadOffset, io.SeekStart); err != nil {
-		return source.UploadOffset, err
-	}
-	limit := source.DeclaredSizeBytes - source.UploadOffset
-	if limit > ClippingUploadChunkBytes {
-		limit = ClippingUploadChunkBytes
-	}
-	written, copyErr := copyContextLimit(opCtx, file, body, limit+1)
-	if copyErr != nil || written > ClippingUploadChunkBytes || written > limit {
-		_ = file.Truncate(source.UploadOffset)
-		_ = file.Sync()
-		if copyErr != nil {
-			return source.UploadOffset, copyErr
-		}
-		return source.UploadOffset, ErrClippingUploadChunkTooLarge
-	}
-	if written == 0 {
-		return source.UploadOffset, errors.New("upload chunk is empty")
-	}
-	if err := opCtx.Err(); err != nil {
-		_ = file.Truncate(source.UploadOffset)
-		_ = file.Sync()
-		return source.UploadOffset, err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Truncate(source.UploadOffset)
-		_ = file.Sync()
-		return source.UploadOffset, err
-	}
-	newOffset := source.UploadOffset + written
-	if err := a.store.UpdateClippingSourceProgress(sourceID, ClippingSourceUploading, newOffset, newOffset); err != nil {
-		_ = file.Truncate(source.UploadOffset)
-		_ = file.Sync()
-		return source.UploadOffset, err
-	}
-	a.store.PublishClippingSource(sourceID)
-	return newOffset, nil
-}
-
-// FinalizeUpload validates the actual local bytes before atomically publishing
-// the source path and changing its durable state to ready.
-func (a *ClippingAcquisition) FinalizeUpload(ctx context.Context, sourceID string) (ClippingSource, error) {
-	if a == nil || a.store == nil {
-		return ClippingSource{}, errors.New("clipping source storage is unavailable")
-	}
-	if err := clippingFilesystemSupported(); err != nil {
-		return ClippingSource{}, err
-	}
-	opCtx, finish, err := a.beginOperation(ctx, sourceID, nil)
-	if err != nil {
-		return ClippingSource{}, err
-	}
-	defer finish()
-	releaseSource := a.lockSource(sourceID)
-	defer releaseSource()
-	source, err := a.store.ClippingSource(sourceID)
-	if err != nil {
-		return ClippingSource{}, err
-	}
-	if source.Status == ClippingSourceReady {
-		return source, nil
-	}
-	if source.Status != ClippingSourceUploading {
-		return ClippingSource{}, errors.New("source is not awaiting upload finalization")
-	}
-	if source.UploadOffset != source.DeclaredSizeBytes || source.DeclaredSizeBytes <= 0 {
-		return ClippingSource{}, ErrClippingUploadIncomplete
-	}
-	result, err := a.finalizeSource(opCtx, sourceID, ClippingSourceUploading)
-	if err != nil && errors.Is(err, errClippingInvalidMedia) {
-		a.failAndRemove(sourceID, "invalid_media")
-	}
-	return result, err
 }
 
 // ProcessNextImport claims and runs one durable public-link import. It is
@@ -483,6 +267,11 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 	}
 	trace := newClippingDiagnosticTrace(a, claimed.ID)
 	trace.record(ClippingDiagnosticStageDispatch, ClippingDiagnosticStarted, "")
+	if claimed.Kind != ClippingSourceYouTube {
+		a.store.clippingMu.Unlock()
+		trace.finish(ClippingDiagnosticFailed, clippingOutcome("unsupported", "unsupported_source_host", "Only public YouTube video links are supported"))
+		return true, a.failLegacyImportPreservingFiles(claimed.ID)
+	}
 	paths, pathErr := a.ensureSourcePaths(claimed.ID)
 	recoverFinalizedFile := false
 	if pathErr == nil {
@@ -496,41 +285,23 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 			} else if errors.Is(tempErr, os.ErrNotExist) && finalErr == nil && youtubeFinalExpectationMatches(claimed, finalInfo) {
 				videoBytes, videoErr := safeGeneratedFileSize(paths.videoTrack)
 				audioBytes, audioErr := safeGeneratedFileSize(paths.audioTrack)
+				_, workspaceErr := os.Lstat(youtubeWorkspacePath(paths))
 				if videoErr != nil {
 					pathErr = videoErr
 				} else if audioErr != nil {
 					pathErr = audioErr
-				} else if videoBytes != 0 || audioBytes != 0 {
+				} else if workspaceErr != nil && !errors.Is(workspaceErr, os.ErrNotExist) {
+					pathErr = workspaceErr
+				} else if videoBytes != 0 || audioBytes != 0 || workspaceErr == nil {
 					pathErr = a.clearYouTubeImportArtifactsLocked(claimed.ID, paths, true)
 				} else {
 					recoverFinalizedFile = true
 				}
 			} else {
-				// A temporary mux or track file has no durable completion marker.
-				// Discard it and restart the selected import from clean paths.
+				// A temporary download workspace has no durable completion marker.
+				// Discard it and restart the import from clean paths.
 				_ = tempInfo
 				pathErr = a.clearYouTubeImportArtifactsLocked(claimed.ID, paths, true)
-			}
-		} else {
-			tempInfo, tempErr := os.Lstat(paths.temp)
-			finalInfo, finalErr := os.Lstat(paths.final)
-			if tempErr != nil && !errors.Is(tempErr, os.ErrNotExist) {
-				pathErr = tempErr
-			} else if finalErr != nil && !errors.Is(finalErr, os.ErrNotExist) {
-				pathErr = finalErr
-			} else if tempErr == nil && finalErr == nil {
-				pathErr = errors.New("source storage has conflicting temporary and final files")
-			} else if errors.Is(tempErr, os.ErrNotExist) && finalErr == nil {
-				if finalInfo.Size() != claimed.SizeBytes || finalInfo.Size() <= 0 {
-					pathErr = errors.New("finalized import file does not match its persisted size")
-				} else {
-					recoverFinalizedFile = true
-				}
-			} else if tempInfo != nil {
-				pathErr = os.Remove(paths.temp)
-				if errors.Is(pathErr, os.ErrNotExist) {
-					pathErr = nil
-				}
 			}
 		}
 	}
@@ -553,7 +324,7 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 	importCtx, cancel := context.WithTimeout(leaseCtx, clippingImportMaxDuration)
 	defer cancel()
 	if recoverFinalizedFile {
-		if _, err := a.finalizeSource(importCtx, claimed.ID, ClippingSourceImporting); err != nil {
+		if _, err := a.finalizeSource(importCtx, claimed.ID); err != nil {
 			if leaseErr := leaseFailure(); leaseErr != nil {
 				return true, a.retryClippingImport(claimed, trace, leaseErr)
 			}
@@ -602,7 +373,7 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 	if err := importCtx.Err(); err != nil {
 		return true, a.retryClippingImport(claimed, trace, err)
 	}
-	_, err = a.finalizeSource(importCtx, claimed.ID, ClippingSourceImporting)
+	_, err = a.finalizeSource(importCtx, claimed.ID)
 	if err != nil {
 		if leaseErr := leaseFailure(); leaseErr != nil {
 			return true, a.retryClippingImport(claimed, trace, leaseErr)
@@ -817,6 +588,9 @@ func (a *ClippingAcquisition) CleanupFailedSources(ctx context.Context) (int, er
 }
 
 func (a *ClippingAcquisition) importToDisk(ctx context.Context, source ClippingSource, tempPath string, trace *clippingDiagnosticTrace) error {
+	if source.Kind != ClippingSourceYouTube {
+		return permanentClippingImportError{clippingOutcome("unsupported", "unsupported_source_host", "Only public YouTube video links are supported")}
+	}
 	trace.start(ClippingDiagnosticStageURLValidation)
 	if a.security == nil {
 		return withClippingDiagnosticCode(permanentClippingImportError{errors.New("source URL encryption is unavailable")}, "source_unavailable")
@@ -833,201 +607,17 @@ func (a *ClippingAcquisition) importToDisk(ctx context.Context, source ClippingS
 		return withClippingDiagnosticCode(permanentClippingImportError{errors.New("stored source type does not match its URL")}, "source_unavailable")
 	}
 	trace.complete()
-	var response *http.Response
-	if source.Kind == ClippingSourceYouTube {
-		trace.start(ClippingDiagnosticStageMetadata)
-		selection, err := a.extractYouTubeMediaWithTrace(ctx, u,
-			func() { trace.complete() },
-			func() { trace.start(ClippingDiagnosticStageFormat) },
-			func(selection youtubeSelection) {
-				trace.activeStage = ""
-				code := "combined_tracks_selected"
-				if selection.Separate {
-					code = "separate_tracks_selected"
-				}
-				trace.record(ClippingDiagnosticStageFormat, ClippingDiagnosticCompleted, code)
-				if selection.Separate && selection.Tracks.Audio != nil && youtubeFormatLanguagePreference(selection.Tracks.Audio.LanguagePreference) == youtubeOriginalLanguagePreference {
-					trace.record(ClippingDiagnosticStageFormat, ClippingDiagnosticCompleted, "original_audio_selected")
-				}
-			},
-		)
-		if err != nil {
-			return err
-		}
-		expectation, expectationErr := expectationForYouTubeSelection(selection)
-		if expectationErr != nil {
-			return withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "The selected audio/video tracks cannot be validated safely; upload an original file you are permitted to reuse")}, "format_unavailable")
-		}
-		a.store.clippingMu.Lock()
-		persistErr := a.store.SetClippingSourceImportExpectation(source.ID, expectation)
-		if persistErr == nil && selection.Separate {
-			persistErr = a.reserveYouTubeWorkspaceLocked(source.ID)
-		}
-		a.store.clippingMu.Unlock()
-		if persistErr != nil {
-			return persistErr
-		}
-		if selection.Separate {
-			videoID, validID := youtubeVideoID(u)
-			if !validID {
-				return withClippingDiagnosticCode(permanentClippingImportError{errors.New("stored source URL could not be validated")}, "source_unavailable")
-			}
-			return a.importYouTubeSeparateTracks(ctx, source, videoID, tempPath, selection, expectation, trace)
-		}
-		trace.start(ClippingDiagnosticStageDownload)
-		response, err = a.fetchYouTubeMediaURL(ctx, selection)
-	} else {
-		trace.start(ClippingDiagnosticStageDownload)
-		response, err = a.fetchClippingURL(ctx, u, source.Kind)
-	}
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		if (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) && source.Kind != ClippingSourceYouTube {
-			return permanentClippingImportError{clippingOutcome("authorization_needed", "provider_denied_download", "The public link does not allow an unauthenticated media download")}
-		}
-		if response.StatusCode == http.StatusPartialContent || response.Header.Get("Content-Range") != "" {
-			if source.Kind == ClippingSourceYouTube {
-				return permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "No supported audio/video format is available; upload an original file you are permitted to reuse")}
-			}
-			return permanentClippingImportError{clippingOutcome("unsupported", "partial_response_not_accepted", "The public link returned a partial response")}
-		}
-		if response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != http.StatusTooManyRequests && source.Kind != ClippingSourceYouTube {
-			return permanentClippingImportError{clippingOutcome("unsupported", "source_http_error", "The public link did not return media")}
-		}
-		if source.Kind == ClippingSourceYouTube {
-			return fmt.Errorf("%w: YouTube media endpoint rejected the selected stream", errClippingImportRetryable)
-		}
-		return fmt.Errorf("%w: source server did not return media", errClippingImportRetryable)
-	}
-	if response.Header.Get("Content-Range") != "" {
-		if source.Kind == ClippingSourceYouTube {
-			return permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "No supported audio/video format is available; upload an original file you are permitted to reuse")}
-		}
-		return permanentClippingImportError{clippingOutcome("unsupported", "partial_response_not_accepted", "The public link returned a partial response")}
-	}
-	maxImportBytes := clippingImportSizeLimit(source.Kind, a.youtubeMaxBytes)
-	if response.ContentLength > maxImportBytes {
-		if source.Kind == ClippingSourceYouTube {
-			return permanentClippingImportError{youtubeImportOutcome("youtube_size_limit_exceeded", "The video exceeds the 20 GiB limit; upload a smaller original file you are permitted to reuse")}
-		}
-		return permanentClippingImportError{clippingOutcome("unsupported", "source_size_limit_exceeded", "The public media file exceeds the 20 GiB size limit")}
-	}
-	contentType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if strings.EqualFold(contentType, "text/html") || strings.EqualFold(contentType, "application/xhtml+xml") {
-		if source.Kind == ClippingSourceYouTube {
-			return permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "No supported audio/video format is available; upload an original file you are permitted to reuse")}
-		}
-		if source.Kind == ClippingSourceGoogleDrive {
-			return permanentClippingImportError{clippingOutcome("original_file_required", "drive_viewer_page_requires_original_file", "The Drive link opened a viewer or confirmation page; upload the original media file")}
-		}
-		return permanentClippingImportError{clippingOutcome("unsupported", "non_media_response", "The public link returned a web page instead of media")}
-	}
-	if !supportedClippingContentType(contentType) {
-		if source.Kind == ClippingSourceYouTube {
-			return permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "No supported audio/video format is available; upload an original file you are permitted to reuse")}
-		}
-		return permanentClippingImportError{clippingOutcome("unsupported", "non_media_response", "The public link did not return a supported media type")}
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := a.ensureImporting(source.ID); err != nil {
-		return err
-	}
-	a.store.clippingMu.Lock()
-	capacityErr := a.checkClippingStorageCapacity(0)
-	a.store.clippingMu.Unlock()
-	if capacityErr != nil {
-		return capacityErr
-	}
-	file, err := openClippingPartTruncate(tempPath)
-	if err != nil {
-		return fmt.Errorf("%w: prepare import file: %v", errClippingImportRetryable, err)
-	}
-	defer file.Close()
-	buffer := make([]byte, clippingImportReadBytes)
-	var committed int64
-	for {
-		if err := ctx.Err(); err != nil {
-			_ = truncateAndSync(file, committed)
-			return err
-		}
-		n, readErr := response.Body.Read(buffer)
-		if n > 0 {
-			if importStreamExceedsLimit(committed, int64(n), maxImportBytes) {
-				_ = truncateAndSync(file, committed)
-				if source.Kind == ClippingSourceYouTube {
-					return permanentClippingImportError{youtubeImportOutcome("youtube_size_limit_exceeded", "The video exceeds the 20 GiB limit; upload a smaller original file you are permitted to reuse")}
-				}
-				return permanentClippingImportError{clippingOutcome("unsupported", "source_size_limit_exceeded", "The public media file exceeds the 20 GiB size limit")}
-			}
-			if err := a.commitImportChunk(ctx, source.ID, file, buffer[:n], committed); err != nil {
-				_ = truncateAndSync(file, committed)
-				return err
-			}
-			committed += int64(n)
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			_ = truncateAndSync(file, committed)
-			return fmt.Errorf("%w: read media response: %v", errClippingImportRetryable, readErr)
-		}
-		if n == 0 {
-			continue
-		}
-	}
-	if committed == 0 {
-		if source.Kind == ClippingSourceYouTube {
-			return permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "No supported audio/video format is available; upload an original file you are permitted to reuse")}
-		}
-		return permanentClippingImportError{clippingOutcome("unsupported", "non_media_response", "The public link returned an empty file")}
-	}
-	if response.ContentLength >= 0 && committed != response.ContentLength {
-		return fmt.Errorf("%w: media length did not match response headers", errClippingImportRetryable)
-	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("%w: sync media response: %v", errClippingImportRetryable, err)
-	}
-	trace.complete()
-	return nil
+	return a.importYouTubeToDisk(ctx, source, u, tempPath, trace)
 }
 
-func (a *ClippingAcquisition) commitImportChunk(ctx context.Context, sourceID string, file *os.File, chunk []byte, previous int64) error {
+func (a *ClippingAcquisition) failLegacyImportPreservingFiles(sourceID string) error {
 	a.store.clippingMu.Lock()
 	defer a.store.clippingMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	source, err := a.store.ClippingSource(sourceID)
-	if err != nil {
-		return err
-	}
-	if source.Status != ClippingSourceImporting {
-		return errors.New("source import was canceled")
-	}
-	if source.UploadOffset != previous {
-		return errors.New("source import progress changed unexpectedly")
-	}
-	if _, err := file.Seek(previous, io.SeekStart); err != nil {
-		return fmt.Errorf("%w: seek import file: %v", errClippingImportRetryable, err)
-	}
-	if err := writeFull(file, chunk); err != nil {
-		return fmt.Errorf("%w: write import file: %v", errClippingImportRetryable, err)
-	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("%w: sync import chunk: %v", errClippingImportRetryable, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	newOffset := previous + int64(len(chunk))
-	if err := a.store.UpdateClippingSourceProgress(sourceID, ClippingSourceImporting, 0, newOffset); err != nil {
-		return fmt.Errorf("%w: persist import offset: %v", errClippingImportRetryable, err)
+	if err := a.store.FailClippingSource(sourceID, "legacy_source_import_unsupported"); err != nil {
+		current, readErr := a.store.ClippingSource(sourceID)
+		if readErr != nil || current.Status != ClippingSourceFailed || current.Failure != "legacy_source_import_unsupported" {
+			return err
+		}
 	}
 	a.store.PublishClippingSource(sourceID)
 	return nil
@@ -1046,143 +636,7 @@ func (a *ClippingAcquisition) ensureImporting(sourceID string) error {
 	return nil
 }
 
-func (a *ClippingAcquisition) fetchClippingURL(ctx context.Context, initial *url.URL, provider ClippingSourceKind) (*http.Response, error) {
-	current := cloneURL(initial)
-	seen := make(map[string]struct{}, clippingImportMaxRedirects+1)
-	for redirects := 0; ; redirects++ {
-		if current == nil {
-			return nil, permanentClippingImportError{errors.New("source URL is empty")}
-		}
-		currentKey := current.String()
-		if _, exists := seen[currentKey]; exists {
-			return nil, permanentClippingImportError{clippingOutcome("unsupported", "redirect_loop", "The public link returned a redirect loop")}
-		}
-		seen[currentKey] = struct{}{}
-		if err := validateClippingProviderURL(current, provider); err != nil {
-			return nil, permanentClippingImportError{err}
-		}
-		addresses, err := a.resolvePublicDestination(ctx, current, provider)
-		if err != nil {
-			return nil, err
-		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, current.String(), nil)
-		if err != nil {
-			return nil, permanentClippingImportError{clippingOutcome("unsupported", "invalid_url", "The source URL could not be requested")}
-		}
-		request.Header.Set("Accept", "video/*,audio/*,application/octet-stream,*/*;q=0.5")
-		request.Header.Set("Accept-Encoding", "identity")
-		transport := a.transportFactory(current, addresses)
-		client := &http.Client{
-			Transport: transport,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		response, err := client.Do(request)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, fmt.Errorf("%w: provider request failed", errClippingImportRetryable)
-		}
-		if !isRedirectStatus(response.StatusCode) {
-			return response, nil
-		}
-		location := response.Header.Get("Location")
-		response.Body.Close()
-		if redirects >= clippingImportMaxRedirects {
-			return nil, permanentClippingImportError{clippingOutcome("unsupported", "redirect_limit_exceeded", "The public link exceeded the redirect limit")}
-		}
-		if location == "" {
-			return nil, permanentClippingImportError{clippingOutcome("unsupported", "redirect_location_missing", "The public link returned an invalid redirect")}
-		}
-		if strings.Contains(location, "#") {
-			return nil, permanentClippingImportError{clippingOutcome("unsupported", "invalid_redirect", "The public link returned an invalid redirect")}
-		}
-		reference, err := url.Parse(location)
-		if err != nil {
-			return nil, permanentClippingImportError{clippingOutcome("unsupported", "invalid_redirect", "The public link returned an invalid redirect")}
-		}
-		current = current.ResolveReference(reference)
-		if err := validateClippingProviderURL(current, provider); err != nil {
-			return nil, permanentClippingImportError{err}
-		}
-	}
-}
-
-func (a *ClippingAcquisition) resolvePublicDestination(ctx context.Context, u *url.URL, provider ClippingSourceKind) ([]net.IP, error) {
-	if err := validateClippingProviderURL(u, provider); err != nil {
-		return nil, err
-	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	resolved, err := a.resolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("%w: provider DNS lookup failed", errClippingImportRetryable)
-	}
-	if len(resolved) == 0 {
-		return nil, clippingOutcome("unsupported", "unsafe_dns_answer", "The provider hostname did not resolve to a public address")
-	}
-	addresses := make([]net.IP, 0, len(resolved))
-	for _, resolvedAddress := range resolved {
-		if resolvedAddress.Zone != "" || !isPublicUnicastIP(resolvedAddress.IP) {
-			return nil, clippingOutcome("unsupported", "unsafe_dns_answer", "The provider hostname resolved to an unsafe address")
-		}
-		addresses = append(addresses, append(net.IP(nil), resolvedAddress.IP...))
-	}
-	return addresses, nil
-}
-
-func newPinnedClippingTransport(u *url.URL, addresses []net.IP) http.RoundTripper {
-	port := u.Port()
-	if port == "" {
-		port = "443"
-	}
-	allowed := make([]net.IP, 0, len(addresses))
-	for _, ip := range addresses {
-		if ip != nil && isPublicUnicastIP(ip) {
-			allowed = append(allowed, append(net.IP(nil), ip...))
-		}
-	}
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	transport := &http.Transport{
-		Proxy:                 nil,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: clippingImportResponseTimeout,
-		DisableCompression:    true,
-		DisableKeepAlives:     true,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			host, destinationPort, err := net.SplitHostPort(address)
-			if err != nil {
-				return nil, err
-			}
-			if strings.TrimSuffix(strings.ToLower(host), ".") != strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") || destinationPort != port {
-				return nil, errors.New("HTTP transport attempted to dial an unvalidated destination")
-			}
-			var dialErrors []error
-			for _, ip := range allowed {
-				if !isPublicUnicastIP(ip) {
-					continue
-				}
-				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-				if dialErr == nil {
-					return conn, nil
-				}
-				dialErrors = append(dialErrors, dialErr)
-			}
-			if len(dialErrors) == 0 {
-				return nil, errors.New("no validated public destination address")
-			}
-			return nil, errors.Join(dialErrors...)
-		},
-	}
-	return transport
-}
-
-func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID string, expectedStatus ClippingSourceStatus) (ClippingSource, error) {
+func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID string) (ClippingSource, error) {
 	if err := ctx.Err(); err != nil {
 		return ClippingSource{}, err
 	}
@@ -1193,14 +647,12 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 	if source.Status == ClippingSourceReady {
 		return source, nil
 	}
-	if source.Status != expectedStatus {
+	if source.Status != ClippingSourceImporting || source.Kind != ClippingSourceYouTube {
 		return ClippingSource{}, errors.New("source is no longer available for finalization")
 	}
 	var youtubeExpectation youtubeImportExpectation
-	if source.Kind == ClippingSourceYouTube {
-		if json.Unmarshal([]byte(source.ImportExpectation), &youtubeExpectation) != nil || !validYouTubeImportExpectation(youtubeExpectation) {
-			return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVStreamMissing)
-		}
+	if json.Unmarshal([]byte(source.ImportExpectation), &youtubeExpectation) != nil || !validYouTubeImportExpectation(youtubeExpectation) {
+		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVStreamMissing)
 	}
 	paths, err := a.sourcePaths(sourceID)
 	if err != nil {
@@ -1234,24 +686,16 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 		file.Close()
 		return ClippingSource{}, errClippingInvalidMedia
 	}
-	if expectedStatus == ClippingSourceUploading && info.Size() != source.DeclaredSizeBytes {
-		file.Close()
-		return ClippingSource{}, ErrClippingUploadIncomplete
-	}
-	if expectedStatus == ClippingSourceUploading && source.UploadOffset != info.Size() {
-		file.Close()
-		return ClippingSource{}, errors.New("persisted upload offset does not match the media file")
-	}
-	if expectedStatus == ClippingSourceImporting && source.SizeBytes != info.Size() {
+	if source.SizeBytes != info.Size() {
 		file.Close()
 		return ClippingSource{}, errors.New("persisted import size does not match the media file")
 	}
-	if source.Kind == ClippingSourceYouTube && source.ImportExpectedSize > 0 &&
+	if source.ImportExpectedSize > 0 &&
 		(source.ImportExpectedSize != info.Size() || !validSHA256Hex(source.ImportExpectedSHA)) {
 		file.Close()
 		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVTimingMismatch)
 	}
-	if source.Kind == ClippingSourceYouTube && localPath == finalPath &&
+	if localPath == finalPath &&
 		(source.ImportExpectedSize != info.Size() || !validSHA256Hex(source.ImportExpectedSHA)) {
 		file.Close()
 		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVTimingMismatch)
@@ -1284,18 +728,15 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 		trace.finish(ClippingDiagnosticFailed, probeErr)
 		return ClippingSource{}, probeErr
 	}
-	if media.DurationMS < 1 || !reasonableClippingDimensions(media.Width, media.Height) || source.Kind == ClippingSourceYouTube && media.AudioStreams < 1 {
+	if media.DurationMS < 1 || !reasonableClippingDimensions(media.Width, media.Height) || media.AudioStreams < 1 {
 		trace.finish(ClippingDiagnosticFailed, errClippingInvalidMedia)
 		return ClippingSource{}, errClippingInvalidMedia
 	}
-	if source.Kind == ClippingSourceYouTube {
-		trace.complete()
-		trace.start(ClippingDiagnosticStageMergedValidate)
-		if err := validateYouTubeProbeExpectation(youtubeExpectation, media); err != nil {
-			trace.finish(ClippingDiagnosticFailed, err)
-			return ClippingSource{}, err
-		}
-		trace.complete()
+	trace.complete()
+	trace.start(ClippingDiagnosticStageOutputValidate)
+	if err := validateYouTubeProbeExpectation(youtubeExpectation, media); err != nil {
+		trace.finish(ClippingDiagnosticFailed, err)
+		return ClippingSource{}, err
 	}
 	trace.complete()
 	trace.start(ClippingDiagnosticStageHash)
@@ -1308,7 +749,7 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 	if err := ctx.Err(); err != nil {
 		return ClippingSource{}, err
 	}
-	if source.Kind == ClippingSourceYouTube && source.ImportExpectedSize > 0 &&
+	if source.ImportExpectedSize > 0 &&
 		(source.ImportExpectedSize != info.Size() || !strings.EqualFold(source.ImportExpectedSHA, digest)) {
 		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVTimingMismatch)
 	}
@@ -1321,16 +762,14 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 	if current.Status == ClippingSourceReady {
 		return current, nil
 	}
-	if current.Status != expectedStatus {
+	if current.Status != ClippingSourceImporting || current.Kind != ClippingSourceYouTube {
 		return ClippingSource{}, errors.New("source was canceled during finalization")
 	}
 	if err := ctx.Err(); err != nil {
 		return ClippingSource{}, err
 	}
-	if current.Kind == ClippingSourceYouTube {
-		if err := a.store.SetClippingSourceImportFinalExpectation(sourceID, info.Size(), digest); err != nil {
-			return ClippingSource{}, err
-		}
+	if err := a.store.SetClippingSourceImportFinalExpectation(sourceID, info.Size(), digest); err != nil {
+		return ClippingSource{}, err
 	}
 	if localPath == tempPath {
 		if err := os.Rename(tempPath, finalPath); err != nil {
@@ -1384,20 +823,13 @@ func (a *ClippingAcquisition) retryImport(source ClippingSource, cause error) er
 		return currentErr
 	}
 	if pathErr == nil {
-		if source.Kind == ClippingSourceYouTube {
-			pathErr = a.clearYouTubeImportArtifactsLocked(source.ID, paths, true)
-		} else {
-			removeErr := removeGeneratedRegularFile(paths.temp)
-			if removeErr != nil {
-				pathErr = removeErr
-			}
-		}
+		pathErr = a.clearYouTubeImportArtifactsLocked(source.ID, paths, true)
 	}
 	if pathErr == nil {
 		pathErr = a.store.ResetClippingSourceImportProgress(source.ID)
 	}
 	reason := safeClippingFailure(cause)
-	if source.Kind == ClippingSourceYouTube && source.ImportAttempts >= MaxClippingImportAttempts {
+	if source.ImportAttempts >= MaxClippingImportAttempts {
 		reason = "youtube_import_unavailable"
 	}
 	updateErr := a.store.RetryClippingImport(source.ID, source.ImportAttempts, a.now().Add(importRetryDelay(source.ImportAttempts)).Unix(), reason)
@@ -1715,7 +1147,7 @@ func summarizeClippingProbeStreams(output clippingProbeOutput, decoders map[stri
 	audioStreams := 0
 	width, height := 0, 0
 	durationMS, durationSet := parseFFprobeDurationMilliseconds(output.Format.Duration)
-	result := clippingMediaProbeResult{}
+	result := clippingMediaProbeResult{FormatName: output.Format.FormatName}
 	for _, stream := range output.Streams {
 		switch stream.CodecType {
 		case "audio":
@@ -2006,216 +1438,35 @@ func copyHashContext(ctx context.Context, dst hash.Hash, src io.Reader) (int64, 
 	}
 }
 
-func copyContextLimit(ctx context.Context, dst io.Writer, src io.Reader, limit int64) (int64, error) {
-	if limit < 0 {
-		return 0, errors.New("invalid upload chunk limit")
-	}
-	buffer := make([]byte, 64<<10)
-	var total int64
-	for total < limit {
-		if err := ctx.Err(); err != nil {
-			return total, err
-		}
-		want := int64(len(buffer))
-		if remaining := limit - total; remaining < want {
-			want = remaining
-		}
-		count, readErr := src.Read(buffer[:int(want)])
-		if count > 0 {
-			written, writeErr := dst.Write(buffer[:count])
-			total += int64(written)
-			if writeErr != nil {
-				return total, writeErr
-			}
-			if written != count {
-				return total, io.ErrShortWrite
-			}
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return total, nil
-			}
-			return total, readErr
-		}
-		if count == 0 {
-			continue
-		}
-	}
-	return total, nil
-}
-
-func writeFull(writer io.Writer, data []byte) error {
-	for len(data) > 0 {
-		written, err := writer.Write(data)
-		if err != nil {
-			return err
-		}
-		if written <= 0 {
-			return io.ErrShortWrite
-		}
-		data = data[written:]
-	}
-	return nil
-}
-
-func truncateAndSync(file *os.File, size int64) error {
-	if err := file.Truncate(size); err != nil {
-		return err
-	}
-	return file.Sync()
-}
-
-func openClippingPart(path string) (*os.File, error) {
-	return openClippingRegularFile(path, os.O_CREATE|os.O_RDWR)
-}
-
-func openClippingPartTruncate(path string) (*os.File, error) {
-	file, err := openClippingRegularFile(path, os.O_CREATE|os.O_RDWR)
-	if err != nil {
-		return nil, err
-	}
-	if err := file.Truncate(0); err != nil {
-		file.Close()
-		return nil, err
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		file.Close()
-		return nil, err
-	}
-	return file, nil
-}
-
-func asCloser(reader io.Reader) io.Closer {
-	closer, _ := reader.(io.Closer)
-	return closer
-}
-
-func sanitizeClippingSourceName(value string) string {
-	value = strings.ToValidUTF8(value, "")
-	value = strings.ReplaceAll(value, `\`, "/")
-	value = filepath.Base(value)
-	value = strings.TrimSpace(value)
-	if value == "." || value == string(filepath.Separator) {
-		value = ""
-	}
-	runes := []rune(value)
-	if len(runes) > 200 {
-		value = string(runes[:200])
-	}
-	clean := strings.Builder{}
-	for _, character := range value {
-		if character >= 0x20 && character != 0x7f {
-			clean.WriteRune(character)
-		}
-	}
-	return strings.TrimSpace(clean.String())
-}
-
-func clippingURLName(u *url.URL) string {
-	name := "public-media"
-	if u != nil {
-		if decoded, err := url.PathUnescape(u.Path); err == nil {
-			candidate := sanitizeClippingSourceName(decoded)
-			if candidate != "" && candidate != "/" {
-				name = candidate
-			}
-		}
-	}
-	if name == "" || name == "." {
-		return "public-media"
-	}
-	return name
-}
-
 func normalizeClippingImportURL(raw string) (*url.URL, ClippingSourceKind, error) {
-	if raw == "" || raw != strings.TrimSpace(raw) || len(raw) > 8192 || hasURLControl(raw) {
-		return nil, "", clippingOutcome("unsupported", "invalid_url", "Enter a valid HTTPS share URL without credentials or fragments")
+	if raw == "" || raw != strings.TrimSpace(raw) || len(raw) > 8192 || hasURLControl(raw) || strings.Contains(raw, "#") {
+		return nil, "", clippingOutcome("unsupported", "invalid_url", "Enter a valid public YouTube video link without credentials or fragments")
 	}
-	// Diagnostic branch: accept common YouTube links or bare 11-character IDs,
-	// but pass only a validated canonical YouTube watch URL to yt-dlp.
+	if strings.HasPrefix(strings.ToLower(raw), "http://") {
+		return nil, "", clippingOutcome("unsupported", "https_required", "Use an HTTPS public YouTube video link")
+	}
 	if videoID, ok := flexibleYouTubeVideoID(raw); ok {
+		candidate := raw
+		if !strings.Contains(candidate, "://") {
+			candidate = "https://" + candidate
+		}
+		parsed, err := url.Parse(candidate)
+		if err != nil {
+			return nil, "", clippingOutcome("unsupported", "invalid_url", "Enter a valid public YouTube video link")
+		}
+		query, err := url.ParseQuery(parsed.RawQuery)
+		if err != nil {
+			return nil, "", clippingOutcome("unsupported", "invalid_url", "Enter a valid public YouTube video link")
+		}
+		for key := range query {
+			switch strings.ToLower(key) {
+			case "list", "playlist", "playlist_id", "video_ids", "start_radio", "index":
+				return nil, "", clippingOutcome("unsupported", "unsupported_youtube_url_shape", "Playlists are not supported; enter one YouTube video link")
+			}
+		}
 		return &url.URL{Scheme: "https", Host: "www.youtube.com", Path: "/watch", RawQuery: "v=" + videoID}, ClippingSourceYouTube, nil
 	}
-	if strings.Contains(raw, "#") {
-		return nil, "", clippingOutcome("unsupported", "invalid_url", "Enter a valid HTTPS share URL without fragments")
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, "", clippingOutcome("unsupported", "invalid_url", "Enter a valid HTTPS share URL")
-	}
-	if err := validatePublicHTTPSURL(u); err != nil {
-		return nil, "", err
-	}
-	host := strings.ToLower(u.Hostname())
-	kind := clippingProviderForHost(host)
-	if kind == ClippingSourceYouTube {
-		videoID, ok := parseYouTubeReference(u, host)
-		if !ok {
-			return nil, "", clippingOutcome("unsupported", "unsupported_youtube_url_shape", "Enter a supported YouTube video reference")
-		}
-		return &url.URL{Scheme: "https", Host: "www.youtube.com", Path: "/watch", RawQuery: "v=" + videoID}, kind, nil
-	}
-	if kind != ClippingSourceGoogleDrive && kind != ClippingSourceDropbox {
-		return nil, "", clippingOutcome("unsupported", "unsupported_source_host", "Use a public Google Drive or Dropbox share URL")
-	}
-	if kind == ClippingSourceDropbox {
-		if !strings.HasPrefix(u.Path, "/s/") && !strings.HasPrefix(u.Path, "/scl/fi/") {
-			return nil, "", clippingOutcome("unsupported", "unsupported_dropbox_link_shape", "Use a public Dropbox shared file link")
-		}
-		query := u.Query()
-		query.Set("dl", "1")
-		u.RawQuery = query.Encode()
-	}
-	return canonicalClippingURL(u), kind, nil
-}
-
-func canonicalClippingURL(u *url.URL) *url.URL {
-	copy := cloneURL(u)
-	copy.Scheme = "https"
-	copy.Host = strings.ToLower(copy.Hostname())
-	if copy.Path == "" {
-		copy.Path = "/"
-	}
-	copy.Fragment = ""
-	copy.RawFragment = ""
-	return copy
-}
-
-func validatePublicHTTPSURL(u *url.URL) error {
-	if u == nil || !strings.EqualFold(u.Scheme, "https") || u.Opaque != "" || u.User != nil || u.Host == "" || u.Fragment != "" || u.RawFragment != "" {
-		return clippingOutcome("unsupported", "https_required", "Use an HTTPS public share URL without credentials or fragments")
-	}
-	if strings.HasSuffix(u.Host, ".") || strings.Contains(u.Host, "%") {
-		return clippingOutcome("unsupported", "invalid_host", "The share URL has an invalid host")
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "" || !asciiDNSName(host) {
-		return clippingOutcome("unsupported", "invalid_host", "The share URL has an invalid host")
-	}
-	if net.ParseIP(host) != nil {
-		return clippingOutcome("unsupported", "ip_literal_forbidden", "The share URL must use an approved provider hostname")
-	}
-	if port := u.Port(); port != "" && port != "443" {
-		return clippingOutcome("unsupported", "port_forbidden", "The share URL must use HTTPS on port 443")
-	}
-	return nil
-}
-
-func asciiDNSName(host string) bool {
-	if len(host) > 253 {
-		return false
-	}
-	for _, label := range strings.Split(host, ".") {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, character := range label {
-			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
-				return false
-			}
-		}
-	}
-	return true
+	return nil, "", clippingOutcome("unsupported", "unsupported_source_host", "Only public YouTube video links are supported")
 }
 
 func hasURLControl(raw string) bool {
@@ -2227,84 +1478,6 @@ func hasURLControl(raw string) bool {
 	return false
 }
 
-func clippingProviderForHost(host string) ClippingSourceKind {
-	switch host {
-	case "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "youtube-nocookie.com", "www.youtube-nocookie.com":
-		return ClippingSourceYouTube
-	case "drive.google.com", "docs.google.com", "drive.usercontent.google.com", "googleusercontent.com":
-		return ClippingSourceGoogleDrive
-	case "dropbox.com", "dropboxusercontent.com":
-		return ClippingSourceDropbox
-	}
-	if strings.HasSuffix(host, ".googleusercontent.com") {
-		return ClippingSourceGoogleDrive
-	}
-	if strings.HasSuffix(host, ".dropbox.com") || strings.HasSuffix(host, ".dropboxusercontent.com") {
-		return ClippingSourceDropbox
-	}
-	return ""
-}
-
-func validateClippingProviderURL(u *url.URL, provider ClippingSourceKind) error {
-	if err := validatePublicHTTPSURL(u); err != nil {
-		return err
-	}
-	if clippingProviderForHost(strings.ToLower(u.Hostname())) != provider {
-		return clippingOutcome("unsupported", "redirect_provider_mismatch", "The public link redirected outside its approved provider")
-	}
-	return nil
-}
-
-func parseYouTubeReference(u *url.URL, host string) (string, bool) {
-	if u == nil || u.RawPath != "" && u.RawPath != u.Path {
-		return "", false
-	}
-	query, err := url.ParseQuery(u.RawQuery)
-	if err != nil {
-		return "", false
-	}
-	for key := range query {
-		switch strings.ToLower(key) {
-		case "list", "playlist", "playlist_id", "video_ids", "start_radio", "index":
-			return "", false
-		}
-	}
-	var id string
-	switch {
-	case host == "youtu.be":
-		if !strings.HasPrefix(u.Path, "/") || strings.Count(u.Path, "/") != 1 {
-			return "", false
-		}
-		id = strings.TrimPrefix(u.Path, "/")
-		if _, exists := query["v"]; exists {
-			return "", false
-		}
-	case u.Path == "/watch":
-		values, exists := query["v"]
-		if !exists || len(values) != 1 {
-			return "", false
-		}
-		id = values[0]
-	case strings.HasPrefix(u.Path, "/shorts/"), strings.HasPrefix(u.Path, "/embed/"):
-		prefix := "/shorts/"
-		if strings.HasPrefix(u.Path, "/embed/") {
-			prefix = "/embed/"
-		}
-		id = strings.TrimPrefix(u.Path, prefix)
-		if strings.Contains(id, "/") || id == "" {
-			return "", false
-		}
-		if _, exists := query["v"]; exists {
-			return "", false
-		}
-	default:
-		return "", false
-	}
-	return id, validYouTubeVideoID(id)
-}
-
-// flexibleYouTubeVideoID accepts IDs and common YouTube link shapes without
-// ever permitting a caller-supplied arbitrary URL to reach the extractor.
 func flexibleYouTubeVideoID(raw string) (string, bool) {
 	if validYouTubeVideoID(raw) {
 		return raw, true
@@ -2375,24 +1548,6 @@ func validYouTubeVideoID(id string) bool {
 	return true
 }
 
-func supportedClippingContentType(contentType string) bool {
-	if contentType == "application/octet-stream" || contentType == "application/x-matroska" {
-		return true
-	}
-	return strings.HasPrefix(contentType, "video/")
-}
-
-func isRedirectStatus(status int) bool {
-	switch status {
-	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
-		return true
-	default:
-		return false
-	}
-}
-
-var errInvalidClippingImportURL = errors.New("invalid public media URL")
-var errUnsafeClippingDestination = errors.New("unsafe public media destination")
 var errClippingProbeUnavailable = errors.New("ffprobe is unavailable")
 
 type permanentClippingImportError struct {
@@ -2405,7 +1560,29 @@ func (failure permanentClippingImportError) Unwrap() error { return failure.err 
 func isPermanentClippingImportError(err error) bool {
 	var permanent permanentClippingImportError
 	var outcome *ClippingAcquisitionError
-	return errors.As(err, &permanent) || errors.As(err, &outcome) || errors.Is(err, errUnsafeClippingDestination) || errors.Is(err, errInvalidClippingImportURL)
+	return errors.As(err, &permanent) || errors.As(err, &outcome)
+}
+
+func importStreamExceedsLimit(committed, incoming, limit int64) bool {
+	return committed < 0 || incoming < 0 || limit < 0 || committed > limit || incoming > limit-committed
+}
+
+func removeGeneratedRegularFile(path string) error {
+	file, err := openClippingRegularFile(path, os.O_RDONLY)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else {
+		return err
+	}
 }
 
 func safeClippingFailure(err error) string {
@@ -2425,18 +1602,7 @@ func safeClippingFailure(err error) string {
 	if errors.Is(err, errClippingInvalidMedia) {
 		return "invalid_media"
 	}
-	if errors.Is(err, errUnsafeClippingDestination) {
-		return "unsafe_dns_answer"
-	}
 	return "source_acquisition_failed"
-}
-
-func cloneURL(u *url.URL) *url.URL {
-	if u == nil {
-		return nil
-	}
-	copy := *u
-	return &copy
 }
 
 func isPublicUnicastIP(ip net.IP) bool {
@@ -2503,21 +1669,21 @@ func (a *ClippingAcquisition) checkClippingStorageCapacity(additionalSourceBytes
 	}
 	var workspace int64
 	for _, remaining := range a.store.clippingImportWorkspaces {
-		if remaining < 0 || remaining > clippingYouTubeTrackWorkspaceBytes || workspace > int64(^uint64(0)>>1)-remaining {
+		if remaining < 0 || remaining > clippingYouTubeWorkspaceBytes || workspace > int64(^uint64(0)>>1)-remaining {
 			return clippingOutcome("unsupported", "storage_reservation_unavailable", "Temporary source workspace reservation is invalid")
 		}
 		workspace += remaining
 	}
 	needed := clippingFreeSpaceFloorBytes + additionalSourceBytes + outstanding + workspace
 	if available < needed {
-		return clippingOutcome("unsupported", "storage_reservation_unavailable", "Not enough free storage is available for the source, temporary track workspace, and safety margin")
+		return clippingOutcome("unsupported", "storage_reservation_unavailable", "Not enough free storage is available for the source, temporary YouTube workspace, and safety margin")
 	}
 	return nil
 }
 
 // reconcileYouTubeWorkspaceReservationsLocked reconstructs scratch accounting
-// for stale split imports after a process restart. Existing bytes are already
-// reflected in Statfs; the map reserves only the remaining 20 GiB track cap.
+// for interrupted native downloads after a process restart. Existing bytes are
+// already reflected in Statfs; the map reserves only the remaining workspace cap.
 // The caller holds Store.clippingMu so admission and import writes see one
 // serialized view.
 func (a *ClippingAcquisition) reconcileYouTubeWorkspaceReservationsLocked(sources []ClippingSource) error {
@@ -2540,6 +1706,7 @@ func (a *ClippingAcquisition) reconcileYouTubeWorkspaceReservationsLocked(source
 		}
 		separate := false
 		workspaceComplete := false
+		version := 0
 		if source.ImportExpectation != "" {
 			var expectation youtubeImportExpectation
 			if err := json.Unmarshal([]byte(source.ImportExpectation), &expectation); err != nil || !validYouTubeImportExpectation(expectation) {
@@ -2547,33 +1714,56 @@ func (a *ClippingAcquisition) reconcileYouTubeWorkspaceReservationsLocked(source
 			}
 			separate = expectation.SeparateTracks
 			workspaceComplete = expectation.WorkspaceComplete
+			version = expectation.Version
 		}
 		paths, err := a.sourcePaths(source.ID)
 		if err != nil {
 			return err
 		}
-		videoBytes, err := safeGeneratedFileSize(paths.videoTrack)
-		if err != nil {
+		legacyTrackBytes := int64(0)
+		if version == 1 {
+			videoBytes, err := safeGeneratedFileSize(paths.videoTrack)
+			if err != nil {
+				return err
+			}
+			audioBytes, err := safeGeneratedFileSize(paths.audioTrack)
+			if err != nil {
+				return err
+			}
+			if importStreamExceedsLimit(videoBytes, audioBytes, MaxClippingSourceBytes) {
+				return errors.New("stored YouTube track workspace exceeds its aggregate limit")
+			}
+			legacyTrackBytes = videoBytes + audioBytes
+		}
+		workDir := youtubeWorkspacePath(paths)
+		workspaceBytes := int64(0)
+		if _, err := os.Lstat(workDir); err == nil {
+			var entries int
+			workspaceBytes, entries, err = youtubeWorkspaceUsage(workDir)
+			if err != nil {
+				return err
+			}
+			if entries > clippingYouTubeWorkspaceEntryLimit {
+				return errors.New("stored YouTube workspace exceeds its entry limit")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		audioBytes, err := safeGeneratedFileSize(paths.audioTrack)
-		if err != nil {
-			return err
-		}
-		if importStreamExceedsLimit(videoBytes, audioBytes, MaxClippingSourceBytes) {
-			return errors.New("stored YouTube track workspace exceeds its aggregate limit")
-		}
-		used := videoBytes + audioBytes
 		if workspaceComplete {
-			if used != 0 {
-				return errors.New("completed YouTube track workspace still contains staged bytes")
+			if legacyTrackBytes != 0 || workspaceBytes != 0 {
+				return errors.New("completed YouTube workspace still contains staged bytes")
 			}
 			continue
+		}
+		used := legacyTrackBytes + workspaceBytes
+		workspaceLimit := a.youtubeWorkspaceLimit()
+		if used < 0 || used > workspaceLimit {
+			return errors.New("stored YouTube workspace exceeds its aggregate limit")
 		}
 		if !separate && used == 0 {
 			continue
 		}
-		a.store.clippingImportWorkspaces[source.ID] = clippingYouTubeTrackWorkspaceBytes - used
+		a.store.clippingImportWorkspaces[source.ID] = workspaceLimit - used
 	}
 	return nil
 }

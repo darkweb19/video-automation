@@ -18,4 +18,4 @@ func configureYouTubeSubprocess(command *exec.Cmd) {
 	}
 }
 
-func youtubeMuxOutputLimitReached(_ *exec.Cmd, _ error) bool { return false }
+func youtubeSubprocessFileLimitReached(_ *exec.Cmd, _ error) bool { return false }

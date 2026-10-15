@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -96,14 +95,6 @@ func clippingM3CoreForSource(source ClippingSource) clippingAnalysisCore {
 	}
 }
 
-func clippingM3Selection(sourceID, contentType string, minSeconds, maxSeconds int) ClippingJobCreate {
-	return ClippingJobCreate{
-		SourceID: sourceID, BudgetLimitMicroUSD: 10_000,
-		ContentType: contentType, MinClipSeconds: minSeconds,
-		MaxClipSeconds: maxSeconds, CandidateLimit: 10,
-	}
-}
-
 func clippingM3CallbackArtifact(jobID string, durationMS int64) ClippingArtifact {
 	return ClippingArtifact{
 		JobID: jobID, Type: clippingAnalysisArtifactType, SchemaVersion: clippingAnalysisSchemaVersion,
@@ -114,7 +105,6 @@ func clippingM3CallbackArtifact(jobID string, durationMS int64) ClippingArtifact
 func clippingM3Candidates(t *testing.T, artifact ClippingArtifact) []clippingCandidate {
 	t.Helper()
 	var payload struct {
-		Selection   clippingSelection   `json:"selection"`
 		ContentType string              `json:"content_type"`
 		Reused      bool                `json:"analysis_reused"`
 		Candidates  []clippingCandidate `json:"candidates"`
@@ -125,7 +115,65 @@ func clippingM3Candidates(t *testing.T, artifact ClippingArtifact) []clippingCan
 	return payload.Candidates
 }
 
-func TestClippingM3EstimateInvoiceCacheRestartAndSelectionEdits(t *testing.T) {
+// Keep lifecycle fixtures on the same one-job storage API as the dashboard.
+func clippingM3CreateJob(t *testing.T, store *Store, sourceID, key string) ClippingJob {
+	t.Helper()
+	job, duplicate, err := store.CreateClippingJob(ClippingJobCreate{
+		SourceID: sourceID, ContentType: "general", MinClipSeconds: 15,
+		MaxClipSeconds: 180, CandidateLimit: 10,
+	}, key)
+	if err != nil || duplicate {
+		t.Fatalf("create single analysis job: job=%+v duplicate=%v error=%v", job, duplicate, err)
+	}
+	return job
+}
+
+func clippingM3ClaimAttempt(t *testing.T, store *Store, jobID string) ClippingStage {
+	t.Helper()
+	if claimed, err := store.ClaimClippingAnalysisSource(jobID); err != nil || !claimed {
+		t.Fatalf("claim source analysis for %s: claimed=%v error=%v", jobID, claimed, err)
+	}
+	stage, claimed, err := store.ClaimClippingStage(jobID, ClippingStageAnalysis, 0, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("claim analysis stage for %s: stage=%+v claimed=%v error=%v", jobID, stage, claimed, err)
+	}
+	if err := store.SetClippingAnalysisClaimAttempt(jobID, stage.AttemptID); err != nil {
+		t.Fatalf("bind analysis claim for %s: %v", jobID, err)
+	}
+	revision, err := store.ClippingAnalysisPipelineRevision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetClippingAttemptPipelineRevision(jobID, ClippingStageAnalysis, stage.AttemptID, stage.LeaseToken, revision); err != nil {
+		t.Fatalf("pin pipeline revision for %s: %v", jobID, err)
+	}
+	if err := store.SetClippingAttemptComputeLimit(jobID, ClippingStageAnalysis, stage.AttemptID, stage.LeaseToken, 120); err != nil {
+		t.Fatalf("set callback compute limit for %s: %v", jobID, err)
+	}
+	return stage
+}
+
+func clippingM3Complete(t *testing.T, store *Store, job ClippingJob, stage ClippingStage, source ClippingSource, core clippingAnalysisCore, digest string) (ClippingStage, bool, bool, error) {
+	t.Helper()
+	return store.CompleteClippingAnalysisStage(
+		job.ID, ClippingStageAnalysis, stage.AttemptID, stage.LeaseToken, digest,
+		clippingM3CallbackArtifact(job.ID, source.DurationMS), core, 10,
+	)
+}
+
+func clippingM3CoreForRevision(t *testing.T, store *Store, source ClippingSource) clippingAnalysisCore {
+	t.Helper()
+	core := clippingM3CoreForSource(source)
+	revision, err := store.ClippingAnalysisPipelineRevision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.PipelineRevision = revision
+	core.AlgorithmVersions["pipeline_revision"] = revision
+	return core
+}
+
+func TestClippingAnalysisCacheSurvivesRestartAndCompletesSecondJob(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenStore(dir)
 	if err != nil {
@@ -134,61 +182,30 @@ func TestClippingM3EstimateInvoiceCacheRestartAndSelectionEdits(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	firstSelection := clippingM3Selection(source.ID, "general", 15, 30)
-	secondSelection := clippingM3Selection(source.ID, "comedy", 100, 180)
-	batch, jobs, duplicate, err := store.CreateClippingBatch(ClippingBatchCreate{
-		IdempotencyKey: "m3-estimate-cache-restart", BudgetLimitMicroUSD: 20_000,
-		Jobs: []ClippingJobCreate{firstSelection, secondSelection},
-	})
-	if err != nil || duplicate || len(jobs) != 2 {
-		t.Fatalf("create M3 jobs: batch=%+v jobs=%+v duplicate=%v error=%v", batch, jobs, duplicate, err)
+	firstJob := clippingM3CreateJob(t, store, source.ID, "simple-analysis-cache-first")
+	cachedJob := clippingM3CreateJob(t, store, source.ID, "simple-analysis-cache-second")
+	stage := clippingM3ClaimAttempt(t, store, firstJob.ID)
+	core := clippingM3CoreForRevision(t, store, source)
+	const callbackDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	completed, duplicate, published, err := clippingM3Complete(t, store, firstJob, stage, source, core, callbackDigest)
+	if err != nil || duplicate || !published || completed.Status != ClippingStageCompleted {
+		t.Fatalf("complete analysis callback: stage=%+v duplicate=%v published=%v error=%v", completed, duplicate, published, err)
 	}
-	firstJob, cachedJob := jobs[0], jobs[1]
-
-	claimed, ok, err := store.ClaimClippingStage(firstJob.ID, ClippingStageAnalysis, 2_000, time.Minute)
-	if err != nil || !ok {
-		t.Fatalf("claim analysis: stage=%+v claimed=%v error=%v", claimed, ok, err)
+	artifacts, err := store.ClippingArtifacts(firstJob.ID)
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("published analysis artifacts=%+v error=%v", artifacts, err)
 	}
-	if err := store.SetClippingAttemptEstimateTerms(firstJob.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 25, 20); err != nil {
-		t.Fatalf("record bounded estimate terms: %v", err)
+	candidates := clippingM3Candidates(t, artifacts[0])
+	if len(candidates) == 0 {
+		t.Fatal("analysis artifact contains no candidate output")
 	}
-	if err := store.SetClippingAttemptEstimateTerms(firstJob.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 25, 20); err != nil {
-		t.Fatalf("identical estimate terms should be idempotent: %v", err)
-	}
-	if err := store.SetClippingAttemptEstimateTerms(firstJob.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 26, 20); !errors.Is(err, ErrClippingInvalidState) {
-		t.Fatalf("changed estimate terms error=%v, want invalid state", err)
-	}
-
-	core := clippingM3CoreForSource(source)
-	stage, isDuplicate, published, err := store.CompleteClippingStageEstimate(
-		firstJob.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken,
-		250, 10, clippingM3CallbackArtifact(firstJob.ID, source.DurationMS), core,
-	)
-	if err != nil || isDuplicate || !published || stage.Status != ClippingStageCompleted || stage.EstimatedMicroUSD != 250 || stage.CostReconciled {
-		t.Fatalf("estimated callback: stage=%+v duplicate=%v published=%v error=%v", stage, isDuplicate, published, err)
-	}
-	firstArtifacts, err := store.ClippingArtifacts(firstJob.ID)
-	if err != nil || len(firstArtifacts) != 1 {
-		t.Fatalf("published first analysis artifacts=%+v error=%v", firstArtifacts, err)
-	}
-	var firstPayload struct {
-		Selection   clippingSelection `json:"selection"`
-		ContentType string            `json:"content_type"`
-	}
-	if err := json.Unmarshal([]byte(firstArtifacts[0].PayloadJSON), &firstPayload); err != nil {
-		t.Fatal(err)
-	}
-	firstCandidates := clippingM3Candidates(t, firstArtifacts[0])
-	if firstPayload.Selection.MinClipSeconds != 15 || firstPayload.Selection.MaxClipSeconds != 30 || firstPayload.ContentType != "general" || len(firstCandidates) == 0 {
-		t.Fatalf("initial 15–30 second selection payload=%+v candidates=%d", firstPayload, len(firstCandidates))
-	}
-	for _, candidate := range firstCandidates {
-		if candidate.DurationMS < 15_000 || candidate.DurationMS > 30_000 {
-			t.Fatalf("short selection returned out-of-range candidate: %+v", candidate)
+	for _, candidate := range candidates {
+		if candidate.DurationMS < 15_000 || candidate.DurationMS > 180_000 {
+			t.Fatalf("candidate duration outside job bounds: %+v", candidate)
 		}
 	}
 	var sawLateAudio, sawLateVisual bool
-	for _, candidate := range firstCandidates {
+	for _, candidate := range candidates {
 		for _, evidence := range candidate.Evidence {
 			if evidence.Kind == "audio_non_speech_audio_transient" && evidence.StartMS >= 320_000 {
 				sawLateAudio = true
@@ -199,82 +216,13 @@ func TestClippingM3EstimateInvoiceCacheRestartAndSelectionEdits(t *testing.T) {
 		}
 	}
 	if !sawLateAudio || !sawLateVisual {
-		t.Fatalf("full-timeline selector lost late event evidence: audio=%v visual=%v candidates=%+v", sawLateAudio, sawLateVisual, firstCandidates)
+		t.Fatalf("analysis lost late source-timeline evidence: audio=%v visual=%v", sawLateAudio, sawLateVisual)
 	}
-
-	jobBeforeInvoice, err := store.ClippingJob(firstJob.ID)
-	if err != nil || jobBeforeInvoice.ReservedMicroUSD != 2_000 || jobBeforeInvoice.SpentMicroUSD != 0 {
-		t.Fatalf("estimate was settled as actual or released early: job=%+v error=%v", jobBeforeInvoice, err)
+	if _, duplicate, published, err := clippingM3Complete(t, store, firstJob, stage, source, core, callbackDigest); err != nil || !duplicate || !published {
+		t.Fatalf("matching callback replay: duplicate=%v published=%v error=%v", duplicate, published, err)
 	}
-	batchBeforeInvoice, err := store.ClippingBatch(batch.ID)
-	if err != nil || batchBeforeInvoice.ReservedMicroUSD != 2_000 || batchBeforeInvoice.SpentMicroUSD != 0 {
-		t.Fatalf("batch estimate accounting before invoice=%+v error=%v", batchBeforeInvoice, err)
-	}
-	stage, isDuplicate, published, err = store.CompleteClippingStageEstimate(
-		firstJob.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken,
-		250, 10, clippingM3CallbackArtifact(firstJob.ID, source.DurationMS), core,
-	)
-	if err != nil || !isDuplicate || !published || stage.Status != ClippingStageCompleted {
-		t.Fatalf("identical estimate callback should be idempotent: stage=%+v duplicate=%v published=%v error=%v", stage, isDuplicate, published, err)
-	}
-	if _, isDuplicate, _, err := store.CompleteClippingStageEstimate(
-		firstJob.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken,
-		275, 11, clippingM3CallbackArtifact(firstJob.ID, source.DurationMS), core,
-	); !errors.Is(err, ErrClippingStaleAttempt) || isDuplicate {
-		t.Fatalf("changed duplicate callback should be rejected: duplicate=%v error=%v", isDuplicate, err)
-	}
-
-	updatedJob, updatedArtifact, err := store.UpdateClippingJobSelection(firstJob.ID, clippingM3Selection(source.ID, "comedy", 100, 180))
-	if err != nil || updatedJob.MinClipSeconds != 100 || updatedJob.MaxClipSeconds != 180 || updatedJob.ContentType != "comedy" || updatedArtifact.Version != 2 {
-		t.Fatalf("cached selector range/profile edit: job=%+v artifact=%+v error=%v", updatedJob, updatedArtifact, err)
-	}
-	var updatedPayload struct {
-		Selection   clippingSelection   `json:"selection"`
-		ContentType string              `json:"content_type"`
-		Candidates  []clippingCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal([]byte(updatedArtifact.PayloadJSON), &updatedPayload); err != nil {
-		t.Fatal(err)
-	}
-	if updatedPayload.Selection.MinClipSeconds != 100 || updatedPayload.Selection.MaxClipSeconds != 180 || updatedPayload.ContentType != "comedy" || len(updatedPayload.Candidates) == 0 {
-		t.Fatalf("long comedy selection payload=%+v", updatedPayload)
-	}
-	var sawLongCandidate bool
-	for _, candidate := range updatedPayload.Candidates {
-		if candidate.DurationMS < 100_000 || candidate.DurationMS > 180_000 {
-			t.Fatalf("long selection returned out-of-range candidate: %+v", candidate)
-		}
-		if candidate.DurationMS >= 100_000 {
-			sawLongCandidate = true
-		}
-	}
-	if !sawLongCandidate {
-		t.Fatalf("100–180 second selection produced no candidate in range; count=%d", len(updatedPayload.Candidates))
-	}
-
-	longerJob, longerArtifact, err := store.UpdateClippingJobSelection(firstJob.ID, clippingM3Selection(source.ID, "podcast", 110, 180))
-	if err != nil || longerJob.MinClipSeconds != 110 || longerJob.MaxClipSeconds != 180 || longerJob.ContentType != "podcast" {
-		t.Fatalf("selection above 100 seconds: job=%+v error=%v", longerJob, err)
-	}
-	var longerPayload struct {
-		Candidates []clippingCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal([]byte(longerArtifact.PayloadJSON), &longerPayload); err != nil {
-		t.Fatal(err)
-	}
-	var sawOver100SecondCandidate bool
-	longerDurations := make([]int64, 0, len(longerPayload.Candidates))
-	for _, candidate := range longerPayload.Candidates {
-		longerDurations = append(longerDurations, candidate.DurationMS)
-		if candidate.DurationMS < 110_000 || candidate.DurationMS > 180_000 {
-			t.Fatalf("110–180 second selection returned out-of-range candidate: %+v", candidate)
-		}
-		if candidate.DurationMS > 100_000 {
-			sawOver100SecondCandidate = true
-		}
-	}
-	if !sawOver100SecondCandidate {
-		t.Fatalf("110–180 second selection returned no clip over 100 seconds: durations=%v", longerDurations)
+	if _, duplicate, _, err := clippingM3Complete(t, store, firstJob, stage, source, core, strings.Repeat("b", 64)); err == nil || duplicate {
+		t.Fatalf("callback with a changed digest was accepted: duplicate=%v error=%v", duplicate, err)
 	}
 
 	if err := store.Close(); err != nil {
@@ -287,235 +235,100 @@ func TestClippingM3EstimateInvoiceCacheRestartAndSelectionEdits(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	loadedCore, found, err := reopened.LoadClippingAnalysisCache(source.ID)
 	if err != nil || !found || loadedCore.SourceSHA256 != source.SHA256 || loadedCore.SourceDurationMS != source.DurationMS || len(loadedCore.Transcript.Segments) != len(core.Transcript.Segments) {
-		t.Fatalf("analysis cache after Store reopen: found=%v segments=%d error=%v", found, len(loadedCore.Transcript.Segments), err)
+		t.Fatalf("analysis cache after restart: found=%v segments=%d error=%v", found, len(loadedCore.Transcript.Segments), err)
 	}
 	if loadedCore.Language.Probability != nil || loadedCore.Transcript.Segments[0].Confidence != nil || loadedCore.Context.Summary == "" || len(loadedCore.Context.Timeline) == 0 {
-		t.Fatalf("cached core lost nullable ASR confidence or global context: language=%+v transcript=%+v context=%+v", loadedCore.Language, loadedCore.Transcript, loadedCore.Context)
+		t.Fatalf("cache lost nullable confidence or context provenance: language=%+v transcript=%+v context=%+v", loadedCore.Language, loadedCore.Transcript, loadedCore.Context)
 	}
-	completedFromCache, err := reopened.TryCompleteClippingJobFromAnalysisCache(cachedJob.ID)
-	if err != nil || !completedFromCache {
-		t.Fatalf("complete second job from persisted cache: completed=%v error=%v", completedFromCache, err)
+	fromCache, err := reopened.TryCompleteClippingJobFromAnalysisCache(cachedJob.ID)
+	if err != nil || !fromCache {
+		t.Fatalf("complete second job from source analysis cache: completed=%v error=%v", fromCache, err)
 	}
-	cachedCompletedJob, err := reopened.ClippingJob(cachedJob.ID)
-	if err != nil || cachedCompletedJob.Status != ClippingJobCompleted || cachedCompletedJob.ReservedMicroUSD != 0 || cachedCompletedJob.SpentMicroUSD != 0 {
-		t.Fatalf("cache reuse unexpectedly dispatched/billed work: job=%+v error=%v", cachedCompletedJob, err)
+	completedJob, err := reopened.ClippingJob(cachedJob.ID)
+	if err != nil || completedJob.Status != ClippingJobCompleted {
+		t.Fatalf("cached job status=%+v error=%v", completedJob, err)
 	}
-	cachedStages, err := reopened.ClippingStages(cachedJob.ID)
-	if err != nil || len(cachedStages) != 1 || cachedStages[0].Status != ClippingStageCompleted || cachedStages[0].AttemptID != "" || cachedStages[0].EstimatedMicroUSD != 0 {
-		t.Fatalf("cached completion should have no worker attempt: stages=%+v error=%v", cachedStages, err)
+	stages, err := reopened.ClippingStages(cachedJob.ID)
+	if err != nil || len(stages) != 1 || stages[0].Status != ClippingStageCompleted || stages[0].AttemptID != "" {
+		t.Fatalf("cached job unexpectedly has a worker attempt: stages=%+v error=%v", stages, err)
 	}
 	cachedArtifacts, err := reopened.ClippingArtifacts(cachedJob.ID)
 	if err != nil || len(cachedArtifacts) != 1 {
-		t.Fatalf("cached job artifacts=%+v error=%v", cachedArtifacts, err)
+		t.Fatalf("cached job result=%+v error=%v", cachedArtifacts, err)
 	}
 	var cachedPayload struct {
 		Reused      bool                `json:"analysis_reused"`
-		Selection   clippingSelection   `json:"selection"`
 		ContentType string              `json:"content_type"`
 		Candidates  []clippingCandidate `json:"candidates"`
 	}
 	if err := json.Unmarshal([]byte(cachedArtifacts[0].PayloadJSON), &cachedPayload); err != nil {
 		t.Fatal(err)
 	}
-	if !cachedPayload.Reused || cachedPayload.Selection.MinClipSeconds != 100 || cachedPayload.Selection.MaxClipSeconds != 180 || cachedPayload.ContentType != "comedy" || len(cachedPayload.Candidates) == 0 {
-		t.Fatalf("restart cache route did not preserve source analysis and requested selector: %+v", cachedPayload)
-	}
-	_, over100CachedArtifact, err := reopened.UpdateClippingJobSelection(cachedJob.ID, clippingM3Selection(source.ID, "podcast", 110, 180))
-	if err != nil {
-		t.Fatalf("cached selector edit above 100 seconds after restart: %v", err)
-	}
-	var over100CachedPayload struct {
-		Selection   clippingSelection   `json:"selection"`
-		ContentType string              `json:"content_type"`
-		Candidates  []clippingCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal([]byte(over100CachedArtifact.PayloadJSON), &over100CachedPayload); err != nil {
-		t.Fatal(err)
-	}
-	if over100CachedPayload.Selection.MinClipSeconds != 110 || over100CachedPayload.Selection.MaxClipSeconds != 180 || over100CachedPayload.ContentType != "podcast" || len(over100CachedPayload.Candidates) == 0 || over100CachedPayload.Candidates[0].DurationMS <= 100_000 {
-		t.Fatalf("cache did not return an over-100-second podcast candidate: %+v", over100CachedPayload)
-	}
-	_, editedCachedArtifact, err := reopened.UpdateClippingJobSelection(cachedJob.ID, clippingM3Selection(source.ID, "general", 15, 30))
-	if err != nil {
-		t.Fatalf("second cached selector edit after restart: %v", err)
-	}
-	var editedCachedPayload struct {
-		Selection   clippingSelection   `json:"selection"`
-		ContentType string              `json:"content_type"`
-		Candidates  []clippingCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal([]byte(editedCachedArtifact.PayloadJSON), &editedCachedPayload); err != nil {
-		t.Fatal(err)
-	}
-	if editedCachedPayload.Selection.MinClipSeconds != 15 || editedCachedPayload.Selection.MaxClipSeconds != 30 || editedCachedPayload.ContentType != "general" || len(editedCachedPayload.Candidates) == 0 {
-		t.Fatalf("short selection edit after restart=%+v", editedCachedPayload)
-	}
-
-	stage, isDuplicate, err = reopened.ReconcileClippingStageCost(firstJob.ID, claimed.AttemptID, 312, "modal-invoice-test-2026-10")
-	if err != nil || isDuplicate || !stage.CostReconciled || stage.ActualMicroUSD != 312 || stage.ReservedMicroUSD != 0 {
-		t.Fatalf("invoice reconciliation: stage=%+v duplicate=%v error=%v", stage, isDuplicate, err)
-	}
-	stage, isDuplicate, err = reopened.ReconcileClippingStageCost(firstJob.ID, claimed.AttemptID, 312, "modal-invoice-test-2026-10")
-	if err != nil || !isDuplicate || stage.ActualMicroUSD != 312 {
-		t.Fatalf("identical invoice reconciliation should be idempotent: stage=%+v duplicate=%v error=%v", stage, isDuplicate, err)
-	}
-	if _, _, err := reopened.ReconcileClippingStageCost(firstJob.ID, claimed.AttemptID, 313, "different-invoice"); !errors.Is(err, ErrClippingInvalidState) {
-		t.Fatalf("changed invoice reconciliation error=%v, want invalid state", err)
-	}
-	settledJob, err := reopened.ClippingJob(firstJob.ID)
-	if err != nil || settledJob.ReservedMicroUSD != 0 || settledJob.SpentMicroUSD != 312 {
-		t.Fatalf("settled job accounting=%+v error=%v", settledJob, err)
-	}
-	settledBatch, err := reopened.ClippingBatch(batch.ID)
-	if err != nil || settledBatch.ReservedMicroUSD != 0 || settledBatch.SpentMicroUSD != 312 {
-		t.Fatalf("settled batch accounting=%+v error=%v", settledBatch, err)
+	if !cachedPayload.Reused || cachedPayload.ContentType != "general" || len(cachedPayload.Candidates) == 0 {
+		t.Fatalf("cache reuse lost provenance or candidate output: %+v", cachedPayload)
 	}
 }
 
-func TestClippingM3CanceledLateCallbackRetainsHoldWithoutPublication(t *testing.T) {
+func TestClippingCanceledLateCallbackIsIgnoredAndIdempotent(t *testing.T) {
 	store := newTestStore(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	batch, jobs := makeClippingBatch(t, store, []string{source.ID}, 10_000, 10_000, "m3-canceled-late")
-	job := jobs[0]
-	claimed, ok, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 2_000, time.Minute)
-	if err != nil || !ok {
-		t.Fatalf("claim analysis: stage=%+v claimed=%v error=%v", claimed, ok, err)
-	}
-	if err := store.SetClippingAttemptEstimateTerms(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 25, 20); err != nil {
-		t.Fatal(err)
-	}
+	job := clippingM3CreateJob(t, store, source.ID, "simple-canceled-late-callback")
+	stage := clippingM3ClaimAttempt(t, store, job.ID)
 	if err := store.CancelClippingJob(job.ID); err != nil {
 		t.Fatal(err)
 	}
-	stage, duplicate, published, err := store.CompleteClippingStageEstimate(
-		job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken,
-		125, 5, clippingM3CallbackArtifact(job.ID, source.DurationMS), clippingM3CoreForSource(source),
-	)
-	if err != nil || duplicate || published || stage.Status != ClippingStageCanceled || stage.CostReconciled || stage.ReservedMicroUSD != 2_000 {
-		t.Fatalf("canceled late callback must remain unpublished and reserved: stage=%+v duplicate=%v published=%v error=%v", stage, duplicate, published, err)
+	core := clippingM3CoreForRevision(t, store, source)
+	const callbackDigest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	completed, duplicate, published, err := clippingM3Complete(t, store, job, stage, source, core, callbackDigest)
+	if err != nil || duplicate || published || completed.Status != ClippingStageCanceled {
+		t.Fatalf("canceled callback should be acknowledged without publication: stage=%+v duplicate=%v published=%v error=%v", completed, duplicate, published, err)
 	}
-	canceledJob, err := store.ClippingJob(job.ID)
-	if err != nil || canceledJob.Status != ClippingJobCanceled || canceledJob.ReservedMicroUSD != 2_000 || canceledJob.SpentMicroUSD != 0 {
-		t.Fatalf("late callback changed canceled job accounting: job=%+v error=%v", canceledJob, err)
-	}
-	canceledBatch, err := store.ClippingBatch(batch.ID)
-	if err != nil || canceledBatch.ReservedMicroUSD != 2_000 || canceledBatch.SpentMicroUSD != 0 {
-		t.Fatalf("late callback changed canceled batch accounting: batch=%+v error=%v", canceledBatch, err)
-	}
-	artifacts, err := store.ClippingArtifacts(job.ID)
-	if err != nil || len(artifacts) != 0 {
-		t.Fatalf("canceled late callback published artifacts: %+v error=%v", artifacts, err)
+	if artifacts, err := store.ClippingArtifacts(job.ID); err != nil || len(artifacts) != 0 {
+		t.Fatalf("canceled callback published artifacts: artifacts=%+v error=%v", artifacts, err)
 	}
 	if _, found, err := store.LoadClippingAnalysisCache(source.ID); err != nil || found {
-		t.Fatalf("canceled late callback populated shared cache: found=%v error=%v", found, err)
+		t.Fatalf("canceled callback populated the source cache: found=%v error=%v", found, err)
 	}
-	_, duplicate, err = store.ReconcileClippingStageCost(job.ID, claimed.AttemptID, 131, "modal-canceled-invoice")
-	if err != nil || duplicate {
-		t.Fatalf("reconcile canceled worker invoice: duplicate=%v error=%v", duplicate, err)
-	}
-	canceledJob, err = store.ClippingJob(job.ID)
-	if err != nil || canceledJob.Status != ClippingJobCanceled || canceledJob.ReservedMicroUSD != 0 || canceledJob.SpentMicroUSD != 131 {
-		t.Fatalf("invoice reconciliation did not release canceled hold: job=%+v error=%v", canceledJob, err)
+	if _, duplicate, published, err := clippingM3Complete(t, store, job, stage, source, core, callbackDigest); err != nil || !duplicate || published {
+		t.Fatalf("canceled callback replay was not safely idempotent: duplicate=%v published=%v error=%v", duplicate, published, err)
 	}
 }
 
-func TestClippingM3CanceledAttemptTombstonePreservesLateCallbackSettlement(t *testing.T) {
+func TestClippingM3CanceledAttemptTombstoneKeepsLateCallbackNonPublishing(t *testing.T) {
 	store, security, _, _ := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	batch, jobs := makeClippingBatch(t, store, []string{source.ID}, 10_000, 10_000, "m3-canceled-tombstone-late-callback")
-	job := jobs[0]
-	stage := clippingM3ClaimAttempt(t, store, job.ID, true)
+	job := clippingM3CreateJob(t, store, source.ID, "simple-tombstone-late-callback")
+	stage := clippingM3ClaimAttempt(t, store, job.ID)
 	app := &dashboardApp{store: store, security: security}
-	currentJob, err := store.ClippingJob(job.ID)
+	callbackExpiry := stage.LeaseExpiresAt + int64(clippingCallbackCapabilityGrace.Seconds())
+	mediaBearer, callbackBearer, err := app.persistClippingDispatchCapabilitiesUntil(stage, callbackExpiry)
 	if err != nil {
-		t.Fatalf("load claimed job: %v", err)
-	}
-	payload, err := buildClippingStageDispatch(currentJob, stage, source, "https://framevault.dev", time.Now())
-	if err != nil {
-		t.Fatalf("build prepared M3 dispatch: %v", err)
-	}
-	revision, err := store.ClippingAnalysisPipelineRevision()
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload.PipelineRevision = revision
-	mediaBearer, callbackBearer, err := app.persistClippingDispatchCapabilitiesUntil(stage, payload.CallbackExpiresAt)
-	if err != nil {
-		t.Fatalf("persist prepared dispatch capabilities: %v", err)
-	}
-	prepared := clippingPreparedDispatch{Payload: payload, MediaBearer: mediaBearer, CallbackBearer: callbackBearer}
-	callbackExpiry := prepared.Payload.CallbackExpiresAt
-	if callbackExpiry <= time.Now().Unix() {
-		t.Fatalf("prepared callback expiry is not in the future: %d", callbackExpiry)
-	}
-	var indexedExpiry int64
-	if err := store.db.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&indexedExpiry); err != nil || indexedExpiry != callbackExpiry {
-		t.Fatalf("persisted callback expiry index=%d want=%d error=%v", indexedExpiry, callbackExpiry, err)
+		t.Fatalf("persist callback capabilities: %v", err)
 	}
 	if err := store.CancelClippingJob(job.ID); err != nil {
-		t.Fatalf("cancel prepared job: %v", err)
-	}
-	if err := store.SetClippingSourceMediaLease(source.ID, time.Now().Add(time.Hour).Unix()); err != nil {
-		t.Fatalf("set active media lease: %v", err)
-	}
-	if err := store.TombstoneClippingSource(source.ID); err == nil || !strings.Contains(strings.ToLower(err.Error()), "media lease") {
-		t.Fatalf("active media lease did not block tombstone: %v", err)
-	}
-	if err := store.SetClippingSourceMediaLease(source.ID, 0); err != nil {
-		t.Fatalf("clear active media lease: %v", err)
-	}
-	if err := store.TombstoneClippingSource(source.ID); err != nil {
-		t.Fatalf("terminal canceled job should tombstone before callback expiry: %v", err)
-	}
-	deletedSource, err := store.ClippingSource(source.ID)
-	if err != nil || deletedSource.Status != ClippingSourceDeleted || deletedSource.SHA256 != source.SHA256 || deletedSource.DurationMS != source.DurationMS {
-		t.Fatalf("tombstone did not preserve callback validation metadata: source=%+v error=%v", deletedSource, err)
-	}
-	for _, scope := range []string{clippingCapabilityMedia, clippingCapabilityCallback, clippingCapabilityLease} {
-		decrypted, err := app.clippingCapability(job.ID, stage.AttemptID, scope)
-		want := map[string]string{
-			clippingCapabilityMedia:    prepared.MediaBearer,
-			clippingCapabilityCallback: prepared.CallbackBearer,
-			clippingCapabilityLease:    stage.LeaseToken,
-		}[scope]
-		if err != nil || decrypted != want {
-			t.Fatalf("tombstone changed unexpired %s capability: token=%q error=%v", scope, decrypted, err)
-		}
-	}
-	var preservedIndex int64
-	if err := store.db.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&preservedIndex); err != nil || preservedIndex != callbackExpiry {
-		t.Fatalf("tombstone changed callback expiry index=%d want=%d error=%v", preservedIndex, callbackExpiry, err)
-	}
-
-	core := clippingM3CoreForSource(source)
-	core.PipelineRevision = revision
-	core.AlgorithmVersions["pipeline_revision"] = revision
-	callbackArtifact := clippingM3CallbackArtifact(job.ID, source.DurationMS)
-	lateStage, duplicate, published, err := store.CompleteClippingStageEstimate(
-		job.ID, ClippingStageAnalysis, stage.AttemptID, stage.LeaseToken, 125, 5, callbackArtifact, core,
-	)
-	if err != nil || duplicate || published || lateStage.Status != ClippingStageCanceled {
-		t.Fatalf("late callback after tombstone should settle without publishing: stage=%+v duplicate=%v published=%v error=%v", lateStage, duplicate, published, err)
-	}
-	if _, duplicate, err := store.ReconcileClippingStageCost(job.ID, stage.AttemptID, 131, "modal-canceled-tombstone-invoice"); err != nil || duplicate {
-		t.Fatalf("reconcile canceled late callback invoice: duplicate=%v error=%v", duplicate, err)
-	}
-	settledJob, err := store.ClippingJob(job.ID)
-	if err != nil || settledJob.Status != ClippingJobCanceled || settledJob.ReservedMicroUSD != 0 || settledJob.SpentMicroUSD != 131 {
-		t.Fatalf("late callback invoice changed canceled job accounting: job=%+v error=%v", settledJob, err)
-	}
-	settledBatch, err := store.ClippingBatch(batch.ID)
-	if err != nil || settledBatch.ReservedMicroUSD != 0 || settledBatch.SpentMicroUSD != 131 {
-		t.Fatalf("late callback invoice changed batch accounting: batch=%+v error=%v", settledBatch, err)
-	}
-	var attemptActual, reconciled, callbackReceived, settledAt int64
-	var reference string
-	if err := store.db.QueryRow(`SELECT actual_micro_usd,cost_reconciled,callback_received_at,settled_at,reconciliation_reference
-		FROM clipping_stage_attempts WHERE attempt_id=?`, stage.AttemptID).Scan(&attemptActual, &reconciled, &callbackReceived, &settledAt, &reference); err != nil {
 		t.Fatal(err)
 	}
-	if attemptActual != 131 || reconciled != 1 || callbackReceived == 0 || settledAt == 0 || reference != "modal-canceled-tombstone-invoice" {
-		t.Fatalf("late callback audit settlement=%d/%d callback=%d settled=%d reference=%q", attemptActual, reconciled, callbackReceived, settledAt, reference)
+	if err := store.TombstoneClippingSource(source.ID); err != nil {
+		t.Fatalf("tombstone canceled source: %v", err)
+	}
+	deleted, err := store.ClippingSource(source.ID)
+	if err != nil || deleted.Status != ClippingSourceDeleted || deleted.SHA256 != source.SHA256 || deleted.DurationMS != source.DurationMS {
+		t.Fatalf("tombstone lost callback identity metadata: source=%+v error=%v", deleted, err)
+	}
+	if token, err := app.clippingCapability(job.ID, stage.AttemptID, clippingCapabilityCallback); err != nil || token != callbackBearer {
+		t.Fatalf("tombstone removed unexpired callback capability: token=%q error=%v", token, err)
+	}
+	if token, err := app.clippingCapability(job.ID, stage.AttemptID, clippingCapabilityMedia); err != nil || token != mediaBearer {
+		t.Fatalf("tombstone removed unexpired media capability: token=%q error=%v", token, err)
+	}
+	core := clippingM3CoreForRevision(t, store, source)
+	const callbackDigest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	completed, duplicate, published, err := clippingM3Complete(t, store, job, stage, source, core, callbackDigest)
+	if err != nil || duplicate || published || completed.Status != ClippingStageCanceled {
+		t.Fatalf("late callback after tombstone should remain nonpublishing: stage=%+v duplicate=%v published=%v error=%v", completed, duplicate, published, err)
+	}
+	if _, duplicate, published, err := clippingM3Complete(t, store, job, stage, source, core, callbackDigest); err != nil || !duplicate || published {
+		t.Fatalf("late tombstone callback replay: duplicate=%v published=%v error=%v", duplicate, published, err)
 	}
 	if artifacts, err := store.ClippingArtifacts(job.ID); err != nil || len(artifacts) != 0 {
 		t.Fatalf("late callback after tombstone published artifacts: %+v error=%v", artifacts, err)
@@ -523,48 +336,78 @@ func TestClippingM3CanceledAttemptTombstonePreservesLateCallbackSettlement(t *te
 	if _, found, err := store.LoadClippingAnalysisCache(source.ID); err != nil || found {
 		t.Fatalf("late callback after tombstone populated cache: found=%v error=%v", found, err)
 	}
-	var claims int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM clipping_analysis_claims WHERE source_id=?`, source.ID).Scan(&claims); err != nil || claims != 0 {
-		t.Fatalf("tombstone retained source claim: claims=%d error=%v", claims, err)
+}
+
+func TestClippingM3LateCallbackUsesPersistedExpiryAfterRetentionShortens(t *testing.T) {
+	store, security, _, _ := clippingDashboardFixture(t)
+	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
+	job := clippingM3CreateJob(t, store, source.ID, "simple-indexed-callback-expiry")
+	stage := clippingM3ClaimAttempt(t, store, job.ID)
+	app := &dashboardApp{store: store, security: security}
+	callbackExpiry := stage.LeaseExpiresAt + int64(clippingCallbackCapabilityGrace.Seconds())
+	if _, _, err := app.persistClippingDispatchCapabilitiesUntil(stage, callbackExpiry); err != nil {
+		t.Fatalf("persist dispatch callback expiry: %v", err)
 	}
-	if callback, err := app.clippingCapability(job.ID, stage.AttemptID, clippingCapabilityCallback); err != nil || callback != prepared.CallbackBearer {
-		t.Fatalf("late callback/reconciliation removed unexpired callback capability: token=%q error=%v", callback, err)
+	var indexedExpiry int64
+	if err := store.db.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&indexedExpiry); err != nil || indexedExpiry != callbackExpiry {
+		t.Fatalf("persisted callback expiry index=%d want %d error=%v", indexedExpiry, callbackExpiry, err)
 	}
-	for _, scope := range []string{
-		clippingCapabilityMedia,
-		clippingCapabilityCallback,
-		clippingCapabilityLease,
-		clippingCapabilityMedia + "_expiry",
-		clippingCapabilityCallback + "_expiry",
-	} {
-		value, err := store.Setting(clippingCapabilitySettingKey(job.ID, stage.AttemptID, scope))
-		if err != nil || value == "" {
-			t.Fatalf("late callback/reconciliation removed unexpired capability setting %q: value=%q error=%v", scope, value, err)
-		}
+
+	// Move the lease past its deadline while the issued callback capability is
+	// still valid. Recovery should retain the claim until the indexed expiry.
+	now := time.Now().Unix()
+	expiredLease := now - 1
+	if _, err := store.db.Exec(`UPDATE clipping_stage_attempts SET lease_expires_at=? WHERE attempt_id=?`, expiredLease, stage.AttemptID); err != nil {
+		t.Fatalf("expire callback attempt lease: %v", err)
 	}
-	if err := store.db.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&preservedIndex); err != nil || preservedIndex != callbackExpiry {
-		t.Fatalf("late callback/reconciliation removed expiry index=%d want=%d error=%v", preservedIndex, callbackExpiry, err)
+	if _, err := store.db.Exec(`UPDATE clipping_stages SET lease_expires_at=? WHERE job_id=? AND name=?`, expiredLease, job.ID, ClippingStageAnalysis); err != nil {
+		t.Fatalf("expire callback stage lease: %v", err)
+	}
+	if err := store.RecoverExpiredClippingStages(now); err != nil {
+		t.Fatalf("recover expired dispatch: %v", err)
+	}
+	stages, err := store.ClippingStages(job.ID)
+	if err != nil || len(stages) != 1 || stages[0].Status != ClippingStageUncertain {
+		t.Fatalf("stage should await its issued callback window: stages=%+v error=%v", stages, err)
+	}
+
+	// Retention may be shortened after dispatch. The callback expiry index is
+	// the durable record of the capability already issued to the worker.
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET retain_until=?,updated_at=? WHERE id=?`, now-1, now, source.ID); err != nil {
+		t.Fatalf("shorten source retention fixture: %v", err)
+	}
+	shortened, err := store.ClippingSource(source.ID)
+	if err != nil || shortened.RetainUntil > now {
+		t.Fatalf("source retention was not shortened: retain_until=%d error=%v", shortened.RetainUntil, err)
+	}
+
+	core := clippingM3CoreForRevision(t, store, source)
+	const callbackDigest = "abababababababababababababababababababababababababababababababab"
+	completed, duplicate, published, err := clippingM3Complete(t, store, job, stage, source, core, callbackDigest)
+	if err != nil || duplicate || !published || completed.Status != ClippingStageCompleted {
+		t.Fatalf("valid late callback was not published through indexed expiry: stage=%+v duplicate=%v published=%v error=%v", completed, duplicate, published, err)
+	}
+	if cached, found, err := store.LoadClippingAnalysisCache(source.ID); err != nil || !found || cached.SourceSHA256 != source.SHA256 {
+		t.Fatalf("late callback did not populate analysis cache: found=%v cached_sha=%q error=%v", found, cached.SourceSHA256, err)
+	}
+	artifacts, err := store.ClippingArtifacts(job.ID)
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("late callback result artifacts=%+v error=%v", artifacts, err)
+	}
+	if _, duplicate, published, err := clippingM3Complete(t, store, job, stage, source, core, callbackDigest); err != nil || !duplicate || !published {
+		t.Fatalf("identical late callback replay: duplicate=%v published=%v error=%v", duplicate, published, err)
 	}
 }
 
 func TestClippingM3SourceTombstoneDeletesAnalysisCache(t *testing.T) {
 	store := newTestStore(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	_, jobs := makeClippingBatch(t, store, []string{source.ID}, 10_000, 10_000, "m3-source-tombstone")
-	job := jobs[0]
-	claimed, ok, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 2_000, time.Minute)
-	if err != nil || !ok {
-		t.Fatalf("claim analysis: stage=%+v claimed=%v error=%v", claimed, ok, err)
-	}
-	if err := store.SetClippingAttemptEstimateTerms(job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken, 25, 20); err != nil {
-		t.Fatal(err)
-	}
-	_, _, published, err := store.CompleteClippingStageEstimate(
-		job.ID, ClippingStageAnalysis, claimed.AttemptID, claimed.LeaseToken,
-		125, 5, clippingM3CallbackArtifact(job.ID, source.DurationMS), clippingM3CoreForSource(source),
-	)
-	if err != nil || !published {
-		t.Fatalf("publish valid analysis before source cleanup: published=%v error=%v", published, err)
+	job := clippingM3CreateJob(t, store, source.ID, "simple-source-tombstone")
+	stage := clippingM3ClaimAttempt(t, store, job.ID)
+	core := clippingM3CoreForRevision(t, store, source)
+	const callbackDigest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	if _, duplicate, published, err := clippingM3Complete(t, store, job, stage, source, core, callbackDigest); err != nil || duplicate || !published {
+		t.Fatalf("publish valid analysis before tombstone: duplicate=%v published=%v error=%v", duplicate, published, err)
 	}
 	if _, found, err := store.LoadClippingAnalysisCache(source.ID); err != nil || !found {
 		t.Fatalf("valid analysis cache missing before tombstone: found=%v error=%v", found, err)
@@ -572,16 +415,16 @@ func TestClippingM3SourceTombstoneDeletesAnalysisCache(t *testing.T) {
 	if err := store.TombstoneClippingSource(source.ID); err != nil {
 		t.Fatal(err)
 	}
-	deletedSource, err := store.ClippingSource(source.ID)
-	if err != nil || deletedSource.Status != ClippingSourceDeleted {
-		t.Fatalf("tombstoned source=%+v error=%v", deletedSource, err)
+	deleted, err := store.ClippingSource(source.ID)
+	if err != nil || deleted.Status != ClippingSourceDeleted {
+		t.Fatalf("tombstoned source=%+v error=%v", deleted, err)
 	}
 	if _, found, err := store.LoadClippingAnalysisCache(source.ID); err != nil || found {
 		t.Fatalf("source tombstone retained analysis cache: found=%v error=%v", found, err)
 	}
 	artifacts, err := store.ClippingArtifacts(job.ID)
 	if err != nil || len(artifacts) != 0 {
-		t.Fatalf("source tombstone retained derived analysis artifact: artifacts=%+v error=%v", artifacts, err)
+		t.Fatalf("source tombstone retained derived artifacts: artifacts=%+v error=%v", artifacts, err)
 	}
 }
 
@@ -595,7 +438,7 @@ func TestClippingM3FixtureTracksWorkerVersionsAndFullTimeline(t *testing.T) {
 		t.Fatalf("fixture version pins drifted from the worker contract: %+v", core)
 	}
 	if _, err := decodeClippingAnalysisCore(mustJSONClippingM3(t, core), source); err != nil {
-		t.Fatalf("fixture does not satisfy canonical worker core validation: %v", err)
+		t.Fatalf("fixture does not satisfy worker core validation: %v", err)
 	}
 	if len(core.Transcript.Segments) != int(source.DurationMS/10_000) || core.Transcript.Segments[0].StartMS != 0 || core.Transcript.Segments[len(core.Transcript.Segments)-1].EndMS != source.DurationMS {
 		t.Fatalf("fixture transcript does not cover the full source: segments=%d last=%+v", len(core.Transcript.Segments), core.Transcript.Segments[len(core.Transcript.Segments)-1])

@@ -3,8 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,7 +13,7 @@ import (
 
 func TestClippingSourceDiagnosticsStayBoundedAndMonotonicAfterRestart(t *testing.T) {
 	dataDir, store, _, acquisition := newClippingAcquisitionFixture(t)
-	rawURL := "https://drive.google.com/file/d/id/view?resourcekey=diagnostic-secret-marker"
+	rawURL := "https://www.youtube.com/watch?v=abcdefghijk&si=diagnostic-secret-marker"
 	source, err := acquisition.CreatePublicImport(context.Background(), true, rawURL, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -110,25 +110,29 @@ func TestClippingImportDiagnosticsClassifyRuntimeAndExtractorFailuresSafely(t *t
 		{
 			name:        "runtime unavailable",
 			runtimePath: func(directory string) string { return filepath.Join(directory, "missing-deno") },
-			stage:       ClippingDiagnosticStageMetadata, status: ClippingDiagnosticFailed, code: "runtime_unavailable",
+			stage:       ClippingDiagnosticStageDownload, status: ClippingDiagnosticFailed, code: "runtime_unavailable",
 		},
 		{
 			name:          "extractor exit failure",
 			extractorBody: "printf 'https://signed.example/media?secret=extractor-secret-marker\\n'\nprintf 'extractor-secret-marker\\n' >&2\nexit 17\n",
 			runtimePath:   func(directory string) string { return writeFakeYouTubeExecutable(t, directory, "deno", "exit 0\n") },
-			stage:         ClippingDiagnosticStageMetadata, status: ClippingDiagnosticRetrying, code: "extractor_exit_failure",
+			stage:         ClippingDiagnosticStageDownload, status: ClippingDiagnosticFailed, code: "extractor_exit_failure",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, store, _, acquisition := newClippingAcquisitionFixture(t)
 			directory := t.TempDir()
+			python, err := exec.LookPath("python3")
+			if err != nil {
+				t.Skip("python3 is required for the native downloader test")
+			}
+			acquisition.youtubePythonExecutable = python
 			acquisition.youtubeExecutable = filepath.Join(directory, "fake-yt-dlp")
 			acquisition.youtubeRuntime = "deno:" + test.runtimePath(directory)
 			if test.extractorBody != "" {
 				acquisition.youtubeExecutable = writeFakeYouTubeExecutable(t, directory, "yt-dlp", test.extractorBody)
 			}
-			acquisition.resolver = clippingTestResolver{{IP: net.ParseIP("8.8.8.8")}}
 			source, err := acquisition.CreatePublicImport(context.Background(), true, "https://youtu.be/abcdefghijk?si=private-link-token", 0)
 			if err != nil {
 				t.Fatal(err)
@@ -165,7 +169,7 @@ func TestClippingImportDiagnosticsClassifyRuntimeAndExtractorFailuresSafely(t *t
 
 func TestClippingDiagnosticInputRejectsUnknownStagesAndCodes(t *testing.T) {
 	_, store, _, acquisition := newClippingAcquisitionFixture(t)
-	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://drive.google.com/file/d/id/view", 0)
+	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

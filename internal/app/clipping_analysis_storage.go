@@ -1,16 +1,13 @@
 package app
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -126,13 +123,13 @@ func (s *Store) SetClippingAttemptPipelineRevision(jobID, stageName, attemptID, 
 	return tx.Commit()
 }
 
-func (s *Store) SetClippingAttemptEstimateTerms(jobID, stageName, attemptID, leaseToken string, rateMicroUSDPerSecond, maxComputeSeconds int64) error {
+// SetClippingAttemptComputeLimit stores the validated worker timeout needed to
+// check the callback's genuine runtime. Legacy budget/rate columns stay inert.
+func (s *Store) SetClippingAttemptComputeLimit(jobID, stageName, attemptID, leaseToken string, maxComputeSeconds int64) error {
 	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || !validStageName(stageName) || attemptID == "" || leaseToken == "" ||
-		rateMicroUSDPerSecond <= 0 || maxComputeSeconds < 1 || maxComputeSeconds > clippingWorkerMaxAttemptComputeSeconds ||
-		rateMicroUSDPerSecond > math.MaxInt64/maxComputeSeconds {
+		maxComputeSeconds < 1 || maxComputeSeconds > clippingWorkerMaxAttemptComputeSeconds {
 		return ErrClippingInvalidState
 	}
-	now := time.Now().Unix()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -145,66 +142,28 @@ func (s *Store) SetClippingAttemptEstimateTerms(jobID, stageName, attemptID, lea
 	if err != nil {
 		return err
 	}
-	if !validClippingLease(leaseToken, attempt.TokenHash) || attempt.Status != "running" || attempt.LeaseExpiresAt <= now ||
-		rateMicroUSDPerSecond*maxComputeSeconds > attempt.ReservedMicroUSD {
+	if !validClippingLease(leaseToken, attempt.TokenHash) || attempt.Status != "running" || attempt.LeaseExpiresAt <= time.Now().Unix() {
 		return ErrClippingStaleAttempt
 	}
-	if attempt.PipelineRevision == "" {
-		revision, revisionErr := clippingAnalysisPipelineRevisionTx(tx)
-		if revisionErr != nil {
-			return revisionErr
-		}
-		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET pipeline_revision=? WHERE attempt_id=?`, revision, attemptID); err != nil {
-			return err
-		}
-	}
-	stage, err := readClippingStage(tx, jobID, stageName)
-	if err != nil || stage.AttemptID != attemptID || stage.Status != ClippingStageRunning {
+	var stageAttempt string
+	var stageStatus ClippingStageStatus
+	var jobStatus ClippingJobStatus
+	if err := tx.QueryRow(`SELECT stage.attempt_id,stage.status,job.status FROM clipping_stages AS stage
+		JOIN clipping_jobs AS job ON job.id=stage.job_id WHERE stage.job_id=? AND stage.name=?`, jobID, stageName).
+		Scan(&stageAttempt, &stageStatus, &jobStatus); err != nil {
 		return ErrClippingStaleAttempt
 	}
-	if attempt.OperatorRateMicroUSDPerSecond != 0 || attempt.MaxComputeSeconds != 0 {
-		if attempt.OperatorRateMicroUSDPerSecond == rateMicroUSDPerSecond && attempt.MaxComputeSeconds == maxComputeSeconds {
-			return tx.Commit()
-		}
+	if stageAttempt != attemptID || stageStatus != ClippingStageRunning || clippingJobTerminal(jobStatus) {
+		return ErrClippingStaleAttempt
+	}
+	if attempt.MaxComputeSeconds != 0 && attempt.MaxComputeSeconds != maxComputeSeconds {
 		return ErrClippingInvalidState
 	}
-	if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET operator_rate_micro_usd_per_second=?,max_compute_seconds=?,cost_reconciled=0 WHERE attempt_id=?`, rateMicroUSDPerSecond, maxComputeSeconds, attemptID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`UPDATE clipping_stages SET cost_reconciled=0,updated_at=? WHERE job_id=? AND name=?`, now, jobID, stageName); err != nil {
+	_, err = tx.Exec(`UPDATE clipping_stage_attempts SET max_compute_seconds=? WHERE attempt_id=?`, maxComputeSeconds, attemptID)
+	if err != nil {
 		return err
 	}
 	return tx.Commit()
-}
-
-func (s *Store) ClippingDispatchBudget(jobID string) (int64, error) {
-	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") {
-		return 0, ErrClippingJobNotFound
-	}
-	var jobLimit, jobSpent, jobReserved, batchLimit, batchSpent, batchReserved int64
-	err := s.db.QueryRow(`SELECT job.budget_limit_micro_usd,job.spent_micro_usd,job.reserved_micro_usd,
-		batch.budget_limit_micro_usd,batch.spent_micro_usd,batch.reserved_micro_usd
-		FROM clipping_jobs AS job JOIN clipping_batches AS batch ON batch.id=job.batch_id WHERE job.id=?`, jobID).
-		Scan(&jobLimit, &jobSpent, &jobReserved, &batchLimit, &batchSpent, &batchReserved)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrClippingJobNotFound
-	}
-	if err != nil {
-		return 0, err
-	}
-	jobRemaining := remainingClippingBudget(jobLimit, jobSpent, jobReserved)
-	batchRemaining := remainingClippingBudget(batchLimit, batchSpent, batchReserved)
-	if batchRemaining < jobRemaining {
-		return batchRemaining, nil
-	}
-	return jobRemaining, nil
-}
-
-func remainingClippingBudget(limit, spent, reserved int64) int64 {
-	if limit < 0 || spent < 0 || reserved < 0 || spent > limit || reserved > limit-spent {
-		return 0
-	}
-	return limit - spent - reserved
 }
 
 func (s *Store) PendingClippingJobs(limit int) ([]ClippingJob, error) {
@@ -286,9 +245,12 @@ func (s *Store) LoadClippingAnalysisCache(sourceID string) (clippingAnalysisCore
 	return core, found, nil
 }
 
-func upsertClippingAnalysisCacheTx(tx *sql.Tx, source ClippingSource, core clippingAnalysisCore, now int64) error {
+func upsertClippingAnalysisCacheTx(tx *sql.Tx, source ClippingSource, core clippingAnalysisCore, computeSeconds int64, now int64) error {
 	if core.SourceSHA256 != source.SHA256 || core.SourceDurationMS != source.DurationMS || source.Status != ClippingSourceReady || !validClippingPipelineRevision(core.PipelineRevision) {
 		return fmt.Errorf("%w: cached source identity does not match", ErrClippingInvalidArtifact)
+	}
+	if computeSeconds < 0 || computeSeconds > clippingWorkerMaxAttemptComputeSeconds {
+		return fmt.Errorf("%w: worker runtime is invalid", ErrClippingInvalidArtifact)
 	}
 	pipelineKey, err := clippingAnalysisPipelineKey(core)
 	if err != nil {
@@ -304,8 +266,8 @@ func upsertClippingAnalysisCacheTx(tx *sql.Tx, source ClippingSource, core clipp
 	if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=? AND pipeline_revision=?`, source.ID, core.PipelineRevision); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO clipping_analysis_cache(source_id,source_sha256,pipeline_key,pipeline_revision,source_duration_ms,payload_json,created_at)
-		VALUES(?,?,?,?,?,?,?)`, source.ID, source.SHA256, pipelineKey, core.PipelineRevision, source.DurationMS, string(payload), now)
+	_, err = tx.Exec(`INSERT INTO clipping_analysis_cache(source_id,source_sha256,pipeline_key,pipeline_revision,source_duration_ms,payload_json,compute_seconds,created_at)
+		VALUES(?,?,?,?,?,?,?,?)`, source.ID, source.SHA256, pipelineKey, core.PipelineRevision, source.DurationMS, string(payload), computeSeconds, now)
 	if err == nil {
 		_, err = tx.Exec(`DELETE FROM clipping_analysis_claims WHERE source_id=? AND pipeline_key=?`, source.ID, core.PipelineRevision)
 	}
@@ -403,8 +365,11 @@ func (s *Store) ClaimClippingAnalysisSource(jobID string) (bool, error) {
 		if attemptErr != nil {
 			return false, attemptErr
 		}
-		callbackExpiresAt := clippingAnalysisCallbackExpiry(oldAttempt, source)
-		if claim.sourceSHA != source.SHA256 || oldAttempt.SettledAt == 0 || !oldAttempt.CostReconciled || callbackExpiresAt == 0 || callbackExpiresAt > now {
+		callbackExpiresAt, expiryErr := clippingIssuedCallbackExpiryTx(tx, oldAttempt, source)
+		if expiryErr != nil {
+			return false, expiryErr
+		}
+		if claim.sourceSHA != source.SHA256 || oldAttempt.SettledAt == 0 || callbackExpiresAt > now {
 			return false, tx.Commit()
 		}
 		if _, err := tx.Exec(`DELETE FROM clipping_analysis_claims WHERE source_id=? AND pipeline_key=? AND job_id=? AND attempt_id=?`, source.ID, claim.pipeline, claim.jobID, claim.attemptID); err != nil {
@@ -430,10 +395,10 @@ func (s *Store) ClaimClippingAnalysisSource(jobID string) (bool, error) {
 }
 
 func clippingAnalysisCallbackExpiry(attempt clippingAttemptRecord, source ClippingSource) int64 {
-	if attempt.LeaseExpiresAt <= 0 || attempt.LeaseExpiresAt > math.MaxInt64-int64(clippingCallbackAccountingGrace.Seconds()) {
+	if attempt.LeaseExpiresAt <= 0 || attempt.LeaseExpiresAt > math.MaxInt64-int64(clippingCallbackCapabilityGrace.Seconds()) {
 		return 0
 	}
-	expiresAt := attempt.LeaseExpiresAt + int64(clippingCallbackAccountingGrace.Seconds())
+	expiresAt := attempt.LeaseExpiresAt + int64(clippingCallbackCapabilityGrace.Seconds())
 	if source.RetainUntil > 0 && source.RetainUntil < expiresAt {
 		expiresAt = source.RetainUntil
 	}
@@ -478,10 +443,9 @@ func (s *Store) ReleaseClippingAnalysisSourceClaim(jobID string) error {
 	return err
 }
 
-// ReleaseClippingAnalysisSourceClaimBeforeSubmit removes a claim only after a
-// caller has failed a reserved attempt with known-zero cost and before any
-// network dispatch began. Unknown accepted outcomes keep their claim through
-// explicit invoice settlement and callback-capability expiry.
+// ReleaseClippingAnalysisSourceClaimBeforeSubmit removes a claim only after
+// dispatch is known not to have started. An unknown accepted outcome keeps its
+// source claim until the callback capability expires.
 func (s *Store) ReleaseClippingAnalysisSourceClaimBeforeSubmit(jobID, attemptID string) error {
 	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || !safeID(attemptID) || !strings.HasPrefix(attemptID, "clipatt_") {
 		return ErrClippingInvalidState
@@ -546,7 +510,11 @@ func (s *Store) TryCompleteClippingJobFromAnalysisCache(jobID string) (bool, err
 	if err != nil || !found {
 		return false, err
 	}
-	artifact, err := buildCachedClippingAnalysisArtifact(job, source, core, 1)
+	var computeSeconds int64
+	if err := tx.QueryRow(`SELECT compute_seconds FROM clipping_analysis_cache WHERE source_id=? AND source_sha256=? AND pipeline_revision=?`, source.ID, source.SHA256, revision).Scan(&computeSeconds); err != nil {
+		return false, err
+	}
+	artifact, err := buildCachedClippingAnalysisArtifact(job, source, core, 1, computeSeconds)
 	if err != nil {
 		return false, err
 	}
@@ -570,13 +538,10 @@ func (s *Store) TryCompleteClippingJobFromAnalysisCache(jobID string) (bool, err
 	if err := insertClippingArtifact(tx, artifact, rangesJSON, now); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(`UPDATE clipping_stages SET status='completed',estimated_micro_usd=0,cost_reconciled=1,error='',updated_at=? WHERE job_id=? AND name=?`, now, job.ID, ClippingStageAnalysis); err != nil {
+	if _, err := tx.Exec(`UPDATE clipping_stages SET status='completed',error='',updated_at=? WHERE job_id=? AND name=?`, now, job.ID, ClippingStageAnalysis); err != nil {
 		return false, err
 	}
 	if _, err := refreshClippingJobStatus(tx, job.ID, now); err != nil {
-		return false, err
-	}
-	if _, err := refreshClippingBatchStatus(tx, job.BatchID, now); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -585,8 +550,14 @@ func (s *Store) TryCompleteClippingJobFromAnalysisCache(jobID string) (bool, err
 	return true, nil
 }
 
-func buildCachedClippingAnalysisArtifact(job ClippingJob, source ClippingSource, core clippingAnalysisCore, version int) (ClippingArtifact, error) {
-	artifact, err := buildClippingAnalysisArtifact(job, source, core, version, 0, 0, 0)
+func buildCachedClippingAnalysisArtifact(job ClippingJob, source ClippingSource, core clippingAnalysisCore, version int, computeSeconds int64) (ClippingArtifact, error) {
+	// Older additive-migration cache rows have no runtime measurement. Zero is
+	// the truthful compatibility value and remains valid for a reused analysis.
+	rate := int64(0)
+	if computeSeconds > 0 {
+		rate = clippingWorkerProtocolCompatibilityRate
+	}
+	artifact, err := buildClippingAnalysisArtifact(job, source, core, version, computeSeconds, rate, computeSeconds)
 	if err != nil {
 		return ClippingArtifact{}, err
 	}
@@ -594,17 +565,10 @@ func buildCachedClippingAnalysisArtifact(job ClippingJob, source ClippingSource,
 	if err := json.Unmarshal([]byte(artifact.PayloadJSON), &payload); err != nil {
 		return ClippingArtifact{}, err
 	}
-	for key, value := range map[string]any{
-		"cost_basis":         "reused_source_analysis_no_new_worker_charge",
-		"actual_cost_status": "not_applicable_cached",
-		"analysis_reused":    true,
-	} {
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			return ClippingArtifact{}, err
-		}
-		payload[key] = encoded
+	for _, key := range []string{"cost_basis", "cost_estimate_micro_usd", "rate_micro_usd_per_second", "actual_cost_status"} {
+		delete(payload, key)
 	}
+	payload["analysis_reused"] = json.RawMessage("true")
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return ClippingArtifact{}, err
@@ -616,28 +580,60 @@ func buildCachedClippingAnalysisArtifact(job ClippingJob, source ClippingSource,
 	return artifact, nil
 }
 
-func clippingArtifactDigest(artifact ClippingArtifact, estimate int64) (string, error) {
-	encoded, err := json.Marshal(struct {
-		Artifact ClippingArtifact `json:"artifact"`
-		Estimate int64            `json:"estimate_micro_usd"`
-	}{artifact, estimate})
-	if err != nil {
-		return "", err
+func stripClippingArtifactCostMetadata(artifact *ClippingArtifact) error {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(artifact.PayloadJSON), &payload); err != nil {
+		return err
 	}
-	digest := sha256.Sum256(encoded)
-	return hex.EncodeToString(digest[:]), nil
+	for _, key := range []string{"cost_basis", "cost_estimate_micro_usd", "rate_micro_usd_per_second", "actual_cost_status"} {
+		delete(payload, key)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	artifact.PayloadJSON = string(encoded)
+	return nil
 }
 
-// CompleteClippingStageEstimate records a successful v2 callback without
-// treating its operator-rate estimate as an invoice. The reservation remains
-// held until an operator records the corresponding Modal invoice.
-func (s *Store) CompleteClippingStageEstimate(jobID, name, attemptID, leaseToken string, estimateMicroUSD, computeSeconds int64, artifact ClippingArtifact, core clippingAnalysisCore) (ClippingStage, bool, bool, error) {
-	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || !validStageName(name) || attemptID == "" || leaseToken == "" || estimateMicroUSD <= 0 || computeSeconds <= 0 {
-		return ClippingStage{}, false, false, ErrClippingStaleAttempt
+func releaseLegacyClippingHold(tx *sql.Tx, job *ClippingJob, attempt clippingAttemptRecord, stageName string, now int64) error {
+	if attempt.SettledAt > 0 {
+		return nil
 	}
-	digest, err := clippingArtifactDigest(artifact, estimateMicroUSD)
-	if err != nil {
-		return ClippingStage{}, false, false, err
+	holdReleased := false
+	if attempt.ReservedMicroUSD > 0 {
+		var batchReserved int64
+		if err := tx.QueryRow(`SELECT reserved_micro_usd FROM clipping_batches WHERE id=?`, job.BatchID).Scan(&batchReserved); err != nil {
+			return err
+		}
+		// Legacy attempts can retain their original reservation value after
+		// settlement. Decrement only when both aggregates still contain this hold.
+		if attempt.ReservedMicroUSD <= job.ReservedMicroUSD && attempt.ReservedMicroUSD <= batchReserved {
+			if err := releaseLegacyClippingReservation(tx, job, attempt.ReservedMicroUSD, now); err != nil {
+				return err
+			}
+			holdReleased = true
+		}
+	}
+	if attempt.CostReconciled && !holdReleased {
+		return nil
+	}
+	if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET reserved_micro_usd=0,actual_micro_usd=0,estimated_micro_usd=0,
+		cost_reconciled=1,reconciliation_reference='legacy_hold_released',settled_at=CASE WHEN settled_at=0 THEN ? ELSE settled_at END
+		WHERE attempt_id=?`, now, attempt.AttemptID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE clipping_stages SET reserved_micro_usd=0,actual_micro_usd=0,estimated_micro_usd=0,cost_reconciled=1,updated_at=? WHERE job_id=? AND name=?`, now, job.ID, stageName)
+	return err
+}
+
+// CompleteClippingAnalysisStage accepts a capability-authenticated Modal
+// result, publishes it only while that durable attempt remains current, and
+// automatically releases any reservation left by a pre-simplification row.
+func (s *Store) CompleteClippingAnalysisStage(jobID, name, attemptID, leaseToken, callbackDigest string, callbackArtifact ClippingArtifact, core clippingAnalysisCore, computeSeconds int64) (ClippingStage, bool, bool, error) {
+	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || name != ClippingStageAnalysis || attemptID == "" || leaseToken == "" ||
+		!validLowerHexDigest(callbackDigest) || computeSeconds <= 0 {
+		return ClippingStage{}, false, false, ErrClippingStaleAttempt
 	}
 	now := time.Now().Unix()
 	tx, err := s.db.Begin()
@@ -659,15 +655,6 @@ func (s *Store) CompleteClippingStageEstimate(jobID, name, attemptID, leaseToken
 	if err != nil {
 		return ClippingStage{}, false, false, err
 	}
-	if attempt.CallbackReceivedAt > 0 {
-		if attempt.CallbackDigest != digest || attempt.EstimatedMicroUSD != estimateMicroUSD {
-			return ClippingStage{}, false, false, ErrClippingStaleAttempt
-		}
-		if err := tx.Commit(); err != nil {
-			return ClippingStage{}, false, false, err
-		}
-		return stage, true, stage.Status == ClippingStageCompleted, nil
-	}
 	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
 	if err != nil {
 		return ClippingStage{}, false, false, err
@@ -676,12 +663,28 @@ func (s *Store) CompleteClippingStageEstimate(jobID, name, attemptID, leaseToken
 	if err != nil {
 		return ClippingStage{}, false, false, err
 	}
-	if attempt.OperatorRateMicroUSDPerSecond <= 0 || attempt.MaxComputeSeconds <= 0 || computeSeconds > attempt.MaxComputeSeconds ||
-		attempt.OperatorRateMicroUSDPerSecond > math.MaxInt64/computeSeconds || estimateMicroUSD != attempt.OperatorRateMicroUSDPerSecond*computeSeconds || estimateMicroUSD > attempt.ReservedMicroUSD {
-		return ClippingStage{}, false, false, fmt.Errorf("%w: callback estimate does not match the recorded dispatch ceiling", ErrClippingInvalidArtifact)
+	if attempt.CallbackReceivedAt > 0 {
+		if attempt.CallbackDigest != callbackDigest {
+			return ClippingStage{}, false, false, ErrClippingStaleAttempt
+		}
+		if err := tx.Commit(); err != nil {
+			return ClippingStage{}, false, false, err
+		}
+		return stage, true, stage.Status == ClippingStageCompleted, nil
 	}
-	if artifact.Type != clippingAnalysisArtifactType || artifact.SchemaVersion != clippingAnalysisSchemaVersion || artifact.Version != 1 || len(artifact.TimeRanges) != 0 {
-		return ClippingStage{}, false, false, fmt.Errorf("%w: source analysis callback must contain an empty candidate range list", ErrClippingInvalidArtifact)
+	callbackExpiry, expiryErr := clippingIssuedCallbackExpiryTx(tx, attempt, source)
+	if expiryErr != nil {
+		return ClippingStage{}, false, false, expiryErr
+	}
+	if callbackExpiry <= now {
+		return ClippingStage{}, false, false, ErrClippingStaleAttempt
+	}
+	if attempt.MaxComputeSeconds < 1 || computeSeconds > attempt.MaxComputeSeconds || computeSeconds > clippingWorkerMaxAttemptComputeSeconds {
+		return ClippingStage{}, false, false, fmt.Errorf("%w: callback runtime exceeds the configured timeout", ErrClippingInvalidArtifact)
+	}
+	if callbackArtifact.Type != clippingAnalysisArtifactType || callbackArtifact.SchemaVersion != clippingAnalysisSchemaVersion || callbackArtifact.Version != 1 ||
+		len(callbackArtifact.TimeRanges) != 0 || callbackArtifact.JobID != jobID || callbackArtifact.SourceDurationMS != source.DurationMS {
+		return ClippingStage{}, false, false, fmt.Errorf("%w: source analysis callback metadata is invalid", ErrClippingInvalidArtifact)
 	}
 	coreJSON, err := json.Marshal(core)
 	if err != nil {
@@ -691,16 +694,24 @@ func (s *Store) CompleteClippingStageEstimate(jobID, name, attemptID, leaseToken
 	if err != nil {
 		return ClippingStage{}, false, false, err
 	}
-	if !validClippingPipelineRevision(attempt.PipelineRevision) || decodedCore.PipelineRevision != attempt.PipelineRevision {
-		return ClippingStage{}, false, false, fmt.Errorf("%w: callback pipeline revision does not match its dispatch", ErrClippingInvalidArtifact)
+	if !validClippingPipelineRevision(attempt.PipelineRevision) || decodedCore.PipelineRevision != attempt.PipelineRevision || decodedCore.SourceSHA256 != source.SHA256 {
+		return ClippingStage{}, false, false, fmt.Errorf("%w: callback pipeline or source identity does not match its dispatch", ErrClippingInvalidArtifact)
 	}
-	if artifact.JobID != jobID || artifact.SourceDurationMS != source.DurationMS {
-		return ClippingStage{}, false, false, ErrClippingInvalidArtifact
+	var claimSource, claimSHA, claimPipeline, claimAttempt string
+	claimErr := tx.QueryRow(`SELECT source_id,source_sha256,pipeline_key,attempt_id FROM clipping_analysis_claims WHERE job_id=?`, jobID).
+		Scan(&claimSource, &claimSHA, &claimPipeline, &claimAttempt)
+	claimCurrent := claimErr == nil && claimSource == source.ID && claimSHA == source.SHA256 && claimPipeline == attempt.PipelineRevision && claimAttempt == attemptID
+	if claimErr != nil && !errors.Is(claimErr, sql.ErrNoRows) {
+		return ClippingStage{}, false, false, claimErr
 	}
-	current := attempt.Status == "running" && stage.AttemptID == attemptID && stage.Status == ClippingStageRunning && stage.LeaseExpiresAt > now && !clippingJobTerminal(job.Status) && source.Status == ClippingSourceReady
+	current := claimCurrent && (attempt.Status == "running" || attempt.Status == "expired") && stage.AttemptID == attemptID &&
+		(stage.Status == ClippingStageRunning || stage.Status == ClippingStageUncertain) && !clippingJobTerminal(job.Status) && source.Status == ClippingSourceReady
 	if current {
-		finalArtifact, err := buildClippingAnalysisArtifact(job, source, decodedCore, 1, estimateMicroUSD, attempt.OperatorRateMicroUSDPerSecond, computeSeconds)
+		finalArtifact, err := buildClippingAnalysisArtifact(job, source, decodedCore, 1, computeSeconds, clippingWorkerProtocolCompatibilityRate, computeSeconds)
 		if err != nil {
+			return ClippingStage{}, false, false, err
+		}
+		if err := stripClippingArtifactCostMetadata(&finalArtifact); err != nil {
 			return ClippingStage{}, false, false, err
 		}
 		rangesJSON, err := validateClippingArtifact(finalArtifact, jobID, source.DurationMS)
@@ -710,64 +721,40 @@ func (s *Store) CompleteClippingStageEstimate(jobID, name, attemptID, leaseToken
 		if err := insertClippingArtifact(tx, finalArtifact, rangesJSON, now); err != nil {
 			return ClippingStage{}, false, false, err
 		}
-		if err := upsertClippingAnalysisCacheTx(tx, source, decodedCore, now); err != nil {
+		if err := upsertClippingAnalysisCacheTx(tx, source, decodedCore, computeSeconds, now); err != nil {
 			return ClippingStage{}, false, false, err
 		}
-		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status='completed',estimated_micro_usd=?,cost_reconciled=0,callback_received_at=?,callback_digest=?,error='' WHERE attempt_id=?`, estimateMicroUSD, now, digest, attemptID); err != nil {
+		if err := releaseLegacyClippingHold(tx, &job, attempt, name, now); err != nil {
 			return ClippingStage{}, false, false, err
 		}
-		if _, err := tx.Exec(`UPDATE clipping_stages SET status='completed',estimated_micro_usd=?,cost_reconciled=0,lease_expires_at=0,error='',updated_at=? WHERE job_id=? AND name=?`, estimateMicroUSD, now, jobID, name); err != nil {
+		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status='completed',callback_received_at=?,callback_digest=?,error='',settled_at=CASE WHEN settled_at=0 THEN ? ELSE settled_at END WHERE attempt_id=?`, now, callbackDigest, now, attemptID); err != nil {
+			return ClippingStage{}, false, false, err
+		}
+		if _, err := tx.Exec(`UPDATE clipping_stages SET status='completed',lease_expires_at=0,error='',updated_at=? WHERE job_id=? AND name=?`, now, jobID, name); err != nil {
 			return ClippingStage{}, false, false, err
 		}
 		if _, err := refreshClippingJobStatus(tx, jobID, now); err != nil {
 			return ClippingStage{}, false, false, err
 		}
-		if _, err := refreshClippingBatchStatus(tx, job.BatchID, now); err != nil {
-			return ClippingStage{}, false, false, err
-		}
 		if err := tx.Commit(); err != nil {
 			return ClippingStage{}, false, false, err
 		}
-		stage.Status, stage.EstimatedMicroUSD, stage.CostReconciled, stage.LeaseExpiresAt, stage.UpdatedAt = ClippingStageCompleted, estimateMicroUSD, false, 0, now
+		stage.Status, stage.LeaseExpiresAt, stage.ReservedMicroUSD, stage.Error, stage.UpdatedAt = ClippingStageCompleted, 0, 0, "", now
 		return stage, false, true, nil
 	}
 
-	// A valid late result settles callback receipt and preserves the hold, but
-	// never publishes stale/canceled transcripts or advances the job.
+	// A canceled, terminal, tombstoned, or superseded attempt never publishes.
+	if err := releaseLegacyClippingHold(tx, &job, attempt, name, now); err != nil {
+		return ClippingStage{}, false, false, err
+	}
 	attemptStatus := "settled_stale"
 	if job.Status == ClippingJobCanceled || stage.Status == ClippingStageCanceled {
 		attemptStatus = "settled_canceled"
 	}
-	if attempt.SettledAt > 0 && attempt.CostReconciled {
-		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status=?,estimated_micro_usd=?,callback_received_at=?,callback_digest=?,error='late analysis callback; prior invoice reconciliation retained' WHERE attempt_id=?`, attemptStatus, estimateMicroUSD, now, digest, attemptID); err != nil {
-			return ClippingStage{}, false, false, err
-		}
-	} else if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status=?,estimated_micro_usd=?,cost_reconciled=0,callback_received_at=?,callback_digest=?,error='late analysis callback; invoice reconciliation required' WHERE attempt_id=?`, attemptStatus, estimateMicroUSD, now, digest, attemptID); err != nil {
+	if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status=?,callback_received_at=?,callback_digest=?,error='non-publishing callback',settled_at=CASE WHEN settled_at=0 THEN ? ELSE settled_at END WHERE attempt_id=?`, attemptStatus, now, callbackDigest, now, attemptID); err != nil {
 		return ClippingStage{}, false, false, err
 	}
-	if stage.AttemptID == attemptID {
-		if stage.Status != ClippingStageCanceled {
-			if attempt.SettledAt > 0 && attempt.CostReconciled {
-				if _, err := tx.Exec(`UPDATE clipping_stages SET estimated_micro_usd=?,updated_at=? WHERE job_id=? AND name=?`, estimateMicroUSD, now, jobID, name); err != nil {
-					return ClippingStage{}, false, false, err
-				}
-			} else {
-				if _, err := tx.Exec(`UPDATE clipping_stages SET status='failed',estimated_micro_usd=?,cost_reconciled=0,lease_expires_at=0,error='Late analysis result was not published; invoice reconciliation required',updated_at=? WHERE job_id=? AND name=?`, estimateMicroUSD, now, jobID, name); err != nil {
-					return ClippingStage{}, false, false, err
-				}
-				if _, err := tx.Exec(`UPDATE clipping_jobs SET status='failed',error='Late analysis result was not published; invoice reconciliation required',updated_at=? WHERE id=? AND status<>'canceled'`, now, jobID); err != nil {
-					return ClippingStage{}, false, false, err
-				}
-			}
-		} else if attempt.SettledAt > 0 && attempt.CostReconciled {
-			if _, err := tx.Exec(`UPDATE clipping_stages SET estimated_micro_usd=?,updated_at=? WHERE job_id=? AND name=?`, estimateMicroUSD, now, jobID, name); err != nil {
-				return ClippingStage{}, false, false, err
-			}
-		} else if _, err := tx.Exec(`UPDATE clipping_stages SET estimated_micro_usd=?,cost_reconciled=0,updated_at=? WHERE job_id=? AND name=?`, estimateMicroUSD, now, jobID, name); err != nil {
-			return ClippingStage{}, false, false, err
-		}
-	}
-	if _, err := refreshClippingBatchStatus(tx, job.BatchID, now); err != nil {
+	if _, err := tx.Exec(`DELETE FROM clipping_analysis_claims WHERE job_id=? AND attempt_id=?`, jobID, attemptID); err != nil {
 		return ClippingStage{}, false, false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -777,10 +764,9 @@ func (s *Store) CompleteClippingStageEstimate(jobID, name, attemptID, leaseToken
 	return stage, false, false, err
 }
 
-func (s *Store) ReconcileClippingStageCost(jobID, attemptID string, actualCostMicroUSD int64, reference string) (ClippingStage, bool, error) {
-	reference = strings.TrimSpace(reference)
-	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || !safeID(attemptID) || !strings.HasPrefix(attemptID, "clipatt_") || actualCostMicroUSD < 0 || len(reference) == 0 || len(reference) > 256 || !utf8.ValidString(reference) || strings.ContainsAny(reference, "\r\n\x00") {
-		return ClippingStage{}, false, ErrClippingInvalidState
+func (s *Store) FailClippingAnalysisCallback(jobID, name, attemptID, leaseToken, callbackDigest string) (ClippingStage, bool, error) {
+	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || name != ClippingStageAnalysis || attemptID == "" || leaseToken == "" || !validLowerHexDigest(callbackDigest) {
+		return ClippingStage{}, false, ErrClippingStaleAttempt
 	}
 	now := time.Now().Unix()
 	tx, err := s.db.Begin()
@@ -788,68 +774,76 @@ func (s *Store) ReconcileClippingStageCost(jobID, attemptID string, actualCostMi
 		return ClippingStage{}, false, err
 	}
 	defer tx.Rollback()
-	var name string
-	if err := tx.QueryRow(`SELECT stage_name FROM clipping_stage_attempts WHERE attempt_id=? AND job_id=?`, attemptID, jobID).Scan(&name); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ClippingStage{}, false, ErrClippingStaleAttempt
-		}
-		return ClippingStage{}, false, err
-	}
 	attempt, err := readClippingAttempt(tx, jobID, name, attemptID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClippingStage{}, false, ErrClippingStaleAttempt
+	}
 	if err != nil {
 		return ClippingStage{}, false, err
+	}
+	if !validClippingLease(leaseToken, attempt.TokenHash) {
+		return ClippingStage{}, false, ErrClippingStaleAttempt
 	}
 	stage, err := readClippingStage(tx, jobID, name)
 	if err != nil {
 		return ClippingStage{}, false, err
 	}
-	if attempt.SettledAt > 0 {
-		if attempt.ActualMicroUSD != actualCostMicroUSD || attempt.ReconciliationReference != reference {
-			return ClippingStage{}, false, ErrClippingInvalidState
+	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
+	if err != nil {
+		return ClippingStage{}, false, err
+	}
+	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, job.SourceID))
+	if err != nil {
+		return ClippingStage{}, false, err
+	}
+	if attempt.CallbackReceivedAt > 0 {
+		if attempt.CallbackDigest != callbackDigest {
+			return ClippingStage{}, false, ErrClippingStaleAttempt
 		}
 		if err := tx.Commit(); err != nil {
 			return ClippingStage{}, false, err
 		}
 		return stage, true, nil
 	}
-	if stage.AttemptID != attemptID || attempt.ReservedMicroUSD <= 0 {
-		return ClippingStage{}, false, ErrClippingInvalidState
+	callbackExpiry, expiryErr := clippingIssuedCallbackExpiryTx(tx, attempt, source)
+	if expiryErr != nil {
+		return ClippingStage{}, false, expiryErr
 	}
-	if attempt.CallbackReceivedAt == 0 && attempt.Status != "canceled" && (attempt.Status == "running" || attempt.LeaseExpiresAt > now) {
-		return ClippingStage{}, false, ErrClippingInvalidState
+	if callbackExpiry <= now {
+		return ClippingStage{}, false, ErrClippingStaleAttempt
 	}
-	if attempt.CallbackReceivedAt > 0 && attempt.EstimatedMicroUSD <= 0 {
-		return ClippingStage{}, false, ErrClippingInvalidState
+	var claimSource, claimSHA, claimPipeline, claimAttempt string
+	claimErr := tx.QueryRow(`SELECT source_id,source_sha256,pipeline_key,attempt_id FROM clipping_analysis_claims WHERE job_id=?`, jobID).
+		Scan(&claimSource, &claimSHA, &claimPipeline, &claimAttempt)
+	claimCurrent := claimErr == nil && claimSource == source.ID && claimSHA == source.SHA256 && claimPipeline == attempt.PipelineRevision && claimAttempt == attemptID
+	if claimErr != nil && !errors.Is(claimErr, sql.ErrNoRows) {
+		return ClippingStage{}, false, claimErr
 	}
-	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
-	if err != nil {
+	current := claimCurrent && (attempt.Status == "running" || attempt.Status == "expired") && stage.AttemptID == attemptID &&
+		(stage.Status == ClippingStageRunning || stage.Status == ClippingStageUncertain) && !clippingJobTerminal(job.Status) && source.Status == ClippingSourceReady
+	if err := releaseLegacyClippingHold(tx, &job, attempt, name, now); err != nil {
 		return ClippingStage{}, false, err
 	}
-	if err := releaseClippingReservation(tx, &job, attempt.ReservedMicroUSD, now); err != nil {
-		return ClippingStage{}, false, err
-	}
-	if err := settleClippingCost(tx, &job, actualCostMicroUSD, now); err != nil {
-		return ClippingStage{}, false, err
-	}
-	if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET actual_micro_usd=?,cost_reconciled=1,reconciliation_reference=?,settled_at=? WHERE attempt_id=?`, actualCostMicroUSD, reference, now, attemptID); err != nil {
-		return ClippingStage{}, false, err
-	}
-	if _, err := tx.Exec(`UPDATE clipping_stages SET actual_micro_usd=actual_micro_usd+?,reserved_micro_usd=0,cost_reconciled=1,updated_at=? WHERE job_id=? AND name=?`, actualCostMicroUSD, now, jobID, name); err != nil {
-		return ClippingStage{}, false, err
-	}
-	// Explicit reconciliation settles an expired dispatch whose callback did
-	// not arrive. Make that job retryable, but keep the source claim until its
-	// callback capability expires so a late worker cannot trigger duplicate
-	// paid analysis during the validity window. Canceled work stays terminal.
-	if stage.Status == ClippingStageUncertain && job.Status == ClippingJobPausedBudget {
-		if _, err := tx.Exec(`UPDATE clipping_stages SET status='failed',error='Dispatch was reconciled without a callback; retry is available after the callback window',updated_at=? WHERE job_id=? AND name=? AND status='uncertain'`, now, jobID, name); err != nil {
+	if current {
+		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status='failed',callback_received_at=?,callback_digest=?,error='analysis worker reported failure',settled_at=CASE WHEN settled_at=0 THEN ? ELSE settled_at END WHERE attempt_id=?`, now, callbackDigest, now, attemptID); err != nil {
 			return ClippingStage{}, false, err
 		}
-		if _, err := tx.Exec(`UPDATE clipping_jobs SET status='failed',error='Dispatch was reconciled without a callback; retry is available after the callback window',updated_at=? WHERE id=? AND status='paused_budget'`, now, jobID); err != nil {
+		if _, err := tx.Exec(`UPDATE clipping_stages SET status='failed',lease_expires_at=0,error='clipping analysis stage failed',updated_at=? WHERE job_id=? AND name=?`, now, jobID, name); err != nil {
+			return ClippingStage{}, false, err
+		}
+		if _, err := tx.Exec(`UPDATE clipping_jobs SET status='failed',error='clipping analysis stage failed',updated_at=? WHERE id=?`, now, jobID); err != nil {
+			return ClippingStage{}, false, err
+		}
+	} else {
+		attemptStatus := "settled_stale"
+		if job.Status == ClippingJobCanceled || stage.Status == ClippingStageCanceled {
+			attemptStatus = "settled_canceled"
+		}
+		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status=?,callback_received_at=?,callback_digest=?,error='non-publishing failure callback',settled_at=CASE WHEN settled_at=0 THEN ? ELSE settled_at END WHERE attempt_id=?`, attemptStatus, now, callbackDigest, now, attemptID); err != nil {
 			return ClippingStage{}, false, err
 		}
 	}
-	if _, err := refreshClippingBatchStatus(tx, job.BatchID, now); err != nil {
+	if _, err := tx.Exec(`DELETE FROM clipping_analysis_claims WHERE job_id=? AND attempt_id=?`, jobID, attemptID); err != nil {
 		return ClippingStage{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -857,92 +851,6 @@ func (s *Store) ReconcileClippingStageCost(jobID, attemptID string, actualCostMi
 	}
 	stage, err = scanClippingStage(s.db.QueryRow(`SELECT `+clippingStageColumns()+` FROM clipping_stages WHERE job_id=? AND name=?`, jobID, name))
 	return stage, false, err
-}
-
-func (s *Store) UpdateClippingJobSelection(jobID string, requested ClippingJobCreate) (ClippingJob, ClippingArtifact, error) {
-	requested.SourceID = ""
-	selection, err := normalizeClippingSelection(requested)
-	if err != nil || !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") {
-		return ClippingJob{}, ClippingArtifact{}, ErrClippingInvalidState
-	}
-	now := time.Now().Unix()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	defer tx.Rollback()
-	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return ClippingJob{}, ClippingArtifact{}, ErrClippingJobNotFound
-	}
-	if err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	if job.Status != ClippingJobCompleted {
-		return ClippingJob{}, ClippingArtifact{}, ErrClippingInvalidState
-	}
-	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, job.SourceID))
-	if err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	revision, err := clippingJobAnalysisPipelineRevisionTx(tx, jobID)
-	if err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	core, found, err := loadClippingAnalysisCacheTx(tx, source, revision)
-	if err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	if !found {
-		return ClippingJob{}, ClippingArtifact{}, errClippingAnalysisUnavailable
-	}
-	if job.ContentType == selection.ContentType && job.MinClipSeconds == selection.MinClipSeconds && job.MaxClipSeconds == selection.MaxClipSeconds && job.CandidateLimit == selection.CandidateLimit {
-		artifacts, err := queryClippingArtifactsTx(tx, jobID)
-		if err != nil || len(artifacts) == 0 {
-			return ClippingJob{}, ClippingArtifact{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return ClippingJob{}, ClippingArtifact{}, err
-		}
-		return job, artifacts[len(artifacts)-1], nil
-	}
-	job.ContentType, job.MinClipSeconds, job.MaxClipSeconds, job.CandidateLimit = selection.ContentType, selection.MinClipSeconds, selection.MaxClipSeconds, selection.CandidateLimit
-	if _, err := tx.Exec(`UPDATE clipping_jobs SET content_type=?,min_clip_seconds=?,max_clip_seconds=?,candidate_limit=?,updated_at=? WHERE id=?`, job.ContentType, job.MinClipSeconds, job.MaxClipSeconds, job.CandidateLimit, now, jobID); err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	var version int
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(version),0) FROM clipping_artifacts WHERE job_id=? AND artifact_type=?`, jobID, clippingAnalysisArtifactType).Scan(&version); err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	artifact, err := buildCachedClippingAnalysisArtifact(job, source, core, version+1)
-	if err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	stage, err := readClippingStage(tx, jobID, ClippingStageAnalysis)
-	if err == nil && stage.AttemptID != "" {
-		attempt, attemptErr := readClippingAttempt(tx, jobID, ClippingStageAnalysis, stage.AttemptID)
-		if attemptErr != nil {
-			return ClippingJob{}, ClippingArtifact{}, attemptErr
-		}
-		if err := annotateClippingArtifactCost(&artifact, attempt.EstimatedMicroUSD, attempt.OperatorRateMicroUSDPerSecond, attempt.MaxComputeSeconds); err != nil {
-			return ClippingJob{}, ClippingArtifact{}, err
-		}
-	} else if err != nil && !errors.Is(err, ErrClippingStageNotFound) {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	rangesJSON, err := validateClippingArtifact(artifact, jobID, source.DurationMS)
-	if err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	if err := insertClippingArtifact(tx, artifact, rangesJSON, now); err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return ClippingJob{}, ClippingArtifact{}, err
-	}
-	job.UpdatedAt = now
-	artifact.CreatedAt = now
-	return job, artifact, nil
 }
 
 func clippingJobAnalysisPipelineRevisionTx(tx *sql.Tx, jobID string) (string, error) {
@@ -958,31 +866,6 @@ func clippingJobAnalysisPipelineRevisionTx(tx *sql.Tx, jobID string) (string, er
 		return "", ErrClippingInvalidArtifact
 	}
 	return artifactPayload.PipelineRevision, nil
-}
-
-func annotateClippingArtifactCost(artifact *ClippingArtifact, estimate, rate, compute int64) error {
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(artifact.PayloadJSON), &payload); err != nil {
-		return err
-	}
-	for key, value := range map[string]any{
-		"cost_basis":                "operator_declared_worker_second_rate_estimate",
-		"cost_estimate_micro_usd":   estimate,
-		"rate_micro_usd_per_second": rate,
-		"compute_seconds":           compute,
-	} {
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		payload[key] = encoded
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	artifact.PayloadJSON = string(encoded)
-	return nil
 }
 
 func queryClippingArtifactsTx(tx *sql.Tx, jobID string) ([]ClippingArtifact, error) {

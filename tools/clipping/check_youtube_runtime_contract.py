@@ -1,81 +1,51 @@
 #!/usr/bin/env python3
-"""Check the pinned yt-dlp metadata contract with synthetic InfoJSON only."""
+"""Check pinned yt-dlp native-selection flags against synthetic local metadata."""
 
 from __future__ import annotations
 
-import argparse
+import importlib.metadata
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
-VIDEO_ID = "abcdefghijk"
-CANONICAL_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
-MEDIA_URLS = {
-    "mp4_1080": "https://r1---runtime-check.googlevideo.com/videoplayback?sig=synthetic-mp4-1080",
-    "mp4_720": "https://r1---runtime-check.googlevideo.com/videoplayback?sig=synthetic-mp4-720",
-    "webm_1440": "https://r1---runtime-check.googlevideo.com/videoplayback?sig=synthetic-webm-1440",
-    "video_original": "https://r1---runtime-check.googlevideo.com/videoplayback?sig=synthetic-video-original",
-    "audio_original": "https://r1---runtime-check.googlevideo.com/videoplayback?sig=synthetic-audio-original",
-    "audio_autodub": "https://r1---runtime-check.googlevideo.com/videoplayback?sig=synthetic-audio-autodub",
-}
-USER_AGENT = "SyntheticRuntimeCheck/1.0"
-EXPECTED_HTTP_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-us,en;q=0.5",
-    "Referer": CANONICAL_URL,
-    "Sec-Fetch-Mode": "navigate",
-    "User-Agent": USER_AGENT,
-}
 RUNTIME_SPEC = "deno:/usr/bin/deno"
-MAX_METADATA_BYTES = 4 << 20
-PRODUCTION_ARG_SHAPE = [
-    "--ignore-config",
-    "--no-plugin-dirs",
-    "--no-cache-dir",
-    "--no-cookies",
-    "--no-playlist",
-    "--no-warnings",
-    "--no-progress",
-    "--quiet",
-    "--skip-download",
-    "--no-simulate",
-    "--dump-single-json",
-    "--no-remote-components",
-    "--js-runtimes",
-    "runtimeSpec",
-    "canonicalURL.String()",
-]
-EXPECTED = {
+MATCH_FILTER = "availability=public & duration <= 14400 & live_status~=^(not_live|was_live)$"
+EXPECTED_PINS = {
     "yt-dlp": ("2026.8.19", "1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf"),
     "yt-dlp-ejs": ("0.8.0", "79300e5fca7f937a1eeede11f0456862c1b41107ce1d726871e0207424f4bdb4"),
 }
 EXPECTED_DENO_APK = "2.7.4-r2"
 EXPECTED_DENO_APK_COMMIT = "bec8b026686323b496365b825ad14fdf4473adf2"
+VIDEO_ID = "abcdefghijk"
+CANONICAL_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
 SCRIPT_PATH = Path(__file__).resolve()
-REPO_ROOT = SCRIPT_PATH.parents[2]
-REPO_LOCK = REPO_ROOT / "tools/clipping/requirements-youtube.lock"
-IMAGE_LOCK = SCRIPT_PATH.with_name("youtube-runtime.lock")
-LOCK_PATH = IMAGE_LOCK if IMAGE_LOCK.exists() else REPO_LOCK
-DOCKERFILE = REPO_ROOT / "Dockerfile"
+SOURCE_ROOT = SCRIPT_PATH.parents[2]
+SOURCE_LOCK = SOURCE_ROOT / "tools/clipping/requirements-youtube.lock"
+INSTALLED_RUNTIME = not SOURCE_LOCK.is_file()
+REPO_ROOT = None if INSTALLED_RUNTIME else SOURCE_ROOT
+LOCK_PATH = SCRIPT_PATH.with_name("youtube-runtime.lock") if INSTALLED_RUNTIME else SOURCE_LOCK
+DOCKERFILE = None if INSTALLED_RUNTIME else SOURCE_ROOT / "Dockerfile"
+BACKEND_SOURCE = None if INSTALLED_RUNTIME else SOURCE_ROOT / "internal/app/clipping_youtube.go"
 
 
 def check_pins() -> None:
     lock_text = LOCK_PATH.read_text(encoding="utf-8")
     logical_text = lock_text.replace("\\\n", " ")
-    for package, (version, digest) in EXPECTED.items():
+    for package, (version, digest) in EXPECTED_PINS.items():
         pin = rf"(?m)^{re.escape(package)}=={re.escape(version)}\s+--hash=sha256:{digest}$"
         if not re.search(pin, logical_text) or logical_text.count(f"{package}==") != 1:
             raise SystemExit(f"{package} version/hash does not match the runtime pin")
     if f"deno={EXPECTED_DENO_APK}" not in lock_text:
         raise SystemExit("runtime lock does not record the Alpine Deno package revision")
-    # Alpine's official package page and signed APKINDEX do not publish a whole-APK SHA-256.
-    # Keep the evidence precise: C authenticates the control gzip stream; datahash covers the payload tarball.
-    for evidence in (
+    provenance = (
         f"build commit {EXPECTED_DENO_APK_COMMIT}",
         "does not publish a whole-APK SHA-256",
         "signed APKINDEX",
@@ -83,434 +53,387 @@ def check_pins() -> None:
         "That authenticated control metadata contains .PKGINFO datahash, a SHA-256 of the payload tarball",
         "https://pkgs.alpinelinux.org/package/v3.24/community/x86_64/deno",
         "https://wiki.alpinelinux.org/wiki/Apk_spec",
-    ):
+    )
+    for evidence in provenance:
         if evidence not in lock_text:
-            raise SystemExit(f"runtime lock is missing precise Alpine Deno integrity provenance: {evidence}")
+            raise SystemExit(f"runtime lock is missing precise Alpine Deno provenance: {evidence}")
     if re.search(r"(?im)^.*deno[^\n]*--hash=sha256:", lock_text):
         raise SystemExit("do not invent a whole-APK SHA-256 absent from Alpine's package page/index")
 
-    contract_text = SCRIPT_PATH.read_text(encoding="utf-8")
-    for option in (
+    for package, (version, _) in EXPECTED_PINS.items():
+        try:
+            installed = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            raise SystemExit(f"pinned runtime package {package} is not installed") from None
+        if installed != version:
+            raise SystemExit(f"installed {package} version {installed} does not match {version}")
+
+    if INSTALLED_RUNTIME:
+        return
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    required_docker = (
+        "COPY tools/clipping/requirements-youtube.lock /usr/local/share/video-automation/youtube-runtime.lock",
+        "COPY tools/clipping/check_youtube_runtime_contract.py /usr/local/share/video-automation/check_youtube_runtime_contract.py",
+        "RUN apk add --no-cache ffmpeg su-exec python3 py3-pip deno=2.7.4-r2",
+        "--only-binary=:all: --require-hashes --target=/opt/yt-dlp",
+        "test -r /opt/yt-dlp/yt_dlp_ejs/yt/solver/core.min.js",
+        "test ! -w /opt/yt-dlp",
+        "test -x /usr/local/bin/yt-dlp",
+        "test -x /usr/bin/deno",
+        "test -w /tmp",
+        'test "$(su-exec app:app /usr/local/bin/yt-dlp --version)" = "2026.08.19"',
+        'test "$(command -v yt-dlp)" = "/usr/local/bin/yt-dlp"',
+        'test "$(command -v deno)" = "/usr/bin/deno"',
+        'test "$(yt-dlp --version)" = "2026.08.19"',
+        "yt-dlp --help | grep -q -- '--no-remote-components'",
+        "yt-dlp --help | grep -q -- '--js-runtimes'",
+        "yt-dlp --help | grep -q -- '--match-filter'",
+        "yt-dlp --help | grep -q -- '--max-filesize'",
+        "yt-dlp --help | grep -q -- '--merge-output-format'",
+        "yt-dlp --help | grep -q -- '--remux-video'",
+        "deno --version | grep -q -E '^deno 2\\.7\\.4( |$)'",
+        "PYTHONPATH=/opt/yt-dlp",
+        "/usr/local/share/video-automation/check_youtube_runtime_contract.py",
+    )
+    for fragment in required_docker:
+        if fragment not in dockerfile:
+            raise SystemExit(f"Dockerfile is missing the expected runtime pin/check: {fragment}")
+    if "/nonexistent/.cache/deno" in dockerfile:
+        raise SystemExit("Deno cache must use the private temporary DENO_DIR")
+
+
+def check_backend_contract() -> None:
+    if INSTALLED_RUNTIME:
+        return
+    text = BACKEND_SOURCE.read_text(encoding="utf-8")
+    runtime = re.search(r'(?m)^\s*clippingYouTubeRuntime\s*=\s*"([^"]+)"', text)
+    if runtime is None or runtime.group(1) != RUNTIME_SPEC:
+        raise SystemExit("backend JavaScript runtime differs from the pinned Deno runtime")
+    match = re.search(
+        r"func youtubeDownloaderArgs\([^\n]+\) \[\]string \{(?P<body>.*?)\n\}",
+        text,
+        re.DOTALL,
+    )
+    if match is None:
+        raise SystemExit("native yt-dlp argv function could not be located")
+    body = match.group("body")
+    required = (
+        '"--ignore-config"',
         '"--no-plugin-dirs"',
+        '"--no-cache-dir"',
         '"--no-cookies"',
-        '"--skip-download"',
+        '"--no-playlist"',
         '"--no-simulate"',
-        '"--dump-single-json"',
         '"--no-remote-components"',
         '"--js-runtimes"',
-        '"deno:/usr/bin/deno"',
-        '"--load-info-json"',
+        '"--match-filter"',
+        '"--max-filesize"',
+        '"--merge-output-format", "mp4"',
+        '"--remux-video", "mp4"',
+        '"source.%(ext)s"',
+        '"--print"',
+    )
+    for fragment in required:
+        if fragment not in body:
+            raise SystemExit(f"backend native yt-dlp argv is missing {fragment}")
+    if re.search(r'"--format"\s*,', body) or '"--proxy"' in body or '"--cookies"' in body:
+        raise SystemExit("backend must use yt-dlp's native selection and ambient transport configuration")
+    for invariant in (
+        "command.Stderr = io.Discard",
+        "configureYouTubeSubprocess(command)",
+        "clippingYouTubeFileLimitLauncher",
+        "youtubeWorkspaceUsage(workDir)",
+        "--no-cookies",
+        "--no-playlist",
     ):
-        if option not in contract_text:
-            raise SystemExit(f"synthetic CLI contract is missing expected argument {option}")
-    if "--format" in PRODUCTION_ARG_SHAPE or "clippingYouTubeMuxedFormat" in PRODUCTION_ARG_SHAPE:
-        raise SystemExit("synthetic CLI contract must request full metadata without a format selector")
-    if re.search(r'(?m)^\s+"--no-netrc",\s*$', contract_text):
-        raise SystemExit("yt-dlp 2026.8.19 does not support --no-netrc; rely on config isolation and omit --netrc")
-
-    if DOCKERFILE.is_file():
-        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
-        required = (
-            "COPY tools/clipping/requirements-youtube.lock /usr/local/share/video-automation/youtube-runtime.lock",
-            "COPY tools/clipping/check_youtube_runtime_contract.py /usr/local/share/video-automation/check_youtube_runtime_contract.py",
-            "RUN apk add --no-cache ffmpeg su-exec python3 py3-pip deno=2.7.4-r2",
-            "--only-binary=:all: --require-hashes --target=/opt/yt-dlp",
-            "chmod -R a+rX /opt/yt-dlp",
-            "test -r /opt/yt-dlp/yt_dlp_ejs/yt/solver/core.min.js",
-            "test ! -w /opt/yt-dlp",
-            "test ! -w /opt/yt-dlp/yt_dlp/YoutubeDL.py",
-            "test ! -w /opt/yt-dlp/yt_dlp_ejs/yt/solver/core.min.js",
-            "test -x /usr/local/bin/yt-dlp",
-            "test -x /usr/bin/deno",
-            "test -w /tmp",
-            'test "$(su-exec app:app /usr/local/bin/yt-dlp --version)" = "2026.08.19"',
-            'DENO_DIR="$1" /usr/bin/deno info > "$1/info.txt" && grep -F "$1" "$1/info.txt" >/dev/null',
-            "test \"$(command -v yt-dlp)\" = \"/usr/local/bin/yt-dlp\"",
-            "test \"$(command -v deno)\" = \"/usr/bin/deno\"",
-            "test \"$(yt-dlp --version)\" = \"2026.08.19\"",
-            "yt-dlp --help | grep -q -- '--no-remote-components'",
-            "yt-dlp --help | grep -q -- '--js-runtimes'",
-            "deno --version | grep -q -E '^deno 2\\.7\\.4( |$)'",
-            "su-exec app:app env HOME=/nonexistent PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 /usr/local/share/video-automation/check_youtube_runtime_contract.py",
-        )
-        for fragment in required:
-            if fragment not in dockerfile:
-                raise SystemExit(f"Dockerfile is missing the expected runtime pin/check: {fragment}")
-        if "/nonexistent/.cache/deno" in dockerfile:
-            raise SystemExit("Deno cache must use the per-import temporary DENO_DIR, not a persistent HOME cache")
-
-    backend_source = REPO_ROOT / "internal/app/clipping_youtube.go"
-    if backend_source.is_file():
-        backend_text = backend_source.read_text(encoding="utf-8")
-        runtime_match = re.search(r'(?m)^\s*clippingYouTubeRuntime\s*=\s*"([^"]+)"', backend_text)
-        if runtime_match is None or runtime_match.group(1) != RUNTIME_SPEC:
-            raise SystemExit("synthetic CLI runtime differs from the production backend runtime")
-        args_match = re.search(r"args := \[\]string\{\s*(.*?)\n\s*\}", backend_text, re.DOTALL)
-        if args_match is None:
-            raise SystemExit("production backend yt-dlp argv could not be located")
-        backend_args = []
-        for item in args_match.group(1).split(","):
-            item = item.strip()
-            if not item:
-                continue
-            backend_args.append(json.loads(item) if item.startswith('"') else item)
-        if backend_args != PRODUCTION_ARG_SHAPE:
-            raise SystemExit("production yt-dlp argv differs from the bounded full-metadata offline contract")
-        if "--format" in backend_args or "clippingYouTubeMuxedFormat" in backend_args:
-            raise SystemExit("production yt-dlp argv must not constrain the metadata format list")
+        if invariant not in text:
+            raise SystemExit(f"backend is missing downloader safety invariant: {invariant}")
+    for obsolete in ("youtubeProxy", "startYouTubeProxy", "extractYouTubeMedia", "importYouTubeSeparateTracks"):
+        if obsolete in text:
+            raise SystemExit(f"obsolete application downloader pipeline remains: {obsolete}")
 
 
-def media_format(
-    name: str,
-    url: str,
-    *,
-    ext: str,
-    protocol: str = "https",
-    vcodec: str = "none",
-    acodec: str = "none",
-    width: int | None = None,
-    height: int | None = None,
-    fps: float | None = None,
-    tbr: float | None = None,
-    quality: int | None = None,
-    abr: float | None = None,
-    asr: int | None = None,
-    audio_channels: int | None = None,
-    language: str | None = None,
-    language_preference: int | None = None,
-    format_note: str | None = None,
-    filesize: int | None = None,
-    filesize_approx: int | None = None,
-) -> dict[str, object]:
-    # Format IDs are synthetic labels here; the importer must select from metadata fields.
-    item: dict[str, object] = {
-        "format_id": name,
-        "url": url,
-        "ext": ext,
-        "protocol": protocol,
-        "vcodec": vcodec,
-        "acodec": acodec,
-        "http_headers": {
-            "User-Agent": USER_AGENT,
-            "Referer": CANONICAL_URL,
-        },
-    }
-    for key, value in (
-        ("width", width),
-        ("height", height),
-        ("fps", fps),
-        ("tbr", tbr),
-        ("quality", quality),
-        ("abr", abr),
-        ("asr", asr),
-        ("audio_channels", audio_channels),
-        ("language", language),
-        ("language_preference", language_preference),
-        ("format_note", format_note),
-        ("filesize", filesize),
-        ("filesize_approx", filesize_approx),
-    ):
-        if value is not None:
-            item[key] = value
-    return item
-
-
-def make_fixture(*, separate_only: bool) -> dict[str, object]:
-    formats = [
-        media_format(
-            "video-only", MEDIA_URLS["video_original"],
-            ext="mp4", vcodec="avc1.640033", width=2560, height=1440,
-            fps=30, tbr=5200, quality=9, filesize_approx=8_900_000,
-        ),
-        media_format(
-            "audio-original-128k", MEDIA_URLS["audio_original"],
-            ext="m4a", acodec="mp4a.40.2", tbr=160, abr=128,
-            asr=48000, audio_channels=2, language="en",
-            language_preference=10, format_note="Original", filesize_approx=540_000,
-        ),
-        media_format(
-            "audio-autodub-192k", MEDIA_URLS["audio_autodub"],
-            ext="m4a", acodec="mp4a.40.2", tbr=224, abr=192,
-            asr=48000, audio_channels=2, language="en",
-            language_preference=2, format_note="English (Auto-dubbed)", filesize=750_000,
-        ),
-        media_format(
-            "high-quality-hls-muxed", "https://runtime-check.invalid/hls-manifest.m3u8",
-            ext="mp4", protocol="m3u8_native", vcodec="avc1.640033",
-            acodec="mp4a.40.2", width=3840, height=2160, fps=60,
-            tbr=10500, quality=10, filesize=10_234_567,
-        ),
-        media_format(
-            "high-quality-dash-muxed", "https://runtime-check.invalid/dash-manifest.mpd",
-            ext="mp4", protocol="http_dash_segments", vcodec="avc1.640032",
-            acodec="mp4a.40.2", width=2560, height=1440, fps=60,
-            tbr=8500, quality=9, filesize=8_234_567,
-        ),
-    ]
-    if not separate_only:
-        formats.extend(
-            [
-                media_format(
-                    "progressive-mp4-1080", MEDIA_URLS["mp4_1080"],
-                    ext="mp4", vcodec="avc1.640028", acodec="mp4a.40.2",
-                    width=1920, height=1080, fps=30, tbr=4100, quality=8,
-                    abr=128, asr=48000, audio_channels=2, filesize=4_234_567,
-                ),
-                media_format(
-                    "progressive-mp4-720", MEDIA_URLS["mp4_720"],
-                    ext="mp4", vcodec="avc1.64001f", acodec="mp4a.40.2",
-                    width=1280, height=720, fps=30, tbr=1800, quality=7,
-                    abr=128, asr=48000, audio_channels=2, filesize=1_234_567,
-                ),
-                media_format(
-                    "progressive-webm-1440", MEDIA_URLS["webm_1440"],
-                    ext="webm", vcodec="vp9", acodec="opus",
-                    width=2560, height=1440, fps=60, tbr=7100, quality=9,
-                    abr=160, asr=48000, audio_channels=2, filesize=7_234_567,
-                ),
-            ]
-        )
+def make_fixture() -> dict[str, object]:
     return {
         "_type": "video",
         "id": VIDEO_ID,
-        "title": "Local synthetic extractor fixture",
+        "title": "Local synthetic native-selection fixture",
         "extractor": "youtube",
         "extractor_key": "Youtube",
         "webpage_url": CANONICAL_URL,
         "original_url": CANONICAL_URL,
         "duration": 73.5,
-        "formats": formats,
+        "availability": "public",
+        "live_status": "not_live",
+        "is_live": False,
+        "formats": [
+            {
+                "format_id": "video-original",
+                "url": "https://runtime-check.invalid/video?sig=synthetic-video",
+                "ext": "mp4",
+                "protocol": "https",
+                "vcodec": "avc1.64001f",
+                "acodec": "none",
+                "width": 1280,
+                "height": 720,
+                "fps": 30,
+                "tbr": 2400,
+                "quality": 5,
+                "filesize": 3_000_000,
+            },
+            {
+                "format_id": "audio-original",
+                "url": "https://runtime-check.invalid/audio?sig=synthetic-original",
+                "ext": "m4a",
+                "protocol": "https",
+                "vcodec": "none",
+                "acodec": "mp4a.40.2",
+                "abr": 128,
+                "asr": 48000,
+                "audio_channels": 2,
+                "language": "en",
+                "language_preference": 10,
+                "format_note": "Original",
+                "filesize": 500_000,
+            },
+            {
+                "format_id": "audio-autodub-higher-bitrate",
+                "url": "https://runtime-check.invalid/audio?sig=synthetic-dub",
+                "ext": "m4a",
+                "protocol": "https",
+                "vcodec": "none",
+                "acodec": "mp4a.40.2",
+                "abr": 192,
+                "asr": 48000,
+                "audio_channels": 2,
+                "language": "en",
+                "language_preference": 2,
+                "format_note": "English (Auto-dubbed)",
+                "filesize": 700_000,
+            },
+        ],
     }
 
 
-def run_fixture(fixture: dict[str, object]) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="youtube-runtime-contract-") as temp_dir:
-        info_path = Path(temp_dir) / "synthetic.info.json"
-        deno_dir = Path(temp_dir) / "deno-cache"
+def run_offline_native_selection() -> None:
+    executable = shutil.which("yt-dlp")
+    if executable is None:
+        raise SystemExit("pinned yt-dlp executable was not found on PATH")
+    try:
+        version = subprocess.run(
+            [executable, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        raise SystemExit("pinned yt-dlp version could not be read") from None
+    if version != "2026.08.19":
+        raise SystemExit(f"yt-dlp CLI version {version} does not match the runtime pin")
+
+    with tempfile.TemporaryDirectory(prefix="youtube-runtime-contract-") as temporary:
+        root = Path(temporary)
+        fixture_path = root / "synthetic.info.json"
+        deno_dir = root / "deno-cache"
         deno_dir.mkdir(mode=0o700)
-        info_path.write_text(json.dumps(fixture), encoding="utf-8")
-        # Local InfoJSON replaces the URL; no media download, model call,
-        # or external network connection is made.
-        argv = ["yt-dlp"]
-        for item in PRODUCTION_ARG_SHAPE:
-            if item == "runtimeSpec":
-                argv.append(RUNTIME_SPEC)
-            elif item == "canonicalURL.String()":
-                argv.extend(["--load-info-json", str(info_path)])
-            else:
-                argv.append(item)
+        fixture_path.write_text(json.dumps(make_fixture()), encoding="utf-8")
+        args = [
+            executable,
+            "--ignore-config",
+            "--no-plugin-dirs",
+            "--no-cache-dir",
+            "--no-cookies",
+            "--no-playlist",
+            "--no-warnings",
+            "--no-progress",
+            "--quiet",
+            "--simulate",
+            "--no-remote-components",
+            "--js-runtimes",
+            RUNTIME_SPEC,
+            "--match-filter",
+            MATCH_FILTER,
+            "--max-filesize",
+            "10000000",
+            "--merge-output-format",
+            "mp4",
+            "--remux-video",
+            "mp4",
+            "--paths",
+            f"temp:{root}",
+            "--output",
+            str(root / "source.%(ext)s"),
+            "--load-info-json",
+            str(fixture_path),
+            "--print",
+            "%(format_id)s",
+        ]
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "HOME": "/nonexistent",
+                "DENO_DIR": str(deno_dir),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
         try:
-            process = subprocess.Popen(
-                argv,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env={
-                    "PATH": os.environ.get("PATH", os.defpath),
-                    "HOME": "/nonexistent",
-                    "DENO_DIR": str(deno_dir),
-                    "LANG": "C.UTF-8",
-                    "LC_ALL": "C.UTF-8",
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                },
+            process = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
                 shell=False,
+                env=environment,
             )
-        except OSError:
-            raise SystemExit("pinned yt-dlp could not be started for the offline synthetic CLI check") from None
-        if process.stdout is None:
-            process.kill()
-            process.wait()
-            raise SystemExit("pinned yt-dlp stdout could not be read for the offline synthetic CLI check")
-        output_bytes = bytearray()
-        output_overflow = threading.Event()
-        output_read_failed = threading.Event()
-
-        def collect_bounded_stdout() -> None:
-            try:
-                while True:
-                    chunk = process.stdout.read(64 << 10)
-                    if not chunk:
-                        return
-                    remaining = MAX_METADATA_BYTES + 1 - len(output_bytes)
-                    output_bytes.extend(chunk[:remaining])
-                    if len(output_bytes) > MAX_METADATA_BYTES:
-                        output_overflow.set()
-                        try:
-                            process.kill()
-                        except OSError:
-                            pass
-                        return
-            except OSError:
-                output_read_failed.set()
-
-        reader = threading.Thread(target=collect_bounded_stdout, daemon=True)
-        reader.start()
-        try:
-            return_code = process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-            reader.join(timeout=2)
-            process.stdout.close()
-            raise SystemExit("pinned yt-dlp exceeded the offline synthetic CLI time bound") from None
-        reader.join(timeout=2)
-        if reader.is_alive():
-            process.kill()
-            process.wait()
-            process.stdout.close()
-            raise SystemExit("pinned yt-dlp stdout reader exceeded the offline synthetic CLI time bound")
-        process.stdout.close()
-        if output_overflow.is_set():
-            raise SystemExit("pinned yt-dlp synthetic metadata exceeded the production JSON bound")
-        if output_read_failed.is_set():
-            raise SystemExit("pinned yt-dlp synthetic metadata could not be read")
-        if return_code != 0:
-            raise SystemExit("pinned yt-dlp rejected the offline synthetic CLI contract")
-        try:
-            output_text = output_bytes.decode("utf-8")
-            output = json.loads(output_text)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            raise SystemExit("pinned yt-dlp did not emit one valid UTF-8 JSON result") from None
-    if not isinstance(output, dict):
-        raise SystemExit("pinned yt-dlp result is not a metadata object")
-    return output
+        except (OSError, subprocess.SubprocessError):
+            raise SystemExit("pinned yt-dlp offline InfoJSON selection check failed to run") from None
+    if process.returncode != 0:
+        raise SystemExit("pinned yt-dlp rejected the synthetic offline InfoJSON fixture")
+    selected = process.stdout.strip().splitlines()
+    if selected != ["video-original+audio-original"]:
+        raise SystemExit(f"native yt-dlp did not prefer the original audio format: {selected!r}")
+    if "synthetic-dub" in process.stdout or "runtime-check.invalid" in process.stdout:
+        raise SystemExit("offline selector output unexpectedly exposed synthetic media URLs")
 
 
-def metadata_formats(output: dict[str, object]) -> list[dict[str, object]]:
-    if output.get("id") != VIDEO_ID or output.get("duration") != 73.5:
-        raise SystemExit("pinned yt-dlp did not preserve the synthetic video ID and duration")
-    formats = output.get("formats")
-    if not isinstance(formats, list) or not formats or any(not isinstance(item, dict) for item in formats):
-        raise SystemExit("pinned yt-dlp did not return the full formats array")
-    return formats
-
-
-def has_synthetic_format(
-    formats: list[dict[str, object]],
-    *,
-    url: str,
-    ext: str,
-    protocol: str,
-    vcodec: str,
-    acodec: str,
-    width: int | None = None,
-    height: int | None = None,
-    fps: float | None = None,
-    tbr: float | None = None,
-    quality: int | None = None,
-    abr: float | None = None,
-    asr: int | None = None,
-    audio_channels: int | None = None,
-    language_preference: int | None = None,
-    language: str | None = None,
-    format_note: str | None = None,
-    filesize: int | None = None,
-    filesize_approx: int | None = None,
-) -> bool:
-    expected: dict[str, object] = {
-        "url": url,
-        "ext": ext,
-        "protocol": protocol,
-        "vcodec": vcodec,
-        "acodec": acodec,
-    }
-    for key, value in (
-        ("width", width),
-        ("height", height),
-        ("fps", fps),
-        ("tbr", tbr),
-        ("quality", quality),
-        ("abr", abr),
-        ("asr", asr),
-        ("audio_channels", audio_channels),
-        ("language_preference", language_preference),
-        ("language", language),
-        ("format_note", format_note),
-        ("filesize", filesize),
-        ("filesize_approx", filesize_approx),
-    ):
-        if value is not None:
-            expected[key] = value
-    return any(
-        all(item.get(key) == value for key, value in expected.items())
-        and item.get("http_headers") == EXPECTED_HTTP_HEADERS
-        for item in formats
-    )
-
-
-def check_metadata_shape(output: dict[str, object], *, separate_only: bool) -> None:
-    formats = metadata_formats(output)
-    if not has_synthetic_format(
-        formats,
-        url=MEDIA_URLS["audio_original"], ext="m4a", protocol="https",
-        vcodec="none", acodec="mp4a.40.2", abr=128, asr=48000,
-        audio_channels=2, language_preference=10, language="en",
-        format_note="Original", filesize_approx=540_000,
-    ):
-        raise SystemExit("pinned yt-dlp did not preserve the original-audio metadata fields")
-    if not has_synthetic_format(
-        formats,
-        url=MEDIA_URLS["audio_autodub"], ext="m4a", protocol="https",
-        vcodec="none", acodec="mp4a.40.2", abr=192, language_preference=2,
-        language="en", format_note="English (Auto-dubbed)",
-        filesize=750_000,
-    ):
-        raise SystemExit("pinned yt-dlp did not preserve the synthetic alternate-audio metadata")
-    if not has_synthetic_format(
-        formats,
-        url="https://runtime-check.invalid/hls-manifest.m3u8", ext="mp4",
-        protocol="m3u8_native", vcodec="avc1.640033", acodec="mp4a.40.2",
-        height=2160, fps=60, tbr=10500, quality=10,
-    ):
-        raise SystemExit("pinned yt-dlp did not preserve protocol and quality metadata for a manifest candidate")
-    if not has_synthetic_format(
-        formats,
-        url="https://runtime-check.invalid/dash-manifest.mpd", ext="mp4",
-        protocol="http_dash_segments", vcodec="avc1.640032", acodec="mp4a.40.2",
-        height=1440, fps=60, tbr=8500, quality=9,
-    ):
-        raise SystemExit("pinned yt-dlp did not preserve protocol and quality metadata for a second manifest candidate")
-    if separate_only:
-        if not has_synthetic_format(
-            formats,
-            url=MEDIA_URLS["video_original"], ext="mp4", protocol="https",
-            vcodec="avc1.640033", acodec="none", width=2560, height=1440,
-            fps=30, tbr=5200, quality=9, filesize_approx=8_900_000,
-        ):
-            raise SystemExit("pinned yt-dlp did not preserve the separate-video metadata fields")
+def run_local_native_merge() -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    deno = Path("/usr/bin/deno")
+    if ffmpeg is None or ffprobe is None or INSTALLED_RUNTIME and not deno.is_file():
+        if INSTALLED_RUNTIME:
+            raise SystemExit("installed runtime is missing FFmpeg, ffprobe, or Deno")
+        print("Skipping local native merge check: FFmpeg or ffprobe is unavailable")
         return
-    if not has_synthetic_format(
-        formats,
-        url=MEDIA_URLS["mp4_1080"], ext="mp4", protocol="https",
-        vcodec="avc1.640028", acodec="mp4a.40.2", width=1920, height=1080,
-        fps=30, tbr=4100, quality=8, filesize=4_234_567,
-    ):
-        raise SystemExit("pinned yt-dlp did not preserve the higher-quality combined MP4 metadata")
-    if not has_synthetic_format(
-        formats,
-        url=MEDIA_URLS["webm_1440"], ext="webm", protocol="https",
-        vcodec="vp9", acodec="opus", width=2560, height=1440, fps=60,
-        tbr=7100, quality=9, filesize=7_234_567,
-    ):
-        raise SystemExit("pinned yt-dlp did not preserve the combined WebM metadata")
 
+    with tempfile.TemporaryDirectory(prefix="youtube-runtime-merge-") as temporary:
+        root = Path(temporary)
+        web_root = root / "media"
+        web_root.mkdir(mode=0o700)
+        work_dir = root / "download"
+        work_dir.mkdir(mode=0o700)
+        video_path = web_root / "video.mp4"
+        audio_path = web_root / "audio.m4a"
+        try:
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "color=c=black:s=320x240:d=1", "-an", "-c:v", "mpeg4", "-pix_fmt",
+                    "yuv420p", "-movflags", "+faststart", "-y", str(video_path),
+                ],
+                check=True, capture_output=True, timeout=20, shell=False,
+            )
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "sine=frequency=1000:duration=1", "-vn", "-c:a", "aac", "-y", str(audio_path),
+                ],
+                check=True, capture_output=True, timeout=20, shell=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise SystemExit("local FFmpeg media fixtures could not be generated") from None
 
-def check_cli_contract() -> None:
-    combined_output = run_fixture(make_fixture(separate_only=False))
-    check_metadata_shape(combined_output, separate_only=False)
-    split_output = run_fixture(make_fixture(separate_only=True))
-    check_metadata_shape(split_output, separate_only=True)
-    print("Pinned yt-dlp offline full-metadata contract passed")
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            partial(SimpleHTTPRequestHandler, directory=str(web_root)),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        fixture = make_fixture()
+        formats = fixture["formats"]
+        assert isinstance(formats, list)
+        video_format, audio_format = formats[0], formats[1]
+        video_format.update(
+            {
+                "url": f"http://127.0.0.1:{server.server_port}/video.mp4",
+                "protocol": "http",
+                "filesize": video_path.stat().st_size,
+            }
+        )
+        audio_format.update(
+            {
+                "url": f"http://127.0.0.1:{server.server_port}/audio.m4a",
+                "protocol": "http",
+                "filesize": audio_path.stat().st_size,
+            }
+        )
+        fixture_path = root / "local.info.json"
+        fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+        deno_dir = root / "deno-cache"
+        deno_dir.mkdir(mode=0o700)
+        args = [
+            shutil.which("yt-dlp") or "yt-dlp",
+            "--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-cookies",
+            "--no-playlist", "--no-warnings", "--no-progress", "--quiet", "--no-simulate",
+            "--no-remote-components", "--js-runtimes", RUNTIME_SPEC, "--match-filter", MATCH_FILTER,
+            "--max-filesize", "10000000", "--merge-output-format", "mp4", "--remux-video", "mp4",
+            "--paths", f"temp:{work_dir}", "--output", str(work_dir / "source.%(ext)s"),
+            "--load-info-json", str(fixture_path),
+            "--print", "before_dl:__FRAMEVAULT_FORMAT__%(format_id)s",
+            "--print", "after_move:__FRAMEVAULT_OUTPUT__%(filepath)s",
+        ]
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "HOME": "/nonexistent",
+                "DENO_DIR": str(deno_dir),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        for name in ("NO_PROXY", "no_proxy"):
+            local_exclusions = ["127.0.0.1", "localhost"]
+            inherited = environment.get(name, "")
+            if inherited:
+                local_exclusions.extend(part.strip() for part in inherited.split(",") if part.strip())
+            environment[name] = ",".join(dict.fromkeys(local_exclusions))
+        try:
+            process = subprocess.run(
+                args, capture_output=True, text=True, timeout=30, check=False, shell=False, env=environment,
+            )
+        except (OSError, subprocess.SubprocessError):
+            server.shutdown()
+            server.server_close()
+            raise SystemExit("pinned yt-dlp local merge check failed to run") from None
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        if process.returncode != 0:
+            raise SystemExit("pinned yt-dlp failed to download and merge synthetic local media")
+        output = work_dir / "source.mp4"
+        if not output.is_file() or output.stat().st_size <= 0:
+            raise SystemExit("yt-dlp did not produce the fixed MP4 output path")
+        lines = process.stdout.strip().splitlines()
+        expected_markers = [
+            "__FRAMEVAULT_FORMAT__video-original+audio-original",
+            "__FRAMEVAULT_OUTPUT__" + str(output),
+        ]
+        if lines != expected_markers:
+            raise SystemExit(f"yt-dlp output markers differ from the importer contract: {lines!r}")
+        try:
+            probe = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format=format_name", "-show_entries", "stream=codec_type", "-of", "json", str(output)],
+                check=True, capture_output=True, text=True, timeout=10, shell=False,
+            )
+            media = json.loads(probe.stdout)
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            raise SystemExit("ffprobe could not validate the native yt-dlp MP4 result") from None
+        format_name = str(media.get("format", {}).get("format_name", ""))
+        stream_types = {stream.get("codec_type") for stream in media.get("streams", [])}
+        if "mp4" not in format_name.split(",") or not {"video", "audio"}.issubset(stream_types):
+            raise SystemExit("native yt-dlp output is not an MP4 with video and audio")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--static-only", action="store_true", help="check source pin/config consistency only")
-    args = parser.parse_args()
     check_pins()
-    if args.static_only:
-        print("YouTube runtime pins and Docker install checks are consistent")
-        return
-    check_cli_contract()
+    check_backend_contract()
+    run_offline_native_selection()
+    run_local_native_merge()
+    print("Pinned yt-dlp offline native-selection contract passed")
 
 
 if __name__ == "__main__":

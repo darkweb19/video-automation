@@ -57,7 +57,7 @@ func buildClippingStageDispatch(job ClippingJob, stage ClippingStage, source Cli
 	if err != nil {
 		return clippingStageDispatch{}, err
 	}
-	callbackExpiresAt := stage.LeaseExpiresAt + int64(clippingCallbackAccountingGrace.Seconds())
+	callbackExpiresAt := stage.LeaseExpiresAt + int64(clippingCallbackCapabilityGrace.Seconds())
 	if source.RetainUntil > 0 && source.RetainUntil < callbackExpiresAt {
 		callbackExpiresAt = source.RetainUntil
 	}
@@ -77,46 +77,42 @@ func buildClippingStageDispatch(job ClippingJob, stage ClippingStage, source Cli
 	}, nil
 }
 
-// prepareClippingStageDispatch performs the durable reservation and encrypted
-// capability writes before returning a worker envelope. It does not send the
+// prepareClippingStageDispatch persists the attempt and encrypted capabilities
+// before returning a worker envelope. It does not send the
 // dispatch or select a provider; M2 leaves this queue waiting until a worker
 // configuration exists.
-func (a *dashboardApp) prepareClippingStageDispatch(jobID string, reserveMicroUSD int64, workerOrigin string) (clippingPreparedDispatch, bool, error) {
+func (a *dashboardApp) prepareClippingStageDispatch(jobID string, _ int64, workerOrigin string) (clippingPreparedDispatch, bool, error) {
 	if a == nil || a.store == nil || a.security == nil {
 		return clippingPreparedDispatch{}, false, errors.New("clipping worker dispatch security is unavailable")
 	}
-	stage, claimed, err := a.store.ClaimClippingStage(jobID, ClippingStageAnalysis, reserveMicroUSD, clippingWorkerLeaseDuration)
+	stage, claimed, err := a.store.ClaimClippingStage(jobID, ClippingStageAnalysis, 0, clippingWorkerLeaseDuration)
 	if err != nil || !claimed {
 		return clippingPreparedDispatch{}, claimed, err
 	}
 	job, err := a.store.ClippingJob(jobID)
 	if err != nil {
-		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker job snapshot could not be loaded", false, 0)
+		_, _ = a.store.FailClippingStageBeforeSubmit(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker job snapshot could not be loaded")
 		return clippingPreparedDispatch{}, false, errors.New("clipping worker job snapshot could not be loaded")
 	}
 	source, err := a.store.ClippingSource(job.SourceID)
 	if err != nil {
-		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker source snapshot could not be loaded", false, 0)
+		_, _ = a.store.FailClippingStageBeforeSubmit(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker source snapshot could not be loaded")
 		a.store.PublishClippingJob(jobID)
-		a.publishClippingBatch(job.BatchID)
 		return clippingPreparedDispatch{}, false, errors.New("clipping worker source snapshot could not be loaded")
 	}
 	payload, err := buildClippingStageDispatch(job, stage, source, workerOrigin, time.Now())
 	if err != nil {
-		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker dispatch envelope could not be built", false, 0)
+		_, _ = a.store.FailClippingStageBeforeSubmit(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker dispatch envelope could not be built")
 		a.store.PublishClippingJob(jobID)
-		a.publishClippingBatch(job.BatchID)
 		return clippingPreparedDispatch{}, false, err
 	}
 	mediaBearer, callbackBearer, err := a.persistClippingDispatchCapabilitiesUntil(stage, payload.CallbackExpiresAt)
 	if err != nil {
-		_, _ = a.store.FailClippingStage(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker capability persistence failed", false, 0)
+		_, _ = a.store.FailClippingStageBeforeSubmit(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker capability persistence failed")
 		a.store.PublishClippingJob(jobID)
-		a.publishClippingBatch(job.BatchID)
 		return clippingPreparedDispatch{}, false, errors.New("clipping worker capabilities could not be persisted")
 	}
 	a.store.PublishClippingJob(jobID)
-	a.publishClippingBatch(job.BatchID)
 	return clippingPreparedDispatch{Payload: payload, MediaBearer: mediaBearer, CallbackBearer: callbackBearer}, true, nil
 }
 

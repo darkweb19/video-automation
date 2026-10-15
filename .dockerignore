@@ -4,6 +4,7 @@
 .gocache
 .gomodcache
 data
+work/
 *.exe
 *.test
 coverage.out

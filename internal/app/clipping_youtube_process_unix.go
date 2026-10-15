@@ -23,7 +23,7 @@ func configureYouTubeSubprocess(command *exec.Cmd) {
 	}
 }
 
-func youtubeMuxOutputLimitReached(command *exec.Cmd, runErr error) bool {
+func youtubeSubprocessFileLimitReached(command *exec.Cmd, runErr error) bool {
 	if runErr == nil || command == nil || command.ProcessState == nil {
 		return false
 	}

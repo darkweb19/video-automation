@@ -10,7 +10,6 @@ const (
 	MaxClippingSourceDurationMS   int64 = 4 * 60 * 60 * 1000
 	MaxClippingStorageBytes       int64 = 100 << 30
 	MaxClippingImportAttempts           = 5
-	MaxClippingBatchJobs                = 100
 	ClippingStageAnalysis               = "analysis"
 	ClippingDefaultMinClipSeconds       = 15
 	ClippingDefaultMaxClipSeconds       = 180
@@ -128,44 +127,26 @@ type ClippingSource struct {
 	DeletedAt          int64                      `json:"deleted_at,omitempty"`
 }
 
-type ClippingBatchCreate struct {
-	IdempotencyKey      string
-	BudgetLimitMicroUSD int64
-	Jobs                []ClippingJobCreate
-}
-
 type ClippingJobCreate struct {
-	SourceID            string
-	BudgetLimitMicroUSD int64
-	ContentType         string
-	MinClipSeconds      int
-	MaxClipSeconds      int
-	CandidateLimit      int
-}
-
-type ClippingBatch struct {
-	ID                  string            `json:"id"`
-	IdempotencyKey      string            `json:"-"`
-	Status              ClippingJobStatus `json:"status"`
-	BudgetLimitMicroUSD int64             `json:"budget_limit_micro_usd"`
-	ReservedMicroUSD    int64             `json:"reserved_micro_usd"`
-	SpentMicroUSD       int64             `json:"spent_micro_usd"`
-	CreatedAt           int64             `json:"created_at"`
-	UpdatedAt           int64             `json:"updated_at"`
+	SourceID       string
+	ContentType    string
+	MinClipSeconds int
+	MaxClipSeconds int
+	CandidateLimit int
 }
 
 type ClippingJob struct {
 	ID                  string            `json:"id"`
-	BatchID             string            `json:"batch_id"`
+	BatchID             string            `json:"-"`
 	SourceID            string            `json:"source_id"`
 	ContentType         string            `json:"content_type"`
 	MinClipSeconds      int               `json:"min_clip_seconds"`
 	MaxClipSeconds      int               `json:"max_clip_seconds"`
 	CandidateLimit      int               `json:"candidate_limit"`
 	Status              ClippingJobStatus `json:"status"`
-	BudgetLimitMicroUSD int64             `json:"budget_limit_micro_usd"`
-	ReservedMicroUSD    int64             `json:"reserved_micro_usd"`
-	SpentMicroUSD       int64             `json:"spent_micro_usd"`
+	BudgetLimitMicroUSD int64             `json:"-"`
+	ReservedMicroUSD    int64             `json:"-"`
+	SpentMicroUSD       int64             `json:"-"`
 	Error               string            `json:"error,omitempty"`
 	CreatedAt           int64             `json:"created_at"`
 	UpdatedAt           int64             `json:"updated_at"`
@@ -179,10 +160,10 @@ type ClippingStage struct {
 	AttemptID         string              `json:"attempt_id,omitempty"`
 	Attempt           int                 `json:"attempt"`
 	LeaseExpiresAt    int64               `json:"lease_expires_at,omitempty"`
-	ReservedMicroUSD  int64               `json:"reserved_micro_usd"`
-	ActualMicroUSD    int64               `json:"actual_micro_usd"`
-	EstimatedMicroUSD int64               `json:"estimated_micro_usd"`
-	CostReconciled    bool                `json:"cost_reconciled"`
+	ReservedMicroUSD  int64               `json:"-"`
+	ActualMicroUSD    int64               `json:"-"`
+	EstimatedMicroUSD int64               `json:"-"`
+	CostReconciled    bool                `json:"-"`
 	LeaseToken        string              `json:"-"`
 	Error             string              `json:"error,omitempty"`
 	CreatedAt         int64               `json:"created_at"`

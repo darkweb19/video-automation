@@ -37,8 +37,12 @@ RUN apk add --no-cache ffmpeg su-exec python3 py3-pip deno=2.7.4-r2 \
 	&& PYTHONPATH=/opt/yt-dlp python3 -c 'from importlib.metadata import version; assert version("yt-dlp") == "2026.8.19"; assert version("yt-dlp-ejs") == "0.8.0"' \
 	&& yt-dlp --help | grep -q -- '--no-remote-components' \
 	&& yt-dlp --help | grep -q -- '--js-runtimes' \
+	&& yt-dlp --help | grep -q -- '--match-filter' \
+	&& yt-dlp --help | grep -q -- '--max-filesize' \
+	&& yt-dlp --help | grep -q -- '--merge-output-format' \
+	&& yt-dlp --help | grep -q -- '--remux-video' \
 	&& deno --version | grep -q -E '^deno 2\.7\.4( |$)' \
-	&& su-exec app:app env HOME=/nonexistent PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 /usr/local/share/video-automation/check_youtube_runtime_contract.py
+	&& su-exec app:app env HOME=/nonexistent PYTHONPATH=/opt/yt-dlp PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 /usr/local/share/video-automation/check_youtube_runtime_contract.py
 
 COPY --from=build --chown=app:app /out/video-automation /app/video-automation
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

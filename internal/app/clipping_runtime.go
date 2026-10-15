@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,22 +17,27 @@ import (
 )
 
 const (
-	clippingWorkerConfigSetting                  = "clipping_worker_config_v1"
-	clippingWorkerProvider                       = "modal_faster_whisper"
-	clippingWorkerModel                          = "large-v3"
-	clippingWorkerReadiness                      = "configured_not_live_checked"
-	clippingWorkerBillingBasis                   = "operator_declared_worker_second_rate_estimate"
+	clippingWorkerConfigSetting = "clipping_worker_config_v1"
+	clippingWorkerProvider      = "modal_faster_whisper"
+	clippingWorkerModel         = "large-v3"
+	clippingWorkerReadiness     = "configured_not_live_checked"
+	// The worker v2 schema still requires this cost-basis label even though its
+	// estimate is ignored and never recorded as billing data.
+	clippingWorkerProtocolCostBasis              = "operator_declared_worker_second_rate_estimate"
 	clippingWorkerMaxAttemptComputeSeconds int64 = 12 * 60 * 60
-	clippingWorkerSubmitTimeout                  = 10 * time.Second
-	clippingWorkerResponseHeaderTimeout          = 8 * time.Second
-	maxClippingWorkerConfigBodyBytes             = 8 << 10
-	maxClippingWorkerDispatchBodyBytes           = 32 << 10
-	maxClippingWorkerResponseBodyBytes           = 64 << 10
-	maxClippingWorkerTokenBytes                  = 4096
-	clippingWorkerUserAgent                      = "FrameVault-Clipping/2.0"
-	clippingWorkerMediaCapabilityHeader          = "X-FrameVault-Media-Capability"
-	clippingWorkerCallbackCapabilityHeader       = "X-FrameVault-Callback-Capability"
-	clippingWorkerConfigVersion                  = 2
+	// This fixed positive value satisfies the unchanged v2 worker schema. It is
+	// protocol compatibility data, not an estimate, reservation, or invoice.
+	clippingWorkerProtocolCompatibilityRate int64 = 1
+	clippingWorkerSubmitTimeout                   = 10 * time.Second
+	clippingWorkerResponseHeaderTimeout           = 8 * time.Second
+	maxClippingWorkerConfigBodyBytes              = 8 << 10
+	maxClippingWorkerDispatchBodyBytes            = 32 << 10
+	maxClippingWorkerResponseBodyBytes            = 64 << 10
+	maxClippingWorkerTokenBytes                   = 4096
+	clippingWorkerUserAgent                       = "FrameVault-Clipping/2.0"
+	clippingWorkerMediaCapabilityHeader           = "X-FrameVault-Media-Capability"
+	clippingWorkerCallbackCapabilityHeader        = "X-FrameVault-Callback-Capability"
+	clippingWorkerConfigVersion                   = 3
 )
 
 var (
@@ -43,15 +47,20 @@ var (
 	clippingWorkerSHA256Pattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
+type clippingIPResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
 // clippingWorkerConfig contains operator-controlled credentials and stays
 // encrypted as a single settings value. Its JSON representation is never
 // returned to the browser.
 type clippingWorkerConfig struct {
-	Enabled               bool   `json:"enabled"`
-	Endpoint              string `json:"endpoint"`
-	BearerToken           string `json:"bearer_token"`
-	RateMicroUSDPerSecond int64  `json:"rate_micro_usd_per_second"`
-	PipelineRevision      string `json:"pipeline_revision"`
+	Enabled                  bool   `json:"enabled"`
+	Endpoint                 string `json:"endpoint"`
+	BearerToken              string `json:"bearer_token"`
+	PipelineRevision         string `json:"pipeline_revision"`
+	MaxComputeSeconds        int64  `json:"max_compute_seconds"`
+	LegacyRateMicroUSDSecond int64  `json:"rate_micro_usd_per_second,omitempty"`
 }
 
 type clippingWorkerStoredConfig struct {
@@ -63,38 +72,36 @@ type clippingWorkerStoredConfig struct {
 // request contract. Blank bearer_token and pipeline_revision values preserve
 // their existing encrypted values when a valid configuration is already stored.
 type clippingWorkerConfigInput struct {
-	Enabled               bool   `json:"enabled"`
-	Endpoint              string `json:"endpoint"`
-	BearerToken           string `json:"bearer_token"`
-	RateMicroUSDPerSecond int64  `json:"rate_micro_usd_per_second"`
-	PipelineRevision      string `json:"pipeline_revision"`
+	Enabled           bool   `json:"enabled"`
+	Endpoint          string `json:"endpoint"`
+	BearerToken       string `json:"bearer_token"`
+	PipelineRevision  string `json:"pipeline_revision"`
+	MaxComputeSeconds int64  `json:"max_compute_seconds"`
 }
 
 // clippingWorkerConfigView is deliberately secret-free and reports only the
 // validated hostname for the operator's Modal endpoint.
 type clippingWorkerConfigView struct {
-	Configured               bool   `json:"configured"`
-	Enabled                  bool   `json:"enabled"`
-	EndpointHost             string `json:"endpoint_host"`
-	Provider                 string `json:"provider"`
-	Model                    string `json:"model"`
-	RateMicroUSDPerSecond    int64  `json:"rate_micro_usd_per_second"`
-	PipelineRevision         string `json:"pipeline_revision"`
-	MaxAttemptComputeSeconds int64  `json:"max_attempt_compute_seconds"`
-	Readiness                string `json:"readiness"`
-	Capabilities             struct {
+	Configured        bool   `json:"configured"`
+	Enabled           bool   `json:"enabled"`
+	EndpointHost      string `json:"endpoint_host"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	PipelineRevision  string `json:"pipeline_revision"`
+	MaxComputeSeconds int64  `json:"max_compute_seconds"`
+	Readiness         string `json:"readiness"`
+	Capabilities      struct {
 		FullTimelineASR    bool `json:"full_timeline_asr"`
 		OriginalScript     bool `json:"original_script"`
 		AudioEvents        bool `json:"audio_events"`
 		SceneMotionEvents  bool `json:"scene_motion_events"`
 		CandidateSelection bool `json:"candidate_selection"`
 	} `json:"capabilities"`
-	BillingBasis string `json:"billing_basis"`
 }
 
-// clippingWorkerDispatchV2 is the canonical Modal submission body. The
-// estimate rate is explicitly declared by the operator and is not an invoice
-// rate or a claim about Modal charges.
+// clippingWorkerDispatchV2 is the canonical Modal submission body. Its
+// required positive rate is fixed protocol-compatibility data; the derived
+// estimate is ignored and never recorded as billing data.
 type clippingWorkerDispatchV2 struct {
 	ProtocolVersion       string `json:"protocol_version"`
 	Model                 string `json:"model"`
@@ -122,7 +129,7 @@ type clippingWorkerDispatchV2 struct {
 type clippingWorkerDialContext func(context.Context, string, string) (net.Conn, error)
 
 // clippingWorkerDispatchOutcomeError records whether the outbound HTTP call
-// began. Callers may release a reservation only when the dispatch is known to
+// began. Callers may mark an attempt retryable only when dispatch is known to
 // have remained on the pre-submit side of that boundary.
 type clippingWorkerDispatchOutcomeError struct {
 	submissionAttempted bool
@@ -204,7 +211,7 @@ func (a *dashboardApp) updateClippingWorkerConfig(w http.ResponseWriter, r *http
 	config, err := saveClippingWorkerConfig(a.store, a.security, input)
 	if err != nil {
 		if errors.Is(err, errInvalidClippingWorkerConfig) {
-			writeError(w, http.StatusBadRequest, "worker endpoint, bearer token, and positive rate must be valid")
+			writeError(w, http.StatusBadRequest, "worker endpoint, bearer token, pipeline revision, and compute timeout must be valid")
 		} else {
 			writeError(w, http.StatusInternalServerError, "could not save clipping worker configuration")
 		}
@@ -216,14 +223,14 @@ func (a *dashboardApp) updateClippingWorkerConfig(w http.ResponseWriter, r *http
 // dispatchPreparedClippingStage loads the current encrypted operator settings
 // for each attempt, so disabling or changing the worker takes effect without
 // restarting the application.
-func (a *dashboardApp) dispatchPreparedClippingStage(ctx context.Context, prepared clippingPreparedDispatch, maxComputeSeconds int64) error {
-	return a.dispatchPreparedClippingStageWithDispatcher(ctx, prepared, maxComputeSeconds, nil)
+func (a *dashboardApp) dispatchPreparedClippingStage(ctx context.Context, prepared clippingPreparedDispatch) error {
+	return a.dispatchPreparedClippingStageWithDispatcher(ctx, prepared, nil)
 }
 
 // dispatchPreparedClippingStageWithDispatcher keeps the final current-attempt
 // check immediately adjacent to the outbound call. The injected dispatcher is
 // used by local tests to exercise cancellation between durable setup and send.
-func (a *dashboardApp) dispatchPreparedClippingStageWithDispatcher(ctx context.Context, prepared clippingPreparedDispatch, maxComputeSeconds int64, dispatcher *clippingWorkerDispatcher) error {
+func (a *dashboardApp) dispatchPreparedClippingStageWithDispatcher(ctx context.Context, prepared clippingPreparedDispatch, dispatcher *clippingWorkerDispatcher) error {
 	if a == nil || a.store == nil || a.security == nil {
 		return clippingWorkerDispatchFailure(errors.New("clipping worker configuration is unavailable"), false)
 	}
@@ -236,7 +243,7 @@ func (a *dashboardApp) dispatchPreparedClippingStageWithDispatcher(ctx context.C
 		return clippingWorkerDispatchFailure(errors.New("clipping worker configuration is invalid"), false)
 	}
 	prepared.Payload.PipelineRevision = config.PipelineRevision
-	if _, err := buildClippingWorkerDispatchV2(prepared.Payload, config.RateMicroUSDPerSecond, maxComputeSeconds); err != nil {
+	if _, err := buildClippingWorkerDispatchV2(prepared.Payload, clippingWorkerProtocolCompatibilityRate, config.MaxComputeSeconds); err != nil {
 		return clippingWorkerDispatchFailure(err, false)
 	}
 	leaseToken, err := a.clippingCapability(prepared.Payload.JobID, prepared.Payload.AttemptID, clippingCapabilityLease)
@@ -248,11 +255,10 @@ func (a *dashboardApp) dispatchPreparedClippingStageWithDispatcher(ctx context.C
 	); err != nil {
 		return clippingWorkerDispatchFailure(errors.New("clipping worker pipeline revision could not be persisted"), false)
 	}
-	if err := a.store.SetClippingAttemptEstimateTerms(
-		prepared.Payload.JobID, prepared.Payload.Stage, prepared.Payload.AttemptID,
-		leaseToken, config.RateMicroUSDPerSecond, maxComputeSeconds,
+	if err := a.store.SetClippingAttemptComputeLimit(
+		prepared.Payload.JobID, prepared.Payload.Stage, prepared.Payload.AttemptID, leaseToken, config.MaxComputeSeconds,
 	); err != nil {
-		return clippingWorkerDispatchFailure(errors.New("clipping worker estimate terms could not be persisted"), false)
+		return clippingWorkerDispatchFailure(errors.New("clipping worker compute timeout could not be persisted"), false)
 	}
 	if dispatcher == nil {
 		dispatcher = newClippingWorkerDispatcher(nil, nil, nil)
@@ -261,14 +267,12 @@ func (a *dashboardApp) dispatchPreparedClippingStageWithDispatcher(ctx context.C
 		if err := checkCtx.Err(); err != nil {
 			return errors.New("clipping worker dispatch context ended before submission")
 		}
-		return a.checkClippingWorkerAttemptCurrent(
-			checkCtx, prepared.Payload, leaseToken, config.RateMicroUSDPerSecond, maxComputeSeconds, config.PipelineRevision,
-		)
+		return a.checkClippingWorkerAttemptCurrent(checkCtx, prepared.Payload, leaseToken, config.PipelineRevision)
 	}
-	return dispatcher.dispatch(ctx, config, prepared, maxComputeSeconds)
+	return dispatcher.dispatch(ctx, config, prepared)
 }
 
-func (a *dashboardApp) checkClippingWorkerAttemptCurrent(ctx context.Context, dispatch clippingStageDispatch, leaseToken string, rateMicroUSDPerSecond, maxComputeSeconds int64, pipelineRevision string) error {
+func (a *dashboardApp) checkClippingWorkerAttemptCurrent(ctx context.Context, dispatch clippingStageDispatch, leaseToken, pipelineRevision string) error {
 	if a == nil || a.store == nil || a.store.db == nil || ctx == nil {
 		return errors.New("clipping worker attempt state is unavailable")
 	}
@@ -289,8 +293,7 @@ func (a *dashboardApp) checkClippingWorkerAttemptCurrent(ctx context.Context, di
 	attempt, err := readClippingAttempt(tx, dispatch.JobID, dispatch.Stage, dispatch.AttemptID)
 	if err != nil || attempt.Status != "running" || attempt.SettledAt != 0 ||
 		attempt.LeaseExpiresAt != dispatch.ExpiresAt || !validClippingLease(leaseToken, attempt.TokenHash) ||
-		attempt.PipelineRevision != pipelineRevision || attempt.OperatorRateMicroUSDPerSecond != rateMicroUSDPerSecond ||
-		attempt.MaxComputeSeconds != maxComputeSeconds {
+		attempt.PipelineRevision != pipelineRevision {
 		return errors.New("clipping worker attempt is no longer current")
 	}
 	var sourceID, sourceSHA256, claimRevision, claimAttemptID string
@@ -355,7 +358,7 @@ func decodeClippingWorkerConfigInput(w http.ResponseWriter, r *http.Request) (cl
 		writeError(w, http.StatusBadRequest, "worker configuration must contain the required fields")
 		return clippingWorkerConfigInput{}, errors.New("invalid worker configuration fields")
 	}
-	for _, name := range []string{"enabled", "endpoint", "bearer_token", "rate_micro_usd_per_second", "pipeline_revision"} {
+	for _, name := range []string{"enabled", "endpoint", "bearer_token", "pipeline_revision", "max_compute_seconds"} {
 		if _, ok := fields[name]; !ok {
 			writeError(w, http.StatusBadRequest, "worker configuration must contain the required fields")
 			return clippingWorkerConfigInput{}, errors.New("missing worker configuration field")
@@ -363,7 +366,7 @@ func decodeClippingWorkerConfigInput(w http.ResponseWriter, r *http.Request) (cl
 	}
 	var input clippingWorkerConfigInput
 	if !isJSONBoolean(fields["enabled"]) || !isJSONString(fields["endpoint"]) || !isJSONString(fields["bearer_token"]) ||
-		!isJSONInteger(fields["rate_micro_usd_per_second"]) || !isJSONString(fields["pipeline_revision"]) {
+		!isJSONInteger(fields["max_compute_seconds"]) || !isJSONString(fields["pipeline_revision"]) {
 		writeError(w, http.StatusBadRequest, "invalid worker configuration request")
 		return clippingWorkerConfigInput{}, errors.New("worker configuration field has the wrong type")
 	}
@@ -379,7 +382,7 @@ func decodeClippingWorkerConfigInput(w http.ResponseWriter, r *http.Request) (cl
 		writeError(w, http.StatusBadRequest, "invalid worker configuration request")
 		return clippingWorkerConfigInput{}, err
 	}
-	if err := json.Unmarshal(fields["rate_micro_usd_per_second"], &input.RateMicroUSDPerSecond); err != nil {
+	if err := json.Unmarshal(fields["max_compute_seconds"], &input.MaxComputeSeconds); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid worker configuration request")
 		return clippingWorkerConfigInput{}, err
 	}
@@ -434,11 +437,15 @@ func loadClippingWorkerConfig(store *Store, security *Security) (clippingWorkerC
 	var stored clippingWorkerStoredConfig
 	decoder := json.NewDecoder(strings.NewReader(plaintext))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&stored); err != nil || (stored.Version != 1 && stored.Version != clippingWorkerConfigVersion) {
+	if err := decoder.Decode(&stored); err != nil || stored.Version < 1 || stored.Version > clippingWorkerConfigVersion {
 		return clippingWorkerConfig{}, false, errors.New("clipping worker configuration is invalid")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return clippingWorkerConfig{}, false, errors.New("clipping worker configuration is invalid")
+	}
+	// Older configurations predated the bounded compute timeout.
+	if stored.Config.MaxComputeSeconds == 0 {
+		stored.Config.MaxComputeSeconds = clippingWorkerMaxAttemptComputeSeconds
 	}
 	// Version 1 predated pipeline pinning. Preserve its encrypted endpoint and
 	// bearer token for operator edits, but require an explicit re-enable after a
@@ -470,7 +477,7 @@ func saveClippingWorkerConfig(store *Store, security *Security, input clippingWo
 	}
 	config, err := validateClippingWorkerConfig(clippingWorkerConfig{
 		Enabled: input.Enabled, Endpoint: input.Endpoint, BearerToken: token,
-		RateMicroUSDPerSecond: input.RateMicroUSDPerSecond, PipelineRevision: pipelineRevision,
+		PipelineRevision: pipelineRevision, MaxComputeSeconds: input.MaxComputeSeconds,
 	})
 	if err != nil {
 		return clippingWorkerConfig{}, errInvalidClippingWorkerConfig
@@ -491,12 +498,9 @@ func saveClippingWorkerConfig(store *Store, security *Security, input clippingWo
 
 func validateClippingWorkerConfig(config clippingWorkerConfig) (clippingWorkerConfig, error) {
 	normalizedEndpoint, _, err := normalizeClippingWorkerEndpoint(config.Endpoint)
-	if err != nil || !validClippingWorkerBearer(config.BearerToken) || config.RateMicroUSDPerSecond <= 0 ||
+	if err != nil || !validClippingWorkerBearer(config.BearerToken) || config.MaxComputeSeconds < 1 || config.MaxComputeSeconds > clippingWorkerMaxAttemptComputeSeconds ||
 		(config.PipelineRevision != "" && !validClippingWorkerPipelineRevision(config.PipelineRevision)) ||
 		(config.Enabled && !validClippingWorkerPipelineRevision(config.PipelineRevision)) {
-		return clippingWorkerConfig{}, errInvalidClippingWorkerConfig
-	}
-	if _, err := estimateClippingWorkerCost(config.RateMicroUSDPerSecond, clippingWorkerMaxAttemptComputeSeconds); err != nil {
 		return clippingWorkerConfig{}, errInvalidClippingWorkerConfig
 	}
 	config.Endpoint = normalizedEndpoint
@@ -568,8 +572,8 @@ func safeClippingWorkerConfigView(config clippingWorkerConfig, configured bool) 
 	view := clippingWorkerConfigView{
 		Configured: configured, Enabled: configured && config.Enabled,
 		Provider: clippingWorkerProvider, Model: clippingWorkerModel,
-		MaxAttemptComputeSeconds: clippingWorkerMaxAttemptComputeSeconds,
-		Readiness:                clippingWorkerReadiness, BillingBasis: clippingWorkerBillingBasis,
+		MaxComputeSeconds: clippingWorkerMaxAttemptComputeSeconds,
+		Readiness:         clippingWorkerReadiness,
 	}
 	view.Capabilities.FullTimelineASR = true
 	view.Capabilities.OriginalScript = true
@@ -579,7 +583,7 @@ func safeClippingWorkerConfigView(config clippingWorkerConfig, configured bool) 
 	if !configured {
 		return view
 	}
-	view.RateMicroUSDPerSecond = config.RateMicroUSDPerSecond
+	view.MaxComputeSeconds = config.MaxComputeSeconds
 	view.PipelineRevision = config.PipelineRevision
 	_, host, err := normalizeClippingWorkerEndpoint(config.Endpoint)
 	if err == nil {
@@ -595,7 +599,7 @@ func buildClippingWorkerDispatchV2(dispatch clippingStageDispatch, rateMicroUSDP
 		!validClippingWorkerPipelineRevision(dispatch.PipelineRevision) ||
 		dispatch.DispatchID != dispatch.JobID+":"+dispatch.Stage || dispatch.SourceDurationMS < 1 ||
 		dispatch.SourceDurationMS > MaxClippingSourceDurationMS || dispatch.ExpiresAt <= now || dispatch.ExpiresAt > now+int64(clippingWorkerMaxAttemptComputeSeconds) ||
-		dispatch.CallbackExpiresAt <= now || dispatch.CallbackExpiresAt > dispatch.ExpiresAt+int64(clippingCallbackAccountingGrace.Seconds()) ||
+		dispatch.CallbackExpiresAt <= now || dispatch.CallbackExpiresAt > dispatch.ExpiresAt+int64(clippingCallbackCapabilityGrace.Seconds()) ||
 		!clippingWorkerSHA256Pattern.MatchString(dispatch.SourceSHA256) || !validClippingContentType(dispatch.ContentType) ||
 		dispatch.MinClipSeconds < ClippingDefaultMinClipSeconds || dispatch.MaxClipSeconds > ClippingDefaultMaxClipSeconds ||
 		dispatch.MinClipSeconds > dispatch.MaxClipSeconds || dispatch.CandidateLimit < ClippingMinCandidateLimit ||
@@ -604,7 +608,7 @@ func buildClippingWorkerDispatchV2(dispatch clippingStageDispatch, rateMicroUSDP
 		maxComputeSeconds < 1 || maxComputeSeconds > clippingWorkerMaxAttemptComputeSeconds {
 		return clippingWorkerDispatchV2{}, errors.New("clipping worker dispatch is invalid")
 	}
-	if _, err := estimateClippingWorkerCost(rateMicroUSDPerSecond, maxComputeSeconds); err != nil {
+	if rateMicroUSDPerSecond != clippingWorkerProtocolCompatibilityRate {
 		return clippingWorkerDispatchV2{}, errors.New("clipping worker dispatch is invalid")
 	}
 	return clippingWorkerDispatchV2{
@@ -629,32 +633,7 @@ func validClippingWorkerTransferURL(raw string) bool {
 		parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" && parsed.RawFragment == ""
 }
 
-func estimateClippingWorkerCost(rateMicroUSDPerSecond, computeSeconds int64) (int64, error) {
-	if rateMicroUSDPerSecond <= 0 || computeSeconds < 0 ||
-		(computeSeconds > 0 && rateMicroUSDPerSecond > math.MaxInt64/computeSeconds) {
-		return 0, errors.New("clipping worker cost estimate is out of range")
-	}
-	return rateMicroUSDPerSecond * computeSeconds, nil
-}
-
-// clippingWorkerComputeSecondsForReservation converts the held integer
-// microUSD budget into a bounded worker compute ceiling using only the
-// operator-declared estimate rate. It does not estimate or settle an invoice.
-func clippingWorkerComputeSecondsForReservation(reservedMicroUSD, rateMicroUSDPerSecond int64) (int64, error) {
-	if reservedMicroUSD <= 0 || rateMicroUSDPerSecond <= 0 {
-		return 0, errors.New("clipping worker reservation cannot fund a compute second")
-	}
-	seconds := reservedMicroUSD / rateMicroUSDPerSecond
-	if seconds < 1 {
-		return 0, errors.New("clipping worker reservation cannot fund a compute second")
-	}
-	if seconds > clippingWorkerMaxAttemptComputeSeconds {
-		seconds = clippingWorkerMaxAttemptComputeSeconds
-	}
-	return seconds, nil
-}
-
-func (d *clippingWorkerDispatcher) dispatch(ctx context.Context, config clippingWorkerConfig, prepared clippingPreparedDispatch, maxComputeSeconds int64) (dispatchErr error) {
+func (d *clippingWorkerDispatcher) dispatch(ctx context.Context, config clippingWorkerConfig, prepared clippingPreparedDispatch) (dispatchErr error) {
 	submissionAttempted := false
 	defer func() {
 		if dispatchErr != nil {
@@ -672,7 +651,7 @@ func (d *clippingWorkerDispatcher) dispatch(ctx context.Context, config clipping
 	if !validClippingWorkerCapabilityBearer(prepared.MediaBearer) || !validClippingWorkerCapabilityBearer(prepared.CallbackBearer) {
 		return errors.New("clipping worker capabilities are unavailable")
 	}
-	dispatch, err := buildClippingWorkerDispatchV2(prepared.Payload, config.RateMicroUSDPerSecond, maxComputeSeconds)
+	dispatch, err := buildClippingWorkerDispatchV2(prepared.Payload, clippingWorkerProtocolCompatibilityRate, config.MaxComputeSeconds)
 	if err != nil {
 		return err
 	}
