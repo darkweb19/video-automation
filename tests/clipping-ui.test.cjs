@@ -183,15 +183,36 @@ function createUI(handler) {
     if (handler) return handler(endpoint, options || {}, requests);
     return {};
   };
+  const toasts = [];
+  const confirmations = [];
+  let confirmResult = true;
   const window = {
     document,
     location: { origin: "http://localhost" },
-    console: { log() {} }
+    console: { log() {} },
+    confirm(message) {
+      confirmations.push(message);
+      return confirmResult;
+    }
   };
   const context = vm.createContext({ window, document, URL, AbortController, module: undefined });
   vm.runInContext(source, context, { filename: "static/clipping.js" });
-  window.ClippingUI.configure({ request });
-  return { api: window.ClippingUI, document, elements, requests, request };
+  window.ClippingUI.configure({
+    request,
+    toast: (message, isError) => toasts.push({ message, isError }),
+    confirm: (message) => window.confirm(message)
+  });
+  return {
+    api: window.ClippingUI,
+    document,
+    elements,
+    requests,
+    request,
+    toasts,
+    confirmations,
+    window,
+    setConfirmResult(value) { confirmResult = value; }
+  };
 }
 
 async function settle() {
@@ -299,6 +320,8 @@ test("failed import displays the redacted backend message and keeps the link ava
   assert.equal(ui.elements.get("clipping-link").value, "https://www.youtube.com/watch?v=abcdefghijk");
   assert.equal(ui.elements.get("clipping-link").disabled, false);
   assert.equal(ui.document.activeElement, ui.elements.get("clipping-link"));
+  assert.equal(ui.toasts.at(-1).message, "This video is unavailable without signing in.");
+  assert.equal(ui.toasts.at(-1).isError, true);
 });
 
 test("ready sources expose a bounded analysis profile and queue a budget-free Modal job", async () => {
@@ -472,6 +495,312 @@ test("logout invalidates a pending source response and clears the clipping works
   assert.equal(ui.elements.get("clipping-source-count").textContent, "0");
 });
 
+test("source deletion confirms, prevents duplicate requests, accepts cleanup-pending 202, and removes analyses", async () => {
+  const source = { id: "clipsrc_remove", kind: "youtube_original_file", status: "ready", title: "Video to remove" };
+  const job = { id: "clipjob_remove", source_id: source.id, status: "running", content_type: "general" };
+  let sources = [source];
+  let jobs = [job];
+  let finishDelete;
+  const pendingDelete = new Promise((resolve) => { finishDelete = resolve; });
+  const ui = createUI(async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: false, enabled: false };
+    if (endpoint === "/api/clipping/sources") return { sources };
+    if (endpoint === "/api/clipping/jobs") return { jobs };
+    if (endpoint === "/api/clipping/sources/clipsrc_remove" && options.method === "DELETE") {
+      return pendingDelete.then((response) => {
+        sources = [];
+        jobs = [];
+        return response;
+      });
+    }
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+
+  const remove = findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "button" && node.textContent === "Delete video");
+  assert.ok(remove);
+  assert.equal(remove.getAttribute("aria-label"), "Delete imported video Video to remove");
+  ui.setConfirmResult(false);
+  remove.click();
+  await settle();
+  assert.match(ui.confirmations[0], /delete.*Video to remove.*analyses.*stops any analysis/i);
+  assert.equal(ui.requests.filter((call) => call.options.method === "DELETE").length, 0);
+  assert.equal(ui.toasts.length, 0);
+
+  ui.setConfirmResult(true);
+  remove.click();
+  await settle();
+  const pendingButton = findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "button" && node.textContent === "Deleting…");
+  assert.ok(pendingButton);
+  assert.equal(pendingButton.getAttribute("aria-disabled"), "true");
+  pendingButton.click();
+  await settle();
+  assert.equal(ui.requests.filter((call) => call.options.method === "DELETE").length, 1);
+
+  finishDelete({ cleanup_pending: true });
+  await settle();
+  const deleteCall = ui.requests.find((call) => call.endpoint === "/api/clipping/sources/clipsrc_remove" && call.options.method === "DELETE");
+  assert.ok(deleteCall);
+  assert.equal(deleteCall.options.body, undefined);
+  assert.equal(ui.elements.get("clipping-source-count").textContent, "0");
+  assert.equal(ui.elements.get("clipping-job-count").textContent, "0");
+  assert.doesNotMatch(treeText(ui.elements.get("clipping-jobs")), /clipjob_remove|Video to remove/);
+  assert.equal(ui.toasts.at(-1).message, "Video and analyses removed. File cleanup is still finishing.");
+  assert.equal(ui.toasts.at(-1).isError, false);
+});
+
+test("active analysis deletion confirms cancellation and keeps its imported video", async () => {
+  const source = { id: "clipsrc_keep", kind: "youtube_original_file", status: "ready", title: "Keep this video" };
+  const job = { id: "clipjob_active", source_id: source.id, status: "running", content_type: "podcast" };
+  let jobs = [job];
+  const ui = createUI(async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: true, enabled: true };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs") return { jobs };
+    if (endpoint === "/api/clipping/jobs/clipjob_active" && options.method === "DELETE") {
+      jobs = [];
+      return null;
+    }
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+  const remove = findNode(ui.elements.get("clipping-jobs"), (node) => node.tagName === "button" && node.textContent === "Delete analysis");
+  assert.ok(remove);
+  assert.equal(remove.getAttribute("aria-label"), "Delete analysis for Keep this video");
+  remove.click();
+  await settle();
+  assert.match(ui.confirmations[0], /stops the analysis in progress and keeps the imported video/);
+  assert.ok(ui.requests.some((call) => call.endpoint === "/api/clipping/jobs/clipjob_active" && call.options.method === "DELETE"));
+  assert.equal(ui.elements.get("clipping-source-count").textContent, "1");
+  assert.equal(ui.elements.get("clipping-job-count").textContent, "0");
+  assert.match(ui.toasts.at(-1).message, /stopped and deleted/);
+});
+
+test("delete failures toast and remain visible inline for both sources and analyses", async () => {
+  const source = { id: "clipsrc_error", kind: "youtube_original_file", status: "ready", title: "Protected video" };
+  const job = { id: "clipjob_error", source_id: source.id, status: "completed", content_type: "general" };
+  const ui = createUI(async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: false, enabled: false };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs") return { jobs: [job] };
+    if (options.method === "DELETE") {
+      const error = new Error(endpoint.includes("sources") ? "Source deletion failed." : "Analysis deletion failed.");
+      error.status = 500;
+      throw error;
+    }
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+  findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "button" && node.textContent === "Delete video").click();
+  await settle();
+  assert.match(treeText(ui.elements.get("clipping-sources")), /Source deletion failed/);
+  assert.equal(ui.toasts.at(-1).message, "Source deletion failed.");
+  assert.equal(ui.toasts.at(-1).isError, true);
+  findNode(ui.elements.get("clipping-jobs"), (node) => node.tagName === "button" && node.textContent === "Delete analysis").click();
+  await settle();
+  assert.match(treeText(ui.elements.get("clipping-jobs")), /Analysis deletion failed/);
+  assert.equal(ui.toasts.at(-1).message, "Analysis deletion failed.");
+  assert.equal(ui.toasts.filter((toast) => toast.isError).length, 2);
+});
+
+test("deleting an ambiguously created analysis clears its idempotency key before the next analysis", async () => {
+  const source = { id: "clipsrc_ambiguous", kind: "youtube_original_file", status: "ready", title: "Ambiguous analysis video" };
+  const existingJob = { id: "clipjob_ambiguous", source_id: source.id, status: "completed", content_type: "general" };
+  const newJob = { id: "clipjob_after_delete", source_id: source.id, status: "queued", content_type: "general" };
+  let jobs = [];
+  const idempotencyKeys = [];
+  let postCount = 0;
+  const ui = createUI(async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: true, enabled: true };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs" && options.method === "POST") {
+      postCount++;
+      idempotencyKeys.push(options.headers["Idempotency-Key"]);
+      if (postCount === 1) {
+        jobs = [existingJob];
+        throw new Error("The connection was interrupted after queueing.");
+      }
+      jobs = [newJob];
+      return { job: newJob };
+    }
+    if (endpoint === "/api/clipping/jobs/clipjob_ambiguous" && options.method === "DELETE") {
+      jobs = [];
+      return null;
+    }
+    if (endpoint === "/api/clipping/jobs") return { jobs };
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+  findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "button" && node.textContent === "Analyze").click();
+  await settle();
+  assert.equal(postCount, 1);
+  await ui.api.refresh();
+  assert.ok(findNode(ui.elements.get("clipping-jobs"), (node) => node.dataset.jobId === existingJob.id));
+  findNode(ui.elements.get("clipping-jobs"), (node) => node.tagName === "button" && node.textContent === "Delete analysis").click();
+  await settle();
+  findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "button" && node.textContent === "Analyze").click();
+  await settle();
+  assert.equal(postCount, 2);
+  assert.notEqual(idempotencyKeys[1], idempotencyKeys[0]);
+  assert.ok(findNode(ui.elements.get("clipping-jobs"), (node) => node.dataset.jobId === newJob.id));
+});
+
+test("initial failed analyses stay silent; SSE failure toasts once per analysis attempt", async () => {
+  const source = { id: "clipsrc_toast", kind: "youtube_original_file", status: "ready", title: "Toast video" };
+  const oldFailure = {
+    id: "clipjob_old_failure", source_id: source.id, status: "failed", error: "old failure",
+    stages: [{ name: "analysis", attempt_id: "attempt_old" }]
+  };
+  const active = {
+    id: "clipjob_sse_failure", source_id: source.id, status: "running",
+    stages: [{ name: "analysis", attempt_id: "attempt_1" }]
+  };
+  let jobs = [oldFailure];
+  const ui = createUI(async (endpoint) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: true, enabled: true };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs") return { jobs };
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+  assert.equal(ui.toasts.length, 0);
+  ui.api.handleEvent("clipping_job", { data: JSON.stringify({ id: oldFailure.id, job: oldFailure }) });
+  await settle();
+  assert.equal(ui.toasts.length, 0);
+
+  jobs = [oldFailure, active];
+  await ui.api.refresh();
+  jobs = [oldFailure, Object.assign({}, active, { status: "failed", updated_at: "2026-10-15T12:00:00Z", error: "safe worker error" })];
+  const failed = jobs[1];
+  ui.api.handleEvent("clipping_job", { data: JSON.stringify({ id: failed.id, job: failed }) });
+  await settle();
+  assert.equal(ui.toasts.length, 1);
+  assert.equal(ui.toasts[0].message, "Analysis failed. See the job for details.");
+  assert.equal(ui.toasts[0].isError, true);
+  assert.equal(ui.toasts[0].message.includes("safe worker error"), false);
+
+  ui.api.handleEvent("clipping_job", { data: JSON.stringify({ id: failed.id, job: Object.assign({}, failed, { updated_at: "2026-10-15T12:01:00Z" }) }) });
+  await settle();
+  assert.equal(ui.toasts.length, 1);
+
+  const retry = Object.assign({}, failed, { status: "running", stages: [{ name: "analysis", attempt_id: "attempt_2" }] });
+  jobs = [oldFailure, retry];
+  ui.api.handleEvent("clipping_job", { data: JSON.stringify({ id: retry.id, job: retry }) });
+  await settle();
+  const retryFailure = Object.assign({}, retry, { status: "failed" });
+  jobs = [oldFailure, retryFailure];
+  ui.api.handleEvent("clipping_job", { data: JSON.stringify({ id: retry.id, job: retryFailure }) });
+  await settle();
+  assert.equal(ui.toasts.length, 2);
+});
+
+test("refresh detects a failure only after observing the analysis as active", async () => {
+  const source = { id: "clipsrc_refresh_failure", kind: "youtube_original_file", status: "ready", title: "Refresh video" };
+  let jobs = [{ id: "clipjob_refresh_failure", source_id: source.id, status: "queued", stages: [{ name: "analysis", attempt_id: "attempt_refresh" }] }];
+  const ui = createUI(async (endpoint) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: true, enabled: true };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs") return { jobs };
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+  jobs = [{ id: "clipjob_refresh_failure", source_id: source.id, status: "failed", error: "safe failure", stages: [{ name: "analysis", attempt_id: "attempt_refresh" }] }];
+  await ui.api.refresh({ notify: true });
+  assert.equal(ui.toasts.length, 1);
+  assert.equal(ui.toasts[0].message, "Analysis failed. See the job for details.");
+  await ui.api.refresh({ notify: true });
+  assert.equal(ui.toasts.length, 1);
+});
+
+test("a fast failed POST response is tracked and toasted before the job list refresh", async () => {
+  const source = { id: "clipsrc_fast_failure", kind: "youtube_original_file", status: "ready", title: "Fast failure video" };
+  let jobs = [];
+  const failed = {
+    id: "clipjob_fast_failure", source_id: source.id, status: "failed", error: "safe Go preflight message",
+    stages: [{ name: "analysis", attempt_id: "attempt_fast" }]
+  };
+  let ui;
+  ui = createUI(async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: true, enabled: true };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs" && options.method === "POST") {
+      jobs = [failed];
+      ui.api.handleEvent("clipping_job", { data: JSON.stringify({ id: failed.id, job: failed }) });
+      return { job: failed };
+    }
+    if (endpoint === "/api/clipping/jobs") return { jobs };
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+  findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "button" && node.textContent === "Analyze").click();
+  await settle();
+  assert.equal(ui.toasts.length, 1);
+  assert.equal(ui.toasts[0].message, "Analysis failed. See the job for details.");
+  assert.equal(ui.toasts[0].message.includes("safe Go preflight message"), false);
+  assert.match(treeText(ui.elements.get("clipping-jobs")), /safe Go preflight message/);
+});
+
+test("deleted analysis tombstones block late result responses and job events from restoring results", async () => {
+  const source = { id: "clipsrc_late_result", kind: "youtube_original_file", status: "ready", title: "Deleted result video" };
+  const job = { id: "clipjob_late_result", source_id: source.id, status: "completed", content_type: "general" };
+  let finishResults;
+  const lateResults = new Promise((resolve) => { finishResults = resolve; });
+  let resultCalls = 0;
+  const ui = createUI(async (endpoint) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: false, enabled: false };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs") return { jobs: [job] };
+    if (endpoint === "/api/clipping/jobs/clipjob_late_result/results") {
+      resultCalls++;
+      return lateResults;
+    }
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+  findNode(ui.elements.get("clipping-jobs"), (node) => node.tagName === "button" && node.textContent === "View saved analysis").click();
+  await settle();
+  ui.api.handleEvent("clipping_job", { data: JSON.stringify({ id: job.id, job: Object.assign({}, job, { analysis_deleted: true }) }) });
+  await settle();
+  finishResults({ job_id: job.id, artifacts: [{ payload_json: JSON.stringify({ payload: { candidates: [{ title: "Must not return" }] } }) }] });
+  await settle();
+  ui.api.handleEvent("clipping_job", { data: JSON.stringify({ id: job.id, job }) });
+  await ui.api.refresh();
+  assert.equal(ui.elements.get("clipping-job-count").textContent, "0");
+  assert.doesNotMatch(treeText(ui.elements.get("clipping-jobs")), /Must not return|Deleted result video/);
+  assert.equal(resultCalls, 1);
+});
+
+test("logout invalidates a pending clipping deletion response", async () => {
+  const source = { id: "clipsrc_logout_delete", kind: "youtube_original_file", status: "ready", title: "Logout deletion" };
+  let finishDelete;
+  const pendingDelete = new Promise((resolve) => { finishDelete = resolve; });
+  const ui = createUI(async (endpoint, options) => {
+    if (endpoint === "/api/clipping/config") return {};
+    if (endpoint === "/api/clipping/config/worker") return { configured: false, enabled: false };
+    if (endpoint === "/api/clipping/sources") return { sources: [source] };
+    if (endpoint === "/api/clipping/jobs") return { jobs: [] };
+    if (endpoint === "/api/clipping/sources/clipsrc_logout_delete" && options.method === "DELETE") return pendingDelete;
+    throw new Error("Unexpected request to " + endpoint);
+  });
+  await ui.api.start();
+  findNode(ui.elements.get("clipping-sources"), (node) => node.tagName === "button" && node.textContent === "Delete video").click();
+  await settle();
+  ui.api.stop(true);
+  finishDelete({ cleanup_pending: true });
+  await settle();
+  assert.equal(ui.elements.get("clipping-source-count").textContent, "0");
+  assert.doesNotMatch(treeText(ui.elements.get("clipping-sources")), /Logout deletion/);
+  assert.equal(ui.toasts.length, 0);
+});
+
 test("Clipping contains only YouTube import and read-only analysis UI and uses authenticated event refreshes", () => {
   const start = markup.indexOf('<section id="clipping-view"');
   const end = markup.indexOf('<section class="view" data-page="vault"', start);
@@ -479,12 +808,15 @@ test("Clipping contains only YouTube import and read-only analysis UI and uses a
   assert.doesNotMatch(clippingMarkup, /type="file"|clipping-batch|batch|budget|retention|invoice|reconcil|Google Drive|Dropbox|export|publishing|candidate editor/i);
   assert.doesNotMatch(source, /\/api\/clipping\/(batches|sources\/upload|config\/retention)|reconcile-cost|\/selection|\/cancel|\/retry|budget_micro_usd|rate_micro_usd_per_second/i);
   assert.doesNotMatch(styles, /upload|batch|budget|retention|invoice|reconcil/i);
-  assert.match(markup, /\/static\/clipping\.js\?v=20261014-youtube-modal-simple/);
-  assert.match(markup, /\/static\/clipping\.css\?v=20261014-youtube-modal-simple/);
+  assert.match(markup, /\/static\/clipping\.js\?v=20261015-delete-abort/);
+  assert.match(markup, /\/static\/clipping\.css\?v=20261015-delete-abort/);
+  assert.match(markup, /\/static\/app\.js\?v=20261015-delete-abort/);
   assert.doesNotMatch(clippingMarkup, /\/docs\/clipping/);
   assert.doesNotMatch(source, /setInterval|setTimeout|fetch\s*\(/);
   assert.match(dashboardSource, /source\.addEventListener\("clipping_source"/);
   assert.match(dashboardSource, /source\.addEventListener\("clipping_job"/);
+  assert.match(dashboardSource, /ClippingUI\?\.configure\([\s\S]*toast:/);
+  assert.match(dashboardSource, /confirm: \(message\) => window\.confirm\(message\)/);
   assert.match(dashboardSource, /credentials:\s*"same-origin"/);
   assert.match(source, /\/api\/clipping\/jobs\/" \+ encodeURIComponent\(id\) \+ "\/results"/);
 });

@@ -108,8 +108,9 @@ type clippingOperationRegistry struct {
 // ClippingAcquisition owns the bounded YouTube import adapter. Its Store
 // remains the source of truth for source state and import leases.
 type ClippingAcquisition struct {
-	store    *Store
-	security *Security
+	store               *Store
+	security            *Security
+	deleteOperationWait time.Duration
 
 	probe                    clippingMediaProbe
 	now                      func() time.Time
@@ -448,38 +449,94 @@ func (a *ClippingAcquisition) startImportLeaseKeepalive(parent context.Context, 
 	return ctx, stop, failure
 }
 
-// CancelSource stops any active stream before installing a durable tombstone.
-func (a *ClippingAcquisition) CancelSource(ctx context.Context, sourceID string) error {
+// DeleteSource stops any active import before installing a durable tombstone,
+// then removes its local media. Job audit rows and callback capabilities stay
+// available long enough for late worker callbacks to settle safely.
+func (a *ClippingAcquisition) DeleteSource(ctx context.Context, sourceID string) ([]string, bool, error) {
 	if a == nil || a.store == nil {
-		return errors.New("clipping source storage is unavailable")
+		return nil, false, errors.New("clipping source storage is unavailable")
 	}
 	done := a.cancelOperation(sourceID)
+	cleanupPending := false
 	if done != nil {
+		waitFor := a.deleteOperationWait
+		if waitFor <= 0 {
+			waitFor = 5 * time.Second
+		}
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(waitFor):
+			cleanupPending = true
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, false, err
 	}
 	a.store.clippingMu.Lock()
 	defer a.store.clippingMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, false, err
 	}
-	if err := a.store.TombstoneClippingSource(sourceID); err != nil {
-		return err
+	jobIDs, err := a.store.DeleteClippingSource(sourceID)
+	if err != nil {
+		return nil, false, err
 	}
 	a.store.PublishClippingSource(sourceID)
+	if done != nil {
+		select {
+		case <-done:
+			cleanupPending = false
+		default:
+			cleanupPending = true
+		}
+	}
+	if cleanupPending {
+		// Leave cleanup_complete=false. The retention cleanup loop skips live
+		// operations and removes the directory after this canceled importer exits.
+		go a.cleanupDeletedSourceAfterOperation(sourceID, done)
+		return jobIDs, true, nil
+	}
 	if err := a.removeSourceFiles(sourceID); err != nil {
-		return err
+		return jobIDs, false, err
 	}
 	if err := a.store.MarkClippingSourceCleaned(sourceID); err != nil {
-		return err
+		return jobIDs, false, err
 	}
 	a.store.PublishClippingSource(sourceID)
-	return nil
+	return jobIDs, false, nil
+}
+
+func (a *ClippingAcquisition) cleanupDeletedSourceAfterOperation(sourceID string, done <-chan struct{}) {
+	if done == nil {
+		return
+	}
+	<-done
+	a.store.clippingMu.Lock()
+	defer a.store.clippingMu.Unlock()
+	source, err := a.store.ClippingSource(sourceID)
+	if err != nil || source.Status != ClippingSourceDeleted || source.CleanupComplete {
+		return
+	}
+	if err := a.removeSourceFiles(sourceID); err != nil {
+		return
+	}
+	if err := a.store.MarkClippingSourceCleaned(sourceID); err != nil {
+		return
+	}
+	a.store.PublishClippingSource(sourceID)
+}
+
+// CancelSource is retained for import lifecycle callers. User initiated
+// removal is a full source deletion, including its visible analysis results.
+func (a *ClippingAcquisition) CancelSource(ctx context.Context, sourceID string) error {
+	jobIDs, _, err := a.DeleteSource(ctx, sourceID)
+	if a == nil || a.store == nil {
+		return err
+	}
+	for _, jobID := range jobIDs {
+		a.store.PublishClippingJob(jobID)
+	}
+	return err
 }
 
 // CleanupExpiredSources tombstones eligible rows before removing files, so a

@@ -126,6 +126,8 @@
     active: false,
     lifecycle: 0,
     requestImpl: null,
+    toastImpl: null,
+    confirmImpl: null,
     requestSequence: { config: 0, worker: 0, sources: 0, jobs: 0 },
     config: null,
     worker: null,
@@ -133,7 +135,15 @@
     jobs: [],
     contentTypes: new Map(),
     pendingSourceIDs: new Set(),
+    pendingDeleteSourceIDs: new Set(),
+    pendingDeleteJobIDs: new Set(),
+    pendingJobBaselines: new Map(),
+    deletedSourceIDs: new Set(),
+    deletedJobIDs: new Set(),
+    jobTracking: new Map(),
+    notifiedFailures: new Set(),
     sourceActionErrors: new Map(),
+    jobActionErrors: new Map(),
     expandedResults: new Set(),
     resultDetails: new Map(),
     resultErrors: new Map(),
@@ -201,6 +211,124 @@
       return Promise.reject(new Error("Sign in to use clipping."));
     }
     return state.requestImpl(path, options || {});
+  }
+
+  function showToast(message, isError) {
+    if (typeof state.toastImpl === "function") state.toastImpl(message, Boolean(isError));
+  }
+
+  function toastError(error, fallback) {
+    const message = error && typeof error.message === "string" && error.message
+      ? error.message
+      : fallback;
+    if (!error || error.status !== 401) showToast(message, true);
+    return message;
+  }
+
+  function confirmAction(message) {
+    return typeof state.confirmImpl === "function" && state.confirmImpl(message) === true;
+  }
+
+  function invalidateListLoads() {
+    state.requestSequence.sources++;
+    state.requestSequence.jobs++;
+  }
+
+  function clearPendingKeysForSource(sourceID) {
+    const id = safeID(sourceID);
+    if (!id) return;
+    const prefix = id + ":";
+    for (const key of state.pendingKeys.keys()) {
+      if (key.startsWith(prefix)) state.pendingKeys.delete(key);
+    }
+  }
+
+  function activeJobStatus(status) {
+    return ["queued", "running", "uncertain"].includes(String(status || "").toLowerCase());
+  }
+
+  function analysisAttemptID(job) {
+    const stages = Array.isArray(job && job.stages) ? job.stages : [];
+    const stage = stages.find((item) => item && item.name === "analysis");
+    const attemptID = stage && stage.attempt_id;
+    return typeof attemptID === "string" && attemptID.trim() ? attemptID.trim() : "";
+  }
+
+  function observeJobStatus(job) {
+    const id = safeID(job && job.id);
+    if (!id || state.deletedJobIDs.has(id) || state.deletedSourceIDs.has(safeID(job && job.source_id))) return;
+    const status = String(job && job.status || "").toLowerCase();
+    const tracking = state.jobTracking.get(id) || { active: false, lastStatus: "", failureGeneration: 0 };
+    if (activeJobStatus(status)) {
+      if (!tracking.active && tracking.lastStatus === "failed") tracking.failureGeneration++;
+      tracking.active = true;
+      tracking.lastStatus = status;
+    } else if (status === "failed") {
+      const sourceID = safeID(job && job.source_id);
+      const pendingBaseline = state.pendingJobBaselines.get(sourceID);
+      if (!tracking.active && state.pendingSourceIDs.has(sourceID) && pendingBaseline && !pendingBaseline.has(id)) {
+        tracking.active = true;
+      }
+      if (tracking.active) {
+        const attemptID = analysisAttemptID(job);
+        const failureID = attemptID || "transition-" + tracking.failureGeneration;
+        const key = id + ":" + failureID;
+        if (!state.notifiedFailures.has(key)) {
+          state.notifiedFailures.add(key);
+          showToast("Analysis failed. See the job for details.", true);
+        }
+      }
+      tracking.active = false;
+      tracking.lastStatus = "failed";
+    } else {
+      tracking.active = false;
+      tracking.lastStatus = status;
+    }
+    state.jobTracking.set(id, tracking);
+  }
+
+  function markJobDeleted(jobID, sourceID) {
+    const id = safeID(jobID);
+    if (!id) return;
+    const existing = state.jobs.find((job) => safeID(job && job.id) === id);
+    clearPendingKeysForSource(sourceID || existing && existing.source_id);
+    state.deletedJobIDs.add(id);
+    state.pendingDeleteJobIDs.delete(id);
+    state.jobActionErrors.delete(id);
+    state.jobTracking.delete(id);
+    state.expandedResults.delete(id);
+    state.resultDetails.delete(id);
+    state.resultErrors.delete(id);
+    state.loadingResults.delete(id);
+    state.jobs = state.jobs.filter((job) => safeID(job && job.id) !== id);
+  }
+
+  function markSourceDeleted(sourceID) {
+    const id = safeID(sourceID);
+    if (!id) return;
+    state.deletedSourceIDs.add(id);
+    state.pendingDeleteSourceIDs.delete(id);
+    state.pendingSourceIDs.delete(id);
+    state.pendingJobBaselines.delete(id);
+    clearPendingKeysForSource(id);
+    state.contentTypes.delete(id);
+    state.sourceActionErrors.delete(id);
+    for (const job of state.jobs.filter((item) => safeID(item && item.source_id) === id)) {
+      markJobDeleted(job.id, id);
+    }
+    state.sources = state.sources.filter((source) => safeID(source && source.id) !== id);
+  }
+
+  function focusFirstAction(container, focusKey) {
+    const visit = (node) => {
+      if (node && node.dataset && node.dataset.clippingFocusKey === focusKey) return node;
+      for (const child of node && node.children || []) {
+        const found = visit(child);
+        if (found) return found;
+      }
+      return null;
+    };
+    visit(container)?.focus?.({ preventScroll: true });
   }
 
   function focusTarget(container, focusKey) {
@@ -296,16 +424,25 @@
       const error = state.sourceActionErrors.get(id) || String(source.error_message || "").trim() || importErrorCopy(source);
       if (error) main.append(element("p", "clipping-row-error", error));
       const actions = element("div", "clipping-source-actions");
+      const deleting = state.pendingDeleteSourceIDs.has(id);
       if (status === "ready") {
         const activeJob = activeJobForSource(id);
         actions.append(makeContentTypeSelect(id, name));
         const analyze = button(activeJob ? jobStatus(activeJob) : "Analyze", "button primary clipping-action",
           () => { if (!activeJob) void createJob(id); });
         analyze.dataset.clippingFocusKey = "analyze";
-        analyze.disabled = Boolean(activeJob || state.pendingSourceIDs.has(id));
+        analyze.disabled = Boolean(activeJob || state.pendingSourceIDs.has(id) || deleting);
         if (state.pendingSourceIDs.has(id)) analyze.textContent = "Queueing analysis…";
         actions.append(analyze);
       }
+      const remove = button(deleting ? "Deleting…" : "Delete video", "button secondary clipping-action clipping-delete-action",
+        () => { void deleteSource(id); });
+      remove.dataset.clippingFocusKey = "delete-source";
+      remove.setAttribute("aria-label", (deleting ? "Deleting imported video " : "Delete imported video ") + name);
+      remove.setAttribute("aria-disabled", String(deleting || state.pendingSourceIDs.has(id)));
+      if (deleting) remove.setAttribute("aria-busy", "true");
+      remove.disabled = state.pendingSourceIDs.has(id);
+      actions.append(remove);
       row.append(main, actions);
       fragment.append(row);
     }
@@ -557,7 +694,7 @@
     row.append(header);
     const status = String(job.status || "").toLowerCase();
     if (["queued", "running"].includes(status)) renderProgress(row, "Analysis progress", statusProgress(job));
-    const error = String(job.error || "").trim();
+    const error = state.jobActionErrors.get(id) || String(job.error || "").trim();
     if (error) row.append(element("p", "clipping-row-error", error));
     const footer = element("div", "clipping-job-actions");
     footer.append(element("span", "clipping-job-meta", "Analysis type: " + (CONTENT_TYPE_LABELS[contentType(job.content_type)] || "General")));
@@ -572,6 +709,16 @@
       if (state.loadingResults.has(id)) toggle.setAttribute("aria-busy", "true");
       footer.append(toggle);
     }
+    const deleting = state.pendingDeleteJobIDs.has(id) || state.pendingDeleteSourceIDs.has(safeID(job.source_id));
+    const remove = button(deleting ? "Deleting…" : "Delete analysis", "button secondary clipping-action clipping-delete-action",
+      () => { void deleteJob(id); });
+    remove.dataset.clippingFocusKey = "delete-job";
+    const sourceNameForJob = source ? sourceName(source) : "this video";
+    remove.setAttribute("aria-label", (deleting ? "Deleting analysis for " : "Delete analysis for ") + sourceNameForJob);
+    remove.setAttribute("aria-disabled", String(deleting));
+    if (deleting) remove.setAttribute("aria-busy", "true");
+    remove.disabled = false;
+    footer.append(remove);
     row.append(footer);
     if (state.expandedResults.has(id)) {
       const results = element("div", "clipping-job-results");
@@ -594,7 +741,7 @@
     restoreFocus(ui.jobs, "jobId", focus);
   }
 
-  async function load(kind, endpoint, render, errorNode, recordName) {
+  async function load(kind, endpoint, render, errorNode, recordName, notifyError) {
     const lifecycle = state.lifecycle;
     const sequence = ++state.requestSequence[kind];
     errorNode.textContent = "";
@@ -602,16 +749,37 @@
       const response = await api(endpoint);
       if (!current(lifecycle) || sequence !== state.requestSequence[kind]) return;
       const records = Array.isArray(response) ? response : response && Array.isArray(response[recordName]) ? response[recordName] : [];
-      if (kind === "sources") state.sources = records;
-      if (kind === "jobs") state.jobs = records;
+      if (kind === "sources") {
+        for (const source of records) {
+          if (String(source && source.status || "").toLowerCase() === "deleted") markSourceDeleted(source.id);
+        }
+        state.sources = records.filter((source) => !state.deletedSourceIDs.has(safeID(source && source.id))
+          && String(source && source.status || "").toLowerCase() !== "deleted");
+      }
+      if (kind === "jobs") {
+        const visible = [];
+        for (const job of records) {
+          const id = safeID(job && job.id);
+          const sourceID = safeID(job && job.source_id);
+          if (!id) continue;
+          if (job.analysis_deleted === true || state.deletedJobIDs.has(id) || state.deletedSourceIDs.has(sourceID)) {
+            markJobDeleted(id, sourceID);
+            continue;
+          }
+          observeJobStatus(job);
+          visible.push(job);
+        }
+        state.jobs = visible;
+      }
       render();
     } catch (error) {
       if (!current(lifecycle) || sequence !== state.requestSequence[kind] || error.name === "AbortError") return;
       errorNode.textContent = error.message || "Could not load clipping information.";
+      if (notifyError) toastError(error, errorNode.textContent);
     }
   }
 
-  async function loadConfig() {
+  async function loadConfig(notifyError) {
     const lifecycle = state.lifecycle;
     const sequence = ++state.requestSequence.config;
     try {
@@ -623,6 +791,7 @@
     } catch (error) {
       if (!current(lifecycle) || sequence !== state.requestSequence.config || error.name === "AbortError") return;
       state.config = null;
+      if (notifyError) toastError(error, "Clipping settings could not be loaded.");
     }
   }
 
@@ -655,7 +824,7 @@
     ui.workerStatus.textContent = details.join(" · ");
   }
 
-  async function loadWorker() {
+  async function loadWorker(notifyError) {
     const lifecycle = state.lifecycle;
     const sequence = ++state.requestSequence.worker;
     ui.workerError.textContent = "";
@@ -678,6 +847,7 @@
       renderWorkerStatus();
       renderWorkerSummary();
       ui.workerError.textContent = error.message || "Worker settings could not be loaded.";
+      if (notifyError) toastError(error, ui.workerError.textContent);
     }
   }
 
@@ -740,7 +910,7 @@
       ui.workerSaveNote.textContent = "Settings saved. The endpoint was not live checked.";
       await loadWorker();
     } catch (error) {
-      if (current(lifecycle)) ui.workerError.textContent = error.message || "Worker settings could not be saved.";
+      if (current(lifecycle)) ui.workerError.textContent = toastError(error, "Worker settings could not be saved.");
     } finally {
       if (current(lifecycle)) ui.workerSave.disabled = false;
     }
@@ -748,7 +918,7 @@
 
   async function toggleResults(jobID) {
     const id = safeID(jobID);
-    if (!id || state.loadingResults.has(id)) return;
+    if (!id || state.deletedJobIDs.has(id) || state.loadingResults.has(id)) return;
     if (state.expandedResults.has(id)) {
       state.expandedResults.delete(id);
       renderJobs();
@@ -761,19 +931,23 @@
 
   async function loadResults(jobID) {
     const id = safeID(jobID);
-    if (!id || !state.active || state.loadingResults.has(id)) return;
+    if (!id || state.deletedJobIDs.has(id) || !state.active || state.loadingResults.has(id)) return;
     const lifecycle = state.lifecycle;
     state.loadingResults.add(id);
     state.resultErrors.delete(id);
     renderJobs();
     try {
       const response = await api("/api/clipping/jobs/" + encodeURIComponent(id) + "/results");
-      if (!current(lifecycle)) return;
+      if (!current(lifecycle) || state.deletedJobIDs.has(id)) return;
       const result = response && response.results ? response.results : response;
       if (result && result.job_id && safeID(result.job_id) !== id) throw new Error("Saved results did not match this analysis job.");
       state.resultDetails.set(id, result || {});
     } catch (error) {
-      if (current(lifecycle) && error.name !== "AbortError") state.resultErrors.set(id, error.message || "Saved analysis could not be loaded.");
+      if (current(lifecycle) && !state.deletedJobIDs.has(id) && error.name !== "AbortError") {
+        const message = error.message || "Saved analysis could not be loaded.";
+        state.resultErrors.set(id, message);
+        toastError(error, message);
+      }
     } finally {
       state.loadingResults.delete(id);
       if (current(lifecycle)) renderJobs();
@@ -794,16 +968,22 @@
         : "clipping-" + Date.now() + "-" + Math.random().toString(16).slice(2);
       state.pendingKeys.set(fingerprint, idempotencyKey);
     }
+    state.pendingJobBaselines.set(id, new Set(state.jobs.map((job) => safeID(job && job.id)).filter(Boolean)));
     state.pendingSourceIDs.add(id);
     state.sourceActionErrors.delete(id);
     renderSources();
     try {
-      await api("/api/clipping/jobs", {
+      const response = await api("/api/clipping/jobs", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ source_id: id, content_type: type })
       });
       if (!current(lifecycle)) return;
+      if (response && response.job && typeof response.job === "object") {
+        const createdID = safeID(response.job.id);
+        if (createdID && !state.jobTracking.has(createdID)) observeJobStatus(Object.assign({}, response.job, { status: "queued" }));
+        observeJobStatus(response.job);
+      }
       state.pendingKeys.delete(fingerprint);
       ui.importStatus.textContent = "Analysis was queued for " + sourceName(source) + ".";
       await Promise.allSettled([
@@ -813,13 +993,14 @@
       renderSources();
       ui.analysisHeading.focus?.({ preventScroll: true });
     } catch (error) {
-      if (current(lifecycle)) {
-        state.sourceActionErrors.set(id, error.message || "Analysis could not be queued.");
+      if (current(lifecycle) && !state.deletedSourceIDs.has(id)) {
+        state.sourceActionErrors.set(id, toastError(error, "Analysis could not be queued."));
         renderSources();
         ui.importStatus.textContent = "";
       }
     } finally {
       state.pendingSourceIDs.delete(id);
+      state.pendingJobBaselines.delete(id);
       if (current(lifecycle)) renderSources();
     }
   }
@@ -864,7 +1045,7 @@
       renderSources();
     } catch (error) {
       if (!current(lifecycle)) return;
-      ui.importError.textContent = error.message || "The YouTube video could not be imported.";
+      ui.importError.textContent = toastError(error, "The YouTube video could not be imported.");
       ui.importStatus.textContent = "";
       restoreLinkFocus = true;
     } finally {
@@ -879,6 +1060,94 @@
     }
   }
 
+  async function deleteSource(sourceID) {
+    const id = safeID(sourceID);
+    const source = state.sources.find((item) => safeID(item && item.id) === id);
+    if (!id || !source || state.deletedSourceIDs.has(id) || state.pendingDeleteSourceIDs.has(id)) return;
+    const name = sourceName(source);
+    if (!confirmAction("Delete “" + name + "” and its analyses? This stops any analysis in progress and removes the imported video.")) return;
+    const lifecycle = state.lifecycle;
+    invalidateListLoads();
+    state.pendingDeleteSourceIDs.add(id);
+    state.sourceActionErrors.delete(id);
+    renderSources();
+    renderJobs();
+    try {
+      const response = await api("/api/clipping/sources/" + encodeURIComponent(id), { method: "DELETE" });
+      if (!current(lifecycle)) return;
+      markSourceDeleted(id);
+      invalidateListLoads();
+      renderSources();
+      renderJobs();
+      showToast(response && response.cleanup_pending === true
+        ? "Video and analyses removed. File cleanup is still finishing."
+        : "Video and its analyses deleted.", false);
+      await Promise.allSettled([
+        load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources"),
+        load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs")
+      ]);
+      focusFirstAction(ui.sources, "delete-source");
+      if (!state.sources.length) ui.link.focus?.({ preventScroll: true });
+    } catch (error) {
+      if (current(lifecycle) && !state.deletedSourceIDs.has(id)) {
+        state.sourceActionErrors.set(id, toastError(error, "The imported video could not be deleted."));
+        renderSources();
+      }
+    } finally {
+      state.pendingDeleteSourceIDs.delete(id);
+      if (current(lifecycle)) {
+        renderSources();
+        renderJobs();
+      }
+    }
+  }
+
+  async function deleteJob(jobID) {
+    const id = safeID(jobID);
+    const job = state.jobs.find((item) => safeID(item && item.id) === id);
+    if (!id || !job || state.deletedJobIDs.has(id) || state.pendingDeleteJobIDs.has(id)
+      || state.pendingDeleteSourceIDs.has(safeID(job.source_id))) return;
+    const source = state.sources.find((item) => safeID(item && item.id) === safeID(job.source_id));
+    const name = source ? sourceName(source) : "this video";
+    const wasActive = activeJobStatus(job.status);
+    const confirmation = wasActive
+      ? "Delete the analysis for “" + name + "”? This stops the analysis in progress and keeps the imported video."
+      : "Delete the saved analysis for “" + name + "”? Its results will be removed and the imported video will remain.";
+    if (!confirmAction(confirmation)) return;
+    const lifecycle = state.lifecycle;
+    invalidateListLoads();
+    state.pendingDeleteJobIDs.add(id);
+    state.jobActionErrors.delete(id);
+    renderJobs();
+    renderSources();
+    try {
+      await api("/api/clipping/jobs/" + encodeURIComponent(id), { method: "DELETE" });
+      if (!current(lifecycle)) return;
+      markJobDeleted(id, job.source_id);
+      invalidateListLoads();
+      renderJobs();
+      renderSources();
+      showToast(wasActive ? "Analysis stopped and deleted." : "Analysis and saved results deleted.", false);
+      await Promise.allSettled([
+        load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs"),
+        load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources")
+      ]);
+      focusFirstAction(ui.jobs, "delete-job");
+      if (!state.jobs.length) ui.analysisHeading.focus?.({ preventScroll: true });
+    } catch (error) {
+      if (current(lifecycle) && !state.deletedJobIDs.has(id)) {
+        state.jobActionErrors.set(id, toastError(error, "The analysis could not be deleted."));
+        renderJobs();
+      }
+    } finally {
+      state.pendingDeleteJobIDs.delete(id);
+      if (current(lifecycle)) {
+        renderJobs();
+        renderSources();
+      }
+    }
+  }
+
   function updateImportState() {
     const hasLink = String(ui.link.value || "").trim().length > 0;
     ui.importButton.disabled = !hasLink || !ui.permission.checked;
@@ -888,7 +1157,7 @@
   }
 
   function bind() {
-    ui.refresh.addEventListener("click", () => { void refresh(); });
+    ui.refresh.addEventListener("click", () => { void refresh({ notify: true }); });
     ui.importForm.addEventListener("submit", (event) => { void submitImport(event); });
     ui.link.addEventListener("input", () => {
       ui.importError.textContent = "";
@@ -905,6 +1174,8 @@
 
   function configure(options) {
     state.requestImpl = options && typeof options.request === "function" ? options.request : null;
+    state.toastImpl = options && typeof options.toast === "function" ? options.toast : null;
+    state.confirmImpl = options && typeof options.confirm === "function" ? options.confirm : null;
   }
 
   function start() {
@@ -916,13 +1187,14 @@
     return refresh();
   }
 
-  async function refresh() {
+  async function refresh(options) {
     if (!state.active) return;
+    const notifyError = Boolean(options && typeof options === "object" && options.notify);
     await Promise.allSettled([
-      loadConfig(),
-      loadWorker(),
-      load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources"),
-      load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs")
+      loadConfig(notifyError),
+      loadWorker(notifyError),
+      load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources", notifyError),
+      load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs", notifyError)
     ]);
     renderSources();
     renderJobs();
@@ -938,7 +1210,15 @@
       state.jobs = [];
       state.contentTypes.clear();
       state.pendingSourceIDs.clear();
+      state.pendingDeleteSourceIDs.clear();
+      state.pendingDeleteJobIDs.clear();
+      state.pendingJobBaselines.clear();
+      state.deletedSourceIDs.clear();
+      state.deletedJobIDs.clear();
+      state.jobTracking.clear();
+      state.notifiedFailures.clear();
       state.sourceActionErrors.clear();
+      state.jobActionErrors.clear();
       state.expandedResults.clear();
       state.resultDetails.clear();
       state.resultErrors.clear();
@@ -977,12 +1257,29 @@
     let payload;
     try { payload = JSON.parse(event.data); } catch (_error) { return; }
     if (kind === "clipping_source") {
+      const source = payload && payload.source && typeof payload.source === "object" ? payload.source : payload;
+      const id = safeID(source && source.id) || safeID(payload && payload.id);
+      if (id && String(source && source.status || "").toLowerCase() === "deleted") {
+        markSourceDeleted(id);
+        renderSources();
+        renderJobs();
+      }
+      if (id && state.deletedSourceIDs.has(id)) return;
       void load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources");
       return;
     }
     if (kind === "clipping_job") {
       const job = payload && payload.job && typeof payload.job === "object" ? payload.job : payload;
-      const id = safeID(job && job.id);
+      const id = safeID(job && job.id) || safeID(payload && payload.id);
+      if (id && job && job.analysis_deleted === true) {
+        markJobDeleted(id, job && job.source_id);
+        renderJobs();
+        renderSources();
+      } else if (id && (state.deletedJobIDs.has(id) || state.deletedSourceIDs.has(safeID(job && job.source_id)))) {
+        return;
+      } else if (id) {
+        observeJobStatus(job);
+      }
       if (id) {
         state.resultDetails.delete(id);
         state.resultErrors.delete(id);
@@ -991,7 +1288,7 @@
         load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs"),
         load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources")
       ]).then(() => {
-        if (id && state.expandedResults.has(id)) void loadResults(id);
+        if (id && !state.deletedJobIDs.has(id) && state.expandedResults.has(id)) void loadResults(id);
       });
     }
   }

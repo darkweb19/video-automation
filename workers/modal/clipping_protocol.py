@@ -607,12 +607,32 @@ def execute_stage(
         return cached
     if on_claim is not None:
         on_claim()
-    stage_result = client(dispatch, media_token)
-    result = canonical_callback(dispatch, stage_result)
+    try:
+        stage_result = client(dispatch, media_token)
+        result = canonical_callback(dispatch, stage_result)
+    except Exception:
+        # Once this attempt is claimed, every client or result-contract error
+        # becomes one durable, non-sensitive failure callback. The ledger
+        # keeps the original attempt from running inference again on replay.
+        result = canonical_failure_callback(dispatch)
     ledger.complete(dispatch, result, now=now)
     if on_complete is not None:
         on_complete()
     return result
+
+
+def canonical_failure_callback(dispatch: StageDispatch) -> dict[str, Any]:
+    """Build the bounded failure envelope accepted by the Go callback."""
+
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "job_id": dispatch.job_id,
+        "stage": dispatch.stage,
+        "dispatch_id": dispatch.dispatch_id,
+        "attempt_id": dispatch.attempt_id,
+        "status": "failed",
+        "actual_cost_micro_usd": 0,
+    }
 
 
 def canonical_callback(dispatch: StageDispatch, stage_result: StageResult) -> dict[str, Any]:

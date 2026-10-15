@@ -165,6 +165,11 @@ func clippingWorkerDispatchDefinitelyNotSubmitted(err error) bool {
 	return errors.As(err, &outcome) && !outcome.submissionAttempted
 }
 
+func clippingWorkerDispatchSubmissionAttempted(err error) bool {
+	var outcome *clippingWorkerDispatchOutcomeError
+	return errors.As(err, &outcome) && outcome.submissionAttempted
+}
+
 // clippingWorkerDispatcher resolves Modal workers for each submission and
 // connects only to the pinned public addresses returned by that lookup.
 // Injected HTTP clients are intended for deterministic local tests.

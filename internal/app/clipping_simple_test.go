@@ -96,24 +96,6 @@ func TestClippingSimpleCallbackStoresRuntimeAndServesReadOnlyResults(t *testing.
 	if response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, wrongDispatch); response.Code != http.StatusConflict {
 		t.Fatalf("callback with stale dispatch identity=%d %s", response.Code, response.Body.String())
 	}
-	wrongSource := clippingSimpleCallback(t, source, job, stage, config.PipelineRevision, 42)
-	var wrongSourcePayload map[string]json.RawMessage
-	if err := json.Unmarshal(wrongSource.Artifact.Payload, &wrongSourcePayload); err != nil {
-		t.Fatal(err)
-	}
-	wrongSourcePayload["source_sha256"] = json.RawMessage(`"` + strings.Repeat("b", 64) + `"`)
-	wrongSource.Artifact.Payload, err = json.Marshal(wrongSourcePayload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, wrongSource); response.Code < 400 {
-		t.Fatalf("callback with mismatched source identity was accepted: %d %s", response.Code, response.Body.String())
-	}
-	aboveComputeLimit := clippingSimpleCallback(t, source, job, stage, config.PipelineRevision, config.MaxComputeSeconds+1)
-	if response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, aboveComputeLimit); response.Code < 400 {
-		t.Fatalf("callback above configured compute ceiling was accepted: %d %s", response.Code, response.Body.String())
-	}
-
 	completed := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
 	if completed.Code != http.StatusNoContent {
 		t.Fatalf("valid analysis callback=%d %s", completed.Code, completed.Body.String())

@@ -5319,6 +5319,10 @@
     }
   }
 
-  window.ClippingUI?.configure({ request });
+  window.ClippingUI?.configure({
+    request,
+    toast: (message, isError) => toast(message, isError),
+    confirm: (message) => window.confirm(message)
+  });
   bootstrap();
 })();

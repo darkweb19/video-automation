@@ -36,7 +36,7 @@
 .clipping-source-status[data-state="ready"] { border-color: var(--rule); background: var(--white); color: var(--ink); }
 .clipping-source-status[data-state="failed"] { border-color: var(--ink); background: var(--ink); color: var(--white); }
 .clipping-source-meta, .clipping-job-meta { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
-.clipping-source-actions { display: flex; align-items: end; gap: 8px; }
+.clipping-source-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
 .clipping-content-type { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
 .clipping-content-type select { min-height: 36px; padding: 7px 8px; font-size: 11px; }
 .clipping-action { min-height: 36px; padding: 8px 12px; font-size: 11px; white-space: nowrap; }
@@ -47,7 +47,9 @@
 .clipping-progress-copy { flex: 0 0 auto; }
 .clipping-job-heading { align-items: flex-start; }
 .clipping-job-row > .clipping-progress { margin-top: 0; }
-.clipping-job-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.clipping-job-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.clipping-delete-action { flex: 0 0 auto; }
+.clipping-delete-action[aria-disabled="true"] { opacity: .48; cursor: progress; }
 .clipping-job-results { display: grid; gap: 12px; min-width: 0; padding-top: 4px; }
 .clipping-settings { margin-top: 18px; padding: 0 18px; border: 1px solid var(--rule); border-radius: var(--radius-panel); background: var(--white); }
 .clipping-settings > summary { min-height: 52px; padding: 16px 0; color: var(--graphite); cursor: pointer; font-size: 13px; font-weight: 600; list-style-position: inside; }

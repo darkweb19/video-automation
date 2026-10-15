@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -63,19 +64,20 @@ type clippingStageView struct {
 }
 
 type clippingJobView struct {
-	ID             string              `json:"id"`
-	SourceID       string              `json:"source_id"`
-	ContentType    string              `json:"content_type"`
-	MinClipSeconds int                 `json:"min_clip_seconds"`
-	MaxClipSeconds int                 `json:"max_clip_seconds"`
-	CandidateLimit int                 `json:"candidate_limit"`
-	Status         ClippingJobStatus   `json:"status"`
-	Progress       int                 `json:"progress"`
-	Error          string              `json:"error,omitempty"`
-	Stages         []clippingStageView `json:"stages"`
-	Artifacts      []ClippingArtifact  `json:"artifacts,omitempty"`
-	CreatedAt      int64               `json:"created_at"`
-	UpdatedAt      int64               `json:"updated_at"`
+	ID              string              `json:"id"`
+	SourceID        string              `json:"source_id"`
+	ContentType     string              `json:"content_type"`
+	MinClipSeconds  int                 `json:"min_clip_seconds"`
+	MaxClipSeconds  int                 `json:"max_clip_seconds"`
+	CandidateLimit  int                 `json:"candidate_limit"`
+	Status          ClippingJobStatus   `json:"status"`
+	AnalysisDeleted bool                `json:"analysis_deleted,omitempty"`
+	Progress        int                 `json:"progress"`
+	Error           string              `json:"error,omitempty"`
+	Stages          []clippingStageView `json:"stages"`
+	Artifacts       []ClippingArtifact  `json:"artifacts,omitempty"`
+	CreatedAt       int64               `json:"created_at"`
+	UpdatedAt       int64               `json:"updated_at"`
 }
 
 func (a *dashboardApp) retentionDeadline(now time.Time) int64 {
@@ -150,7 +152,7 @@ func clippingJobSummary(job ClippingJob, stages []ClippingStage, artifacts []Cli
 		ID: job.ID, SourceID: job.SourceID, ContentType: job.ContentType,
 		MinClipSeconds: job.MinClipSeconds, MaxClipSeconds: job.MaxClipSeconds, CandidateLimit: job.CandidateLimit, Status: job.Status,
 		Progress: clippingJobProgress(stages, job.Status),
-		Error:    job.Error, Stages: stageViews, Artifacts: artifacts, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
+		Error:    job.Error, AnalysisDeleted: job.AnalysisDeleted, Stages: stageViews, Artifacts: artifacts, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
 	}
 }
 
@@ -230,6 +232,32 @@ func (a *dashboardApp) clippingSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"source": clippingSourceSummary(source)})
 }
 
+func (a *dashboardApp) deleteClippingSource(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid clipping source id")
+		return
+	}
+	jobIDs, cleanupPending, err := a.clippingAcquisition.DeleteSource(r.Context(), id)
+	for _, jobID := range jobIDs {
+		a.deleteClippingCapabilities(jobID)
+		a.store.PublishClippingJob(jobID)
+	}
+	a.store.PublishClippingSource(id)
+	if err != nil {
+		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "could not delete clipping source"))
+		return
+	}
+	if cleanupPending {
+		writeJSON(w, http.StatusAccepted, map[string]any{"cleanup_pending": true})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *dashboardApp) createClippingImport(w http.ResponseWriter, r *http.Request) {
 	if !mutationAllowed(w, r) {
 		return
@@ -280,6 +308,9 @@ func (a *dashboardApp) clippingJobs(w http.ResponseWriter, _ *http.Request) {
 	}
 	views := make([]clippingJobView, 0, len(jobs))
 	for _, job := range jobs {
+		if job.AnalysisDeleted {
+			continue
+		}
 		view, err := a.clippingJobResponse(job, false)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not load clipping jobs")
@@ -297,7 +328,7 @@ func (a *dashboardApp) clippingJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job, err := a.store.ClippingJob(id)
-	if err != nil {
+	if err != nil || job.AnalysisDeleted {
 		writeError(w, http.StatusNotFound, "clipping job not found")
 		return
 	}
@@ -365,7 +396,7 @@ func (a *dashboardApp) clippingJobResults(w http.ResponseWriter, r *http.Request
 		return
 	}
 	job, err := a.store.ClippingJob(id)
-	if err != nil {
+	if err != nil || job.AnalysisDeleted {
 		writeError(w, http.StatusNotFound, "clipping job not found")
 		return
 	}
@@ -378,6 +409,29 @@ func (a *dashboardApp) clippingJobResults(w http.ResponseWriter, r *http.Request
 		artifacts[index] = sanitizeClippingArtifactForPublic(artifacts[index])
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": job.ID, "source_id": job.SourceID, "artifacts": artifacts})
+}
+
+func (a *dashboardApp) deleteClippingAnalysis(w http.ResponseWriter, r *http.Request) {
+	if !mutationAllowed(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if !safeID(id) {
+		writeError(w, http.StatusBadRequest, "invalid clipping job id")
+		return
+	}
+	if err := a.store.DeleteClippingAnalysis(id); err != nil {
+		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "could not delete clipping analysis"))
+		return
+	}
+	job, err := a.store.ClippingJob(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "analysis was deleted but its job could not be reloaded")
+		return
+	}
+	a.deleteClippingCapabilities(job.ID)
+	a.store.PublishClippingJob(job.ID)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *dashboardApp) cancelClippingJob(w http.ResponseWriter, r *http.Request) {
@@ -834,40 +888,40 @@ func clippingWorkerCallbackDigest(input clippingWorkerCallback) (string, error) 
 	return hex.EncodeToString(digest[:]), nil
 }
 
+func clippingWorkerCallbackBodyDigest(body []byte) string {
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:])
+}
+
+func (a *dashboardApp) failInvalidCurrentClippingCallback(w http.ResponseWriter, jobID, attemptID, leaseToken, digest string) {
+	_, duplicate, err := a.store.FailClippingAnalysisCallback(jobID, ClippingStageAnalysis, attemptID, leaseToken, digest)
+	if err != nil {
+		if errors.Is(err, ErrClippingStaleAttempt) || errors.Is(err, ErrClippingJobTerminal) {
+			a.revokeClippingMediaCapability(jobID, attemptID)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "worker callback failure could not be recorded")
+		return
+	}
+	_ = duplicate
+	a.store.PublishClippingJob(jobID)
+	a.revokeClippingMediaCapability(jobID, attemptID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Request) {
 	jobID, attemptID := r.PathValue("jobID"), r.PathValue("attemptID")
 	if !safeID(jobID) || !safeID(attemptID) || r.URL.RawQuery != "" {
 		writeError(w, http.StatusBadRequest, "invalid worker callback request")
 		return
 	}
-	if r.ContentLength > maxClippingCallbackBodyBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "worker artifact exceeds 4 MiB")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxClippingCallbackBodyBytes)
-	if !isJSON(r.Header.Get("Content-Type")) {
-		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
-	}
 	if !a.authorizeClippingBearer(w, r, jobID, attemptID, clippingCapabilityCallback) {
 		return
 	}
-	var input clippingWorkerCallback
-	if err := decodeClippingWorkerCallback(w, r, &input); err != nil {
-		return
-	}
-	if input.ProtocolVersion != clippingProtocolVersion || input.JobID != jobID || input.Stage != ClippingStageAnalysis ||
-		input.AttemptID != attemptID || input.DispatchID == "" || input.ActualCostMicroUSD != 0 {
-		writeError(w, http.StatusBadRequest, "worker callback does not match the clipping protocol")
-		return
-	}
-	_, stage, source, ok := a.workerStage(jobID, attemptID)
-	if !ok {
+	_, stage, _, ok := a.workerStage(jobID, attemptID)
+	if !ok || stage.AttemptID != attemptID {
 		writeError(w, http.StatusConflict, "worker callback attempt is stale")
-		return
-	}
-	if input.DispatchID != stage.IdempotencyKey {
-		writeError(w, http.StatusConflict, "worker callback dispatch id is stale")
 		return
 	}
 	expiry, expiryErr := a.clippingCapabilityExpiry(jobID, attemptID, clippingCapabilityCallback)
@@ -885,9 +939,56 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusUnauthorized, "worker lease capability is unavailable")
 		return
 	}
+	if r.ContentLength > maxClippingCallbackBodyBytes {
+		digest := clippingWorkerCallbackBodyDigest([]byte("oversize:" + strconv.FormatInt(r.ContentLength, 10)))
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxClippingCallbackBodyBytes)
+	body, readErr := io.ReadAll(r.Body)
+	if readErr != nil {
+		digest := clippingWorkerCallbackBodyDigest(append(body, []byte("\x00read-error")...))
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
+		return
+	}
+	bodyDigest := clippingWorkerCallbackBodyDigest(body)
+	if !isJSON(r.Header.Get("Content-Type")) {
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, bodyDigest)
+		return
+	}
+	var input clippingWorkerCallback
+	if err := decodeClippingWorkerCallback(body, &input); err != nil {
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, bodyDigest)
+		return
+	}
+	// Capabilities are bound to one accepted attempt. A stale or misrouted body
+	// must not terminate that attempt, and legacy protocol callbacks remain
+	// rejected without changing their migrated job state.
+	if input.ProtocolVersion != clippingProtocolVersion {
+		writeError(w, http.StatusBadRequest, "worker callback protocol is unsupported")
+		return
+	}
+	if input.JobID != jobID || input.Stage != ClippingStageAnalysis || input.AttemptID != attemptID {
+		writeError(w, http.StatusBadRequest, "worker callback attempt identity does not match")
+		return
+	}
+	if input.DispatchID == "" || input.DispatchID != stage.IdempotencyKey {
+		writeError(w, http.StatusConflict, "worker callback dispatch identity is stale")
+		return
+	}
+	if input.ActualCostMicroUSD != 0 {
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, bodyDigest)
+		return
+	}
+	var source ClippingSource
+	_, stage, source, ok = a.workerStage(jobID, attemptID)
+	if !ok {
+		writeError(w, http.StatusConflict, "worker callback attempt is stale")
+		return
+	}
 	digest, err := clippingWorkerCallbackDigest(input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "worker callback could not be fingerprinted")
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, bodyDigest)
 		return
 	}
 	switch input.Status {
@@ -895,12 +996,12 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		payload := strings.TrimSpace(string(input.Artifact.Payload))
 		if input.CostEstimateMicroUSD <= 0 || input.CostBasis != clippingWorkerProtocolCostBasis ||
 			input.Artifact.Type != clippingAnalysisArtifactType || input.Artifact.SchemaVersion != clippingAnalysisSchemaVersion || input.Artifact.Version != 1 || len(input.Artifact.TimeRanges) != 0 {
-			writeError(w, http.StatusBadRequest, "worker source analysis artifact is invalid")
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
 			return
 		}
 		core, coreErr := decodeClippingAnalysisCore(payload, source)
 		if coreErr != nil {
-			writeError(w, http.StatusBadRequest, "worker source analysis failed validation")
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
 			return
 		}
 		var protocol struct {
@@ -912,7 +1013,7 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		if err := json.Unmarshal(input.Artifact.Payload, &protocol); err != nil || protocol.Basis != clippingWorkerProtocolCostBasis ||
 			protocol.Rate != clippingWorkerProtocolCompatibilityRate || protocol.ComputeSeconds <= 0 ||
 			protocol.Estimate != input.CostEstimateMicroUSD || protocol.Estimate != protocol.ComputeSeconds {
-			writeError(w, http.StatusBadRequest, "worker callback runtime metadata is invalid")
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
 			return
 		}
 		callbackArtifact := ClippingArtifact{
@@ -927,7 +1028,7 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "worker callback could not be applied"))
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
 			return
 		}
 		if published && !duplicate {
@@ -937,7 +1038,7 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		w.WriteHeader(http.StatusNoContent)
 	case "failed":
 		if input.CostEstimateMicroUSD != 0 || input.CostBasis != "" {
-			writeError(w, http.StatusBadRequest, "failed worker callback cannot contain estimate metadata")
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
 			return
 		}
 		_, duplicate, err := a.store.FailClippingAnalysisCallback(jobID, stage.Name, attemptID, leaseToken, digest)
@@ -956,29 +1057,17 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		a.revokeClippingMediaCapability(jobID, attemptID)
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		writeError(w, http.StatusBadRequest, "worker callback status must be completed or failed")
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
 	}
 }
 
-func decodeClippingWorkerCallback(w http.ResponseWriter, r *http.Request, target any) error {
-	decoder := json.NewDecoder(r.Body)
+func decodeClippingWorkerCallback(body []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "worker artifact exceeds 4 MiB")
-		} else {
-			writeError(w, http.StatusBadRequest, "invalid worker callback JSON")
-		}
 		return err
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "worker artifact exceeds 4 MiB")
-		} else {
-			writeError(w, http.StatusBadRequest, "worker callback must contain one JSON object")
-		}
 		return errors.New("worker callback contains trailing JSON")
 	}
 	return nil

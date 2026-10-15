@@ -78,14 +78,14 @@ func (p *Processor) runClippingAnalysisWorker(ctx context.Context) {
 }
 
 func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, error) {
-	config, configured, err := loadClippingWorkerConfig(p.app.store, p.app.security)
-	if err != nil {
-		return false, err
-	}
 	jobs, err := p.app.store.PendingClippingJobs(20)
 	if err != nil {
 		return false, err
 	}
+	if len(jobs) == 0 {
+		return false, nil
+	}
+	config, configured, configErr := loadClippingWorkerConfig(p.app.store, p.app.security)
 	for _, job := range jobs {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
@@ -93,11 +93,17 @@ func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, erro
 		cached, err := p.app.store.TryCompleteClippingJobFromAnalysisCache(job.ID)
 		if err != nil {
 			p.logger.Warn("clipping source cache could not be applied", "job_id", job.ID)
+			p.failQueuedClippingAnalysis(job.ID, "Analysis results could not be loaded. Try analyzing the source again.")
 			continue
 		}
 		if cached {
 			p.app.store.PublishClippingJob(job.ID)
 			return true, nil
+		}
+		if configErr != nil {
+			p.logger.Warn("clipping worker configuration could not be loaded", "job_id", job.ID)
+			p.failQueuedClippingAnalysis(job.ID, "Analysis configuration could not be loaded. Check worker settings and try again.")
+			continue
 		}
 		if !configured || !config.Enabled {
 			continue
@@ -105,6 +111,7 @@ func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, erro
 		claimedSource, err := p.app.store.ClaimClippingAnalysisSource(job.ID)
 		if err != nil {
 			p.logger.Warn("clipping source analysis could not be claimed", "job_id", job.ID)
+			p.failQueuedClippingAnalysis(job.ID, "Analysis could not be started because the source was unavailable.")
 			continue
 		}
 		if !claimedSource {
@@ -115,6 +122,8 @@ func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, erro
 			_ = p.app.store.ReleaseClippingAnalysisSourceClaim(job.ID)
 			if err != nil {
 				p.logger.Warn("clipping analysis dispatch could not be prepared", "job_id", job.ID)
+				p.failQueuedClippingAnalysis(job.ID, "Analysis could not be prepared. Try analyzing the source again.")
+				p.app.store.PublishClippingJob(job.ID)
 			}
 			continue
 		}
@@ -125,7 +134,11 @@ func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, erro
 					if releaseErr := p.app.store.ReleaseClippingAnalysisSourceClaimBeforeSubmit(job.ID, prepared.Payload.AttemptID); releaseErr != nil {
 						_ = p.app.store.ReleaseClippingAnalysisSourceClaim(job.ID)
 					}
+				} else {
+					_ = p.app.store.CancelClippingJob(job.ID)
 				}
+			} else {
+				_ = p.app.store.CancelClippingJob(job.ID)
 			}
 			p.app.store.PublishClippingJob(job.ID)
 			continue
@@ -159,11 +172,27 @@ func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, erro
 					}
 				} else {
 					p.logger.Warn("known-zero analysis lease could not be loaded", "job_id", job.ID)
+					_ = p.app.store.CancelClippingJob(job.ID)
+					p.app.store.PublishClippingJob(job.ID)
 				}
 			} else {
-				// Once http.Client.Do starts, any failure can hide a worker
-				// acceptance. Keep the source claim until the callback window closes.
-				p.logger.Warn("clipping analysis dispatch outcome is pending", "job_id", job.ID)
+				// A failed HTTP response can still hide acceptance. Fail visibly,
+				// but retain the claim and callback guard until the exact attempt
+				// settles or its callback capability expires.
+				reason := "Analysis worker submission failed. Try again after the callback window closes."
+				if !clippingWorkerDispatchSubmissionAttempted(err) {
+					p.logger.Warn("clipping analysis dispatch outcome is ambiguous", "job_id", job.ID)
+				}
+				leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
+				if leaseErr == nil {
+					if _, failErr := p.app.store.FailClippingStageAfterSubmit(job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken, reason); failErr != nil {
+						p.logger.Warn("submitted clipping analysis failure could not be recorded", "job_id", job.ID)
+					}
+				} else {
+					_ = p.app.store.CancelClippingJob(job.ID)
+					p.logger.Warn("submitted clipping analysis lease could not be loaded", "job_id", job.ID)
+				}
+				p.app.store.PublishClippingJob(job.ID)
 			}
 		} else {
 			p.app.store.PublishClippingJob(job.ID)
@@ -171,6 +200,17 @@ func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, erro
 		return true, nil
 	}
 	return false, nil
+}
+
+func (p *Processor) failQueuedClippingAnalysis(jobID, reason string) {
+	failed, err := p.app.store.FailQueuedClippingJob(jobID, reason)
+	if err != nil {
+		p.logger.Warn("queued clipping analysis failure could not be recorded", "job_id", jobID)
+		return
+	}
+	if failed {
+		p.app.store.PublishClippingJob(jobID)
+	}
 }
 
 // runClippingStageRecovery marks expired attempts uncertain, then releases
@@ -203,7 +243,7 @@ func (p *Processor) runClippingStageRecovery(ctx context.Context) {
 func (p *Processor) recoverClippingStages() error {
 	now := time.Now().Unix()
 	expired, err := p.app.store.ExpiredClippingStages(now, 100)
-	if err != nil || len(expired) == 0 {
+	if err != nil {
 		return err
 	}
 	if err := p.app.store.RecoverExpiredClippingStages(now); err != nil {

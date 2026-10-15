@@ -312,6 +312,193 @@ class ClippingM3WorkerTests(unittest.TestCase):
         self.assertEqual(lifecycle, ["reload", "commit"])
         self.assertEqual(response, {"ready": True, "model_snapshot": "c" * 40})
 
+    def test_analysis_setup_failures_send_terminal_callback_without_starting_analysis(self):
+        now = int(time.time())
+        payload = dispatch_payload(
+            expires_at=now + 120,
+            callback_expires_at=now + 120 + MAX_CALLBACK_GRACE_SECONDS,
+        )
+        for failure in ("model configuration", "model volume reload"):
+            with self.subTest(failure=failure):
+                owner_calls = []
+
+                class FailedVolume:
+                    def reload(self):
+                        raise RuntimeError("volume reload failed")
+
+                def owner_remote(operation, request):
+                    owner_calls.append((operation, request))
+                    if operation == "claim":
+                        return {"claimed": True, "cached": None}
+                    if operation == "complete":
+                        return {"completed": True}
+                    return {"delivered": True}
+
+                configured = {
+                    WORKER_ORIGIN_KEY: "https://framevault.dev",
+                    WORKER_PIPELINE_REVISION_KEY: "framevault_m3_worker_v1",
+                }
+                model_revision = RuntimeError("model revision unavailable") if failure == "model configuration" else "a" * 40
+                with patch.dict(os.environ, configured), patch.dict(
+                    clipping_worker._MODAL_FUNCTIONS,
+                    {"ledger_owner": SimpleNamespace(remote=owner_remote)},
+                ), patch.object(clipping_worker, "_configured_model_revision", side_effect=[model_revision]), patch.object(
+                    clipping_worker,
+                    "_MODAL_MODEL_VOLUME",
+                    FailedVolume(),
+                ), patch.object(clipping_worker, "deliver_callback", return_value=True) as deliver, patch.object(
+                    clipping_worker,
+                    "process_dispatch",
+                ) as process:
+                    accepted = clipping_analysis_task(payload, MEDIA_CAP, CALLBACK_CAP)
+
+                self.assertTrue(accepted)
+                process.assert_not_called()
+                deliver.assert_called_once()
+                sent = deliver.call_args.args[2]
+                self.assertEqual(sent["status"], "failed")
+                self.assertEqual(sent["job_id"], payload["job_id"])
+                self.assertEqual(sent["attempt_id"], payload["attempt_id"])
+                self.assertEqual([operation for operation, _ in owner_calls], ["claim", "complete", "mark_delivered"])
+
+    def test_callback_replay_failure_delivers_canonical_failure_and_clears_result(self):
+        now = int(time.time())
+        payload = dispatch_payload(
+            expires_at=now + 120,
+            callback_expires_at=now + 120 + MAX_CALLBACK_GRACE_SECONDS,
+        )
+        owner_calls = []
+
+        def owner_remote(operation, request):
+            owner_calls.append((operation, request))
+            return {"delivered": True}
+
+        with patch.dict(os.environ, {
+            WORKER_ORIGIN_KEY: "https://framevault.dev",
+            WORKER_PIPELINE_REVISION_KEY: "framevault_m3_worker_v1",
+        }), patch.dict(
+            clipping_worker._MODAL_FUNCTIONS,
+            {"ledger_owner": SimpleNamespace(remote=owner_remote)},
+        ), patch.object(clipping_worker, "replay_cached_callback", return_value=False) as replay, patch.object(
+            clipping_worker,
+            "deliver_callback",
+            return_value=True,
+        ) as deliver:
+            accepted = clipping_callback_replay_task(payload, CALLBACK_CAP, {"cached": "result"})
+
+        self.assertTrue(accepted)
+        replay.assert_called_once()
+        deliver.assert_called_once()
+        self.assertEqual(deliver.call_args.args[2]["status"], "failed")
+        self.assertEqual(owner_calls[0][0], "mark_delivered")
+
+    def test_unacknowledged_replay_failure_keeps_cached_result(self):
+        now = int(time.time())
+        payload = dispatch_payload(
+            expires_at=now + 120,
+            callback_expires_at=now + 120 + MAX_CALLBACK_GRACE_SECONDS,
+        )
+        with patch.dict(os.environ, {
+            WORKER_ORIGIN_KEY: "https://framevault.dev",
+            WORKER_PIPELINE_REVISION_KEY: "framevault_m3_worker_v1",
+        }), patch.object(clipping_worker, "replay_cached_callback", return_value=False), patch.object(
+            clipping_worker,
+            "deliver_callback",
+            return_value=False,
+        ) as deliver, patch.object(clipping_worker, "_clear_delivered_worker_callback") as clear:
+            accepted = clipping_callback_replay_task(payload, CALLBACK_CAP, {"cached": "result"})
+
+        self.assertFalse(accepted)
+        self.assertEqual(deliver.call_args.args[2]["status"], "failed")
+        clear.assert_not_called()
+
+    def test_unacknowledged_failure_callback_keeps_cached_result_for_replay(self):
+        now = int(time.time())
+        payload = dispatch_payload(
+            expires_at=now + 120,
+            callback_expires_at=now + 120 + MAX_CALLBACK_GRACE_SECONDS,
+        )
+
+        class FakeVolume:
+            def reload(self):
+                return None
+
+        with patch.dict(os.environ, {
+            WORKER_ORIGIN_KEY: "https://framevault.dev",
+            WORKER_PIPELINE_REVISION_KEY: "framevault_m3_worker_v1",
+        }), patch.object(clipping_worker, "_configured_model_revision", return_value="a" * 40), patch.object(
+            clipping_worker,
+            "_MODAL_MODEL_VOLUME",
+            FakeVolume(),
+        ), patch.object(clipping_worker, "process_dispatch", return_value=False), patch.object(
+            clipping_worker,
+            "deliver_callback",
+            return_value=False,
+        ) as deliver, patch.object(clipping_worker, "_clear_delivered_worker_callback") as clear:
+            accepted = clipping_analysis_task(payload, MEDIA_CAP, CALLBACK_CAP)
+
+        self.assertFalse(accepted)
+        self.assertEqual(deliver.call_count, 1)
+        self.assertEqual(deliver.call_args.args[2]["status"], "failed")
+        clear.assert_not_called()
+
+    def test_unacknowledged_setup_failure_is_cached_for_callback_replay(self):
+        now = int(time.time())
+        payload = dispatch_payload(
+            expires_at=now + 120,
+            callback_expires_at=now + 120 + MAX_CALLBACK_GRACE_SECONDS,
+        )
+        dispatch = StageDispatch.parse(payload, now=now)
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = SQLiteDispatchLedger(Path(directory) / "ledger.sqlite3")
+
+            def owner_remote(operation, request):
+                return ledger_rpc_operation(
+                    ledger,
+                    operation,
+                    request,
+                    expected_origin="https://framevault.dev",
+                    expected_pipeline_revision="framevault_m3_worker_v1",
+                )
+
+            class FakeVolume:
+                def reload(self):
+                    return None
+
+            try:
+                with patch.dict(os.environ, {
+                    WORKER_ORIGIN_KEY: "https://framevault.dev",
+                    WORKER_PIPELINE_REVISION_KEY: "framevault_m3_worker_v1",
+                }), patch.dict(
+                    clipping_worker._MODAL_FUNCTIONS,
+                    {"ledger_owner": SimpleNamespace(remote=owner_remote)},
+                ), patch.object(clipping_worker, "_configured_model_revision", side_effect=RuntimeError("configuration failed")), patch.object(
+                    clipping_worker,
+                    "_MODAL_MODEL_VOLUME",
+                    FakeVolume(),
+                ), patch.object(clipping_worker, "deliver_callback", return_value=False), patch.object(
+                    clipping_worker,
+                    "process_dispatch",
+                ) as process:
+                    with self.assertRaisesRegex(RuntimeError, "clipping worker task failed"):
+                        clipping_analysis_task(payload, MEDIA_CAP, CALLBACK_CAP)
+                process.assert_not_called()
+                action, cached = dispatch_admission(
+                    dispatch,
+                    lambda operation, request: ledger_rpc_operation(
+                        ledger,
+                        operation,
+                        request,
+                        expected_origin="https://framevault.dev",
+                        expected_pipeline_revision="framevault_m3_worker_v1",
+                    ),
+                )
+                self.assertEqual(action, "replay")
+                self.assertEqual(cached["status"], "failed")
+                self.assertEqual(cached["attempt_id"], dispatch.attempt_id)
+            finally:
+                ledger.close()
+
     @staticmethod
     def _dns_answer(address):
         parsed = ipaddress.ip_address(address)

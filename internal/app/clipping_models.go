@@ -147,6 +147,7 @@ type ClippingJob struct {
 	BudgetLimitMicroUSD int64             `json:"-"`
 	ReservedMicroUSD    int64             `json:"-"`
 	SpentMicroUSD       int64             `json:"-"`
+	AnalysisDeleted     bool              `json:"analysis_deleted,omitempty"`
 	Error               string            `json:"error,omitempty"`
 	CreatedAt           int64             `json:"created_at"`
 	UpdatedAt           int64             `json:"updated_at"`

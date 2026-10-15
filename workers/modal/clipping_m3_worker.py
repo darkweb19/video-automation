@@ -55,6 +55,7 @@ try:  # Works both as a Modal script and as a local test module.
         StageResult,
         WorkerUnavailable,
         callback_headers,
+        canonical_failure_callback,
         execute_stage,
         media_headers,
     )
@@ -84,6 +85,7 @@ except ImportError:  # pragma: no cover - used by `modal deploy workers/modal/..
         StageResult,
         WorkerUnavailable,
         callback_headers,
+        canonical_failure_callback,
         execute_stage,
         media_headers,
     )
@@ -1187,6 +1189,45 @@ def replay_cached_callback(
     return acknowledged
 
 
+def _clear_delivered_worker_callback(dispatch: StageDispatch) -> None:
+    """Discard cached result content after Go acknowledges a failure callback."""
+
+    try:
+        RemoteDispatchLedger(
+            lambda operation, request: _MODAL_FUNCTIONS["ledger_owner"].remote(
+                operation,
+                dict(request),
+            )
+        ).mark_delivered(dispatch)
+    except Exception as error:
+        # The Go failure callback is already acknowledged. Keep any existing
+        # ledger tombstone; a cleanup error must not trigger inference again.
+        _safe_log_failure("clipping_callback_cache_cleanup_failed", dispatch, error)
+
+
+def _persist_worker_failure_callback(dispatch: StageDispatch) -> None:
+    """Cache a canonical failure before delivery so retries can replay it."""
+
+    ledger = RemoteDispatchLedger(
+        lambda operation, request: _MODAL_FUNCTIONS["ledger_owner"].remote(
+            operation,
+            dict(request),
+        )
+    )
+    failure = canonical_failure_callback(dispatch)
+    try:
+        claimed, cached = ledger.claim(dispatch)
+        if claimed:
+            ledger.complete(dispatch, failure)
+        elif cached is None:
+            # This invocation may have already claimed the worker row before
+            # a setup/volume error. Completion is safe only for that running
+            # attempt; the owner rejects completed or mismatched rows.
+            ledger.complete(dispatch, failure)
+    except Exception as error:
+        _safe_log_failure("clipping_failure_callback_cache_failed", dispatch, error)
+
+
 def dispatch_ack(dispatch: StageDispatch) -> dict[str, Any]:
     """Sanitized 202 body tied to the exact job attempt accepted for enqueue."""
 
@@ -1266,16 +1307,16 @@ def clipping_callback_replay_task(
     cached_callback: dict[str, Any],
 ) -> bool:
     dispatch: StageDispatch | None = None
+    expected_origin = os.environ.get(WORKER_ORIGIN_KEY)
+    expected_pipeline_revision = os.environ.get(WORKER_PIPELINE_REVISION_KEY)
     try:
-        expected_origin = os.environ.get(WORKER_ORIGIN_KEY)
-        expected_pipeline_revision = os.environ.get(WORKER_PIPELINE_REVISION_KEY)
         dispatch = StageDispatch.parse(
             dispatch_payload,
             allow_expired=True,
             expected_origin=expected_origin,
             expected_pipeline_revision=expected_pipeline_revision,
         )
-        return replay_cached_callback(
+        acknowledged = replay_cached_callback(
             dispatch_payload,
             callback_capability,
             cached_callback,
@@ -1286,8 +1327,35 @@ def clipping_callback_replay_task(
             expected_origin=expected_origin,
             expected_pipeline_revision=expected_pipeline_revision,
         )
+        if acknowledged:
+            return True
+        _LOGGER.warning("clipping_callback_replay_delivery_pending job=%s attempt=%s", dispatch.job_id, dispatch.attempt_id)
+        accepted = deliver_callback(
+            dispatch.callback_url,
+            callback_capability,
+            canonical_failure_callback(dispatch),
+            callback_expires_at=dispatch.callback_expires_at,
+        )
+        if accepted:
+            _LOGGER.warning("clipping_failure_callback_acknowledged job=%s attempt=%s", dispatch.job_id, dispatch.attempt_id)
+            _clear_delivered_worker_callback(dispatch)
+        return accepted
     except Exception as error:
         _safe_log_failure("clipping_callback_replay_failed", dispatch, error)
+        if dispatch is not None:
+            try:
+                accepted = deliver_callback(
+                    dispatch.callback_url,
+                    callback_capability,
+                    canonical_failure_callback(dispatch),
+                    callback_expires_at=dispatch.callback_expires_at,
+                )
+                if accepted:
+                    _LOGGER.warning("clipping_failure_callback_acknowledged job=%s attempt=%s", dispatch.job_id, dispatch.attempt_id)
+                    _clear_delivered_worker_callback(dispatch)
+                    return True
+            except Exception as callback_error:
+                _safe_log_failure("clipping_failure_callback_delivery_failed", dispatch, callback_error)
         raise RuntimeError("clipping callback replay failed") from None
 
 
@@ -1297,16 +1365,16 @@ def clipping_analysis_task(
     callback_capability: str,
 ) -> bool:
     dispatch: StageDispatch | None = None
+    expected_origin = os.environ.get(WORKER_ORIGIN_KEY)
+    expected_pipeline_revision = os.environ.get(WORKER_PIPELINE_REVISION_KEY)
     try:
-        expected_origin = os.environ.get(WORKER_ORIGIN_KEY)
-        expected_pipeline_revision = os.environ.get(WORKER_PIPELINE_REVISION_KEY)
-        _configured_model_revision()
         dispatch = StageDispatch.parse(
             dispatch_payload,
             allow_expired=True,
             expected_origin=expected_origin,
             expected_pipeline_revision=expected_pipeline_revision,
         )
+        _configured_model_revision()
         if _MODAL_MODEL_VOLUME is None:
             raise AnalysisError("worker model volume is unavailable")
         # CPU prewarm is the sole persistent writer of model files. GPU
@@ -1329,9 +1397,36 @@ def clipping_analysis_task(
             _LOGGER.info("clipping_callback_acknowledged job=%s attempt=%s", dispatch.job_id, dispatch.attempt_id)
         else:
             _LOGGER.warning("clipping_callback_delivery_pending job=%s attempt=%s", dispatch.job_id, dispatch.attempt_id)
+            # A completed callback may have been rejected or lost. A bounded
+            # failure callback gives Go a terminal event if the first body
+            # could not be committed; replay remains guarded by the ledger.
+            accepted = deliver_callback(
+                dispatch.callback_url,
+                callback_capability,
+                canonical_failure_callback(dispatch),
+                callback_expires_at=dispatch.callback_expires_at,
+            )
+            if accepted:
+                _LOGGER.warning("clipping_failure_callback_acknowledged job=%s attempt=%s", dispatch.job_id, dispatch.attempt_id)
+                _clear_delivered_worker_callback(dispatch)
         return accepted
     except Exception as error:
         _safe_log_failure("clipping_worker_task_failed", dispatch, error)
+        if dispatch is not None:
+            try:
+                _persist_worker_failure_callback(dispatch)
+                accepted = deliver_callback(
+                    dispatch.callback_url,
+                    callback_capability,
+                    canonical_failure_callback(dispatch),
+                    callback_expires_at=dispatch.callback_expires_at,
+                )
+                if accepted:
+                    _LOGGER.warning("clipping_failure_callback_acknowledged job=%s attempt=%s", dispatch.job_id, dispatch.attempt_id)
+                    _clear_delivered_worker_callback(dispatch)
+                    return True
+            except Exception as callback_error:
+                _safe_log_failure("clipping_failure_callback_delivery_failed", dispatch, callback_error)
         raise RuntimeError("clipping worker task failed") from None
 
 

@@ -202,6 +202,7 @@ func (s *Store) migrateClipping() error {
 			"min_clip_seconds": "INTEGER NOT NULL DEFAULT 15 CHECK(min_clip_seconds BETWEEN 15 AND 180)",
 			"max_clip_seconds": "INTEGER NOT NULL DEFAULT 180 CHECK(max_clip_seconds BETWEEN 15 AND 180)",
 			"candidate_limit":  "INTEGER NOT NULL DEFAULT 10 CHECK(candidate_limit BETWEEN 7 AND 10)",
+			"analysis_deleted": "INTEGER NOT NULL DEFAULT 0 CHECK(analysis_deleted IN (0,1))",
 		},
 		"clipping_stages": {
 			"estimated_micro_usd": "INTEGER NOT NULL DEFAULT 0 CHECK(estimated_micro_usd >= 0)",
@@ -1303,6 +1304,118 @@ func (s *Store) TombstoneClippingSource(id string) error {
 	return s.tombstoneClippingSource(id, time.Now().Unix(), false)
 }
 
+// DeleteClippingSource removes user-visible source media and analysis data,
+// cancels any current analysis, and retains the job/attempt audit rows. A late
+// callback remains authenticated but cannot publish against the terminal job.
+func (s *Store) DeleteClippingSource(id string) ([]string, error) {
+	if !safeClippingSourceID(id) {
+		return nil, ErrClippingSourceNotFound
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, id)); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrClippingSourceNotFound
+		}
+		return nil, err
+	}
+	rows, err := tx.Query(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE source_id=? ORDER BY created_at,id`, id)
+	if err != nil {
+		return nil, err
+	}
+	jobs := make([]ClippingJob, 0)
+	for rows.Next() {
+		job, err := scanClippingJob(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	jobIDs := make([]string, 0, len(jobs))
+	for index := range jobs {
+		job := &jobs[index]
+		jobIDs = append(jobIDs, job.ID)
+		if !clippingJobTerminal(job.Status) {
+			if err := cancelClippingJobTx(tx, job, now); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := tx.Exec(`UPDATE clipping_jobs SET analysis_deleted=1,updated_at=? WHERE source_id=?`, now, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM clipping_analysis_claims WHERE source_id=?`, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM clipping_artifacts WHERE job_id IN (SELECT id FROM clipping_jobs WHERE source_id=?)`, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE clipping_sources SET status='deleted',source_url='',deleted_at=CASE WHEN deleted_at=0 THEN ? ELSE deleted_at END,updated_at=?,cleanup_complete=0,next_import_at=0,import_lease_until=0,media_lease_until=0 WHERE id=?`, now, now, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return jobIDs, nil
+}
+
+// FailQueuedClippingJob records a terminal local failure before a worker
+// attempt is claimed. It cannot change a job that another worker has started.
+func (s *Store) FailQueuedClippingJob(jobID, reason string) (bool, error) {
+	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") {
+		return false, ErrClippingJobNotFound
+	}
+	now := time.Now().Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrClippingJobNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	if job.Status != ClippingJobQueued || job.AnalysisDeleted {
+		return false, nil
+	}
+	stage, err := readClippingStage(tx, jobID, ClippingStageAnalysis)
+	if err != nil || stage.Status != ClippingStageQueued || stage.AttemptID != "" {
+		return false, err
+	}
+	reason = cleanClippingError(reason)
+	if reason == "" {
+		reason = "Analysis could not be started"
+	}
+	if _, err := tx.Exec(`UPDATE clipping_stages SET status='failed',error=?,updated_at=? WHERE job_id=? AND name=? AND status='queued' AND attempt_id=''`, reason, now, jobID, ClippingStageAnalysis); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`UPDATE clipping_jobs SET status='failed',error=?,updated_at=? WHERE id=? AND status='queued'`, reason, now, jobID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) ExpireClippingSource(id string, now int64) error {
 	if now <= 0 {
 		now = time.Now().Unix()
@@ -1471,12 +1584,14 @@ type clippingQueryer interface {
 }
 
 func clippingJobColumns() string {
-	return `id,batch_id,source_id,content_type,min_clip_seconds,max_clip_seconds,candidate_limit,status,budget_limit_micro_usd,reserved_micro_usd,spent_micro_usd,error,created_at,updated_at`
+	return `id,batch_id,source_id,content_type,min_clip_seconds,max_clip_seconds,candidate_limit,status,budget_limit_micro_usd,reserved_micro_usd,spent_micro_usd,analysis_deleted,error,created_at,updated_at`
 }
 
 func scanClippingJob(row clippingRowScanner) (ClippingJob, error) {
 	var job ClippingJob
-	err := row.Scan(&job.ID, &job.BatchID, &job.SourceID, &job.ContentType, &job.MinClipSeconds, &job.MaxClipSeconds, &job.CandidateLimit, &job.Status, &job.BudgetLimitMicroUSD, &job.ReservedMicroUSD, &job.SpentMicroUSD, &job.Error, &job.CreatedAt, &job.UpdatedAt)
+	var analysisDeleted int
+	err := row.Scan(&job.ID, &job.BatchID, &job.SourceID, &job.ContentType, &job.MinClipSeconds, &job.MaxClipSeconds, &job.CandidateLimit, &job.Status, &job.BudgetLimitMicroUSD, &job.ReservedMicroUSD, &job.SpentMicroUSD, &analysisDeleted, &job.Error, &job.CreatedAt, &job.UpdatedAt)
+	job.AnalysisDeleted = analysisDeleted != 0
 	return job, err
 }
 
@@ -1777,7 +1892,7 @@ func (s *Store) ClaimClippingStage(jobID, name string, reserveMicroUSD int64, le
 	} else if err != nil {
 		return ClippingStage{}, false, err
 	}
-	if job.Status == ClippingJobCanceled || job.Status == ClippingJobCompleted || job.Status == ClippingJobFailed || stage.Status == ClippingStageCanceled || stage.Status == ClippingStageCompleted || stage.Status == ClippingStageFailed || stage.Status == ClippingStageUncertain {
+	if job.AnalysisDeleted || job.Status == ClippingJobCanceled || job.Status == ClippingJobCompleted || job.Status == ClippingJobFailed || stage.Status == ClippingStageCanceled || stage.Status == ClippingStageCompleted || stage.Status == ClippingStageFailed || stage.Status == ClippingStageUncertain {
 		if err := tx.Commit(); err != nil {
 			return ClippingStage{}, false, err
 		}
@@ -1964,6 +2079,117 @@ func (s *Store) RecoverExpiredClippingStages(now int64) error {
 			return err
 		}
 	}
+	// User cancellation can leave an authenticated callback window open. Once
+	// that exact capability expires, release the source claim without changing
+	// the terminal job or making another inference attempt.
+	rows, err = tx.Query(`SELECT attempt.job_id,attempt.stage_name,attempt.attempt_id
+		FROM clipping_stage_attempts AS attempt
+		JOIN clipping_stages AS stage ON stage.job_id=attempt.job_id AND stage.name=attempt.stage_name
+		WHERE stage.status='canceled' AND stage.attempt_id=attempt.attempt_id
+		AND attempt.status='canceled' AND attempt.callback_received_at=0
+		AND attempt.reconciliation_reference<>'known_no_submission'
+		AND COALESCE((SELECT expiry.expires_at FROM clipping_capability_expiry_index AS expiry
+			WHERE expiry.job_id=attempt.job_id AND expiry.attempt_id=attempt.attempt_id),
+			attempt.lease_expires_at+?)<=?`, int64(clippingCallbackCapabilityGrace.Seconds()), now)
+	if err != nil {
+		return err
+	}
+	var canceledDue []expiredStage
+	for rows.Next() {
+		var item expiredStage
+		if err := rows.Scan(&item.jobID, &item.name, &item.attemptID); err != nil {
+			rows.Close()
+			return err
+		}
+		canceledDue = append(canceledDue, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range canceledDue {
+		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status='settled_canceled',reconciliation_reference='callback_window_expired',error='callback window expired' WHERE attempt_id=? AND status='canceled' AND callback_received_at=0`, item.attemptID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM clipping_analysis_claims WHERE job_id=? AND attempt_id=?`, item.jobID, item.attemptID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM settings WHERE key IN (?,?,?,?,?)`,
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityMedia),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityLease),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityMedia+"_expiry"),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback+"_expiry")); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, item.jobID, item.attemptID); err != nil {
+			return err
+		}
+	}
+	// Failed submitted attempts keep their callback and source claim until the
+	// capability window closes. Settle them then so a later explicit Analyze
+	// action can safely claim the source without repeating uncertain work.
+	rows, err = tx.Query(`SELECT attempt.job_id,attempt.stage_name,attempt.attempt_id
+		FROM clipping_stage_attempts AS attempt
+		JOIN clipping_stages AS stage ON stage.job_id=attempt.job_id AND stage.name=attempt.stage_name
+		WHERE stage.status='failed' AND stage.attempt_id=attempt.attempt_id
+		AND attempt.status='failed' AND attempt.callback_received_at=0
+		AND attempt.reconciliation_reference NOT IN ('known_no_submission','callback_window_expired')
+		AND COALESCE((SELECT expiry.expires_at FROM clipping_capability_expiry_index AS expiry
+			WHERE expiry.job_id=attempt.job_id AND expiry.attempt_id=attempt.attempt_id),
+			attempt.lease_expires_at+?)<=?`, int64(clippingCallbackCapabilityGrace.Seconds()), now)
+	if err != nil {
+		return err
+	}
+	var failedDue []expiredStage
+	for rows.Next() {
+		var item expiredStage
+		if err := rows.Scan(&item.jobID, &item.name, &item.attemptID); err != nil {
+			rows.Close()
+			return err
+		}
+		failedDue = append(failedDue, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range failedDue {
+		job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, item.jobID))
+		if err != nil {
+			return err
+		}
+		attempt, err := readClippingAttempt(tx, item.jobID, item.name, item.attemptID)
+		if err != nil {
+			return err
+		}
+		if err := releaseLegacyClippingHold(tx, &job, attempt, item.name, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET reconciliation_reference='callback_window_expired',error='callback window expired',settled_at=CASE WHEN settled_at=0 THEN ? ELSE settled_at END WHERE attempt_id=? AND status='failed'`, now, item.attemptID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM clipping_analysis_claims WHERE job_id=? AND attempt_id=?`, item.jobID, item.attemptID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM settings WHERE key IN (?,?,?,?,?)`,
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityMedia),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityLease),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityMedia+"_expiry"),
+			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback+"_expiry")); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, item.jobID, item.attemptID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -2065,7 +2291,7 @@ func (s *Store) RetryClippingStage(jobID, name string) (ClippingStage, error) {
 	if err != nil {
 		return ClippingStage{}, err
 	}
-	if job.Status == ClippingJobCanceled || job.Status == ClippingJobCompleted {
+	if job.AnalysisDeleted || job.Status == ClippingJobCanceled || job.Status == ClippingJobCompleted {
 		return ClippingStage{}, ErrClippingJobTerminal
 	}
 	stage, err := readClippingStage(tx, jobID, name)
@@ -2268,6 +2494,14 @@ func insertClippingArtifact(tx *sql.Tx, artifact ClippingArtifact, rangesJSON st
 
 func (s *Store) FailClippingStageBeforeSubmit(jobID, name, attemptID, leaseToken, reason string) (ClippingStage, error) {
 	return s.failClippingStage(jobID, name, attemptID, leaseToken, reason, false, true)
+}
+
+// FailClippingStageAfterSubmit makes a current submitted attempt visibly
+// terminal while retaining its source claim and callback window. A late
+// callback can settle as stale, and a manual retry remains blocked until the
+// original callback capability expires.
+func (s *Store) FailClippingStageAfterSubmit(jobID, name, attemptID, leaseToken, reason string) (ClippingStage, error) {
+	return s.failClippingStage(jobID, name, attemptID, leaseToken, reason, false, false)
 }
 
 func (s *Store) failClippingStage(jobID, name, attemptID, leaseToken, reason string, retryable, knownNoSubmission bool) (ClippingStage, error) {

@@ -310,16 +310,25 @@ class ClippingProtocolTests(unittest.TestCase):
     def test_operator_rate_estimate_must_reconcile_and_never_claim_actual(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = SQLiteDispatchLedger(Path(directory) / "worker-ledger.sqlite3")
+            calls = []
             try:
-                with self.assertRaises(ProtocolError):
-                    execute_stage(
-                        dispatch_payload(), media_token=MEDIA_CAP, callback_token=CALLBACK_CAP,
-                        ledger=ledger,
-                        client=lambda _dispatch, _token: StageResult(valid_artifact(), 0),
-                        now=100,
-                    )
+                result = execute_stage(
+                    dispatch_payload(), media_token=MEDIA_CAP, callback_token=CALLBACK_CAP,
+                    ledger=ledger,
+                    client=lambda _dispatch, _token: calls.append("client") or StageResult(valid_artifact(), 0),
+                    now=100,
+                )
+                replay = execute_stage(
+                    dispatch_payload(), media_token=MEDIA_CAP, callback_token=CALLBACK_CAP,
+                    ledger=ledger,
+                    client=lambda *_args: calls.append("incorrect-repeat") or valid_result(),
+                    now=100,
+                )
             finally:
                 ledger.close()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result, replay)
+        self.assertEqual(calls, ["client"])
 
     def test_running_attempt_can_be_retried_only_with_new_attempt_id(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -364,14 +373,15 @@ class ClippingProtocolTests(unittest.TestCase):
                     ("attempt_bad_rate", {"payload": {**valid_artifact()["payload"], "rate_micro_usd_per_second": True}}),
                     ("attempt_bad_estimate", {"payload": {**valid_artifact()["payload"], "cost_estimate_micro_usd": 99}}),
                 ):
-                    with self.subTest(attempt=attempt), self.assertRaises(ProtocolError):
-                        execute_stage(
+                    with self.subTest(attempt=attempt):
+                        rejected = execute_stage(
                             dispatch_payload(attempt_id=attempt),
                             media_token=MEDIA_CAP, callback_token=CALLBACK_CAP,
                             ledger=ledger,
                             client=lambda _d, _t, c=change: StageResult(valid_artifact(**c), 100),
                             now=100,
                         )
+                        self.assertEqual(rejected["status"], "failed")
                 def artifact_at_size(target_size):
                     artifact = valid_artifact(payload={**valid_artifact()["payload"], "large": ""})
                     base_size = len(json.dumps(artifact, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -394,14 +404,14 @@ class ClippingProtocolTests(unittest.TestCase):
                 large = artifact_at_size(MAX_ARTIFACT_BYTES + 1)
                 large_size = len(json.dumps(large, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
                 self.assertEqual(large_size, MAX_ARTIFACT_BYTES + 1)
-                with self.assertRaises(ProtocolError):
-                    execute_stage(
-                        dispatch_payload(attempt_id="attempt_over_3mb"),
-                        media_token=MEDIA_CAP, callback_token=CALLBACK_CAP,
-                        ledger=ledger,
-                        client=lambda _d, _t: StageResult(large, 100),
-                        now=100,
-                    )
+                rejected = execute_stage(
+                    dispatch_payload(attempt_id="attempt_over_3mb"),
+                    media_token=MEDIA_CAP, callback_token=CALLBACK_CAP,
+                    ledger=ledger,
+                    client=lambda _d, _t: StageResult(large, 100),
+                    now=100,
+                )
+                self.assertEqual(rejected["status"], "failed")
                 self.assertEqual(MAX_CALLBACK_OVERHEAD_BYTES, 32 * 1024)
                 overhead_dispatch = StageDispatch.parse(dispatch_payload(attempt_id="attempt_overhead"), now=100)
                 self.assertEqual(ledger.claim(overhead_dispatch, now=100), (True, None))

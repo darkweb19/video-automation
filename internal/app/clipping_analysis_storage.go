@@ -170,7 +170,7 @@ func (s *Store) PendingClippingJobs(limit int) ([]ClippingJob, error) {
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	rows, err := s.db.Query(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE status='queued' ORDER BY created_at,id LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE status='queued' AND analysis_deleted=0 ORDER BY created_at,id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +184,48 @@ func (s *Store) PendingClippingJobs(limit int) ([]ClippingJob, error) {
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+// DeleteClippingAnalysis removes user-visible results while preserving the
+// job, stage, and attempt audit. An active attempt is canceled in the same
+// transaction; its callback claim remains until the issued capability window
+// closes or a late callback settles it.
+func (s *Store) DeleteClippingAnalysis(jobID string) error {
+	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") {
+		return ErrClippingJobNotFound
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrClippingJobNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if job.AnalysisDeleted {
+		return tx.Commit()
+	}
+	if !clippingJobTerminal(job.Status) {
+		if err := cancelClippingJobTx(tx, &job, time.Now().Unix()); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM clipping_artifacts WHERE job_id=?`, jobID); err != nil {
+		return err
+	}
+	// The cache contains the source transcript and analysis core. Removing it
+	// prevents a later Analyze action from silently recreating deleted results.
+	if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, job.SourceID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE clipping_jobs SET analysis_deleted=1,updated_at=? WHERE id=?`, time.Now().Unix(), jobID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func loadClippingAnalysisCacheTx(tx *sql.Tx, source ClippingSource, revision string) (clippingAnalysisCore, bool, error) {
@@ -290,6 +332,9 @@ func (s *Store) ClaimClippingAnalysisSource(jobID string) (bool, error) {
 	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
 	if err != nil {
 		return false, err
+	}
+	if job.AnalysisDeleted || job.Status != ClippingJobQueued {
+		return false, nil
 	}
 	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, job.SourceID))
 	if err != nil {
@@ -495,7 +540,7 @@ func (s *Store) TryCompleteClippingJobFromAnalysisCache(jobID string) (bool, err
 	if err != nil {
 		return false, err
 	}
-	if job.Status != ClippingJobQueued {
+	if job.AnalysisDeleted || job.Status != ClippingJobQueued {
 		return false, nil
 	}
 	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, job.SourceID))
