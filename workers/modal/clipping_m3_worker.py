@@ -123,6 +123,7 @@ MAX_MEDIA_STREAM_START_SKEW_MS = 50
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 DOWNLOAD_TIMEOUT_SECONDS = 30
 HTTP_TIMEOUT_SECONDS = 15
+MEDIA_PROBE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 0.5)
 CALLBACK_DELAYS_SECONDS = (0, 1, 2, 4, 8)
 COMPUTE_COST_BASIS = "operator_declared_worker_second_rate_estimate"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -151,6 +152,28 @@ _SPECIAL_IP_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
 
 class ComputeDeadlineExceeded(WorkCancelled):
     """The dispatch compute budget ended before source analysis completed."""
+
+
+class MediaProbeCancelled(WorkCancelled):
+    """Only allow fixed, non-sensitive reason codes and HTTP status in worker logs."""
+
+    def __init__(self, reason_code: str, http_status: int | None = None):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.http_status = http_status
+
+
+def _media_probe_http_category(status: int) -> tuple[str, bool]:
+    """Return safe reason and whether this response merits a short retry."""
+    if status in (401, 403):
+        return "media_capability_rejected", False
+    if status == 404:
+        return "media_source_not_found", False
+    if status == 410:
+        return "media_attempt_expired_or_removed", False
+    if status in (408, 429) or 500 <= status <= 599:
+        return "media_probe_transient_http", True
+    return "media_probe_unexpected_http", False
 
 
 class NoRedirectHandler(urllib_request.HTTPRedirectHandler):
@@ -414,22 +437,53 @@ def probe_media_capability(
     *,
     opener_factory: Callable[[], Any] = _opener,
     timeout: float = HTTP_TIMEOUT_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Make a one-byte scoped range request to observe cancellation/expiry."""
+    """Validate a one-byte media range; retry only transient faults within one deadline.
+
+    Permanent authorization/absence failures stop immediately. Never log a
+    bearer, URL, exception message, or response body from this capability call.
+    """
 
     headers = media_headers(media_token)
     headers["Range"] = "bytes=0-0"
     request = urllib_request.Request(dispatch.media_url, headers=headers, method="GET")
-    try:
-        with opener_factory().open(request, timeout=timeout) as response:
-            if response.getcode() not in (200, 206):
-                raise WorkCancelled("media capability is no longer active")
-            response.read(1)
-    except WorkCancelled:
-        raise
-    except Exception as error:
-        # A revoked scope, redirect or transport failure all stop this attempt.
-        raise WorkCancelled("media capability could not be renewed") from error
+    deadline = monotonic() + max(0.0, float(timeout))
+    for attempt, delay in enumerate(MEDIA_PROBE_RETRY_DELAYS_SECONDS):
+        if delay:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise MediaProbeCancelled("media_probe_timeout") from None
+            sleep(min(delay, remaining))
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise MediaProbeCancelled("media_probe_timeout") from None
+        try:
+            with opener_factory().open(request, timeout=remaining) as response:
+                status = response.getcode()
+                if status in (200, 206):
+                    response.read(1)
+                    return
+        except urllib_error.HTTPError as error:
+            status = error.code
+            error.close()
+        except PinnedConnectionError:
+            # Invalid DNS/address sets are policy failures, not retryable outages.
+            raise MediaProbeCancelled("media_probe_dns_validation_failed") from None
+        except ssl.SSLError:
+            raise MediaProbeCancelled("media_probe_tls_failed") from None
+        except (urllib_error.URLError, OSError, TimeoutError):
+            if attempt + 1 == len(MEDIA_PROBE_RETRY_DELAYS_SECONDS):
+                raise MediaProbeCancelled("media_probe_transport_failed") from None
+            continue
+        except Exception:
+            raise MediaProbeCancelled("media_probe_unexpected_failure") from None
+        # HTTPError and non-success responses are handled identically.
+        reason_code, retryable = _media_probe_http_category(status)
+        if not retryable or attempt + 1 == len(MEDIA_PROBE_RETRY_DELAYS_SECONDS):
+            raise MediaProbeCancelled(reason_code, status) from None
+    raise MediaProbeCancelled("media_probe_transport_failed") from None
 
 
 def verify_media_file(
@@ -1151,12 +1205,31 @@ def _valid_dispatch_shared_secret(value: Any) -> bool:
 
 
 def _safe_log_failure(event: str, dispatch: StageDispatch | None, error: Exception) -> None:
+    # Log controlled categories only. Untrusted network errors may contain
+    # capability-bearing URLs, so their exception text must never be emitted.
+    safe_deadline_codes = {
+        "dispatch lease expired": "dispatch_lease_expired",
+        "callback capability expired": "callback_capability_expired",
+        "dispatch compute deadline expired": "compute_deadline_expired",
+        "dispatch capability expired during source download": "download_lease_expired",
+        "dispatch capability expired after source download": "download_lease_expired",
+    }
+    category = "not_applicable"
+    http_status: int | str = "-"
+    if isinstance(error, MediaProbeCancelled):
+        category = error.reason_code
+        if error.http_status is not None:
+            http_status = error.http_status
+    elif isinstance(error, WorkCancelled):
+        category = safe_deadline_codes.get(str(error), "unspecified_cancellation")
     _LOGGER.warning(
-        "%s job=%s attempt=%s reason=%s",
+        "%s job=%s attempt=%s reason=%s category=%s http_status=%s",
         event,
         dispatch.job_id if dispatch else "unknown",
         dispatch.attempt_id if dispatch else "unknown",
         type(error).__name__,
+        category,
+        http_status,
     )
 
 

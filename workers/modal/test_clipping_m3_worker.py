@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from clipping_analysis import AnalysisError, WorkCancelled, analyze_source
@@ -34,6 +35,7 @@ from clipping_m3_worker import (
     ComputeDeadlineExceeded,
     DispatchBodyTooLarge,
     MAX_DISPATCH_BODY_BYTES,
+    MediaProbeCancelled,
     NoRedirectHandler,
     PinnedConnectionError,
     PinnedHTTPSConnection,
@@ -60,6 +62,7 @@ from clipping_m3_worker import (
     clipping_ledger_owner,
     clipping_model_prewarm_task,
     process_dispatch,
+    probe_media_capability,
     verify_media_file,
 )
 from clipping_protocol import (
@@ -531,6 +534,90 @@ class ClippingM3WorkerTests(unittest.TestCase):
         clock["mono"] = 11
         with self.assertRaises(ComputeDeadlineExceeded):
             guard()
+
+    def test_media_probe_accepts_ranged_response_and_uses_scoped_bearer(self):
+        dispatch = StageDispatch.parse(dispatch_payload(), now=100)
+        class CapturingOpener:
+            def __init__(self):
+                self.requests = []
+            def open(self, request, timeout):
+                self.requests.append((dict(request.header_items()), timeout))
+                return MemoryResponse(b"x", status=206)
+        opener = CapturingOpener()
+        probe_media_capability(
+            dispatch, MEDIA_CAP, opener_factory=lambda: opener, timeout=5,
+        )
+        self.assertEqual(len(opener.requests), 1)
+        headers, request_timeout = opener.requests[0]
+        self.assertEqual(headers["Range"], "bytes=0-0")
+        self.assertEqual(headers["Authorization"], "Bearer " + MEDIA_CAP)
+        self.assertGreater(request_timeout, 0)
+
+    def test_media_probe_http_failures_identify_safe_cancellation_categories(self):
+        dispatch = StageDispatch.parse(dispatch_payload(), now=100)
+        for status, expected in (
+            (401, "media_capability_rejected"),
+            (403, "media_capability_rejected"),
+            (404, "media_source_not_found"),
+            (410, "media_attempt_expired_or_removed"),
+            (302, "media_probe_unexpected_http"),
+        ):
+            with self.subTest(status=status):
+                attempts = []
+                class RejectingOpener:
+                    def open(self, *_args, **_kwargs):
+                        attempts.append(True)
+                        raise urllib_error.HTTPError(
+                            "https://secret.invalid/never-log", status,
+                            "token=secret-from-response", {}, None,
+                        )
+                with self.assertRaises(MediaProbeCancelled) as context:
+                    probe_media_capability(
+                        dispatch, MEDIA_CAP, opener_factory=RejectingOpener,
+                    )
+                self.assertEqual(context.exception.reason_code, expected)
+                self.assertEqual(context.exception.http_status, status)
+                self.assertEqual(len(attempts), 1)
+
+    def test_media_probe_transient_retries_are_bounded_and_safe(self):
+        dispatch = StageDispatch.parse(dispatch_payload(), now=100)
+        attempts, delays = [], []
+        class FlakyOpener:
+            def open(self, *_args, **_kwargs):
+                attempts.append(True)
+                if len(attempts) <= 2:
+                    raise urllib_error.HTTPError(
+                        "https://secret.invalid/never-log", 503,
+                        "bearer=private", {}, None,
+                    )
+                return MemoryResponse(b"x", status=206)
+        probe_media_capability(
+            dispatch, MEDIA_CAP, opener_factory=FlakyOpener,
+            sleep=delays.append,
+        )
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(delays, [0.25, 0.5])
+
+        class TransportFailure:
+            def open(self, *_args, **_kwargs):
+                raise urllib_error.URLError("Bearer secret-in-error")
+        with self.assertRaises(MediaProbeCancelled) as context:
+            probe_media_capability(
+                dispatch, MEDIA_CAP, opener_factory=TransportFailure,
+                sleep=lambda _: None,
+            )
+        self.assertEqual(context.exception.reason_code, "media_probe_transport_failed")
+
+    def test_worker_cancel_logs_reason_code_without_untrusted_network_data(self):
+        dispatch = StageDispatch.parse(dispatch_payload(), now=100)
+        error = MediaProbeCancelled("media_attempt_expired_or_removed", 410)
+        with self.assertLogs("framevault.clipping", level="WARNING") as messages:
+            clipping_worker._safe_log_failure("clipping_worker_task_failed", dispatch, error)
+        rendered = "\\n".join(messages.output)
+        self.assertIn("category=media_attempt_expired_or_removed", rendered)
+        self.assertIn("http_status=410", rendered)
+        self.assertNotIn(MEDIA_CAP, rendered)
+        self.assertNotIn(dispatch.media_url, rendered)
 
     def test_work_guard_stops_at_retention_limited_callback_expiry(self):
         dispatch = StageDispatch.parse(dispatch_payload(callback_expires_at=105), now=100)
