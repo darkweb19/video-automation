@@ -806,6 +806,39 @@ class ClippingM3WorkerTests(unittest.TestCase):
         self.assertNotIn(MEDIA_CAP, rendered)
         self.assertNotIn(dispatch.media_url, rendered)
 
+    def test_work_guard_logs_sampled_success_and_safe_410_failure(self):
+        dispatch = StageDispatch.parse(dispatch_payload(
+            expires_at=200,
+            callback_expires_at=200 + MAX_CALLBACK_GRACE_SECONDS,
+        ), now=100)
+        clock = {"wall": 101.0, "mono": 0.0}
+        attempts = []
+
+        def probe(_dispatch, _media_capability):
+            attempts.append(True)
+            if len(attempts) == 2:
+                raise MediaProbeCancelled("media_attempt_expired_or_removed", 410)
+
+        guard = WorkGuard(
+            dispatch, MEDIA_CAP, active_probe=probe,
+            wall_clock=lambda: clock["wall"],
+            monotonic=lambda: clock["mono"],
+        )
+        with self.assertLogs("framevault.clipping", level="INFO") as collected:
+            guard()
+            clock["mono"] = 16.0
+            clock["wall"] = 117.0
+            with self.assertRaises(MediaProbeCancelled):
+                guard()
+        rendered = "\n".join(collected.output)
+        self.assertIn("clipping_media_probe_ok", rendered)
+        self.assertIn("checks=1", rendered)
+        self.assertIn("clipping_media_probe_rejected", rendered)
+        self.assertIn("category=media_attempt_expired_or_removed", rendered)
+        self.assertIn("http_status=410", rendered)
+        self.assertNotIn(MEDIA_CAP, rendered)
+        self.assertNotIn(dispatch.media_url, rendered)
+
     def test_work_guard_stops_at_retention_limited_callback_expiry(self):
         dispatch = StageDispatch.parse(dispatch_payload(callback_expires_at=105), now=100)
         guard = WorkGuard(
@@ -1652,13 +1685,21 @@ class ClippingM3WorkerTests(unittest.TestCase):
                             "payload": payload_core,
                         }, payload_core["cost_estimate_micro_usd"], COMPUTE_COST_BASIS)
 
-                    accepted = process_dispatch(
-                        payload, MEDIA_CAP, CALLBACK_CAP,
-                        ledger=RemoteDispatchLedger(rpc),
-                        analysis_client=client,
-                        callback_sender=lambda _url, _token, result: sent.append(result) or True,
-                        now=now,
-                    )
+                    with self.assertLogs("framevault.clipping", level="INFO") as recorded:
+                        accepted = process_dispatch(
+                            payload, MEDIA_CAP, CALLBACK_CAP,
+                            ledger=RemoteDispatchLedger(rpc),
+                            analysis_client=client,
+                            callback_sender=lambda _url, _token, result: sent.append(result) or True,
+                            now=now,
+                        )
+                    observed = "\n".join(recorded.output)
+                    self.assertIn("clipping_stage_ledger_complete", observed)
+                    self.assertIn("clipping_worker_callback_complete", observed)
+                    if fail:
+                        self.assertIn("clipping_analysis_stage_failed", observed)
+                    self.assertNotIn(MEDIA_CAP, observed)
+                    self.assertNotIn(CALLBACK_CAP, observed)
                     self.assertTrue(accepted)
                     self.assertEqual(len(sent), 1)
                     self.assertEqual(sent[0]["status"], "failed" if fail else "completed")

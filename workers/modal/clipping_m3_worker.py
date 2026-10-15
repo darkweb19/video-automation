@@ -130,6 +130,8 @@ CALLBACK_DELAYS_SECONDS = (0, 1, 2, 4, 8)
 COMPUTE_COST_BASIS = "operator_declared_worker_second_rate_estimate"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _LOGGER = logging.getLogger("framevault.clipping")
+# Emit existing INFO phase markers in Modal without changing global SDK logging.
+_LOGGER.setLevel(logging.INFO)
 _GLOBAL_IPV6_UNICAST = ipaddress.ip_network("2000::/3")
 _SPECIAL_IP_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "0.0.0.0/8",
@@ -328,22 +330,34 @@ class WorkGuard:
         self.active_probe = active_probe or probe_media_capability
         self.probe_interval_seconds = probe_interval_seconds
         self.last_probe: float | None = None
+        self.probe_count = 0
 
     def __call__(self) -> None:
         self._check_deadline()
         if self.last_probe is None or self.monotonic() - self.last_probe >= self.probe_interval_seconds:
-            if self._default_active_probe:
-                remaining = min(
-                    self.dispatch.expires_at - self.wall_clock(),
-                    self.dispatch.callback_expires_at - self.wall_clock(),
-                    self.dispatch.max_compute_seconds - (self.monotonic() - self.started),
-                )
-                timeout = max(0.01, min(float(HTTP_TIMEOUT_SECONDS), remaining))
-                self.active_probe(self.dispatch, self.media_token, timeout=timeout)
-            else:
-                self.active_probe(self.dispatch, self.media_token)
+            try:
+                if self._default_active_probe:
+                    remaining = min(
+                        self.dispatch.expires_at - self.wall_clock(),
+                        self.dispatch.callback_expires_at - self.wall_clock(),
+                        self.dispatch.max_compute_seconds - (self.monotonic() - self.started),
+                    )
+                    timeout = max(0.01, min(float(HTTP_TIMEOUT_SECONDS), remaining))
+                    self.active_probe(self.dispatch, self.media_token, timeout=timeout)
+                else:
+                    self.active_probe(self.dispatch, self.media_token)
+            except MediaProbeCancelled as error:
+                _safe_log_failure("clipping_media_probe_rejected", self.dispatch, error)
+                raise
             self._check_deadline()
             self.last_probe = self.monotonic()
+            self.probe_count += 1
+            if self.probe_count == 1 or self.probe_count % 4 == 0:
+                _LOGGER.info(
+                    "clipping_media_probe_ok job=%s attempt=%s checks=%d elapsed_ms=%d",
+                    self.dispatch.job_id, self.dispatch.attempt_id, self.probe_count,
+                    int((self.monotonic() - self.started) * 1000),
+                )
 
     def _check_deadline(self) -> None:
         if self.wall_clock() >= self.dispatch.expires_at:
@@ -834,8 +848,19 @@ def analyze_dispatch(
         active_probe=active_probe,
     )
     source_path = create_private_temp_file(temp_directory)
+    phase = "media_preflight"
+    phase_started = time.monotonic()
+    _LOGGER.info("clipping_worker_phase_start job=%s attempt=%s phase=%s",
+                 dispatch.job_id, dispatch.attempt_id, phase)
     try:
         guard()
+        _LOGGER.info("clipping_worker_phase_complete job=%s attempt=%s phase=%s elapsed_ms=%d",
+                     dispatch.job_id, dispatch.attempt_id, phase,
+                     int((time.monotonic() - phase_started) * 1000))
+        phase = "source_download"
+        phase_started = time.monotonic()
+        _LOGGER.info("clipping_worker_phase_start job=%s attempt=%s phase=%s",
+                     dispatch.job_id, dispatch.attempt_id, phase)
         digest = download_media(
             dispatch,
             media_token,
@@ -846,11 +871,26 @@ def analyze_dispatch(
         )
         if not hmac.compare_digest(digest, dispatch.source_sha256):
             raise AnalysisError("source SHA-256 does not match the dispatch")
+        _LOGGER.info("clipping_worker_phase_complete job=%s attempt=%s phase=%s elapsed_ms=%d bytes=%d",
+                     dispatch.job_id, dispatch.attempt_id, phase,
+                     int((time.monotonic() - phase_started) * 1000),
+                     source_path.stat().st_size)
+        phase = "media_metadata_probe"
+        phase_started = time.monotonic()
+        _LOGGER.info("clipping_worker_phase_start job=%s attempt=%s phase=%s",
+                     dispatch.job_id, dispatch.attempt_id, phase)
         media_info = media_probe(source_path, dispatch.source_duration_ms, cancel_check=guard)
         if not isinstance(media_info, Mapping) or not isinstance(media_info.get("has_audio_stream"), bool):
             raise AnalysisError("media stream metadata is invalid")
         if media_info.get("has_video_stream") is not True:
             raise AnalysisError("source has no video stream")
+        _LOGGER.info("clipping_worker_phase_complete job=%s attempt=%s phase=%s elapsed_ms=%d has_audio=%s",
+                     dispatch.job_id, dispatch.attempt_id, phase,
+                     int((time.monotonic() - phase_started) * 1000), media_info["has_audio_stream"])
+        phase = "source_analysis"
+        phase_started = time.monotonic()
+        _LOGGER.info("clipping_worker_phase_start job=%s attempt=%s phase=%s",
+                     dispatch.job_id, dispatch.attempt_id, phase)
         guard()
         analysis = analyze_source(
             source_path,
@@ -870,6 +910,13 @@ def analyze_dispatch(
             runtime_manifest=runtime_manifest,
             cancel_check=guard,
         )
+        _LOGGER.info("clipping_worker_phase_complete job=%s attempt=%s phase=%s elapsed_ms=%d",
+                     dispatch.job_id, dispatch.attempt_id, phase,
+                     int((time.monotonic() - phase_started) * 1000))
+        phase = "result_serialization"
+        phase_started = time.monotonic()
+        _LOGGER.info("clipping_worker_phase_start job=%s attempt=%s phase=%s",
+                     dispatch.job_id, dispatch.attempt_id, phase)
         compute_seconds = guard.compute_seconds()
         payload = build_source_core_payload(
             analysis,
@@ -884,7 +931,13 @@ def analyze_dispatch(
             "time_ranges": [],
             "payload": payload,
         }
+        _LOGGER.info("clipping_worker_phase_complete job=%s attempt=%s phase=%s elapsed_ms=%d compute_seconds=%d",
+                     dispatch.job_id, dispatch.attempt_id, phase,
+                     int((time.monotonic() - phase_started) * 1000), compute_seconds)
         return StageResult(artifact, payload["cost_estimate_micro_usd"], COMPUTE_COST_BASIS)
+    except Exception as error:
+        _safe_log_failure("clipping_worker_phase_failed", dispatch, error, phase=phase)
+        raise
     finally:
         try:
             source_path.unlink(missing_ok=True)
@@ -969,6 +1022,8 @@ def process_dispatch(
     media_headers(media_token)
     callback_headers(callback_token)
     client = analysis_client or analyze_dispatch
+    _LOGGER.info("clipping_worker_attempt_start job=%s attempt=%s",
+                 dispatch.job_id, dispatch.attempt_id)
     callback = execute_stage(
         payload,
         media_token=media_token,
@@ -984,7 +1039,11 @@ def process_dispatch(
     if callback is None:
         # The callback was acknowledged on an earlier run; the ledger's
         # completed tombstone prevents a second inference.
+        _LOGGER.info("clipping_worker_attempt_cached job=%s attempt=%s callback_required=false",
+                     dispatch.job_id, dispatch.attempt_id)
         return True
+    _LOGGER.info("clipping_worker_callback_start job=%s attempt=%s status=%s",
+                 dispatch.job_id, dispatch.attempt_id, callback["status"])
     if callback_sender is deliver_callback:
         acknowledged = deliver_callback(
             dispatch.callback_url,
@@ -997,6 +1056,8 @@ def process_dispatch(
     if acknowledged:
         ledger.mark_delivered(dispatch)
         commit_ledger()
+    _LOGGER.info("clipping_worker_callback_complete job=%s attempt=%s status=%s acknowledged=%s",
+                 dispatch.job_id, dispatch.attempt_id, callback["status"], acknowledged)
     return acknowledged
 
 
@@ -1250,7 +1311,9 @@ def _valid_dispatch_shared_secret(value: Any) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
-def _safe_log_failure(event: str, dispatch: StageDispatch | None, error: Exception) -> None:
+def _safe_log_failure(
+    event: str, dispatch: StageDispatch | None, error: Exception, *, phase: str = "unknown",
+) -> None:
     # Log controlled categories only. Untrusted network errors may contain
     # capability-bearing URLs, so their exception text must never be emitted.
     safe_deadline_codes = {
@@ -1269,10 +1332,11 @@ def _safe_log_failure(event: str, dispatch: StageDispatch | None, error: Excepti
     elif isinstance(error, WorkCancelled):
         category = safe_deadline_codes.get(str(error), "unspecified_cancellation")
     _LOGGER.warning(
-        "%s job=%s attempt=%s reason=%s category=%s http_status=%s",
+        "%s job=%s attempt=%s phase=%s reason=%s category=%s http_status=%s",
         event,
         dispatch.job_id if dispatch else "unknown",
         dispatch.attempt_id if dispatch else "unknown",
+        phase,
         type(error).__name__,
         category,
         http_status,
@@ -1379,12 +1443,18 @@ def clipping_analysis_task(
             expected_origin=expected_origin,
             expected_pipeline_revision=expected_pipeline_revision,
         )
+        _LOGGER.info("clipping_gpu_task_started job=%s attempt=%s source_duration_ms=%d",
+                     dispatch.job_id, dispatch.attempt_id, dispatch.source_duration_ms)
         _configured_model_revision()
         if _MODAL_MODEL_VOLUME is None:
             raise AnalysisError("worker model volume is unavailable")
         # CPU prewarm is the sole persistent writer of model files. GPU
         # containers reload the committed snapshot and never commit it.
+        _LOGGER.info("clipping_gpu_model_volume_reload_start job=%s attempt=%s",
+                     dispatch.job_id, dispatch.attempt_id)
         _MODAL_MODEL_VOLUME.reload()
+        _LOGGER.info("clipping_gpu_model_volume_reload_complete job=%s attempt=%s",
+                     dispatch.job_id, dispatch.attempt_id)
         accepted = process_dispatch(
             dispatch_payload,
             media_capability,
@@ -1524,6 +1594,8 @@ def clipping_dispatch_api() -> Any:
                 _MODAL_FUNCTIONS["analysis"].spawn(payload, media_capability, callback_capability)
             elif action == "replay":
                 _MODAL_FUNCTIONS["callback_replay"].spawn(payload, callback_capability, cached_callback)
+            _LOGGER.info("clipping_dispatch_accepted job=%s attempt=%s action=%s",
+                         dispatch.job_id, dispatch.attempt_id, action)
 
         try:
             await run_in_threadpool(admit_and_enqueue)

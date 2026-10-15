@@ -603,28 +603,64 @@ def execute_stage(
     # Preserve an unclaimed dispatch if no runtime client has been configured.
     if client is None:
         raise WorkerUnavailable("analysis runtime is not configured")
+    started = time.monotonic()
+    logging.getLogger("framevault.clipping").info(
+        "clipping_stage_claim_start job=%s attempt=%s",
+        dispatch.job_id, dispatch.attempt_id,
+    )
     claimed, cached = ledger.claim(dispatch, now=now)
     if not claimed:
+        logging.getLogger("framevault.clipping").info(
+            "clipping_stage_claim_cached job=%s attempt=%s has_cached_callback=%s",
+            dispatch.job_id, dispatch.attempt_id, cached is not None,
+        )
         return cached
     if on_claim is not None:
         on_claim()
+    logging.getLogger("framevault.clipping").info(
+        "clipping_stage_analysis_start job=%s attempt=%s",
+        dispatch.job_id, dispatch.attempt_id,
+    )
     try:
         stage_result = client(dispatch, media_token)
         result = canonical_callback(dispatch, stage_result)
     except Exception as error:
-        # Log only the exception class: raw errors may include media URLs or
-        # transcript fragments. Keep the failure callback canonical.
+        # Allow only fixed cancellation categories and integer HTTP status;
+        # raw exception strings can include scoped media URLs or transcripts.
+        safe_codes = {
+            "media_capability_rejected", "media_source_not_found",
+            "media_attempt_expired_or_removed", "media_probe_transient_http",
+            "media_probe_unexpected_http", "media_probe_timeout",
+            "media_probe_dns_validation_failed", "media_probe_tls_failed",
+            "media_probe_transport_failed", "media_probe_unexpected_failure",
+        }
+        category = getattr(error, "reason_code", None) if type(error).__name__ == "MediaProbeCancelled" else None
+        if category not in safe_codes:
+            category = "not_applicable"
+        status = getattr(error, "http_status", None) if category != "not_applicable" else None
+        if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+            status = "-"
         logging.getLogger("framevault.clipping").warning(
-            "clipping_analysis_stage_failed job=%s attempt=%s reason=%s",
-            dispatch.job_id, dispatch.attempt_id, type(error).__name__,
+            "clipping_analysis_stage_failed job=%s attempt=%s reason=%s category=%s http_status=%s elapsed_ms=%d",
+            dispatch.job_id, dispatch.attempt_id, type(error).__name__, category, status,
+            int((time.monotonic() - started) * 1000),
         )
         # Once this attempt is claimed, every client or result-contract error
         # becomes one durable, non-sensitive failure callback. The ledger
         # keeps the original attempt from running inference again on replay.
         result = canonical_failure_callback(dispatch)
+    logging.getLogger("framevault.clipping").info(
+        "clipping_stage_ledger_complete_start job=%s attempt=%s status=%s",
+        dispatch.job_id, dispatch.attempt_id, result["status"],
+    )
     ledger.complete(dispatch, result, now=now)
     if on_complete is not None:
         on_complete()
+    logging.getLogger("framevault.clipping").info(
+        "clipping_stage_ledger_complete job=%s attempt=%s status=%s elapsed_ms=%d",
+        dispatch.job_id, dispatch.attempt_id, result["status"],
+        int((time.monotonic() - started) * 1000),
+    )
     return result
 
 

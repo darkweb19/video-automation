@@ -32,4 +32,6 @@ jobs:
       - name: Test remote ledger complete and callback regression
         env:
           PYTHONPATH: workers/modal
-        run: python3 -m unittest test_clipping_m3_worker.ClippingM3WorkerTests.test_process_dispatch_with_remote_ledger_persists_success_and_failure -v
+        run: |
+          python3 -m unittest test_clipping_m3_worker.ClippingM3WorkerTests.test_process_dispatch_with_remote_ledger_persists_success_and_failure -v
+          python3 -m unittest test_clipping_m3_worker.ClippingM3WorkerTests.test_work_guard_logs_sampled_success_and_safe_410_failure -v
