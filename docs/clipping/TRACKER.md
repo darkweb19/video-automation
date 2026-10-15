@@ -16,7 +16,7 @@ Last updated: 2026-10-14 (America/Toronto). This file is the authoritative statu
 - Browser evidence: 7 synthetic desktop/mobile checks and 8 authenticated local-app checks pass, including protected source API auth, embedded assets, import errors/progress, source/job SSE focus and expanded read-only results, zero external requests, and no horizontal overflow at 390px. Data and screenshots are under `/workspace/work/`; the isolated server is stopped. Imported/results data were explicitly mocked, not live YouTube or Modal.
 - Pre-existing regression repairs are test-only: mocked transcription tests now mock/verify the added CUDA preflight; video-only wire fixture matches pinned Modal 1.3.1; process-cancellation test waits for a real started fixture child. Clean baseline `944381f` reproduced the unrelated FFmpeg workflow timeout at the helper's 10s wait. That one test now uses its existing 90s context deadline; baseline/current standalone passes took 19.12s/16.16s, with all output-quality/status assertions unchanged.
 - Limits: live YouTube access remains unverified because the enforced environment policy returns CONNECT 403. Docker daemon/base pull work, but the runtime image validation is blocked by HTTP 403 for Alpine's package index. The host installed-runtime-layout probe found its lock correctly but cannot execute the image's `/usr/bin/deno` prerequisite on this host. These are unresolved environment checks, not passed image/live tests. No deployment or paid inference occurred.
-- State: implementation, full local regressions, focused race/build checks and independent review are complete. Publication is authorized only to `feat/clipper-ai`; the reviewed changes are ready for the scoped commit series and fast-forward push. Git history and the post-push parity check are authoritative for publication. Next operational check is a permitted live YouTube import after a separately authorized app deployment; paid inference/deployment were not run here.
+- State: implementation, full local regressions, focused race/build checks, independent review and feature-code publication are complete. Four meaningful commits (`7e53013`, `c60fe1d`, `df99e73`, `92aff4b`) were fast-forward pushed only to `feat/clipper-ai`; remote/local parity and a clean worktree were verified at `92aff4bd445e8905b97085b0d80420bf9bfb910c`. This publication-record commit follows separately; Git history records the final tip and the final push is checked against the remote. Next operational check is a permitted live YouTube import after a separately authorized app deployment; paid inference/deployment were not run here.
 
 ## Historical checkpoints before the 2026-10-14 scope replacement
 
@@ -128,7 +128,7 @@ Dependencies marked “contracts” allow parallel implementation only after the
 | Simple API/config tests | simple_backend_tests / gpt-6-luna / max | clipping_runtime_test.go, dashboard_clipping_test.go, new simple-flow tests | done |
 | Independent review | simplification_review then finish_review / gpt-6-luna / max | Read-only integrated review; final reviewer approved | done |
 | Final corrections | finish_small_fixes / gpt-6-luna / max | MP4 filename, expiry-index test, worker cancellation handshake | done |
-| Coordination/publication | main thread | PLAN/TRACKER/ADR/SESSION, verification and Git | in_progress |
+| Coordination/publication | main thread | Reviewed implementation published through 92aff4b; parity verified; publication record follows | done |
 
 The tables below describe earlier assignments.
 
