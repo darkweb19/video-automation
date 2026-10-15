@@ -314,7 +314,11 @@ func TestFiveSceneWorkflowStreamsDownloadsAndCombinesWithFFmpeg(t *testing.T) {
 		t.Fatalf("project did not reach combining: status=%s scenes=%+v", project.Status, project.Scenes)
 	}
 	processor.processCombiningProjects(ctx, []VideoProject{project})
-	completed := waitForCombineProjectStatus(t, store, project.ID, "completed")
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("workflow context must have a deadline")
+	}
+	completed := waitForCombineProjectStatusUntil(t, store, project.ID, "completed", deadline)
 	if !completed.FinalVideoReady || completed.FinalSizeBytes == 0 {
 		t.Fatalf("final project output = %+v", completed)
 	}
@@ -356,7 +360,11 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, failure string) {
 
 func waitForCombineProjectStatus(t *testing.T, store *Store, projectID, want string) VideoProject {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	return waitForCombineProjectStatusUntil(t, store, projectID, want, time.Now().Add(10*time.Second))
+}
+
+func waitForCombineProjectStatusUntil(t *testing.T, store *Store, projectID, want string, deadline time.Time) VideoProject {
+	t.Helper()
 	for time.Now().Before(deadline) {
 		project, err := store.Project(projectID)
 		if err != nil {

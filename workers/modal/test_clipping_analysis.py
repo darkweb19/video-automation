@@ -453,8 +453,11 @@ class ClippingAnalysisTests(unittest.TestCase):
                     cache_dir=directory,
                     snapshot_downloader=lambda **kwargs: (prewarm_calls.append(kwargs), str(snapshot))[1],
                 )
-                with patch.dict(sys.modules, {"faster_whisper": model_module, "huggingface_hub": hub_module, "av": av_module}):
+                with patch.dict(sys.modules, {"faster_whisper": model_module, "huggingface_hub": hub_module, "av": av_module}), patch(
+                    "clipping_analysis._require_cuda_runtime_libraries"
+                ) as cuda_preflight:
                     result = transcribe_faster_whisper("fixture.media")
+                cuda_preflight.assert_called_once_with()
                 self.assertEqual(result["language"], "en")
                 self.assertEqual(prewarm_calls[0]["local_files_only"], False)
                 self.assertEqual(calls[0][0], "download")
@@ -548,9 +551,12 @@ class ClippingAnalysisTests(unittest.TestCase):
 
             _MODEL_CACHE.clear()
             try:
-                with patch.dict(sys.modules, {"faster_whisper": model_module, "huggingface_hub": hub_module}):
+                with patch.dict(sys.modules, {"faster_whisper": model_module, "huggingface_hub": hub_module}), patch(
+                    "clipping_analysis._require_cuda_runtime_libraries"
+                ) as cuda_preflight:
                     with self.assertRaises(WorkCancelled):
                         transcribe_faster_whisper("fixture.media", cancel_check=cancel_after_load)
+                cuda_preflight.assert_called_once_with()
                 self.assertEqual(model_loaded, [True])
                 self.assertEqual(transcribe_calls, [])
             finally:

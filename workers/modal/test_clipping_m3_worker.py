@@ -566,17 +566,21 @@ class ClippingM3WorkerTests(unittest.TestCase):
     def test_bounded_process_cancellation_kills_its_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
             pid_file = Path(directory) / "child.pid"
+            started_file = Path(directory) / "child.started"
+            child_script = (
+                "import pathlib,time; "
+                f"pathlib.Path({str(started_file)!r}).write_text('started'); "
+                "time.sleep(30)"
+            )
             script = (
                 "import pathlib,subprocess,sys,time; "
-                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']); "
+                f"child=subprocess.Popen([sys.executable,'-c',{child_script!r}]); "
                 f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid)); "
                 "print('ready',flush=True); time.sleep(30)"
             )
-            checks = {"count": 0}
 
-            def cancel_after_ready():
-                checks["count"] += 1
-                if checks["count"] > 1:
+            def cancel_after_child_started():
+                if pid_file.is_file() and started_file.is_file():
                     raise WorkCancelled("fixture cancelled")
 
             started = time.monotonic()
@@ -585,9 +589,11 @@ class ClippingM3WorkerTests(unittest.TestCase):
                     [sys.executable, "-c", script],
                     timeout=20,
                     output_limit=1024,
-                    cancel_check=cancel_after_ready,
+                    cancel_check=cancel_after_child_started,
                 )
             self.assertLess(time.monotonic() - started, 3)
+            self.assertTrue(pid_file.is_file(), "fixture did not publish the child PID before cancellation")
+            self.assertTrue(started_file.is_file(), "fixture child had not started before cancellation")
             child_pid = int(pid_file.read_text())
             child_proc = Path(f"/proc/{child_pid}/stat")
             deadline = time.monotonic() + 1
