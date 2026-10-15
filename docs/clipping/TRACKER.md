@@ -1,8 +1,21 @@
 # AI clipping tracker
 
-Last updated: 2026-10-14 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
+Last updated: 2026-10-15 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
 
 ## Current checkpoint
+
+### C3.DELETE / C3.ABORT — 2026-10-15 (code complete; publication blocked)
+
+- User requests delete functionality for imported clips and analyses, and analysis abort with a toast on Go or Modal errors, inside `feat/clipper-ai`, using LUNA Max. Interpret deletion as adding delete actions, with clarification pending. This authorizes scoped implementation and local verification/review; no paid inference or deployment.
+- Baseline: clean feature checkout fetched from origin; implementation owner `delete_abort` uses actual `gpt-6-luna` / `max` for Go/Python runtime, tests and current feature docs; `ui_delete_abort` uses the same model/effort for the exclusively assigned static UI and Node tests. `review_delete_abort` independently reviews read-only. Lead owns TRACKER.md and SESSION.md, Git integration and verification. Separate LUNA Max reviewer follows implementation.
+- Acceptance: authenticated usable delete actions with safe lifecycle/media cleanup; Go/Modal errors terminate the affected analysis and show a safe toast; late callbacks cannot resume deleted/failed work; focused regressions and independent review pass.
+- Implementation: authenticated source/analysis deletion cancels active work, hides results, purges artifacts/cache and removes source media; a running import returns 202 with durable deferred cleanup. Compatible additive `analysis_deleted` storage preserves job/attempt audit. Media capabilities are revoked; authenticated late callbacks can settle but never restore deleted or failed analyses. Deleted analyses cannot be retried through old API requests.
+- Go failures, current-attempt invalid worker results and Modal runtime/setup failures produce terminal job failures and live events. Ambiguous submissions retain their inference guard until settlement/expiry; failed-attempt recovery releases claims after the issued callback window. Stale/unauthenticated/legacy identities preserve existing rejection behavior. Worker failure envelopes and undelivered cached callbacks retain bounded replay without repeating inference.
+- Browser actions confirm deletion, accept pending cleanup, clear stale idempotency keys, preserve lifecycle/focus and prevent late-event result restoration. Failure toasts are keyed to the attempt/transition; initial historical failures and repeated events stay silent.
+- Verification: full `go test ./... -count=1 -p=1` passes (app 39.225s), `go vet ./...`, binary build and targeted deletion/failure/simple-callback race suite pass (12.871s). Go 1.22.12, GOMAXPROCS=2. Node clipping 18/18 and dashboard 87/87 pass, plus both JS syntax checks. Pinned Modal 1.3.1/FastAPI 0.115.12 offline Python discovery passes 75 tests (final repeat 3.568s), and callback delivery regressions pass. `git diff --check` passes. Earlier Python expectation failures were repaired to assert durable failure envelopes, then the complete suite passed.
+- Independent LUNA Max review identified and fixed active-import cleanup ordering, expired failed-attempt claim release, stale browser idempotency keys and failure-callback replay/cache durability. Final integrated reviewer sign-off: approved with no remaining actionable findings. No live import, model download, paid inference or deployment. Browser coverage is the Node DOM harness; no new rendered-browser claim.
+- Code is committed locally as `f0b4ce745166ab60ee8018c4d5191ab5ff011dfa` (`feat(clipping): add deletion and abort failed analyses`). Final independent review and all checks pass. Publication is blocked: automatic approval review rejected the combined fetch/commit/push command before execution because the current user request did not explicitly authorize external source publication to the remote. No push occurred. The existing origin is `https://github.com/darkweb19/video-automation.git`; no alternate remote or workaround was used. Obtain explicit approval to push the two local commits only to `origin/feat/clipper-ai`; no deployment or paid inference is included. Prior milestone statuses remain unchanged.
+- Verification commands: `go test ./... -count=1 -p=1`; `go vet ./...`; `go build -o /workspace/work/video-automation ./cmd/video-automation`; `go test -race ./internal/app -run 'Test(ClippingDashboardDelete|DeleteSourceDefers|AmbiguousFailed|ProcessorConfiguration|ClippingInvalidCurrent|ClippingOversizeCurrent|ClippingSimpleCallback)' -count=1`; `node tests/clipping-ui.test.cjs`; `node tests/dashboard-ui.test.cjs`; `node --check` for clipping.js and app.js; `/workspace/work/modal-venv/bin/python -m unittest discover -s workers/modal -p 'test_clipping*.py'`; `/workspace/work/modal-venv/bin/python workers/modal/callback_delivery_test.py`; `git diff --check`.
 
 ### C2.8 / C3.SIMPLE — 2026-10-14
 
@@ -53,6 +66,7 @@ Last updated: 2026-10-14 (America/Toronto). This file is the authoritative statu
 
 | Date | User instruction / scope | Effect |
 | --- | --- | --- |
+| 2026-10-15 | Implement imported-clip/analysis deletion and abort analysis with a toast on Go/Modal errors, inside feat/clipper-ai, using LUNA Max | Authorizes C3.DELETE/C3.ABORT implementation and local verification/review; no paid inference or deployment. |
 | 2026-10-14 | Pull recently merged feature branch; rebuild YouTube import without YoutubeProxy; preserve Modal analysis; use Luna Max; commit/push feature branch. Follow-up: only YouTube import and Modal analysis, remove reconciliation and other clipping workflows, clean UI. | Authorizes C2.8/C3.SIMPLE implementation, scope replacement, local checks/review and fast-forward publication to existing `feat/clipper-ai`; no deployment or paid test inference. |
 | 2026-10-13 | Update README, AGENTS.md and docs with current simple information; agent instructions unchanged and main thread remains CTO | D1 documentation refresh and independent review under existing feature-only publication scope. |
 | 2026-10-12 | Fix recurring audio import failure, find cause/rethink method if needed, simplify UI, test, use Luna Max agents and commit/push feat/clipper-ai | C2.6/C3.UI2 implementation, local/live free acquisition verification where accessible, independent review and feature-only fast-forward publication authorized; no paid inference, merge or deployment. |
@@ -107,6 +121,8 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 | C3.2 | Content-specific candidate selection, scores/evidence/confidence, boundary refinement, deduplication, title/hooks, cache reuse and UI | C3.1 | done | Lead integration + `m3_ui`, `m3_runtime`, `m3_tests` / `gpt-6-luna` / max; implementation and deterministic regressions complete; fixtures are not M1 quality measurements |
 | C3.UI | Clean source intake and progressive disclosure without behavior changes | C3.1/C3.2 | done | `clean_ui`, `agent_docs`, `asset_routes`, independent `ui_review` / gpt-6-luna / max; evidence below |
 | C3.TRACE | Browser console import and analysis diagnostics | C3.UI | done | LUNA Max backend/frontend authors and independent reviewer; full Go/race/vet/build, Node 31+87, scoped Chromium native form verification and review passed |
+| C3.DELETE | Safe imported-source and analysis deletion | Current simple clipping flow; 2026-10-15 authorization | done | delete_abort + ui_delete_abort / LUNA Max; current checkpoint |
+| C3.ABORT | Terminal analysis failure and safe toast on Go/Modal errors | Current simple clipping flow; 2026-10-15 authorization | done | Same authors; independent review_delete_abort / LUNA Max; current checkpoint |
 | C4.1 | Caption/framing/edit contracts and audio-preserving renderer | M3 | planned | Unassigned |
 | C4.2 | Preview/editor, overrides, translations, export lifecycle | C4.1 contracts | planned | Unassigned |
 | C5.1 | Clip export integration with YouTube storage and uploads | M4 | planned | Unassigned |
@@ -118,6 +134,15 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 Dependencies marked “contracts” allow parallel implementation only after the shared interface is agreed and file ownership assigned. All milestone tasks inherit PLAN.md acceptance criteria. Split these tasks into smaller numbered tasks as needed; preserve completed IDs and evidence.
 
 ## Active assignments
+
+| Task | Agent / model / effort | Exclusive ownership | State |
+| --- | --- | --- | --- |
+| C3.DELETE / C3.ABORT backend | delete_abort / gpt-6-luna / max | Go/worker runtime and tests; M3 feature guide | implementation/checks complete |
+| C3.DELETE / C3.ABORT UI | ui_delete_abort / gpt-6-luna / max | Static clipping assets/app integration; Node UI tests | implementation/checks complete |
+| C3.DELETE / C3.ABORT review | review_delete_abort / gpt-6-luna / max | Read-only independent integrated review | done; approved |
+| C3.DELETE / C3.ABORT coordination | main thread | TRACKER.md, SESSION.md, integration/Git/verification | checks/handoff complete; external push blocked pending approval |
+
+Earlier assignments:
 
 | Task | Agent / model / effort | Exclusive ownership | State |
 | --- | --- | --- | --- |
