@@ -27,3 +27,9 @@ jobs:
           PYTHONPATH: workers/modal
           FRAMEVAULT_SCENE_BINARY: ./workers/modal/scene-analyzer/target/release/framevault-scene-analyzer
         run: python3 -m unittest discover -s workers/modal -p test_clipping_rust_scene.py -v
+      - name: Install minimal worker test dependency
+        run: python3 -m pip install --disable-pip-version-check 'fastapi==0.115.12'
+      - name: Test remote ledger complete and callback regression
+        env:
+          PYTHONPATH: workers/modal
+        run: python3 -m unittest test_clipping_m3_worker.ClippingM3WorkerTests.test_process_dispatch_with_remote_ledger_persists_success_and_failure -v
