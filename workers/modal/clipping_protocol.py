@@ -24,6 +24,37 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlsplit
 
 
+# Unbuffered, privacy-safe breadcrumbs visible even when INFO is filtered.
+# Never log exception messages, bearer credentials, paths, URLs or transcripts.
+_TRACE_ATOM = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+_TRACE_FIELDS = frozenset({
+    "phase", "action", "status", "reason", "decoder", "operation", "category",
+    "elapsed_ms", "duration_ms", "bytes", "source_bytes", "source_duration_ms",
+    "http_status", "segments", "events", "windows", "frames", "checks",
+    "attempt_number", "call_id", "retry", "has_audio", "accepted", "cached",
+    "completed", "acknowledged", "size_mb",
+})
+
+
+def trace_worker(event: str, *, job: str = "-", attempt: str = "-", **fields: Any) -> None:
+    """Emit only whitelisted scalar fields, flushed to Modal stdout."""
+    if not isinstance(event, str) or not _TRACE_ATOM.fullmatch(event):
+        return
+    def atom(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)[:20]
+        if isinstance(value, str) and _TRACE_ATOM.fullmatch(value):
+            return value
+        return "-"
+    tokens = ["framevault_trace", "event=" + event, "job=" + atom(job), "attempt=" + atom(attempt)]
+    for key in sorted(fields):
+        if key in _TRACE_FIELDS:
+            tokens.append(key + "=" + atom(fields[key]))
+    print(" ".join(tokens), flush=True)
+
+
 PROTOCOL_VERSION = "framevault.clipping.v2"
 SUPPORTED_STAGE = "analysis"
 SUPPORTED_MODEL = "large-v3"
@@ -608,7 +639,10 @@ def execute_stage(
         "clipping_stage_claim_start job=%s attempt=%s",
         dispatch.job_id, dispatch.attempt_id,
     )
+    trace_worker("ledger_claim_begin", job=dispatch.job_id, attempt=dispatch.attempt_id)
     claimed, cached = ledger.claim(dispatch, now=now)
+    trace_worker("ledger_claim_complete", job=dispatch.job_id, attempt=dispatch.attempt_id,
+                 accepted=claimed, cached=cached is not None)
     if not claimed:
         logging.getLogger("framevault.clipping").info(
             "clipping_stage_claim_cached job=%s attempt=%s has_cached_callback=%s",
@@ -616,14 +650,19 @@ def execute_stage(
         )
         return cached
     if on_claim is not None:
+        trace_worker("ledger_claim_commit_begin", job=dispatch.job_id, attempt=dispatch.attempt_id)
         on_claim()
+        trace_worker("ledger_claim_commit_complete", job=dispatch.job_id, attempt=dispatch.attempt_id)
     logging.getLogger("framevault.clipping").info(
         "clipping_stage_analysis_start job=%s attempt=%s",
         dispatch.job_id, dispatch.attempt_id,
     )
+    trace_worker("analysis_client_begin", job=dispatch.job_id, attempt=dispatch.attempt_id)
     try:
         stage_result = client(dispatch, media_token)
+        trace_worker("analysis_client_complete", job=dispatch.job_id, attempt=dispatch.attempt_id)
         result = canonical_callback(dispatch, stage_result)
+        trace_worker("analysis_result_validated", job=dispatch.job_id, attempt=dispatch.attempt_id)
     except Exception as error:
         # Allow only fixed cancellation categories and integer HTTP status;
         # raw exception strings can include scoped media URLs or transcripts.
@@ -640,6 +679,8 @@ def execute_stage(
         status = getattr(error, "http_status", None) if category != "not_applicable" else None
         if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
             status = "-"
+        trace_worker("analysis_client_failed", job=dispatch.job_id, attempt=dispatch.attempt_id,
+                     reason=type(error).__name__, category=category, http_status=status)
         logging.getLogger("framevault.clipping").warning(
             "clipping_analysis_stage_failed job=%s attempt=%s reason=%s category=%s http_status=%s elapsed_ms=%d",
             dispatch.job_id, dispatch.attempt_id, type(error).__name__, category, status,
@@ -653,9 +694,12 @@ def execute_stage(
         "clipping_stage_ledger_complete_start job=%s attempt=%s status=%s",
         dispatch.job_id, dispatch.attempt_id, result["status"],
     )
+    trace_worker("ledger_complete_begin", job=dispatch.job_id, attempt=dispatch.attempt_id, status=result["status"])
     ledger.complete(dispatch, result, now=now)
+    trace_worker("ledger_complete_stored", job=dispatch.job_id, attempt=dispatch.attempt_id, status=result["status"])
     if on_complete is not None:
         on_complete()
+        trace_worker("ledger_complete_committed", job=dispatch.job_id, attempt=dispatch.attempt_id)
     logging.getLogger("framevault.clipping").info(
         "clipping_stage_ledger_complete job=%s attempt=%s status=%s elapsed_ms=%d",
         dispatch.job_id, dispatch.attempt_id, result["status"],

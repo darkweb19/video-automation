@@ -32,6 +32,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+try:
+    from .clipping_protocol import trace_worker
+except ImportError:  # Standalone Modal deployment / local test imports.
+    from clipping_protocol import trace_worker
+
 
 SUPPORTED_MODEL = "large-v3"
 TRANSCRIBER_VERSION = "faster-whisper==1.1.1/large-v3"
@@ -128,17 +133,22 @@ def transcribe_faster_whisper(
 
     if model_name != SUPPORTED_MODEL:
         raise AnalysisError("unsupported transcription model")
+    trace_worker("whisper_import_begin")
     try:
         from faster_whisper import WhisperModel
     except ImportError as error:
         raise AnalysisError("faster-whisper runtime is unavailable") from error
 
+    trace_worker("whisper_import_complete")
     cancel_check()
+    trace_worker("whisper_model_load_begin")
     model = _whisper_model(model_name, WhisperModel, cancel_check=cancel_check)
+    trace_worker("whisper_model_load_complete")
     cancel_check()
     try:
         segments: list[dict[str, Any]] = []
         with _restricted_pyav_inputs():
+            trace_worker("whisper_transcribe_begin")
             segment_iter, info = model.transcribe(
                 str(media_path),
                 task="transcribe",
@@ -148,6 +158,8 @@ def transcribe_faster_whisper(
                 vad_filter=False,
                 condition_on_previous_text=True,
             )
+            trace_worker("whisper_first_segment_wait")
+            last_progress_time = time.monotonic()
             for item in segment_iter:
                 cancel_check()
                 segments.append(
@@ -159,8 +171,12 @@ def transcribe_faster_whisper(
                         "speaker_id": None,
                     }
                 )
+                if len(segments) == 1 or len(segments) % 100 == 0 or time.monotonic() - last_progress_time >= 30:
+                    trace_worker("whisper_segment_progress", segments=len(segments))
+                    last_progress_time = time.monotonic()
                 if len(segments) > MAX_TRANSCRIPT_SEGMENTS:
                     raise AnalysisError("transcript has too many segments")
+        trace_worker("whisper_transcribe_complete", segments=len(segments))
         probability = getattr(info, "language_probability", None)
         if probability is not None and not math.isfinite(float(probability)):
             probability = None
@@ -172,10 +188,13 @@ def transcribe_faster_whisper(
             "speaker_labels_available": False,
         }
     except WorkCancelled:
+        trace_worker("whisper_cancelled")
         raise
     except AnalysisError:
+        trace_worker("whisper_analysis_error")
         raise
     except Exception as error:
+        trace_worker("whisper_runtime_error", reason=type(error).__name__)
         # Model/provider exception text may include local paths; keep it out of
         # callback payloads and logs at the caller.
         raise AnalysisError("transcription failed") from error
@@ -238,7 +257,9 @@ def _whisper_model(
     # CPU prewarm operation first; this is local-only so job capabilities can
     # never accompany a Hugging Face request.
     if model is None:
+        trace_worker("whisper_snapshot_verify_begin")
         snapshot, marker = _require_prewarmed_snapshot(revision)
+        trace_worker("whisper_snapshot_verify_complete")
         cancel_check()
     if model is None:
         try:
@@ -247,9 +268,12 @@ def _whisper_model(
             raise AnalysisError("pinned Hugging Face model loader is unavailable") from error
         device = os.environ.get("FRAMEVAULT_WHISPER_DEVICE", "cuda")
         if device == "cuda":
+            trace_worker("whisper_cuda_library_check_begin")
             _require_cuda_runtime_libraries()
+            trace_worker("whisper_cuda_library_check_complete")
         compute_type = "float16" if device == "cuda" else "int8"
         cache_root = Path(os.environ.get("FRAMEVAULT_WHISPER_CACHE", "/tmp/framevault-whisper-cache"))
+        trace_worker("whisper_snapshot_local_resolve_begin")
         try:
             snapshot = Path(snapshot_download(
                 repo_id="Systran/faster-whisper-large-v3",
@@ -264,21 +288,26 @@ def _whisper_model(
             raise AnalysisError("pinned faster-whisper model snapshot is unavailable") from error
         if snapshot.name != revision or not snapshot.is_dir():
             raise AnalysisError("faster-whisper snapshot does not match the configured immutable revision")
+        trace_worker("whisper_model_weights_hash_begin")
         cancel_check()
         weights_sha256, snapshot_revision = _model_snapshot_fingerprint(
             revision=revision,
             cancel_check=cancel_check,
         )
+        trace_worker("whisper_model_weights_hash_complete")
         if snapshot_revision != revision or weights_sha256 != marker["model_weights_sha256"]:
             raise AnalysisError("prewarmed faster-whisper model fingerprint does not match local snapshot")
         cancel_check()
+        trace_worker("whisper_gpu_model_init_begin")
         model = model_class(
             str(snapshot),
             device=device,
             compute_type=compute_type,
         )
+        trace_worker("whisper_gpu_model_init_complete")
         cancel_check()
         _MODEL_CACHE[cache_key] = model
+    trace_worker("whisper_model_available", cached=cache_key in _MODEL_CACHE)
     return model
 
 
@@ -663,6 +692,7 @@ def analyze_source(
         raise AnalysisError("audio stream metadata is invalid")
     cancel_check()
     stage_started = time.monotonic()
+    trace_worker("analysis_phase_begin", phase="transcription")
     logging.getLogger("framevault.clipping").info("clipping_analysis_phase_start phase=transcription")
     use_default_transcriber = transcriber is None and has_audio_stream
     if has_audio_stream:
@@ -683,8 +713,10 @@ def analyze_source(
         "clipping_analysis_phase_complete phase=transcription elapsed_ms=%d segments=%d",
         int((time.monotonic() - stage_started) * 1000), len(segments),
     )
+    trace_worker("analysis_phase_complete", phase="transcription", elapsed_ms=int((time.monotonic()-stage_started)*1000), segments=len(segments))
     cancel_check()
     stage_started = time.monotonic()
+    trace_worker("analysis_phase_begin", phase="audio_scan")
     logging.getLogger("framevault.clipping").info("clipping_analysis_phase_start phase=audio_scan")
     if not has_audio_stream:
         audio_scan = {
@@ -700,8 +732,10 @@ def analyze_source(
         "clipping_analysis_phase_complete phase=audio_scan elapsed_ms=%d",
         int((time.monotonic() - stage_started) * 1000),
     )
+    trace_worker("analysis_phase_complete", phase="audio_scan", elapsed_ms=int((time.monotonic()-stage_started)*1000))
     cancel_check()
     stage_started = time.monotonic()
+    trace_worker("analysis_phase_begin", phase="visual_scan")
     logging.getLogger("framevault.clipping").info("clipping_analysis_phase_start phase=visual_scan")
     if visual_scanner is None:
         visual_scan = scan_visual_events(media_path, source_duration_ms, cancel_check=cancel_check)
@@ -716,7 +750,9 @@ def analyze_source(
         "clipping_analysis_phase_complete phase=visual_scan elapsed_ms=%d visual_events=%d",
         int((time.monotonic() - stage_started) * 1000), len(visual_events),
     )
+    trace_worker("analysis_phase_complete", phase="visual_scan", events=len(visual_events), elapsed_ms=int((time.monotonic()-stage_started)*1000))
     stage_started = time.monotonic()
+    trace_worker("analysis_phase_begin", phase="candidate_inspection")
     logging.getLogger("framevault.clipping").info("clipping_analysis_phase_start phase=candidate_inspection")
     candidate_inspections = inspect_candidate_windows(
         media_path,
@@ -735,6 +771,9 @@ def analyze_source(
         "clipping_analysis_phase_complete phase=candidate_inspection elapsed_ms=%d inspected_windows=%d",
         int((time.monotonic() - stage_started) * 1000), len(candidate_inspections),
     )
+    trace_worker("analysis_phase_complete", phase="candidate_inspection", windows=len(candidate_inspections), elapsed_ms=int((time.monotonic()-stage_started)*1000))
+    trace_worker("analysis_phase_begin", phase="runtime_manifest")
+    manifest_started = time.monotonic()
     runtime_manifest = dict(runtime_manifest or analysis_runtime_manifest(
         include_model=use_default_transcriber,
         cancel_check=cancel_check,
@@ -746,6 +785,7 @@ def analyze_source(
             "ctranslate2_version": "not-used-no-audio-stream",
             "language_mode": "auto",
         })
+    trace_worker("analysis_phase_complete", phase="runtime_manifest", elapsed_ms=int((time.monotonic()-manifest_started)*1000))
     transcript_text = " ".join(segment.text for segment in segments).strip()
     language = transcript_result.get("language")
     language = language if isinstance(language, str) and language else None
@@ -1577,11 +1617,13 @@ def _rust_scene_analysis(
         "--mode", mode,
         "--decode", decode,
     ]
+    trace_worker("rust_scene_process_begin", phase=mode, decoder=decode)
     cancel_check()
     process = subprocess.Popen(
         command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, start_new_session=True,
     )
+    trace_worker("rust_scene_process_spawned", phase=mode)
     assert process.stdout is not None
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
@@ -1629,13 +1671,16 @@ def _rust_scene_analysis(
             for event in result["visual_events"]:
                 if event["start_ms"] < start_ms or event["end_ms"] > end_ms:
                     raise AnalysisError("Rust dense scene event is outside the requested window")
+        trace_worker("rust_scene_process_complete", phase=mode, decoder=result["decoder"],
+                     events=len(result["events"] if mode == "full" else result["visual_events"]))
         logging.getLogger("framevault.clipping").info(
             "clipping_rust_scene_finished mode=%s decoder=%s events=%d",
             mode, result["decoder"],
             len(result["events"] if mode == "full" else result["visual_events"]),
         )
         return result
-    except Exception:
+    except Exception as error:
+        trace_worker("rust_scene_process_failed", phase=mode, reason=type(error).__name__)
         _kill_process_group(process)
         raise
     finally:
