@@ -38,7 +38,9 @@ func classifyYouTubeDownloaderStderr(stderr []byte) string {
 		strings.Contains(message, "proxyerror"),
 		strings.Contains(message, "proxy error"),
 		strings.Contains(message, "proxy connect"),
-		strings.Contains(message, "connect tunnel"):
+		strings.Contains(message, "connect tunnel"),
+		strings.Contains(message, "http connect 403"),
+		strings.Contains(message, "connect request failed"):
 		return "proxy_failure"
 	case strings.Contains(message, "confirm you're not a bot"),
 		strings.Contains(message, "sign in to confirm you"),
