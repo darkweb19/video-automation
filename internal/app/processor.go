@@ -154,7 +154,18 @@ func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, erro
 			}
 			return false, ctx.Err()
 		}
+		dispatchStarted := time.Now()
 		if err := p.app.dispatchPreparedClippingStage(ctx, prepared); err != nil {
+			category, httpStatus := clippingWorkerDispatchFailureDetails(err)
+			p.logger.Warn(
+				"clipping analysis dispatch acknowledgement unavailable",
+				"job_id", job.ID,
+				"attempt_id", prepared.Payload.AttemptID,
+				"submission_attempted", clippingWorkerDispatchSubmissionAttempted(err),
+				"category", category,
+				"http_status", httpStatus,
+				"elapsed_ms", time.Since(dispatchStarted).Milliseconds(),
+			)
 			if clippingWorkerDispatchDefinitelyNotSubmitted(err) {
 				leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
 				if leaseErr == nil {
@@ -176,21 +187,23 @@ func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, erro
 					p.app.store.PublishClippingJob(job.ID)
 				}
 			} else {
-				// A failed HTTP response can still hide acceptance. Fail visibly,
-				// but retain the claim and callback guard until the exact attempt
-				// settles or its callback capability expires.
-				reason := "Analysis worker submission failed. Try again after the callback window closes."
-				if !clippingWorkerDispatchSubmissionAttempted(err) {
-					p.logger.Warn("clipping analysis dispatch outcome is ambiguous", "job_id", job.ID)
-				}
+				// A 202 can be accepted by Modal even if its acknowledgement
+				// arrives after our HTTP timeout or cannot be parsed. Never mark
+				// that attempt failed: doing so clears its media lease and makes
+				// the accepted GPU worker receive 410 during its first probe.
+				// Keep it running (but explicitly noted as uncertain) until the
+				// signed callback or existing expiry/recovery flow settles it.
 				leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
 				if leaseErr == nil {
-					if _, failErr := p.app.store.FailClippingStageAfterSubmit(job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken, reason); failErr != nil {
-						p.logger.Warn("submitted clipping analysis failure could not be recorded", "job_id", job.ID)
+					if _, noteErr := p.app.store.NoteClippingStageSubmissionUncertain(
+						job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken,
+					); noteErr != nil && !errors.Is(noteErr, ErrClippingStaleAttempt) {
+						p.logger.Warn("ambiguous clipping dispatch could not be recorded", "job_id", job.ID)
 					}
 				} else {
-					_ = p.app.store.CancelClippingJob(job.ID)
-					p.logger.Warn("submitted clipping analysis lease could not be loaded", "job_id", job.ID)
+					// Preserve the state for reconciliation, rather than canceling a
+					// worker that may have already accepted the dispatch.
+					p.logger.Warn("ambiguous clipping dispatch lease could not be loaded", "job_id", job.ID)
 				}
 				p.app.store.PublishClippingJob(job.ID)
 			}

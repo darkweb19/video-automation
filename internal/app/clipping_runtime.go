@@ -28,8 +28,11 @@ const (
 	// This fixed positive value satisfies the unchanged v2 worker schema. It is
 	// protocol compatibility data, not an estimate, reservation, or invoice.
 	clippingWorkerProtocolCompatibilityRate int64 = 1
-	clippingWorkerSubmitTimeout                   = 10 * time.Second
-	clippingWorkerResponseHeaderTimeout           = 8 * time.Second
+	// Modal's /dispatch waits for ledger admission and a durable spawn before
+	// responding 202. The previous 8s header deadline raced observed ~7.5s
+	// cold submissions; keep both deadlines finite but allow bounded overhead.
+	clippingWorkerSubmitTimeout                   = 30 * time.Second
+	clippingWorkerResponseHeaderTimeout           = 25 * time.Second
 	maxClippingWorkerConfigBodyBytes              = 8 << 10
 	maxClippingWorkerDispatchBodyBytes            = 32 << 10
 	maxClippingWorkerResponseBodyBytes            = 64 << 10
@@ -134,6 +137,8 @@ type clippingWorkerDialContext func(context.Context, string, string) (net.Conn, 
 type clippingWorkerDispatchOutcomeError struct {
 	submissionAttempted bool
 	err                 error
+	category            string // fixed diagnostic code, never external error text
+	httpStatus          int
 }
 
 func (e *clippingWorkerDispatchOutcomeError) Error() string {
@@ -155,7 +160,29 @@ func clippingWorkerDispatchFailure(err error, submissionAttempted bool) error {
 	if errors.As(err, &existing) {
 		return err
 	}
-	return &clippingWorkerDispatchOutcomeError{submissionAttempted: submissionAttempted, err: err}
+	return &clippingWorkerDispatchOutcomeError{submissionAttempted: submissionAttempted, err: err, category: "unclassified"}
+}
+
+// clippingWorkerDispatchDiagnosticFailure avoids logging request URLs, bearer
+// capabilities, or untrusted HTTP response bodies, even on transport errors.
+func clippingWorkerDispatchDiagnosticFailure(err error, category string, httpStatus int) error {
+	if err == nil {
+		return nil
+	}
+	return &clippingWorkerDispatchOutcomeError{
+		submissionAttempted: true, err: err, category: category, httpStatus: httpStatus,
+	}
+}
+
+func clippingWorkerDispatchFailureDetails(err error) (category string, httpStatus int) {
+	var outcome *clippingWorkerDispatchOutcomeError
+	if !errors.As(err, &outcome) {
+		return "unclassified", 0
+	}
+	if outcome.category == "" {
+		return "unclassified", 0
+	}
+	return outcome.category, outcome.httpStatus
 }
 
 // clippingWorkerDispatchDefinitelyNotSubmitted is true only for a typed
@@ -704,17 +731,30 @@ func (d *clippingWorkerDispatcher) dispatch(ctx context.Context, config clipping
 	submissionAttempted = true
 	response, err := client.Do(request)
 	if err != nil {
-		return errors.New("clipping worker submission failed")
+		category := "transport_failure"
+		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+			category = "submit_timeout"
+		} else if errors.Is(requestCtx.Err(), context.Canceled) {
+			category = "submit_canceled"
+		}
+		return clippingWorkerDispatchDiagnosticFailure(
+			errors.New("clipping worker submission failed"), category, 0,
+		)
 	}
 	if response == nil || response.Body == nil {
-		return errors.New("clipping worker acceptance response is invalid")
+		return clippingWorkerDispatchDiagnosticFailure(
+			errors.New("clipping worker acceptance response is invalid"), "missing_http_response", 0,
+		)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusAccepted {
-		return errors.New("clipping worker did not accept the dispatch")
+		return clippingWorkerDispatchDiagnosticFailure(
+			errors.New("clipping worker did not accept the dispatch"),
+			"unexpected_http_status", response.StatusCode,
+		)
 	}
 	if err := parseClippingWorkerAcceptedResponse(response.Body, dispatch); err != nil {
-		return err
+		return clippingWorkerDispatchDiagnosticFailure(err, "invalid_acknowledgement", http.StatusAccepted)
 	}
 	return nil
 }

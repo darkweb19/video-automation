@@ -2492,6 +2492,69 @@ func insertClippingArtifact(tx *sql.Tx, artifact ClippingArtifact, rangesJSON st
 	return err
 }
 
+// NoteClippingStageSubmissionUncertain records a missing dispatch
+// acknowledgement without revoking a potentially accepted worker's lease.
+// The attempt stays running, its source claim and media capability remain
+// valid, and the existing callback/recovery paths settle it exactly once.
+// A genuine cancellation or already settled attempt cannot be resurrected.
+func (s *Store) NoteClippingStageSubmissionUncertain(jobID, name, attemptID, leaseToken string) (ClippingStage, error) {
+	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || !validStageName(name) || !safeID(attemptID) || leaseToken == "" {
+		return ClippingStage{}, ErrClippingStaleAttempt
+	}
+	now := time.Now().Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return ClippingStage{}, err
+	}
+	defer tx.Rollback()
+	attempt, err := readClippingAttempt(tx, jobID, name, attemptID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClippingStage{}, ErrClippingStaleAttempt
+	}
+	if err != nil {
+		return ClippingStage{}, err
+	}
+	stage, err := readClippingStage(tx, jobID, name)
+	if err != nil {
+		return ClippingStage{}, err
+	}
+	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
+	if err != nil {
+		return ClippingStage{}, err
+	}
+	if !validClippingLease(leaseToken, attempt.TokenHash) ||
+		attempt.Status != "running" || attempt.SettledAt != 0 ||
+		attempt.CallbackReceivedAt != 0 || attempt.LeaseExpiresAt <= now ||
+		stage.AttemptID != attemptID || stage.Status != ClippingStageRunning ||
+		stage.LeaseExpiresAt <= now || stage.LeaseExpiresAt != attempt.LeaseExpiresAt ||
+		job.Status != ClippingJobRunning {
+		return ClippingStage{}, ErrClippingStaleAttempt
+	}
+
+	// Only the stage note changes. Never clear lease_expires_at, modify
+	// attempt status, release the source claim, or alter callback credentials.
+	const note = "Worker dispatch acknowledgement is uncertain; awaiting callback"
+	result, err := tx.Exec(`UPDATE clipping_stages SET error=?,updated_at=?
+		WHERE job_id=? AND name=? AND attempt_id=? AND status='running' AND lease_expires_at>?`,
+		note, now, jobID, name, attemptID, now)
+	if err != nil {
+		return ClippingStage{}, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return ClippingStage{}, err
+	}
+	if count != 1 {
+		return ClippingStage{}, ErrClippingStaleAttempt
+	}
+	if err := tx.Commit(); err != nil {
+		return ClippingStage{}, err
+	}
+	stage.Error = note
+	stage.UpdatedAt = now
+	return stage, nil
+}
+
 func (s *Store) FailClippingStageBeforeSubmit(jobID, name, attemptID, leaseToken, reason string) (ClippingStage, error) {
 	return s.failClippingStage(jobID, name, attemptID, leaseToken, reason, false, true)
 }

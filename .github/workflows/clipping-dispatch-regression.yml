@@ -1,0 +1,33 @@
+name: Clipping uncertain-dispatch regression
+
+on:
+  push:
+    branches: [fix/clipper-youtube-import-diagnostics]
+    paths:
+      - "internal/app/clipping_*.go"
+      - "internal/app/processor.go"
+      - "internal/app/dashboard_clipping.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/clipping-dispatch-regression.yml"
+  pull_request:
+    paths:
+      - "internal/app/clipping_*.go"
+      - "internal/app/processor.go"
+      - "internal/app/dashboard_clipping.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/clipping-dispatch-regression.yml"
+
+jobs:
+  go-clipping-dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test full Go clipping backend contracts
+        run: go test ./internal/app -count=1
