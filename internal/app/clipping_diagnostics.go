@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 )
 
@@ -270,7 +271,10 @@ func (trace *clippingDiagnosticTrace) record(stage string, status ClippingSource
 	}
 	if err := trace.acquisition.store.AppendClippingSourceDiagnostic(trace.sourceID, stage, status, code); err == nil {
 		trace.acquisition.store.PublishClippingSource(trace.sourceID)
+	} else {
+		slog.Warn("clipping import diagnostic write failed", "source_id", trace.sourceID, "stage", stage)
 	}
+	slog.Info("clipping import stage", "source_id", trace.sourceID, "stage", stage, "status", status, "reason_code", code)
 }
 
 func (trace *clippingDiagnosticTrace) start(stage string) {
