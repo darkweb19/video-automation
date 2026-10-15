@@ -1,0 +1,29 @@
+name: Clipping Rust scene analyzer
+
+on:
+  push:
+    branches: [fix/clipper-youtube-import-diagnostics]
+    paths:
+      - "workers/modal/**"
+      - ".github/workflows/clipping-rust-scene.yml"
+  pull_request:
+    paths:
+      - "workers/modal/**"
+      - ".github/workflows/clipping-rust-scene.yml"
+
+jobs:
+  rust-scene:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build model-free scene analyzer
+        run: |
+          cargo test --offline --manifest-path workers/modal/scene-analyzer/Cargo.toml
+          cargo build --offline --release --manifest-path workers/modal/scene-analyzer/Cargo.toml
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Check Rust to Python visual analysis contract
+        env:
+          PYTHONPATH: workers/modal
+          FRAMEVAULT_SCENE_BINARY: ./workers/modal/scene-analyzer/target/release/framevault-scene-analyzer
+        run: python3 -m unittest discover -s workers/modal -p test_clipping_rust_scene.py -v
