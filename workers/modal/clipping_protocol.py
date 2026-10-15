@@ -10,6 +10,7 @@ this database.
 from __future__ import annotations
 
 import hashlib
+import logging
 import ipaddress
 import json
 import os
@@ -610,7 +611,13 @@ def execute_stage(
     try:
         stage_result = client(dispatch, media_token)
         result = canonical_callback(dispatch, stage_result)
-    except Exception:
+    except Exception as error:
+        # Log only the exception class: raw errors may include media URLs or
+        # transcript fragments. Keep the failure callback canonical.
+        logging.getLogger("framevault.clipping").warning(
+            "clipping_analysis_stage_failed job=%s attempt=%s reason=%s",
+            dispatch.job_id, dispatch.attempt_id, type(error).__name__,
+        )
         # Once this attempt is claimed, every client or result-contract error
         # becomes one durable, non-sensitive failure callback. The ledger
         # keeps the original attempt from running inference again on replay.
