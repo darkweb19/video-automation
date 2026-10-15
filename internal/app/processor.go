@@ -268,6 +268,7 @@ func (p *Processor) recoverClippingStages() error {
 // five-second project/generation scan. A single bounded worker is intentional:
 // imports can run for hours and contend for persistent disk/network capacity.
 func (p *Processor) runClippingImportWorker(ctx context.Context) {
+	p.logger.Info("clipping import worker started", "queue_idle_poll_seconds", 30)
 	for {
 		if err := ctx.Err(); err != nil {
 			return
@@ -276,7 +277,7 @@ func (p *Processor) runClippingImportWorker(ctx context.Context) {
 		if err != nil && ctx.Err() == nil {
 			// Import errors may include remote URLs or filesystem details. The
 			// source row contains a sanitized user-facing failure message.
-			p.logger.Warn("clipping source import failed")
+			p.logger.Warn("clipping source import worker iteration failed", "reason_code", clippingDiagnosticCode(ClippingDiagnosticStageDispatch, err))
 		}
 		if err != nil && ctx.Err() == nil {
 			if !waitProcessor(ctx, 5*time.Second) {
