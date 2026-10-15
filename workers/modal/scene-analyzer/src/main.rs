@@ -51,8 +51,8 @@ fn histogram(frame: &[u8]) -> [u32; 32] {
 }
 
 fn differences(a: &[u8], b: &[u8], left: &[u32; 32], right: &[u32; 32]) -> (f64, f64) {
-    let absolute: u64 = a.iter().zip(b).map(|(x, y)| (i32::from(*x) - i32::from(*y)).unsigned_abs() as u64).sum();
-    let distribution: u64 = left.iter().zip(right).map(|(x, y)| (i64::from(*x) - i64::from(*y)).unsigned_abs()).sum();
+    let absolute: u64 = a.iter().zip(b).map(|(x, y)| (i32::from(*x) - i32::from(*y)).abs() as u64).sum();
+    let distribution: u64 = left.iter().zip(right).map(|(x, y)| (i64::from(*x) - i64::from(*y)).abs() as u64).sum();
     (absolute as f64 / FRAME_BYTES as f64, distribution as f64 / (2.0 * FRAME_BYTES as f64))
 }
 
@@ -61,7 +61,7 @@ fn add_full(map: &mut BTreeMap<(u64, u8), Event>, event: Event) {
     // A single strongest event of each kind per 15-second source bin preserves
     // coverage across four-hour sources without flooding the callback artifact.
     let key = (event.start / FULL_BIN_MS, category);
-    if map.get(&key).is_none_or(|prior| event.score > prior.score) {
+    if map.get(&key).map_or(true, |prior| event.score > prior.score) {
         map.insert(key, event);
     }
 }
