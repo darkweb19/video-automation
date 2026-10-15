@@ -1,4 +1,6 @@
-# M2: integrated sources, jobs and batches
+# M2: integrated sources, jobs and batches (historical)
+
+> This document records the earlier M2/C2.4/C3.1 implementation and is not the current product or API guide. C3.SIMPLE replaced its upload, Drive/Dropbox, batch, budget, retention-control, cancellation/retry, selection-editing, and invoice-reconciliation flows. The active browser workflow imports one public YouTube video and requests Modal analysis; see the [README](../../README.md), [YouTube import guide](YOUTUBE-IMPORT.md), and [M3 operator guide](M3-IMPLEMENTATION.md). Historical details below describe the earlier implementation only.
 
 M2 was authorized on 2026-10-08 with remaining M1 feasibility explicitly waived. Existing M1 documents, schemas, synthetic fixtures and tools remain historical offline evidence; the waiver does not establish live acquisition, quality or cost feasibility. M2 extends the existing authenticated Go application and embedded dashboard. Deployment is separate.
 
@@ -58,6 +60,6 @@ After this M2 snapshot was written, the user authorized public single-video YouT
 
 ## C3.1/C3.2 authorized M3 extension — 2026-10-09
 
-The user subsequently authorized M3 analysis and candidate selection. The previous M2 statement that no provider is selected remains the historical M2 state; current M3 adds an opt-in Modal faster-whisper/FFmpeg worker, same-origin Settings, strict v2 callback handling, source-scoped media, immutable model-commit provenance, cached transcript/event cores, and editable heuristic candidate selection. The worker is still disabled until an operator deploys and configures it. See [M3-IMPLEMENTATION.md](M3-IMPLEMENTATION.md) for exact setup and limits. No live inference, paid run, or deployment occurred. M1 corpus-based quality/language/cost goals remain unmeasured, and M4 rendering/editing remains unimplemented.
+The user later authorized M3 analysis and candidate generation. The worker remains opt-in and requires a separate operator deployment and configuration. The current UI displays persisted transcript, context, and heuristic candidates read-only. See [M3-IMPLEMENTATION.md](M3-IMPLEMENTATION.md) for current operator setup and limits. No live inference, paid run, or deployment occurred. M1 corpus-based quality/language/cost goals remain unmeasured, and M4 rendering/editing remains unimplemented.
 
-M3 retention cleanup removes source media and derived transcript/cache/artifact data while preserving the soft source row and job/stage/attempt accounting audit. Terminal jobs may be tombstoned after media leases allow it; callback and lease capability settings plus their persisted expiry index remain through the actual callback window so late callbacks can settle cost without publishing. Nonterminal jobs, especially `paused_budget`, remain protected until their callback windows expire. A canceled job's late result cannot advance the job, and source-row deletion is not used for cleanup.
+Current source retention is automatic and is not adjustable through the browser. The detailed cleanup and accounting mechanics in earlier M2/M3 iterations are historical; the current worker and server enforce bounded source, callback, and artifact lifetimes.

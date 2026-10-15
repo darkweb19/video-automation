@@ -64,4 +64,12 @@ The `/api/events` response does not set a hop-by-hop `Connection` header. Local 
 
 This ADR records the accepted M2 design, not deployed behavior. Append or supersede decisions with evidence when subsequent evaluation resolves providers/render placement or later requirements change. Do not silently rewrite accepted architecture during an agent task.
 
+### C2.8 / C3.SIMPLE scope replacement — 2026-10-14
+
+The user explicitly removed the application YoutubeProxy and narrowed Clipping to YouTube import plus Modal analysis. This supersedes the earlier acquisition proxy/Go track-selector decisions, operator-invoice/budget workflow, and instructions to retain other workflows in disclosures. Use yt-dlp's maintained native downloader with FFmpeg MP4 merge/finalization, canonical single-video inputs, bounded temporary files and the existing source probe/hash/atomic-ready lifecycle. The execution environment's outbound network proxy is infrastructure and is separate from the removed application component.
+
+Remove active clipping upload, public Drive/Dropbox, batch, retention-setting, selection-edit and reconciliation API/UI flows. Keep legacy SQLite schema/data for compatible upgrades; source capacity and dispatch lifecycle safeguards remain technical necessities. Modal analysis algorithms, runtime model pins, worker protocol, authenticated transfer, replay guards and read-only artifacts remain. Analysis dispatch no longer depends on operator billing-rate settings or manual invoice settlement. Persist genuine outcomes and runtime estimates without claiming invoices were measured. Never automatically repeat an uncertain accepted inference.
+
+The dashboard shows a YouTube-link form, imported sources and explicit analysis actions/results, with compact connection settings. Editor, exports and publishing are outside the current scope. Local code validation and independent review are distinct from live YouTube availability, paid inference or deployment.
+
 Related: [ADR-001](001-go-service-layout.md), [ADR-003](003-railway-persistence.md), [implementation plan](../clipping/PLAN.md), [tracker](../clipping/TRACKER.md).

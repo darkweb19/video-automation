@@ -6,7 +6,21 @@ On 2026-10-09 (America/Toronto), the user authorized M3/C3.1+C3.2 implementation
 
 M2 implementation was approved on 2026-10-08 with remaining M1 feasibility explicitly skipped. Commit/push of completed M2 to `feat/clipper-ai` was subsequently authorized; preserve that branch's prior M1 artifacts. This does not authorize paid provider calls, benchmarks, later milestones or deployment. See [TRACKER.md](TRACKER.md) for the current authorization and task states, [ADR-004](../architecture/004-ai-clipping.md) for the proposed architecture, and [AGENTS.md](../../AGENTS.md) for the execution workflow.
 
-## Product requirements
+## Current scope — 2026-10-14
+
+The user narrowed Clipping to two functions: YouTube-link import and analysis through the existing Modal worker. Rebuild acquisition without the application YoutubeProxy. Preserve the current full-source analysis, source-time transcript, context/events, candidate-selection algorithm, and worker protocol. Changes are authorized for implementation, local verification, independent Luna Max review, commit and fast-forward push only to `feat/clipper-ai`.
+
+The active work is C2.8 (native yt-dlp download and MP4 finalization) and C3.SIMPLE (remove clipping reconciliation and other workflows; simplify the dashboard). The earlier product requirements and M0–M6 below describe historical broader planning. They do not require retaining removed features or authorize editor/export/publishing work in this task.
+
+**Import acceptance:** supported single-video YouTube link or ID becomes a validated MP4 containing video and original audio on the app volume; no application proxy/custom track selector; safe redacted failure for unavailable videos; bounded disk/file/runtime use, cancellation and restart handling; actual media probe, hash and atomic Ready transition remain. No cookies, caller-controlled extractor options or restricted-video bypass.
+
+**Analysis acceptance:** a Ready source can be explicitly analyzed through the configured Modal worker without job/batch budgets, operator billing rates or invoice reconciliation. Existing artifact validation, source identity, authentication, replay protection, cache reuse and read-only results remain. Unknown submitted work must not be redispatched automatically. Model/worker analysis files and their recent fixes remain unchanged.
+
+**UI acceptance:** one clear YouTube-link import form, imported-video status and an Analyze action, analysis progress and read-only results. Remove file uploads, Drive/Dropbox intake, batches, budgets, retention settings, reconciliation forms and candidate-editing controls and their active API flows. Keep only the worker connection settings needed for Modal analysis. Existing user data is preserved by compatibility schema rather than destructive migration.
+
+**Evidence:** local downloader/lifecycle tests, budget-free API/callback tests, Node and authenticated browser checks, full Go and existing worker regressions, independent review. A restricted-environment denial leaves live YouTube verification unverified; mocked imports do not establish real availability. Deployment and paid inference are separate and are not part of this request.
+
+## Historical product requirements
 
 - Integrate into the existing FrameVault application and repository.
 - Personal channels first; public customer accounts are future scope.
@@ -21,7 +35,7 @@ M2 implementation was approved on 2026-10-08 with remaining M1 feasibility expli
 - Include alternative hooks/titles, batch processing, and YouTube publishing/scheduling. Hook suggestions must remain faithful to the source; generated speech and reordered dialogue are excluded initially.
 - Later scope: direct TikTok/Instagram publishing, customer accounts/billing, dubbing, advanced timeline editing, and learning from permitted engagement analytics.
 
-## Budget baseline and assumptions
+## Historical budget baseline and assumptions
 
 The user selected US$1 for a one-hour source and said the budget can scale with duration. The proposed interpretation awaiting plan approval is `max(1 USD, source_hours × 1 USD)` for analysis plus the initial 7–10 exports. Examples: 10–60 minutes $1, two hours $2, four hours $4. Existing hosting and retained storage are separate; additional translations/renders require explicit cost disclosure.
 
@@ -31,7 +45,7 @@ Benchmark CPU/GPU time, provider tokens, media transfers, retries, cold starts, 
 
 For the initial opt-in M3 worker, the operator-declared rate and bounded compute ceiling produce a reservation estimate, not a Modal quote or settled charge. Keep the reservation outstanding until an operator records an invoice amount and reconciliation reference (including an explicit zero). Unknown/late outcomes block retry. The initial transcript/context/event extraction and candidate scores are deterministic engineering heuristics; score components and signal evidence explain ranking inputs but are not calibrated probabilities, semantic model judgments, or guarantees of engagement.
 
-## Milestones and acceptance criteria
+## Historical milestones and acceptance criteria
 
 ### M0 — Planning and execution workflow
 

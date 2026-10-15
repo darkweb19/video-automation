@@ -1,8 +1,24 @@
 # AI clipping tracker
 
-Last updated: 2026-10-13 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
+Last updated: 2026-10-14 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
 
 ## Current checkpoint
+
+### C2.8 / C3.SIMPLE — 2026-10-14
+
+- User authorized pulling the recently merged `feat/clipper-ai`, rebuilding YouTube import without YoutubeProxy, preserving Modal analysis, using Luna Max agents, and committing/pushing the feature branch. Follow-up narrows Clipping to YouTube import and Modal analysis only; remove reconciliation and other clipping workflows and clean the UI. This supersedes prior clipping invoice, budget, batch, upload and editing requirements. No deployment or paid test inference is included.
+- Clean pulled baseline: `944381f02bfb35a71fc53c61966d35ab3c4ed0f4`; a fresh fetch on continuation confirmed the remote feature branch still matches that baseline. The existing branch is `feat/clipper-ai`; no alternate `feat/clpper-ai` remote branch exists.
+- Implementation: canonical single-video YouTube link/ID -> pinned native yt-dlp download and FFmpeg MP4 merge/remux -> bounded actual-container/audio/video probe, sync/hash/atomic Ready -> explicit existing Modal analysis and read-only results. New source names end in `.mp4`. The application proxy and Go format/track pipeline are deleted.
+- Active upload, Drive/Dropbox, batch, retention-setting, budget/rate, invoice-reconciliation and selection-edit flows are removed from clipping APIs/UI. Existing Ready media/artifacts and compatible SQLite columns remain. Unsupported pending legacy imports are marked failed without deleting their files. Current Modal worker/algorithm/protocol files and Go candidate-analysis algorithm are unchanged; positive v2 wire fields are compatibility metadata, never app invoices or spending gates.
+- Durable lifecycle fixes cover late/duplicate/current-attempt callbacks, indexed issued callback expiry across cleanup/restart/retention changes, unknown legacy v1 attempts with explicit retry only after expiry, cancellation before submission, and old cache rows with unknown compute runtime. No unknown accepted inference is automatically repeated.
+- Authors and tests: `youtube_rebuild`, `clipping_simplify`, `clean_clipping_ui`, `simple_backend_tests`, `worker_regression_tests`, and resumed `finish_small_fixes`, all actual `gpt-6-luna` / `max`. Main owns coordination/docs/Git only. TERRA unavailable. Initial independent reviewer `simplification_review` found actionable issues that were repaired, then hit a quota interruption. Fresh independent read-only reviewer `finish_review` (`gpt-6-luna` / `max`) approved the final integrated diff with no outstanding findings.
+- Verification so far: final `go test ./... -count=1 -p=1` passes (app 55.890s; Go 1.22.12, `GOMAXPROCS=2`), `go vet ./...` and binary build pass. Node Clipping 9/9 and dashboard 87/87 plus both JavaScript syntax checks pass. Python callback delivery, protocol 14/14, analysis 18/18, and pinned-Modal-SDK worker 34/34 pass. The actual pinned yt-dlp CLI selected original audio and downloaded/merged/remuxed real local HTTP media to an ffprobe-verified MP4; no YouTube request or inference was made by that check. Focused `go test -race ./internal/app -run 'Test(Clipping|YouTube)' -count=1` passes (162.075s). `git diff --check` passes and 57 local Markdown file links resolve across 10 changed documents.
+- Browser evidence: 7 synthetic desktop/mobile checks and 8 authenticated local-app checks pass, including protected source API auth, embedded assets, import errors/progress, source/job SSE focus and expanded read-only results, zero external requests, and no horizontal overflow at 390px. Data and screenshots are under `/workspace/work/`; the isolated server is stopped. Imported/results data were explicitly mocked, not live YouTube or Modal.
+- Pre-existing regression repairs are test-only: mocked transcription tests now mock/verify the added CUDA preflight; video-only wire fixture matches pinned Modal 1.3.1; process-cancellation test waits for a real started fixture child. Clean baseline `944381f` reproduced the unrelated FFmpeg workflow timeout at the helper's 10s wait. That one test now uses its existing 90s context deadline; baseline/current standalone passes took 19.12s/16.16s, with all output-quality/status assertions unchanged.
+- Limits: live YouTube access remains unverified because the enforced environment policy returns CONNECT 403. Docker daemon/base pull work, but the runtime image validation is blocked by HTTP 403 for Alpine's package index. The host installed-runtime-layout probe found its lock correctly but cannot execute the image's `/usr/bin/deno` prerequisite on this host. These are unresolved environment checks, not passed image/live tests. No deployment or paid inference occurred.
+- State: implementation, full local regressions, focused race/build checks and independent review are complete. Publication is authorized only to `feat/clipper-ai`; the reviewed changes are ready for the scoped commit series and fast-forward push. Git history and the post-push parity check are authoritative for publication. Next operational check is a permitted live YouTube import after a separately authorized app deployment; paid inference/deployment were not run here.
+
+## Historical checkpoints before the 2026-10-14 scope replacement
 
 - C2.7 implementation, independent review and final full Go suite/vet verification are complete for the newly reported unsupported audio/video format error. Baseline `24b11a1`, clean feature branch. User requested a fix under continuing feature-only commit/push scope. User supplied a valid youtu.be short URL; canonicalization is supported, but live metadata remains inaccessible under current outbound policy. Owners: `format_fix` (backend and regression tests), `format_review` (independent read-only diagnosis/review), both Luna Max; lead owns tracker/handoff/Git. Preserve original audio, quality, DNS/redirect controls and resource bounds; no deployment or paid calls.
 
@@ -37,6 +53,7 @@ Last updated: 2026-10-13 (America/Toronto). This file is the authoritative statu
 
 | Date | User instruction / scope | Effect |
 | --- | --- | --- |
+| 2026-10-14 | Pull recently merged feature branch; rebuild YouTube import without YoutubeProxy; preserve Modal analysis; use Luna Max; commit/push feature branch. Follow-up: only YouTube import and Modal analysis, remove reconciliation and other clipping workflows, clean UI. | Authorizes C2.8/C3.SIMPLE implementation, scope replacement, local checks/review and fast-forward publication to existing `feat/clipper-ai`; no deployment or paid test inference. |
 | 2026-10-13 | Update README, AGENTS.md and docs with current simple information; agent instructions unchanged and main thread remains CTO | D1 documentation refresh and independent review under existing feature-only publication scope. |
 | 2026-10-12 | Fix recurring audio import failure, find cause/rethink method if needed, simplify UI, test, use Luna Max agents and commit/push feat/clipper-ai | C2.6/C3.UI2 implementation, local/live free acquisition verification where accessible, independent review and feature-only fast-forward publication authorized; no paid inference, merge or deployment. |
 | 2026-10-12 | Fix YouTube separate-track link imports; preserve combined path, security/quality/bounds; synthetic tests, independent LUNA Max review, operator docs/handoff, meaningful commits and push to existing feature branch; no main-thread implementation | Authorizes C2.5 implementation, local checks, docs, ordinary commits and fast-forward push only to `feat/clipper-ai`. TERRA unavailable; actual agents use `gpt-6-luna` / `max`. No deployment, paid inference, real YouTube test downloads, merge, force-push or main changes. |
@@ -101,6 +118,19 @@ States: `planned`, `ready`, `in_progress`, `in_review`, `blocked`, `skipped`, `d
 Dependencies marked “contracts” allow parallel implementation only after the shared interface is agreed and file ownership assigned. All milestone tasks inherit PLAN.md acceptance criteria. Split these tasks into smaller numbered tasks as needed; preserve completed IDs and evidence.
 
 ## Active assignments
+
+| Task | Agent / model / effort | Exclusive ownership | State |
+| --- | --- | --- | --- |
+| C2.8 native MP4 importer | youtube_rebuild / gpt-6-luna / max | Acquisition/YouTube/files/diagnostics, Docker and YouTube runtime tools, import guide | done |
+| C3.SIMPLE backend | clipping_simplify / gpt-6-luna / max | Models/storage/runtime/routes/processor and backend tests | done |
+| C3.SIMPLE UI | clean_clipping_ui / gpt-6-luna / max | Embedded assets/frontend tests, README/AGENTS/operator guides | done |
+| Existing merged worker regression tests | worker_regression_tests / gpt-6-luna / max | Python test files and video-only wire fixture only; worker runtime unchanged | done |
+| Simple API/config tests | simple_backend_tests / gpt-6-luna / max | clipping_runtime_test.go, dashboard_clipping_test.go, new simple-flow tests | done |
+| Independent review | simplification_review then finish_review / gpt-6-luna / max | Read-only integrated review; final reviewer approved | done |
+| Final corrections | finish_small_fixes / gpt-6-luna / max | MP4 filename, expiry-index test, worker cancellation handshake | done |
+| Coordination/publication | main thread | PLAN/TRACKER/ADR/SESSION, verification and Git | in_progress |
+
+The tables below describe earlier assignments.
 
 Current repair assignments (all requested agents `gpt-6-luna` / `max`):
 

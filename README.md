@@ -8,11 +8,11 @@ Jump to [Quick start](#quick-start), [Create videos](#create-videos), [Clipping]
 
 - **Video generation:** create a single clip or a 30-second project. Projects use OpenRouter to plan five connected scenes; the selected OpenRouter or Modal video provider creates five six-second, 480p vertical clips, which FFmpeg joins into a silent 1080×1920 video.
 - **YouTube uploads:** upload a completed video manually after connecting a YouTube account. FrameVault does not publish or schedule videos automatically.
-- **Clipping:** upload a source file or import a public YouTube, Google Drive, or Dropbox link, then optionally request transcript and candidate analysis. Analysis uses a separately configured Modal worker.
+- **Clipping:** import one public YouTube video, then request transcript and candidate analysis from a separately configured Modal worker.
 
 ## Current clipping limits
 
-The optional analysis worker is not deployed by default. Candidate selection is heuristic. M1 remains skipped, not passed: its remaining real-media feasibility work was waived, so quality, language, and cost targets remain unmeasured. Captions, editing, framing, clip rendering and export, and scheduling are planned work. Live YouTube, Drive, and Dropbox import behavior has not been verified. YouTube availability is best-effort; Drive viewer or confirmation pages may need an original-file upload, and Dropbox import is limited to public shared-file links. See the [clipping plan](docs/clipping/PLAN.md) and [documentation index](docs/README.md) for status and operator guides.
+The optional analysis worker is not deployed by default. Candidate selection is heuristic. M1 remains skipped, not passed: its remaining real-media feasibility work was waived, so quality and language performance remain unmeasured. Clipping currently supports public YouTube links only; live import success has not been verified and availability is best-effort. The Clipping page does not edit or export candidate videos. See the [clipping plan](docs/clipping/PLAN.md) and [documentation index](docs/README.md) for status and operator guides.
 
 ## Quick start
 
@@ -56,11 +56,11 @@ Project story planning and project ideas use OpenRouter's Haiku model. Single-cl
 
 ## Use Clipping
 
-The **Clipping** tab accepts a source file or a public YouTube, Google Drive, or Dropbox link. Confirm that you have permission to reuse and process the footage. Importing a source does not start analysis. After it is Ready, choose **Start analysis** for one source or select sources for a batch.
+The **Clipping** tab imports one public YouTube video at a time. Confirm that you have permission to reuse and process the footage. When the video is ready, choose its analysis type and select **Analyze**. Importing a link does not start analysis.
 
-YouTube links are limited to one public video, four hours, and 20 GiB. Import availability and compatible formats are best-effort; source audio is preserved. Separate video and audio tracks are downloaded concurrently; a retryable track failure gets one bounded retry while preserving a successful peer, and selected-track HTTP 401/403/410 responses trigger a fresh-metadata retry. Some links need an original-file upload instead. Public Drive and Dropbox links are also accepted, but live provider behavior is unverified; Drive viewer or confirmation pages may require the original file, and Dropbox links must be public shared-file links. File uploads are resumable. Detailed limits, recovery, and diagnostics are in [YouTube import operations](docs/clipping/YOUTUBE-IMPORT.md).
+Links are limited to one video, four hours, and 20 GiB, and the original audio is kept. Availability and compatible formats are best-effort; use the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for supported links and failure details. Private or sign-in-only videos are not supported.
 
-Analysis and candidate review require the optional Modal worker and operator configuration described in [M3 setup](docs/clipping/M3-IMPLEMENTATION.md). The current workflow returns analysis and candidate moments; it does not make edited or captioned video exports.
+Analysis requires the optional Modal worker and operator configuration described in [M3 setup](docs/clipping/M3-IMPLEMENTATION.md). The page shows saved transcript, context, and candidate results. It does not edit, render, export, or publish clips.
 
 ## Upload to YouTube
 
@@ -99,7 +99,7 @@ Enter it under **Forgot password?** on the sign-in screen. It expires after 15 m
 
 ## Development
 
-The service entry point is `cmd/video-automation/main.go`; backend code and tests are in `internal/app/`, and the embedded dashboard is in `internal/webui/static/`. Modal workers are under `workers/modal/`. Native development needs Go and FFmpeg. Native YouTube imports also need the pinned yt-dlp/Deno runtime and ffprobe; separate-track imports use `/usr/bin/python3` with its Unix `resource` module. See the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for runtime details.
+The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go and FFmpeg. Native YouTube imports also need the pinned yt-dlp/Deno runtime and ffprobe. See the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for runtime details.
 
 Run locally with a writable data directory:
 
