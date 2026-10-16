@@ -4,6 +4,7 @@
   const CONTENT_TYPES = ["general", "podcast", "comedy", "gaming", "movie"];
   const IMPORT_ERROR_COPY = {
     youtube_import_unavailable: "The YouTube importer is unavailable right now. Try again later or ask the operator to check the importer setup.",
+    youtube_bot_challenge: "YouTube requested verification of automated access from this server. This import cannot continue; try again later.",
     youtube_video_unavailable: "This video could not be opened from its public link. Check that it plays without signing in or age verification.",
     youtube_format_unavailable: "No supported original video and audio format was available for this video.",
     youtube_original_audio_unavailable: "The original audio track was not available for this video.",

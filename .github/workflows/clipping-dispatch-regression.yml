@@ -7,6 +7,8 @@ on:
       - "internal/app/clipping_*.go"
       - "internal/app/processor.go"
       - "internal/app/dashboard_clipping.go"
+      - "internal/webui/static/clipping.js"
+      - "tests/clipping-ui.test.cjs"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/clipping-dispatch-regression.yml"
@@ -15,6 +17,8 @@ on:
       - "internal/app/clipping_*.go"
       - "internal/app/processor.go"
       - "internal/app/dashboard_clipping.go"
+      - "internal/webui/static/clipping.js"
+      - "tests/clipping-ui.test.cjs"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/clipping-dispatch-regression.yml"
@@ -31,3 +35,8 @@ jobs:
           cache: true
       - name: Test full Go clipping backend contracts
         run: go test ./internal/app -count=1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test clipping dashboard behavior
+        run: node --test tests/clipping-ui.test.cjs

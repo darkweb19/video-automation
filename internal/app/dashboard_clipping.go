@@ -109,6 +109,8 @@ func clippingSourceErrorMessage(code string) string {
 		return "This YouTube source is not a supported video with a valid duration and dimensions."
 	case "unsafe_dns_answer":
 		return "The YouTube link resolved to an unsafe destination. Check the link and try again."
+	case "youtube_bot_challenge":
+		return "YouTube requested verification of automated access from this server, so this video could not be imported. Try again later; repeated immediate retries are unlikely to help."
 	case "source_import_timed_out", "extractor_exit_failure":
 		return "YouTube could not download this public video. Retry once, then choose another public video."
 	case "source_import_canceled":

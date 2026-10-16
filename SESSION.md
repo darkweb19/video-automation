@@ -1,3 +1,12 @@
+# Session handoff — 2026-10-16, C2.9 YouTube bot-challenge fail-fast
+
+- User explicitly requested the scoped bot-challenge handling fix, deferring alternative import methods. Branch: `fix/clipper-youtube-import-diagnostics`. Starting HEAD `d4feb54ff29495d4e2bf8d6c98acfdef3dd7768d`.
+- Nonzero yt-dlp exits with `bot_challenge` fail on the first attempt as `youtube_bot_challenge`. Transient failures keep existing retries, canceled work remains canceled, and size/output constraints remain fail-closed. Go source API and browser fallback display a safe verification message.
+- Regression checks cover terminal source state, exact attempt count, redacted diagnostics, workspace removal, no auto-retry, and browser rendering. The branch's Go CI now also runs `node --test tests/clipping-ui.test.cjs`.
+- No bypass, new downloader, upload method, paid inference, live YouTube test, Railway/Modal deployment, or main-branch change. Verify CI after publication.
+
+---
+
 # Session handoff — 2026-10-16, C3.AUDIO-COVERAGE (three-commit scoped repair)
 
 - User authorized three distinct commits and publication to `fix/clipper-youtube-import-diagnostics` for the frontend's `invalid_media_coverage` error. The prior log proves completed Modal inference and callback 204 but did not disclose the actual PCM/video coverage. The likely mismatch is a short decoded-audio tail; avoid claiming it is proven without live numeric measurements.

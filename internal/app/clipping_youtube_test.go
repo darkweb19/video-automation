@@ -184,6 +184,53 @@ func TestYouTubeImportFailureRedactsSignedOutputAndCleansWorkspace(t *testing.T)
 	}
 }
 
+func TestYouTubeBotChallengeFailsWithoutAutomaticRetriesOrLeakingOutput(t *testing.T) {
+	_, store, _, acquisition := newClippingAcquisitionFixture(t)
+	secret := "signed-media-secret-marker"
+	acquisition.youtubeExecutable = writeFakeYouTubeExecutable(t, t.TempDir(), "yt-dlp",
+		"printf \"ERROR: Sign in to confirm you're not a bot. https://media.example/video?token="+secret+"\\n\" >&2\nexit 1\n")
+	acquisition.youtubePythonExecutable = requirePython(t)
+	acquisition.youtubeRuntime = "deno:" + writeFakeYouTubeExecutable(t, t.TempDir(), "deno", "exit 0\n")
+	source := createYouTubeImport(t, acquisition)
+
+	worked, err := acquisition.ProcessNextImport(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("process challenged downloader worked=%v error=%v", worked, err)
+	}
+	loaded, err := store.ClippingSource(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != ClippingSourceFailed || loaded.ImportAttempts != 1 || loaded.Failure != "youtube_bot_challenge" {
+		t.Fatalf("bot challenge should fail once with a distinct reason: status=%s attempts=%d failure=%s", loaded.Status, loaded.ImportAttempts, loaded.Failure)
+	}
+	if !diagnosticHas(loaded.Diagnostics, ClippingDiagnosticStageDownload, ClippingDiagnosticFailed, "bot_challenge") {
+		t.Fatalf("missing safe bot_challenge diagnostic: %+v", loaded.Diagnostics)
+	}
+	encoded, err := jsonMarshalClippingSource(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(encoded, secret) || strings.Contains(encoded, "media.example") {
+		t.Fatal("sensitive extractor text leaked to durable state")
+	}
+	view := clippingSourceSummary(loaded)
+	if view.Error != "youtube_bot_challenge" || !strings.Contains(view.ErrorMessage, "verification of automated access") {
+		t.Fatalf("source API lacks actionable message: error=%s message=%s", view.Error, view.ErrorMessage)
+	}
+	paths, err := acquisition.sourcePaths(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(youtubeWorkspacePath(paths)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("terminal bot challenge left a temporary workspace: %v", err)
+	}
+	worked, err = acquisition.ProcessNextImport(context.Background())
+	if err != nil || worked {
+		t.Fatalf("terminal bot challenge was retried: worked=%v error=%v", worked, err)
+	}
+}
+
 func TestYouTubeImportPerFileLimitStopsOversizeDownloader(t *testing.T) {
 	ffmpeg := requireFFmpeg(t)
 	media := makeLocalYouTubeMP4(t, ffmpeg, false, false)

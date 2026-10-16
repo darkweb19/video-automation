@@ -324,6 +324,26 @@ test("failed import displays the redacted backend message and keeps the link ava
   assert.equal(ui.toasts.at(-1).isError, true);
 });
 
+test("YouTube bot challenge renders a specific safe error for a failed imported source", async () => {
+  const challenged = {
+    id: "clipsrc_bot_challenge",
+    kind: "youtube_original_file",
+    status: "failed",
+    error: "youtube_bot_challenge",
+    title: "Public video"
+  };
+  const ui = createUI(defaultHandler({ sources: [challenged] }));
+  await ui.api.start();
+  const shown = treeText(ui.elements.get("clipping-sources"));
+  assert.match(shown, /Import failed/);
+  assert.match(shown, /YouTube requested verification of automated access/);
+  assert.doesNotMatch(shown, /extractor_exit_failure|signed-media-secret/);
+
+  challenged.error_message = "YouTube requested verification of automated access from this server.";
+  await ui.api.refresh();
+  assert.match(treeText(ui.elements.get("clipping-sources")), /YouTube requested verification of automated access from this server/);
+});
+
 test("ready sources expose a bounded analysis profile and queue a budget-free Modal job", async () => {
   let jobs = [];
   const source = { id: "clipsrc_ready", kind: "youtube_original_file", status: "ready", title: "Ready video", duration_ms: 60000 };

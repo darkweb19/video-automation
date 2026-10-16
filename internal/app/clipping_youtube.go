@@ -310,7 +310,8 @@ func (a *ClippingAcquisition) runYouTubeDownloader(ctx context.Context, sourceID
 			slog.Warn("clipping youtube downloader interrupted", "source_id", sourceID, "reason_code", clippingDiagnosticCode(ClippingDiagnosticStageDownload, ctx.Err()), "elapsed_ms", time.Since(startedAt).Milliseconds())
 			return ctx.Err()
 		case runErr := <-waitDone:
-			slog.Info("clipping youtube downloader exited", "source_id", sourceID, "exit_code", youtubeDownloaderExitCode(runErr), "stderr_category", classifyYouTubeDownloaderStderr(diagnosticStderr.tail), "output_limit_hit", output.exceeded, "elapsed_ms", time.Since(startedAt).Milliseconds())
+			stderrCategory := classifyYouTubeDownloaderStderr(diagnosticStderr.tail)
+			slog.Info("clipping youtube downloader exited", "source_id", sourceID, "exit_code", youtubeDownloaderExitCode(runErr), "stderr_category", stderrCategory, "output_limit_hit", output.exceeded, "elapsed_ms", time.Since(startedAt).Milliseconds())
 			if output.exceeded {
 				return withClippingDiagnosticCode(permanentClippingImportError{youtubeImportOutcome("youtube_format_unavailable", "The public video returned an invalid downloader response; check the video link and try again")}, "extractor_output_limit")
 			}
@@ -320,6 +321,18 @@ func (a *ClippingAcquisition) runYouTubeDownloader(ctx context.Context, sourceID
 			}
 			if runErr != nil && (youtubeSubprocessFileLimitReached(command, runErr) || youtubeWorkspaceHasFileAtLimit(workDir, maxBytes)) {
 				return youtubeSizeLimitFailure()
+			}
+			// YouTube asked this runtime to verify automated access. Repeating
+			// the request immediately with the same identity will not help.
+			// Preserve a safe, actionable failure without exposing stderr.
+			if runErr != nil && stderrCategory == "bot_challenge" {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return withClippingDiagnosticCode(
+					permanentClippingImportError{youtubeImportOutcome("youtube_bot_challenge", "YouTube requested verification of automated access; this server cannot import the video right now")},
+					"bot_challenge",
+				)
 			}
 			return finishYouTubeDownloaderCommand(command, runErr, capture, ctx)
 		case <-ticker.C:

@@ -4,6 +4,14 @@ Last updated: 2026-10-15 (America/Toronto). This file is the authoritative statu
 
 ## Current checkpoint
 
+### C2.9 — YouTube bot-challenge fail-fast — 2026-10-16
+
+- User authorized the scoped failure-handling repair; alternate import methods are deferred. Branch: `fix/clipper-youtube-import-diagnostics`. No deployment, live extraction, paid inference, merge to main, or anti-bot bypass.
+- Existing yt-dlp stderr classifier already identifies `bot_challenge`. A nonzero bot-challenge exit now becomes a terminal `youtube_bot_challenge` source failure instead of generic retryable `extractor_exit_failure`; cancellation and file/output size-limit precedence remain intact. Go dashboard API and browser fallback display specific safe copy. Other extractor errors keep the existing retry policy.
+- Offline regression fixtures cover one attempt, failed source, safe diagnostics, no leaked raw stderr/URL, workspace cleanup, no automatic repeat, and browser error rendering. Clipping dispatch CI now runs Node clipping dashboard tests alongside full Go backend tests.
+- This does not remove the underlying YouTube access refusal. Alternate acquisition and environmental investigation remain separate work; CI must be checked after push.
+
+
 ### C3.AUDIO-COVERAGE — 2026-10-16 (three-commit repair)
 
 - User explicitly authorized fixing `invalid_media_coverage` on `fix/clipper-youtube-import-diagnostics` in exactly three commits and pushing to that same branch. No deployment, paid GPU inference, merge, or main-branch changes were requested.

@@ -46,12 +46,12 @@ Common sanitized `stderr_category` values:
 | `proxy_failure` | Outbound proxy / HTTP CONNECT policy, DNS, or egress restrictions |
 | `upstream_http_403` / `upstream_http_401` | YouTube or media-CDN access rejection |
 | `upstream_rate_limited` | Rate limiting from the deployment IP |
-| `bot_challenge` | YouTube anti-automation challenge in that environment |
+| `bot_challenge` | YouTube anti-automation challenge; terminal `youtube_bot_challenge` source failure, no immediate retries |
 | `private_video`, `age_restricted`, `geo_blocked` | Video access or region requirements |
 | `format_unavailable` | Unsupported or missing original video/audio format |
 | `certificate_failure`, `network_timeout` | TLS or transport problem |
 | `no_stderr` / `unclassified_extractor_error` | No recognizable safe category; use exit code and stage trace for next diagnosis |
 
-Categories are heuristics for investigation, not proof of root cause. They intentionally do not expose raw stderr. The status remains retriable/permanent according to the original importer behavior; instrumentation alone does not enable arbitrary URLs, cookies, proxy bypass, or unsupported media.
+Categories are heuristics for investigation, not proof of root cause. They intentionally do not expose raw stderr. As of the 2026-10-16 bot-challenge repair, a nonzero yt-dlp exit classified as `bot_challenge` is a terminal `youtube_bot_challenge` import failure, with no repeated immediate attempts from the same runtime. The UI explains that this server could not satisfy YouTube's verification request; a later new import remains a separate user action. Unrecognized or transient extractor errors retain the existing bounded retry policy. This is error handling, **not a workaround for YouTube access restrictions**: it adds no cookies, plugins, credentials, proxies, or alternative media acquisition.
 
 For tests, run `go test ./internal/app` (requires the repository's Go toolchain, ffmpeg, and ffprobe) and `python3 tools/clipping/check_youtube_runtime_contract.py` in a supported runtime. No live download is performed by those hermetic checks. Live YouTube imports must be exercised separately within the deployment environment.
