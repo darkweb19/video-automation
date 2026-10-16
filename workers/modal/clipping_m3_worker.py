@@ -1413,7 +1413,10 @@ def clipping_ledger_owner(
     operation: str = "prune",
     request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    trace_worker("ledger_owner_entered", operation=operation)
+    # Scheduled pruning is routine housekeeping, not a job lifecycle event.
+    # Preserve failure visibility through the existing exception handling.
+    if operation != "prune":
+        trace_worker("ledger_owner_entered", operation=operation)
     if _MODAL_LEDGER_VOLUME is None:
         raise RuntimeError("ledger volume is not configured")
     try:
