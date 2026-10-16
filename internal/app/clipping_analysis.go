@@ -26,6 +26,12 @@ const (
 	clippingDefaultPipelineRevision = "framevault-m3-v1"
 )
 
+const (
+	clippingWorkerRustVisualEventsVersion = "rust-scene-v1-gray-histogram-motion"
+	clippingWorkerRustCandidateInspectionVersion = "rust-scene-dense-v1"
+	clippingWorkerFFmpegCandidateInspectionVersion = "ffmpeg-dense-candidate-window-v2-profile-pool"
+)
+
 var clippingEditorialCue = regexp.MustCompile(`(?i)(\?|!|\b(?:wait|but|because|actually|imagine|never|finally|secret|truth|why|what if|turns out|didn.t know|you won.t believe)\b|क्यों|लेकिन|तर|किन्तु|फेरि|सुनो)`)
 var clippingPipelineRevisionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 var clippingEmotionCue = regexp.MustCompile(`(?i)(\b(?:love|hate|fear|amazing|terrible|impossible|crazy|incredible|angry|cry|laugh|laughter|wow|oh no|surprise|shocked)\b|😂|🤣|😱|😢|वाह|हासो|रोयो|डर)`)
@@ -298,11 +304,20 @@ func validClippingAnalysisProvenance(core clippingAnalysisCore) bool {
 	if !core.MediaStreams.HasAudio {
 		audioEventsVersion = "not-run-no-audio-stream-v1"
 	}
+	// The GPU image explicitly runs the Rust full and dense scene analyzers.
+	// Accept only the matching pinned pair, while retaining the legacy
+	// FFmpeg pair for cached results created before the Rust rollout.
+	visualEventsVersion := clippingWorkerVisualEventsVersion
+	candidateInspectionVersion := clippingWorkerFFmpegCandidateInspectionVersion
+	if got, ok := core.AlgorithmVersions["visual_events"].(string); ok && got == clippingWorkerRustVisualEventsVersion {
+		visualEventsVersion = clippingWorkerRustVisualEventsVersion
+		candidateInspectionVersion = clippingWorkerRustCandidateInspectionVersion
+	}
 	algorithmStrings := map[string]string{
 		"audio_events":         audioEventsVersion,
-		"visual_events":        clippingWorkerVisualEventsVersion,
+		"visual_events":        visualEventsVersion,
 		"context_timeline":     clippingWorkerContextVersion,
-		"candidate_inspection": "ffmpeg-dense-candidate-window-v2-profile-pool",
+		"candidate_inspection": candidateInspectionVersion,
 		"pipeline_revision":    core.PipelineRevision,
 	}
 	for key, want := range algorithmStrings {
