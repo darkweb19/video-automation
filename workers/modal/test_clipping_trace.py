@@ -3,7 +3,7 @@
 from contextlib import redirect_stdout
 from io import StringIO
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import clipping_m3_worker
 from clipping_protocol import trace_worker
@@ -50,7 +50,7 @@ class ClippingTraceTests(unittest.TestCase):
 
     def test_scheduled_prune_is_silent_but_state_changes_still_trace(self):
         output = StringIO()
-        with patch.object(clipping_m3_worker, "_MODAL_LEDGER_VOLUME", object()), \
+        with patch.object(clipping_m3_worker, "_MODAL_LEDGER_VOLUME", MagicMock()), \
              patch.object(clipping_m3_worker, "run_ledger_rpc", return_value={"pruned": True}) as rpc, \
              redirect_stdout(output):
             self.assertEqual(clipping_m3_worker.clipping_ledger_owner(), {"pruned": True})
