@@ -4,6 +4,15 @@ Last updated: 2026-10-15 (America/Toronto). This file is the authoritative statu
 
 ## Current checkpoint
 
+### C3.AUDIO-COVERAGE — 2026-10-16 (three-commit repair)
+
+- User explicitly authorized fixing `invalid_media_coverage` on `fix/clipper-youtube-import-diagnostics` in exactly three commits and pushing to that same branch. No deployment, paid GPU inference, merge, or main-branch changes were requested.
+- Root cause suspected from runtime evidence: FFmpeg audio PCM coverage can be slightly shorter than the container/video duration while the Go validator previously required exact equality. No exact audio coverage values were present in the uploaded Modal log, so this is a bounded fix with diagnostics rather than a claim of verified live delta.
+- Go accepts successful audio scans with an end-tail gap no more than 250 ms **and** 1% of source duration, while keeping visual coverage exact, audio completion metadata strict, and video-only constraints unchanged. Modal now logs numeric coverage and measured gaps. Go logs safe numeric coverage diagnostics for rejected current callbacks.
+- Regression tests cover exact/short/proportional/oversized/missing/overscanned audio, unchanged visual invariants, callback publication/idempotency/error status, and a short-audio real FFmpeg fixture. Updated Rust/Python CI runs the new targeted worker tests.
+- Verification: changes were inspected through GitHub. Remote Go and Python CI runs are expected after branch publication; live coverage measurements, deployment, and paid tests were not conducted here.
+
+
 ### C3.RUST-CALLBACK — 2026-10-16 (scoped repair)
 
 - User authorized fixing the Rust/Go completion mismatch and scheduled prune log noise on `fix/clipper-youtube-import-diagnostics`, with five distinct commits and a fast-forward push to that branch. This authorization does not include deployment, paid GPU inference, or merges to main.

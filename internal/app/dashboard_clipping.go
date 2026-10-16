@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"os"
@@ -1020,7 +1021,22 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		}
 		core, coreErr := decodeClippingAnalysisCore(payload, source)
 		if coreErr != nil {
-			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest, clippingAnalysisCallbackValidationCode(coreErr))
+			code := clippingAnalysisCallbackValidationCode(coreErr)
+			if code == "invalid_media_coverage" {
+				// Diagnostics are typed numbers/booleans only. Never log raw
+				// callbacks, media URLs, bearer tokens, or transcript content.
+				slog.Warn("clipping analysis callback rejected: media coverage",
+					"job", jobID, "attempt", attemptID,
+					"source_duration_ms", source.DurationMS,
+					"has_audio", core.MediaStreams.HasAudio,
+					"has_video", core.MediaStreams.HasVideo,
+					"audio_scanned_duration_ms", core.Coverage.AudioScannedDurationMS,
+					"visual_scanned_duration_ms", core.Coverage.VisualScannedDurationMS,
+					"audio_analysis_complete", core.AudioAnalysisStatus == "complete",
+					"transcript_available", core.Transcript.Available,
+					"transcript_complete", core.Transcript.Status == "complete")
+			}
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest, code)
 			return
 		}
 		var protocol struct {

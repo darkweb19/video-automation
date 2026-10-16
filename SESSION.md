@@ -1,3 +1,13 @@
+# Session handoff — 2026-10-16, C3.AUDIO-COVERAGE (three-commit scoped repair)
+
+- User authorized three distinct commits and publication to `fix/clipper-youtube-import-diagnostics` for the frontend's `invalid_media_coverage` error. The prior log proves completed Modal inference and callback 204 but did not disclose the actual PCM/video coverage. The likely mismatch is a short decoded-audio tail; avoid claiming it is proven without live numeric measurements.
+- Go allows only an audio-end deficit bounded to min(250 ms, 1% of source duration) when audio and transcript metadata show successful completion. It still rejects truncated, missing, excessive, or overreported audio and any missing visual coverage; video-only invariants remain unchanged.
+- Modal worker now emits numeric `clipping_worker_coverage` logs after analysis. Go emits typed numeric diagnostics when `invalid_media_coverage` rejects a callback. Offline Go callback and Python real-FFmpeg fixture regressions cover the contract.
+- This task makes no Modal deployment, Railway deployment, or paid GPU request. The code-only publication starts GitHub CI; check the actual CI result and run a fresh live analysis only under separate deployment/test authorization.
+- Target branch is `fix/clipper-youtube-import-diagnostics`. No other branches or previous terminal job state are changed.
+
+---
+
 # Session handoff — 2026-10-16, C3.RUST-CALLBACK (repair branch)
 
 - User authorized a five-commit fix/push specifically to `fix/clipper-youtube-import-diagnostics`. The underlying defect was Rust scene provenance rejected by Go's FFmpeg-only callback validator; a rejection could be recorded as failed while Modal saw HTTP 204. This repair supports pinned Rust and legacy FFmpeg provenance as distinct pairs and records safe failure codes in job errors.

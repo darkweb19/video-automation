@@ -337,6 +337,73 @@ func TestClippingRustSceneWorkerCallbackReconcilesDashboard(t *testing.T) {
 	}
 }
 
+// A small measured audio tail must publish and remain replay-idempotent;
+// truncated audio or incomplete visual scans must fail with a safe reason.
+func TestClippingAudioCoverageCallbackPublishesOnlyBoundedTail(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		audioGap int64
+		visualGap int64
+		completed bool
+	}{
+		{"small-audio-tail", 120, 0, true},
+		{"at-audio-boundary", 250, 0, true},
+		{"oversized-audio-tail", 251, 0, false},
+		{"truncated-audio", 10_000, 0, false},
+		{"missing-visual-coverage", 120, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, security, handler, cookie := clippingDashboardFixture(t)
+			source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
+			config := clippingCreateWorkerConfigForTest(t, store, security)
+			job := clippingM3CreateJob(t, store, source.ID, "coverage-callback-"+tc.name)
+			prepared, stage := clippingStartSimpleJobAttempt(t, store, security, job.ID)
+			callback := clippingSimpleCallback(t, source, job, stage, config.PipelineRevision, 42)
+			var payload map[string]any
+			if err := json.Unmarshal(callback.Artifact.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			coverage, ok := payload["coverage"].(map[string]any)
+			if !ok {
+				t.Fatal("missing coverage")
+			}
+			coverage["audio_scanned_duration_ms"] = source.DurationMS - tc.audioGap
+			coverage["visual_scanned_duration_ms"] = source.DurationMS - tc.visualGap
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callback.Artifact.Payload = encoded
+			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			for i := 0; i < 2; i++ {
+				response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
+				if response.Code != http.StatusNoContent {
+					t.Fatalf("callback %d=%d body=%s", i, response.Code, response.Body.String())
+				}
+			}
+			got, err := store.ClippingJob(job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := store.ClippingArtifacts(job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.completed {
+				if got.Status != ClippingJobCompleted || len(artifacts) != 1 {
+					t.Fatalf("short-tail callback should publish: job=%+v artifacts=%d", got, len(artifacts))
+				}
+				result := clippingDashboardRequest(handler, http.MethodGet, "/api/clipping/jobs/"+job.ID+"/results", "", cookie, "")
+				if result.Code != http.StatusOK {
+					t.Fatalf("results should be served: %d %s", result.Code, result.Body.String())
+				}
+			} else if got.Status != ClippingJobFailed || len(artifacts) != 0 || !strings.Contains(got.Error, "invalid_media_coverage") {
+				t.Fatalf("invalid-coverage callback should fail: job=%+v artifacts=%d", got, len(artifacts))
+			}
+		})
+	}
+}
+
 func TestClippingOversizeCurrentCallbackFailsAnalysis(t *testing.T) {
 	for _, contentLengthKnown := range []bool{true, false} {
 		name := "max-bytes-reader"
