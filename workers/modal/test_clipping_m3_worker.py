@@ -936,6 +936,20 @@ class ClippingM3WorkerTests(unittest.TestCase):
         self.assertIsNone(payload["audio_events"][0]["evidence"]["semantic_label"])
         self.assertEqual(payload["visual_events"][0]["evidence"]["visual_evidence_strength"], "weak")
 
+    def test_source_core_preserves_measured_audio_tail(self):
+        dispatch = StageDispatch.parse(dispatch_payload(), now=100)
+        analysis = source_analysis(dispatch)
+        analysis["audio_scan"]["covered_duration_ms"] = dispatch.source_duration_ms - 120
+        payload = build_source_core_payload(
+            analysis, compute_seconds=4, rate_micro_usd_per_second=125
+        )
+        self.assertEqual(payload["source_duration_ms"], dispatch.source_duration_ms)
+        self.assertEqual(
+            payload["coverage"]["audio_scanned_duration_ms"],
+            dispatch.source_duration_ms - 120,
+        )
+        self.assertEqual(payload["coverage"]["visual_scanned_duration_ms"], dispatch.source_duration_ms)
+
     def test_analyze_dispatch_runs_download_probe_core_and_private_cleanup_offline(self):
         dispatch = StageDispatch.parse(dispatch_payload(), now=100)
         response = MemoryResponse(MEDIA_BYTES)

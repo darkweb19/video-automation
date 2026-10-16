@@ -35,4 +35,6 @@ jobs:
         run: |
           python3 -m unittest test_clipping_m3_worker.ClippingM3WorkerTests.test_process_dispatch_with_remote_ledger_persists_success_and_failure -v
           python3 -m unittest test_clipping_m3_worker.ClippingM3WorkerTests.test_work_guard_logs_sampled_success_and_safe_410_failure -v
+          python3 -m unittest test_clipping_m3_worker.ClippingM3WorkerTests.test_source_core_preserves_measured_audio_tail -v
+          python3 -m unittest test_clipping_analysis.ClippingAnalysisTests.test_real_ffmpeg_short_audio_tail_reports_measured_pcm_coverage -v
           python3 -m unittest test_clipping_trace -v

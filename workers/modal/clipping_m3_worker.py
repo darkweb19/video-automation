@@ -953,6 +953,19 @@ def analyze_dispatch(
             compute_seconds=compute_seconds,
             rate_micro_usd_per_second=dispatch.rate_micro_usd_per_second,
         )
+        coverage = payload["coverage"]
+        # Only numeric timestamps and generated IDs are logged; no media
+        # URLs, tokens, transcript text, or callback payloads.
+        _LOGGER.info(
+            "clipping_worker_coverage job=%s attempt=%s source_duration_ms=%d "
+            "audio_scanned_duration_ms=%d visual_scanned_duration_ms=%d "
+            "audio_tail_gap_ms=%d visual_tail_gap_ms=%d",
+            dispatch.job_id, dispatch.attempt_id, dispatch.source_duration_ms,
+            coverage["audio_scanned_duration_ms"], coverage["visual_scanned_duration_ms"],
+            dispatch.source_duration_ms - coverage["audio_scanned_duration_ms"]
+            if analysis["media_streams"]["has_audio"] else 0,
+            dispatch.source_duration_ms - coverage["visual_scanned_duration_ms"],
+        )
         artifact = {
             "type": "clipping.analysis",
             "schema_version": "2",

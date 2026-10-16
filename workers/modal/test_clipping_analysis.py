@@ -663,6 +663,23 @@ class ClippingAnalysisTests(unittest.TestCase):
         self.assertTrue(any(event["kind"] == "dense_motion_change" for event in dense["visual_events"]))
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
+    def test_real_ffmpeg_short_audio_tail_reports_measured_pcm_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory) / "short-audio-tail.mkv"
+            # Video/container lasts 6 s; PCM ends 120 ms earlier. No padding.
+            command = [
+                shutil.which("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=64x64:r=10:d=6",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=8000:duration=5.88",
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "ffv1", "-c:a", "pcm_s16le", str(media),
+            ]
+            subprocess.run(command, check=True, capture_output=True, timeout=30)
+            measured = scan_audio_events(media, [], 6_000)
+
+        self.assertEqual(measured["covered_duration_ms"], 5_880)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
     def test_ffmpeg_rejects_external_playlist_reference_before_http_request(self):
         with tempfile.TemporaryDirectory() as directory:
             playlist = Path(directory) / "external.ffconcat"
