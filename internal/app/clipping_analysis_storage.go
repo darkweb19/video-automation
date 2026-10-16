@@ -809,9 +809,20 @@ func (s *Store) CompleteClippingAnalysisStage(jobID, name, attemptID, leaseToken
 	return stage, false, false, err
 }
 
-func (s *Store) FailClippingAnalysisCallback(jobID, name, attemptID, leaseToken, callbackDigest string) (ClippingStage, bool, error) {
+func (s *Store) FailClippingAnalysisCallback(jobID, name, attemptID, leaseToken, callbackDigest string, failureCodes ...string) (ClippingStage, bool, error) {
 	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") || name != ClippingStageAnalysis || attemptID == "" || leaseToken == "" || !validLowerHexDigest(callbackDigest) {
 		return ClippingStage{}, false, ErrClippingStaleAttempt
+	}
+	failureMessage := "clipping analysis stage failed"
+	if len(failureCodes) > 0 {
+		// Only these fixed codes can become persisted, browser-visible errors.
+		// Never persist callback bodies, parser errors, or worker credentials.
+		switch failureCodes[0] {
+		case "invalid_callback_body", "callback_payload_too_large", "invalid_cost_metadata",
+			"invalid_artifact_metadata", "source_identity_mismatch", "invalid_pipeline_provenance",
+			"invalid_media_coverage", "invalid_analysis_payload", "artifact_persistence_failed":
+			failureMessage += " (" + failureCodes[0] + ")"
+		}
 	}
 	now := time.Now().Unix()
 	tx, err := s.db.Begin()
@@ -873,10 +884,10 @@ func (s *Store) FailClippingAnalysisCallback(jobID, name, attemptID, leaseToken,
 		if _, err := tx.Exec(`UPDATE clipping_stage_attempts SET status='failed',callback_received_at=?,callback_digest=?,error='analysis worker reported failure',settled_at=CASE WHEN settled_at=0 THEN ? ELSE settled_at END WHERE attempt_id=?`, now, callbackDigest, now, attemptID); err != nil {
 			return ClippingStage{}, false, err
 		}
-		if _, err := tx.Exec(`UPDATE clipping_stages SET status='failed',lease_expires_at=0,error='clipping analysis stage failed',updated_at=? WHERE job_id=? AND name=?`, now, jobID, name); err != nil {
+		if _, err := tx.Exec(`UPDATE clipping_stages SET status='failed',lease_expires_at=0,error=?,updated_at=? WHERE job_id=? AND name=?`, failureMessage, now, jobID, name); err != nil {
 			return ClippingStage{}, false, err
 		}
-		if _, err := tx.Exec(`UPDATE clipping_jobs SET status='failed',error='clipping analysis stage failed',updated_at=? WHERE id=?`, now, jobID); err != nil {
+		if _, err := tx.Exec(`UPDATE clipping_jobs SET status='failed',error=?,updated_at=? WHERE id=?`, failureMessage, now, jobID); err != nil {
 			return ClippingStage{}, false, err
 		}
 	} else {

@@ -893,8 +893,8 @@ func clippingWorkerCallbackBodyDigest(body []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func (a *dashboardApp) failInvalidCurrentClippingCallback(w http.ResponseWriter, jobID, attemptID, leaseToken, digest string) {
-	_, duplicate, err := a.store.FailClippingAnalysisCallback(jobID, ClippingStageAnalysis, attemptID, leaseToken, digest)
+func (a *dashboardApp) failInvalidCurrentClippingCallback(w http.ResponseWriter, jobID, attemptID, leaseToken, digest string, failureCodes ...string) {
+	_, duplicate, err := a.store.FailClippingAnalysisCallback(jobID, ClippingStageAnalysis, attemptID, leaseToken, digest, failureCodes...)
 	if err != nil {
 		if errors.Is(err, ErrClippingStaleAttempt) || errors.Is(err, ErrClippingJobTerminal) {
 			a.revokeClippingMediaCapability(jobID, attemptID)
@@ -908,6 +908,25 @@ func (a *dashboardApp) failInvalidCurrentClippingCallback(w http.ResponseWriter,
 	a.store.PublishClippingJob(jobID)
 	a.revokeClippingMediaCapability(jobID, attemptID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// These codes describe validation of Go-owned contracts, never content from
+// the untrusted callback. The worker still receives 204 after a durable
+// terminal rejection so it will not re-run successful inference.
+func clippingAnalysisCallbackValidationCode(err error) string {
+	if err == nil {
+		return "invalid_analysis_payload"
+	}
+	switch {
+	case strings.Contains(err.Error(), "source hash or duration"):
+		return "source_identity_mismatch"
+	case strings.Contains(err.Error(), "pipeline provenance"):
+		return "invalid_pipeline_provenance"
+	case strings.Contains(err.Error(), "coverage or availability"):
+		return "invalid_media_coverage"
+	default:
+		return "invalid_analysis_payload"
+	}
 }
 
 func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Request) {
@@ -941,14 +960,14 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 	}
 	if r.ContentLength > maxClippingCallbackBodyBytes {
 		digest := clippingWorkerCallbackBodyDigest([]byte("oversize:" + strconv.FormatInt(r.ContentLength, 10)))
-		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest, "callback_payload_too_large")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxClippingCallbackBodyBytes)
 	body, readErr := io.ReadAll(r.Body)
 	if readErr != nil {
 		digest := clippingWorkerCallbackBodyDigest(append(body, []byte("\x00read-error")...))
-		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest, "invalid_callback_body")
 		return
 	}
 	bodyDigest := clippingWorkerCallbackBodyDigest(body)
@@ -958,7 +977,7 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 	}
 	var input clippingWorkerCallback
 	if err := decodeClippingWorkerCallback(body, &input); err != nil {
-		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, bodyDigest)
+		a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, bodyDigest, "invalid_callback_body")
 		return
 	}
 	// Capabilities are bound to one accepted attempt. A stale or misrouted body
@@ -996,12 +1015,12 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		payload := strings.TrimSpace(string(input.Artifact.Payload))
 		if input.CostEstimateMicroUSD <= 0 || input.CostBasis != clippingWorkerProtocolCostBasis ||
 			input.Artifact.Type != clippingAnalysisArtifactType || input.Artifact.SchemaVersion != clippingAnalysisSchemaVersion || input.Artifact.Version != 1 || len(input.Artifact.TimeRanges) != 0 {
-			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest, "invalid_artifact_metadata")
 			return
 		}
 		core, coreErr := decodeClippingAnalysisCore(payload, source)
 		if coreErr != nil {
-			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest, clippingAnalysisCallbackValidationCode(coreErr))
 			return
 		}
 		var protocol struct {
@@ -1013,7 +1032,7 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 		if err := json.Unmarshal(input.Artifact.Payload, &protocol); err != nil || protocol.Basis != clippingWorkerProtocolCostBasis ||
 			protocol.Rate != clippingWorkerProtocolCompatibilityRate || protocol.ComputeSeconds <= 0 ||
 			protocol.Estimate != input.CostEstimateMicroUSD || protocol.Estimate != protocol.ComputeSeconds {
-			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest, "invalid_cost_metadata")
 			return
 		}
 		callbackArtifact := ClippingArtifact{
@@ -1028,7 +1047,7 @@ func (a *dashboardApp) clippingWorkerCallback(w http.ResponseWriter, r *http.Req
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest)
+			a.failInvalidCurrentClippingCallback(w, jobID, attemptID, leaseToken, digest, "artifact_persistence_failed")
 			return
 		}
 		if published && !duplicate {
