@@ -445,6 +445,31 @@ func TestClippingM3FixtureTracksWorkerVersionsAndFullTimeline(t *testing.T) {
 	}
 }
 
+func TestClippingM3RustSceneProvenanceVersionPair(t *testing.T) {
+	store := newTestStore(t)
+	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
+	for _, tc := range []struct {
+		name, visual, inspection string
+		accepted bool
+	}{
+		{"rust pair", clippingWorkerRustVisualEventsVersion, clippingWorkerRustCandidateInspectionVersion, true},
+		{"legacy ffmpeg pair", clippingWorkerVisualEventsVersion, clippingWorkerFFmpegCandidateInspectionVersion, true},
+		{"rust full with ffmpeg dense", clippingWorkerRustVisualEventsVersion, clippingWorkerFFmpegCandidateInspectionVersion, false},
+		{"ffmpeg full with rust dense", clippingWorkerVisualEventsVersion, clippingWorkerRustCandidateInspectionVersion, false},
+		{"unknown engine", "rust-scene-unpinned", clippingWorkerRustCandidateInspectionVersion, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core := clippingM3CoreForSource(source)
+			core.AlgorithmVersions["visual_events"] = tc.visual
+			core.AlgorithmVersions["candidate_inspection"] = tc.inspection
+			_, err := decodeClippingAnalysisCore(mustJSONClippingM3(t, core), source)
+			if (err == nil) != tc.accepted {
+				t.Fatalf("provenance accepted=%v want=%v error=%v", err == nil, tc.accepted, err)
+			}
+		})
+	}
+}
+
 func mustJSONClippingM3(t *testing.T, value any) string {
 	t.Helper()
 	encoded, err := json.Marshal(value)

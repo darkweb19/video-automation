@@ -3,7 +3,9 @@
 from contextlib import redirect_stdout
 from io import StringIO
 import unittest
+from unittest.mock import patch
 
+import clipping_m3_worker
 from clipping_protocol import trace_worker
 
 
@@ -45,6 +47,18 @@ class ClippingTraceTests(unittest.TestCase):
         self.assertIn("phase=-", data)
         self.assertNotIn("Bearer", data)
         self.assertNotIn("secret", data)
+
+    def test_scheduled_prune_is_silent_but_state_changes_still_trace(self):
+        output = StringIO()
+        with patch.object(clipping_m3_worker, "_MODAL_LEDGER_VOLUME", object()), \
+             patch.object(clipping_m3_worker, "run_ledger_rpc", return_value={"pruned": True}) as rpc, \
+             redirect_stdout(output):
+            self.assertEqual(clipping_m3_worker.clipping_ledger_owner(), {"pruned": True})
+            self.assertEqual(clipping_m3_worker.clipping_ledger_owner("claim", {}), {"pruned": True})
+        self.assertNotIn("operation=prune", output.getvalue())
+        self.assertIn("framevault_trace event=ledger_owner_entered", output.getvalue())
+        self.assertIn("operation=claim", output.getvalue())
+        self.assertEqual(rpc.call_count, 2)
 
 
 if __name__ == "__main__":

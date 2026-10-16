@@ -275,6 +275,68 @@ func TestClippingCurrentAttemptResultErrorsFailAnalysis(t *testing.T) {
 	}
 }
 
+// Real Modal GPU images send Rust scene provenance. The Go callback must
+// commit those results, not acknowledge their rejection as if they succeeded.
+func TestClippingRustSceneWorkerCallbackReconcilesDashboard(t *testing.T) {
+	for _, tc := range []struct {
+		name, visual, inspection string
+		completed bool
+	}{
+		{"rust-pair", clippingWorkerRustVisualEventsVersion, clippingWorkerRustCandidateInspectionVersion, true},
+		{"mixed-engine", clippingWorkerRustVisualEventsVersion, clippingWorkerFFmpegCandidateInspectionVersion, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, security, handler, cookie := clippingDashboardFixture(t)
+			source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
+			config := clippingCreateWorkerConfigForTest(t, store, security)
+			job := clippingM3CreateJob(t, store, source.ID, "rust-worker-callback-"+tc.name)
+			prepared, stage := clippingStartSimpleJobAttempt(t, store, security, job.ID)
+			callback := clippingSimpleCallback(t, source, job, stage, config.PipelineRevision, 42)
+			var payload map[string]any
+			if err := json.Unmarshal(callback.Artifact.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			algorithms, ok := payload["algorithm_versions"].(map[string]any)
+			if !ok {
+				t.Fatal("callback has no algorithm provenance")
+			}
+			algorithms["visual_events"] = tc.visual
+			algorithms["candidate_inspection"] = tc.inspection
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callback.Artifact.Payload = encoded
+			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			for i := 0; i < 2; i++ {
+				response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
+				if response.Code != http.StatusNoContent {
+					t.Fatalf("callback replay %d status=%d body=%s", i, response.Code, response.Body.String())
+				}
+			}
+			got, err := store.ClippingJob(job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := store.ClippingArtifacts(job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.completed {
+				if got.Status != ClippingJobCompleted || len(artifacts) != 1 {
+					t.Fatalf("Rust callback should publish: job=%+v artifacts=%d", got, len(artifacts))
+				}
+				results := clippingDashboardRequest(handler, http.MethodGet, "/api/clipping/jobs/"+job.ID+"/results", "", cookie, "")
+				if results.Code != http.StatusOK || !strings.Contains(results.Body.String(), "\"artifacts\"") {
+					t.Fatalf("dashboard result status=%d body=%s", results.Code, results.Body.String())
+				}
+			} else if got.Status != ClippingJobFailed || len(artifacts) != 0 || !strings.Contains(got.Error, "invalid_pipeline_provenance") {
+				t.Fatalf("invalid Rust callback should fail with safe reason: job=%+v artifacts=%d", got, len(artifacts))
+			}
+		})
+	}
+}
+
 func TestClippingOversizeCurrentCallbackFailsAnalysis(t *testing.T) {
 	for _, contentLengthKnown := range []bool{true, false} {
 		name := "max-bytes-reader"
