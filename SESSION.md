@@ -1,3 +1,13 @@
+# Session handoff — 2026-10-16, C3.RUST-CALLBACK (repair branch)
+
+- User authorized a five-commit fix/push specifically to `fix/clipper-youtube-import-diagnostics`. The underlying defect was Rust scene provenance rejected by Go's FFmpeg-only callback validator; a rejection could be recorded as failed while Modal saw HTTP 204. This repair supports pinned Rust and legacy FFmpeg provenance as distinct pairs and records safe failure codes in job errors.
+- Modal scheduled ledger prune continues on the preexisting schedule, but routine `ledger_owner_entered operation=prune` trace is suppressed. Non-prune ledger activity remains observable.
+- Regression tests cover valid Rust and legacy provenance, invalid mixed versions, actual Go callback settling and artifact publishing, idempotent delivery, and quiet scheduled prune traces.
+- Verification limitation: GitHub connector supports file/commit operations, but the execution container has no GitHub network access. Go/Python suites and live analysis were not executed here; no deployment or paid inference occurred. Run the tests and verify a fresh authorized live job before declaring rollout successful.
+- Target branch: `fix/clipper-youtube-import-diagnostics`. This scope supersedes older branch restrictions only for this request.
+
+---
+
 # Session handoff — 2026-10-15, C3.DELETE / C3.ABORT (published)
 
 - User authorized imported-clip/analysis deletion and analysis abort with toast on Go/Modal errors, inside `feat/clipper-ai`, using LUNA Max. The user explicitly authorized pushing the reviewed changes on 2026-10-15; deployment and paid inference remain separate.

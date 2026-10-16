@@ -4,6 +4,14 @@ Last updated: 2026-10-15 (America/Toronto). This file is the authoritative statu
 
 ## Current checkpoint
 
+### C3.RUST-CALLBACK — 2026-10-16 (scoped repair)
+
+- User authorized fixing the Rust/Go completion mismatch and scheduled prune log noise on `fix/clipper-youtube-import-diagnostics`, with five distinct commits and a fast-forward push to that branch. This authorization does not include deployment, paid GPU inference, or merges to main.
+- Root cause: the GPU returns Rust full/dense scene algorithm provenance, while Go historically accepted only the legacy FFmpeg pair. The handler can return HTTP 204 after recording a rejected terminal callback; only the persisted Go job and artifacts establish completion.
+- Repair: accept only the two known analyzer pairs, persist bounded safe validation-failure codes in the job, preserve capability/source/revision checks, keep periodic pruning but silence its routine trace, and add offline Go/Python regression coverage.
+- Verification boundary: code inspection and deterministic source checks via the GitHub connector. The execution environment cannot clone the remote repository or run the repository-wide Go/Python test suites; run the documented offline suites in CI or an available checkout before deployment. No live GPU test or deployment claimed.
+
+
 ### C3.DELETE / C3.ABORT — 2026-10-15 (published)
 
 - User requests delete functionality for imported clips and analyses, and analysis abort with a toast on Go or Modal errors, inside `feat/clipper-ai`, using LUNA Max. Interpret deletion as adding delete actions, with clarification pending. This authorizes scoped implementation and local verification/review; no paid inference or deployment.
