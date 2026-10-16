@@ -37,6 +37,7 @@ var clippingDiagnosticCodes = map[string]struct{}{
 	"unsafe_destination":        {},
 	"runtime_unavailable":       {},
 	"extractor_exit_failure":    {},
+	"bot_challenge":             {},
 	"extractor_output_limit":    {},
 	"format_unavailable":        {},
 	"av_stream_missing":         {},
@@ -227,6 +228,8 @@ func clippingDiagnosticCode(stage string, err error) string {
 			return "format_unavailable"
 		case "youtube_import_unavailable":
 			return "runtime_unavailable"
+		case "youtube_bot_challenge":
+			return "bot_challenge"
 		case "youtube_video_unavailable":
 			return "video_unavailable"
 		case "youtube_duration_limit_exceeded":
