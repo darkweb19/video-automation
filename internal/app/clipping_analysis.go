@@ -248,14 +248,23 @@ func decodeClippingAnalysisCore(payload string, source ClippingSource) (clipping
 	return core, nil
 }
 
+// PCM decode may end just before the MP4 container/video timeline due to
+// codec padding and timestamp rounding. This is a tail-only allowance: at
+// most 250 ms AND at most 1% of the video, whichever is smaller.
+const clippingAudioCoverageTailMaxMS int64 = 250
+
 func validClippingAnalysisMediaTimeline(core clippingAnalysisCore, durationMS int64) bool {
-	if !core.MediaStreams.HasVideo || core.Coverage.VisualScannedDurationMS != durationMS {
+	// Visual coverage remains exact. The source duration was verified earlier.
+	if durationMS <= 0 || !core.MediaStreams.HasVideo || core.Coverage.VisualScannedDurationMS != durationMS {
 		return false
 	}
 	if core.MediaStreams.HasAudio {
+		audioTailMS := durationMS - core.Coverage.AudioScannedDurationMS
+		allowedTailMS := min64(clippingAudioCoverageTailMaxMS, durationMS/100)
 		return core.AudioAnalysisStatus == "complete" && core.Transcript.Available &&
-			core.Transcript.Status == "complete" && core.Coverage.AudioScannedDurationMS == durationMS
+			core.Transcript.Status == "complete" && audioTailMS >= 0 && audioTailMS <= allowedTailMS
 	}
+	// Video-only sources must still prove that no audio work or evidence ran.
 	return core.AudioAnalysisStatus == "skipped_no_audio_stream" && !core.Transcript.Available &&
 		core.Transcript.Status == "unavailable_no_audio_stream" && len(core.Transcript.Segments) == 0 &&
 		len(core.AudioEvents) == 0 && core.Coverage.AudioScannedDurationMS == 0

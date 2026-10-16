@@ -470,6 +470,55 @@ func TestClippingM3RustSceneProvenanceVersionPair(t *testing.T) {
 	}
 }
 
+func TestClippingAnalysisAudioCoverageAllowsOnlyShortDecodedTail(t *testing.T) {
+	store := newTestStore(t)
+	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
+	for _, tc := range []struct {
+		name      string
+		audioGap  int64
+		visualGap int64
+		accepted  bool
+	}{
+		{"exact", 0, 0, true},
+		{"aac_tail", 21, 0, true},
+		{"within_limit", 249, 0, true},
+		{"at_limit", 250, 0, true},
+		{"beyond_limit", 251, 0, false},
+		{"truncated_audio", 10_000, 0, false},
+		{"missing_audio_scan", clippingM3FixtureDurationMS, 0, false},
+		{"overscanned_audio", -1, 0, false},
+		{"incomplete_visual_scan", 21, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core := clippingM3CoreForSource(source)
+			core.Coverage.AudioScannedDurationMS = source.DurationMS - tc.audioGap
+			core.Coverage.VisualScannedDurationMS = source.DurationMS - tc.visualGap
+			_, err := decodeClippingAnalysisCore(mustJSONClippingM3(t, core), source)
+			if (err == nil) != tc.accepted {
+				t.Fatalf("decoded=%v want=%v gap=%d visual_gap=%d err=%v", err == nil, tc.accepted, tc.audioGap, tc.visualGap, err)
+			}
+		})
+	}
+}
+
+func TestClippingAnalysisAudioTailToleranceIsProportionalForShortSources(t *testing.T) {
+	// A 6-second source must not accept an arbitrary 250-ms missing tail.
+	core := clippingAnalysisCore{
+		MediaStreams: clippingMediaStreams{HasAudio: true, HasVideo: true},
+		AudioAnalysisStatus: "complete",
+		Transcript: clippingTranscript{Available: true, Status: "complete"},
+		Coverage: clippingAnalysisCoverage{VisualScannedDurationMS: 6_000},
+	}
+	for _, tc := range []struct{ gap int64; accept bool }{
+		{0, true}, {60, true}, {61, false}, {250, false},
+	} {
+		core.Coverage.AudioScannedDurationMS = 6_000 - tc.gap
+		if got := validClippingAnalysisMediaTimeline(core, 6_000); got != tc.accept {
+			t.Errorf("audio gap=%d accepted=%v want=%v", tc.gap, got, tc.accept)
+		}
+	}
+}
+
 func mustJSONClippingM3(t *testing.T, value any) string {
 	t.Helper()
 	encoded, err := json.Marshal(value)
