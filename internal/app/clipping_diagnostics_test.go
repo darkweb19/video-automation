@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +11,7 @@ import (
 
 func TestClippingSourceDiagnosticsStayBoundedAndMonotonicAfterRestart(t *testing.T) {
 	dataDir, store, _, acquisition := newClippingAcquisitionFixture(t)
-	rawURL := "https://www.youtube.com/watch?v=abcdefghijk&si=diagnostic-secret-marker"
-	source, err := acquisition.CreatePublicImport(context.Background(), true, rawURL, 0)
+	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk&si=diagnostic-secret-marker", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,75 +95,6 @@ func TestClippingSourceListResponseIncludesSafeDiagnostics(t *testing.T) {
 	}
 }
 
-func TestClippingImportDiagnosticsClassifyRuntimeAndExtractorFailuresSafely(t *testing.T) {
-	tests := []struct {
-		name          string
-		extractorBody string
-		runtimePath   func(string) string
-		stage         string
-		status        ClippingSourceDiagnosticStatus
-		code          string
-	}{
-		{
-			name:        "runtime unavailable",
-			runtimePath: func(directory string) string { return filepath.Join(directory, "missing-deno") },
-			stage:       ClippingDiagnosticStageDownload, status: ClippingDiagnosticFailed, code: "runtime_unavailable",
-		},
-		{
-			name:          "extractor exit failure",
-			extractorBody: "printf 'https://signed.example/media?secret=extractor-secret-marker\\n'\nprintf 'extractor-secret-marker\\n' >&2\nexit 17\n",
-			runtimePath:   func(directory string) string { return writeFakeYouTubeExecutable(t, directory, "deno", "exit 0\n") },
-			stage:         ClippingDiagnosticStageDownload, status: ClippingDiagnosticFailed, code: "extractor_exit_failure",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, store, _, acquisition := newClippingAcquisitionFixture(t)
-			directory := t.TempDir()
-			python, err := exec.LookPath("python3")
-			if err != nil {
-				t.Skip("python3 is required for the native downloader test")
-			}
-			acquisition.youtubePythonExecutable = python
-			acquisition.youtubeExecutable = filepath.Join(directory, "fake-yt-dlp")
-			acquisition.youtubeRuntime = "deno:" + test.runtimePath(directory)
-			if test.extractorBody != "" {
-				acquisition.youtubeExecutable = writeFakeYouTubeExecutable(t, directory, "yt-dlp", test.extractorBody)
-			}
-			source, err := acquisition.CreatePublicImport(context.Background(), true, "https://youtu.be/abcdefghijk?si=private-link-token", 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if worked, err := acquisition.ProcessNextImport(context.Background()); err != nil || !worked {
-				t.Fatalf("process import worked=%v error=%v", worked, err)
-			}
-			loaded, err := store.ClippingSource(source.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			foundFailure := false
-			for _, item := range loaded.Diagnostics {
-				if item.Stage == test.stage && item.Status == test.status && item.Code == test.code {
-					foundFailure = true
-				}
-			}
-			if !foundFailure {
-				t.Fatalf("missing safe diagnostic %s/%s/%s in %+v", test.stage, test.status, test.code, loaded.Diagnostics)
-			}
-			encoded, err := json.Marshal(clippingSourceSummary(loaded))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(string(encoded), "private-link-token") || strings.Contains(string(encoded), "extractor-secret-marker") || strings.Contains(string(encoded), "signed.example") || strings.Contains(string(encoded), "stderr") {
-				t.Fatalf("source diagnostic leaked private extractor data: %s", encoded)
-			}
-			if test.name == "runtime unavailable" && strings.Contains(string(encoded), "format_unavailable") {
-				t.Fatalf("missing runtime was mislabeled as a format limitation: %s", encoded)
-			}
-		})
-	}
-}
-
 func TestClippingDiagnosticInputRejectsUnknownStagesAndCodes(t *testing.T) {
 	_, store, _, acquisition := newClippingAcquisitionFixture(t)
 	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
@@ -178,5 +106,18 @@ func TestClippingDiagnosticInputRejectsUnknownStagesAndCodes(t *testing.T) {
 	}
 	if err := store.AppendClippingSourceDiagnostic(source.ID, ClippingDiagnosticStageDownload, ClippingDiagnosticFailed, "raw error with secret"); err == nil {
 		t.Fatal("non-enumerated diagnostic code was accepted")
+	}
+}
+
+func TestSafeClippingFailureKeepsOnlyAllowlistedApifyDiagnosticCodes(t *testing.T) {
+	for _, code := range []string{"apify_rate_limited", "apify_download_expired", "apify_download_failed"} {
+		err := withClippingDiagnosticCode(errClippingImportRetryable, code)
+		if got := safeClippingFailure(err); got != code {
+			t.Errorf("safeClippingFailure(%q)=%q, want same allowlisted retry code", code, got)
+		}
+	}
+	unsafe := withClippingDiagnosticCode(errClippingImportRetryable, "download_failed")
+	if got := safeClippingFailure(unsafe); got != "source_acquisition_failed" {
+		t.Fatalf("safeClippingFailure returned unapproved generic diagnostic %q", got)
 	}
 }

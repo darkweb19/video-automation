@@ -8,9 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"hash"
 	"io"
+	"log/slog"
 	"math"
 	"math/big"
 	"net"
@@ -31,6 +31,7 @@ const (
 	clippingImportLeaseRenewInterval         = 5 * time.Minute
 	clippingFreeSpaceFloorBytes              = int64(4 << 30)
 	clippingYouTubeWorkspaceBytes            = 2 * MaxClippingSourceBytes
+	clippingYouTubeWorkspaceEntryLimit       = 4096
 	clippingYouTubeDurationToleranceMS int64 = 2_000
 	clippingProbeTimeout                     = 15 * time.Second
 	clippingProbeOutputLimit                 = 64 << 10
@@ -43,13 +44,15 @@ const (
 )
 
 var (
-	ErrClippingRightsNotAttested       = errors.New("explicit rights and processing attestation is required")
-	ErrClippingPlatformUnavailable     = errors.New("native clipping source files require a Linux or Unix host; run the application in Docker/Linux")
-	ErrYouTubeImportUnavailable        = errors.New("YouTube import is unavailable; check the public video link and try again")
-	errClippingInvalidMedia            = errors.New("source is not a supported video with a valid duration and dimensions")
-	errClippingImportRetryable         = errors.New("YouTube import failed")
-	errClippingYouTubeAVStreamMissing  = errors.New("YouTube source is missing required audio/video stream timing")
-	errClippingYouTubeAVTimingMismatch = errors.New("YouTube source audio/video timing does not match")
+	ErrClippingRightsNotAttested          = errors.New("explicit rights and processing attestation is required")
+	ErrClippingPlatformUnavailable        = errors.New("native clipping source files require a Linux or Unix host; run the application in Docker/Linux")
+	ErrYouTubeImportUnavailable           = errors.New("YouTube import is unavailable; check the public video link and try again")
+	errClippingInvalidMedia               = errors.New("source is not a supported video with a valid duration and dimensions")
+	errClippingImportRetryable            = errors.New("YouTube import failed")
+	errClippingDurationLimitExceeded      = errors.New("YouTube source duration exceeds the import limit")
+	errClippingYouTubeWorkspaceEntryLimit = errors.New("YouTube workspace contains too many entries")
+	errClippingYouTubeAVStreamMissing     = errors.New("YouTube source is missing required audio/video stream timing")
+	errClippingYouTubeAVTimingMismatch    = errors.New("YouTube source audio/video timing does not match")
 )
 
 var clippingDecoderCache sync.Map // executable identity -> map[codec]struct{}
@@ -111,17 +114,13 @@ type clippingOperationRegistry struct {
 type ClippingAcquisition struct {
 	store               *Store
 	security            *Security
+	apify               *clippingApifyClient
 	deleteOperationWait time.Duration
 
-	probe                    clippingMediaProbe
-	now                      func() time.Time
-	diskAvailable            func(string) (int64, error)
-	leaseRenewEvery          time.Duration
-	youtubeExecutable        string
-	youtubePythonExecutable  string
-	youtubeRuntime           string
-	youtubeMaxBytes          int64
-	youtubeWorkspaceMaxBytes int64
+	probe           clippingMediaProbe
+	now             func() time.Time
+	diskAvailable   func(string) (int64, error)
+	leaseRenewEvery time.Duration
 
 	processImportMu sync.Mutex
 	locksMu         sync.Mutex
@@ -137,6 +136,7 @@ func NewClippingAcquisition(store *Store, security *Security) *ClippingAcquisiti
 	return &ClippingAcquisition{
 		store:           store,
 		security:        security,
+		apify:           newClippingApifyClientFromEnv(),
 		probe:           probeClippingMedia,
 		now:             time.Now,
 		diskAvailable:   clippingAvailableDiskBytes,
@@ -328,7 +328,7 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 	importCtx, cancel := context.WithTimeout(leaseCtx, clippingImportMaxDuration)
 	defer cancel()
 	if recoverFinalizedFile {
-		if _, err := a.finalizeSource(importCtx, claimed.ID); err != nil {
+		if _, err := a.finalizeSource(importCtx, claimed.ID, claimed.ImportAttempts); err != nil {
 			if leaseErr := leaseFailure(); leaseErr != nil {
 				return true, a.retryClippingImport(claimed, trace, leaseErr)
 			}
@@ -377,7 +377,7 @@ func (a *ClippingAcquisition) ProcessNextImport(ctx context.Context) (bool, erro
 	if err := importCtx.Err(); err != nil {
 		return true, a.retryClippingImport(claimed, trace, err)
 	}
-	_, err = a.finalizeSource(importCtx, claimed.ID)
+	_, err = a.finalizeSource(importCtx, claimed.ID, claimed.ImportAttempts)
 	if err != nil {
 		if leaseErr := leaseFailure(); leaseErr != nil {
 			return true, a.retryClippingImport(claimed, trace, leaseErr)
@@ -477,12 +477,13 @@ func (a *ClippingAcquisition) DeleteSource(ctx context.Context, sourceID string)
 		return nil, false, err
 	}
 	a.store.clippingMu.Lock()
-	defer a.store.clippingMu.Unlock()
 	if err := ctx.Err(); err != nil {
+		a.store.clippingMu.Unlock()
 		return nil, false, err
 	}
 	jobIDs, err := a.store.DeleteClippingSource(sourceID)
 	if err != nil {
+		a.store.clippingMu.Unlock()
 		return nil, false, err
 	}
 	a.store.PublishClippingSource(sourceID)
@@ -498,16 +499,40 @@ func (a *ClippingAcquisition) DeleteSource(ctx context.Context, sourceID string)
 		// Leave cleanup_complete=false. The retention cleanup loop skips live
 		// operations and removes the directory after this canceled importer exits.
 		go a.cleanupDeletedSourceAfterOperation(sourceID, done)
+		a.store.clippingMu.Unlock()
+		a.abortAttachedApifyRunAfterDelete(sourceID)
 		return jobIDs, true, nil
 	}
 	if err := a.removeSourceFiles(sourceID); err != nil {
+		a.store.clippingMu.Unlock()
+		a.abortAttachedApifyRunAfterDelete(sourceID)
 		return jobIDs, false, err
 	}
 	if err := a.store.MarkClippingSourceCleaned(sourceID); err != nil {
+		a.store.clippingMu.Unlock()
+		a.abortAttachedApifyRunAfterDelete(sourceID)
 		return jobIDs, false, err
 	}
 	a.store.PublishClippingSource(sourceID)
+	a.store.clippingMu.Unlock()
+	a.abortAttachedApifyRunAfterDelete(sourceID)
 	return jobIDs, false, nil
+}
+
+// abortAttachedApifyRunAfterDelete only aborts an acknowledged run after the
+// source tombstone is durable. It uses a detached short context so the user
+// cancellation that installed the tombstone cannot suppress cleanup.
+func (a *ClippingAcquisition) abortAttachedApifyRunAfterDelete(sourceID string) {
+	if a == nil || a.store == nil || a.apify == nil {
+		return
+	}
+	state, found, err := a.store.GetClippingApifyRunState(sourceID)
+	if err != nil || !found || state.StartState != clippingApifyRunAttached || state.RunID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	a.apify.abortRunBestEffort(ctx, state.RunID)
 }
 
 func (a *ClippingAcquisition) cleanupDeletedSourceAfterOperation(sourceID string, done <-chan struct{}) {
@@ -697,20 +722,36 @@ func (a *ClippingAcquisition) ensureImporting(sourceID string) error {
 	return nil
 }
 
-func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID string) (ClippingSource, error) {
+func clippingImportClaimIsLive(source ClippingSource, sourceID string, expectedAttempts int, now time.Time) bool {
+	if expectedAttempts < 1 || expectedAttempts > MaxClippingImportAttempts || now.IsZero() {
+		return false
+	}
+	return source.ID == sourceID && source.Kind == ClippingSourceYouTube && source.Status == ClippingSourceImporting &&
+		source.RightsAttested && source.ImportAttempts == expectedAttempts && source.ImportLeaseUntil > now.Unix()
+}
+
+func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID string, expectedAttempts int) (ClippingSource, error) {
 	if err := ctx.Err(); err != nil {
 		return ClippingSource{}, err
 	}
+	if expectedAttempts < 1 || expectedAttempts > MaxClippingImportAttempts {
+		return ClippingSource{}, ErrClippingStaleAttempt
+	}
+	a.store.clippingMu.Lock()
 	source, err := a.store.ClippingSource(sourceID)
 	if err != nil {
+		a.store.clippingMu.Unlock()
 		return ClippingSource{}, err
 	}
 	if source.Status == ClippingSourceReady {
+		a.store.clippingMu.Unlock()
 		return source, nil
 	}
-	if source.Status != ClippingSourceImporting || source.Kind != ClippingSourceYouTube {
+	if !clippingImportClaimIsLive(source, sourceID, expectedAttempts, a.now()) {
+		a.store.clippingMu.Unlock()
 		return ClippingSource{}, errors.New("source is no longer available for finalization")
 	}
+	a.store.clippingMu.Unlock()
 	var youtubeExpectation youtubeImportExpectation
 	if json.Unmarshal([]byte(source.ImportExpectation), &youtubeExpectation) != nil || !validYouTubeImportExpectation(youtubeExpectation) {
 		return ClippingSource{}, errors.Join(errClippingInvalidMedia, errClippingYouTubeAVStreamMissing)
@@ -823,16 +864,26 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 	if current.Status == ClippingSourceReady {
 		return current, nil
 	}
-	if current.Status != ClippingSourceImporting || current.Kind != ClippingSourceYouTube {
+	if !clippingImportClaimIsLive(current, sourceID, expectedAttempts, a.now()) {
 		return ClippingSource{}, errors.New("source was canceled during finalization")
 	}
 	if err := ctx.Err(); err != nil {
 		return ClippingSource{}, err
 	}
-	if err := a.store.SetClippingSourceImportFinalExpectation(sourceID, info.Size(), digest); err != nil {
+	if err := a.store.SetClippingSourceImportFinalExpectationForAttempt(sourceID, expectedAttempts, info.Size(), digest); err != nil {
 		return ClippingSource{}, err
 	}
 	if localPath == tempPath {
+		current, err = a.store.ClippingSource(sourceID)
+		if err != nil || !clippingImportClaimIsLive(current, sourceID, expectedAttempts, a.now()) {
+			if err != nil {
+				return ClippingSource{}, err
+			}
+			return ClippingSource{}, ErrClippingStaleAttempt
+		}
+		if err := ctx.Err(); err != nil {
+			return ClippingSource{}, err
+		}
 		if err := os.Rename(tempPath, finalPath); err != nil {
 			return ClippingSource{}, err
 		}
@@ -848,8 +899,19 @@ func (a *ClippingAcquisition) finalizeSource(ctx context.Context, sourceID strin
 		}
 		return ClippingSource{}, err
 	}
+	current, err = a.store.ClippingSource(sourceID)
+	if err != nil || !clippingImportClaimIsLive(current, sourceID, expectedAttempts, a.now()) {
+		if localPath == tempPath {
+			_ = os.Rename(finalPath, tempPath)
+			_ = syncClippingDirectory(filepath.Dir(finalPath))
+		}
+		if err != nil {
+			return ClippingSource{}, err
+		}
+		return ClippingSource{}, ErrClippingStaleAttempt
+	}
 	trace.start(ClippingDiagnosticStageReady)
-	if err := a.store.MarkClippingSourceReady(sourceID, info.Size(), media.DurationMS, digest); err != nil {
+	if err := a.store.MarkClippingSourceImportReady(sourceID, expectedAttempts, info.Size(), media.DurationMS, digest); err != nil {
 		trace.finish(ClippingDiagnosticFailed, err)
 		if localPath == tempPath {
 			_ = os.Rename(finalPath, tempPath)
@@ -1649,6 +1711,12 @@ func removeGeneratedRegularFile(path string) error {
 func safeClippingFailure(err error) string {
 	if err == nil {
 		return "source_acquisition_failed"
+	}
+	var diagnostic clippingDiagnosticError
+	if errors.As(err, &diagnostic) && strings.HasPrefix(diagnostic.code, "apify_") {
+		if _, ok := clippingDiagnosticCodes[diagnostic.code]; ok {
+			return diagnostic.code
+		}
 	}
 	var outcome *ClippingAcquisitionError
 	if errors.As(err, &outcome) && outcome.Reason != "" {

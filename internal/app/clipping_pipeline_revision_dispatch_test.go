@@ -24,7 +24,7 @@ func clippingRevisionTestSource(t *testing.T, store *Store, name, content string
 		t.Fatal(err)
 	}
 	if err := store.SetClippingSourceImportExpectation(source.ID, youtubeImportExpectation{
-		Version: clippingYouTubeExpectationVersion, SeparateTracks: true,
+		Version: clippingYouTubeExpectationVersion,
 	}); err != nil {
 		t.Fatalf("set YouTube import expectation: %v", err)
 	}

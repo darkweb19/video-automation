@@ -13,6 +13,8 @@ const (
 	ClippingDiagnosticStageURLValidation  = "source_url_validation"
 	ClippingDiagnosticStageReservation    = "source_reservation"
 	ClippingDiagnosticStageDispatch       = "import_dispatch"
+	ClippingDiagnosticStageActorStart     = "actor_start"
+	ClippingDiagnosticStageActorPoll      = "actor_poll"
 	ClippingDiagnosticStageDownload       = "media_download"
 	ClippingDiagnosticStageOutputValidate = "download_output_validation"
 	ClippingDiagnosticStageProbe          = "media_probe"
@@ -24,6 +26,8 @@ var clippingDiagnosticStages = map[string]struct{}{
 	ClippingDiagnosticStageURLValidation:  {},
 	ClippingDiagnosticStageReservation:    {},
 	ClippingDiagnosticStageDispatch:       {},
+	ClippingDiagnosticStageActorStart:     {},
+	ClippingDiagnosticStageActorPoll:      {},
 	ClippingDiagnosticStageDownload:       {},
 	ClippingDiagnosticStageOutputValidate: {},
 	ClippingDiagnosticStageProbe:          {},
@@ -60,6 +64,17 @@ var clippingDiagnosticCodes = map[string]struct{}{
 	"retry_scheduled":           {},
 	"source_unavailable":        {},
 	"download_timeout":          {},
+	"apify_config_missing":      {},
+	"apify_auth_failed":         {},
+	"apify_actor_failed":        {},
+	"apify_timeout":             {},
+	"apify_rate_limited":        {},
+	"apify_artifact_missing":    {},
+	"apify_download_expired":    {},
+	"apify_start_uncertain":     {},
+	"apify_actor_mismatch":      {},
+	"apify_invalid_response":    {},
+	"apify_download_failed":     {},
 }
 
 // AppendClippingSourceDiagnostic persists one safe, monotonic source trace

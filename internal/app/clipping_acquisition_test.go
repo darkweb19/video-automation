@@ -96,22 +96,21 @@ func TestClippingCodecRequiresAllowedInstalledDecoder(t *testing.T) {
 	}
 }
 
-func TestClippingPermanentYouTubeImportFailuresReleaseSourceReservations(t *testing.T) {
+func TestClippingMissingApifyConfigurationFailsWithoutRetainingReservations(t *testing.T) {
+	t.Setenv("APIFY_API_TOKEN", "")
+	t.Setenv("APIFY_YOUTUBE_ACTOR_ID", "")
 	_, store, _, acquisition := newClippingAcquisitionFixture(t)
-	acquisition.youtubePythonExecutable = requirePython(t)
-	acquisition.youtubeExecutable = writeFakeYouTubeExecutable(t, t.TempDir(), "yt-dlp", "exit 0\n")
-	acquisition.youtubeRuntime = "deno:" + filepath.Join(t.TempDir(), "missing-deno")
 	for index := 0; index < 6; index++ {
 		source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
 		if err != nil {
 			t.Fatalf("create import %d: %v", index, err)
 		}
 		if _, err := acquisition.ProcessNextImport(context.Background()); err != nil {
-			t.Fatalf("process unavailable-runtime failure %d: %v", index, err)
+			t.Fatalf("process missing-configuration failure %d: %v", index, err)
 		}
 		failed, err := store.ClippingSource(source.ID)
-		if err != nil || failed.Status != ClippingSourceFailed || failed.ReservedSizeBytes != 0 || failed.Failure != "youtube_import_unavailable" {
-			t.Fatalf("failed import retained reservation: source=%+v error=%v", failed, err)
+		if err != nil || failed.Status != ClippingSourceFailed || failed.ReservedSizeBytes != 0 || failed.Failure != "apify_config_missing" {
+			t.Fatalf("missing Apify config retained reservation or exposed an unsafe failure: source=%+v error=%v", failed, err)
 		}
 	}
 	var reserved int64
@@ -292,7 +291,7 @@ func TestClippingImportExpectationRemainsSanitized(t *testing.T) {
 	store.clippingMu.Lock()
 	claimed, err := store.BeginClippingImport(source.ID, 0, clippingImportLeaseDuration)
 	if err == nil {
-		err = store.SetClippingSourceImportExpectation(claimed.ID, youtubeImportExpectation{Version: clippingYouTubeExpectationVersion, SeparateTracks: true})
+		err = store.SetClippingSourceImportExpectation(claimed.ID, youtubeImportExpectation{Version: clippingYouTubeExpectationVersion})
 	}
 	store.clippingMu.Unlock()
 	if err != nil {

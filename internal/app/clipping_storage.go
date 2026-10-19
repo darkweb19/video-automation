@@ -232,6 +232,9 @@ func (s *Store) migrateClipping() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS clipping_analysis_cache_revision ON clipping_analysis_cache(source_id,pipeline_revision,created_at DESC)`); err != nil {
 		return fmt.Errorf("index clipping analysis cache revision: %w", err)
 	}
+	if err := s.migrateClippingApifyStorage(); err != nil {
+		return err
+	}
 	if err := s.migrateClippingCompatibilityState(); err != nil {
 		return fmt.Errorf("migrate clipping compatibility state: %w", err)
 	}
@@ -816,6 +819,31 @@ func (s *Store) UpdateClippingSourceProgress(id string, status ClippingSourceSta
 	return tx.Commit()
 }
 
+// UpdateClippingSourceImportProgress persists download bytes only for the
+// exact live YouTube import attempt. Upload progress remains on the generic
+// status-aware method above.
+func (s *Store) UpdateClippingSourceImportProgress(id string, expectedAttempts int, sizeBytes int64) error {
+	if !safeClippingSourceID(id) || expectedAttempts < 1 || expectedAttempts > MaxClippingImportAttempts || sizeBytes < 0 {
+		return ErrClippingInvalidState
+	}
+	now := time.Now().Unix()
+	result, err := s.db.Exec(`UPDATE clipping_sources SET upload_offset=0,size_bytes=?,updated_at=?
+		WHERE id=? AND kind='youtube_original_file' AND status='importing' AND rights_attested=1
+		AND import_attempts=? AND import_lease_until>? AND size_bytes<=? AND declared_size_bytes>=? AND declared_size_bytes<=?`,
+		sizeBytes, now, id, expectedAttempts, now, sizeBytes, sizeBytes, MaxClippingSourceBytes)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrClippingInvalidState
+	}
+	return nil
+}
+
 func (s *Store) ResetClippingSourceImportProgress(id string) error {
 	if !safeClippingSourceID(id) {
 		return ErrClippingSourceNotFound
@@ -879,7 +907,12 @@ func (s *Store) CompleteClippingSourceTrackWorkspace(id string) error {
 		return err
 	}
 	var expectation youtubeImportExpectation
-	if kind != ClippingSourceYouTube || status != ClippingSourceImporting || json.Unmarshal([]byte(encoded), &expectation) != nil || !validYouTubeImportExpectation(expectation) || !expectation.SeparateTracks {
+	if kind != ClippingSourceYouTube || status != ClippingSourceImporting || json.Unmarshal([]byte(encoded), &expectation) != nil || !validYouTubeImportExpectation(expectation) {
+		return ErrClippingInvalidState
+	}
+	workspaceMarkerAllowed := expectation.Version == 2 && expectation.SeparateTracks ||
+		expectation.Version == clippingYouTubeExpectationVersion && !expectation.SeparateTracks
+	if !workspaceMarkerAllowed {
 		return ErrClippingInvalidState
 	}
 	expectation.WorkspaceComplete = true
@@ -917,7 +950,50 @@ func (s *Store) SetClippingSourceImportFinalExpectation(id string, sizeBytes int
 	return nil
 }
 
+// SetClippingSourceImportFinalExpectationForAttempt binds a completed
+// temporary output only while the same import attempt still owns a live lease.
+func (s *Store) SetClippingSourceImportFinalExpectationForAttempt(id string, expectedAttempts int, sizeBytes int64, sha256Hex string) error {
+	if !safeClippingSourceID(id) || expectedAttempts < 1 || expectedAttempts > MaxClippingImportAttempts ||
+		sizeBytes < 1 || sizeBytes > MaxClippingSourceBytes || len(sha256Hex) != sha256.Size*2 {
+		return ErrClippingInvalidState
+	}
+	if _, err := hex.DecodeString(sha256Hex); err != nil {
+		return ErrClippingInvalidState
+	}
+	now := time.Now().Unix()
+	result, err := s.db.Exec(`UPDATE clipping_sources SET import_expected_size_bytes=?,import_expected_sha256=?,updated_at=?
+		WHERE id=? AND kind='youtube_original_file' AND status='importing' AND rights_attested=1
+		AND import_attempts=? AND import_lease_until>? AND import_expectation_json<>''
+		AND size_bytes=? AND declared_size_bytes>=? AND declared_size_bytes<=?`,
+		sizeBytes, strings.ToLower(sha256Hex), now, id, expectedAttempts, now, sizeBytes, sizeBytes, MaxClippingSourceBytes)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrClippingInvalidState
+	}
+	return nil
+}
+
 func (s *Store) MarkClippingSourceReady(id string, sizeBytes, durationMS int64, sha256Hex string) error {
+	return s.markClippingSourceReady(id, 0, sizeBytes, durationMS, sha256Hex)
+}
+
+// MarkClippingSourceImportReady publishes an imported YouTube source only for
+// the exact active import attempt that owns a live lease. Upload completion
+// continues to use MarkClippingSourceReady.
+func (s *Store) MarkClippingSourceImportReady(id string, expectedAttempts int, sizeBytes, durationMS int64, sha256Hex string) error {
+	if expectedAttempts < 1 || expectedAttempts > MaxClippingImportAttempts {
+		return ErrClippingInvalidState
+	}
+	return s.markClippingSourceReady(id, expectedAttempts, sizeBytes, durationMS, sha256Hex)
+}
+
+func (s *Store) markClippingSourceReady(id string, expectedImportAttempt int, sizeBytes, durationMS int64, sha256Hex string) error {
 	if !safeClippingSourceID(id) || sizeBytes < 1 || sizeBytes > MaxClippingSourceBytes || durationMS < 1 || durationMS > MaxClippingSourceDurationMS {
 		return errors.New("source size or duration is outside clipping limits")
 	}
@@ -938,11 +1014,17 @@ func (s *Store) MarkClippingSourceReady(id string, sizeBytes, durationMS int64, 
 	var declared, offset int64
 	var expectedSize int64
 	var expectedSHA, expectationJSON string
-	if err := tx.QueryRow(`SELECT kind,status,declared_size_bytes,upload_offset,rights_attested,import_expectation_json,import_expected_size_bytes,import_expected_sha256 FROM clipping_sources WHERE id=?`, id).Scan(&kind, &status, &declared, &offset, &rightsAttested, &expectationJSON, &expectedSize, &expectedSHA); err != nil {
+	var importAttempts, importLeaseUntil int64
+	if err := tx.QueryRow(`SELECT kind,status,declared_size_bytes,upload_offset,rights_attested,import_expectation_json,import_expected_size_bytes,import_expected_sha256,import_attempts,import_lease_until FROM clipping_sources WHERE id=?`, id).Scan(&kind, &status, &declared, &offset, &rightsAttested, &expectationJSON, &expectedSize, &expectedSHA, &importAttempts, &importLeaseUntil); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrClippingSourceNotFound
 		}
 		return err
+	}
+	now := time.Now().Unix()
+	if expectedImportAttempt > 0 && (kind != ClippingSourceYouTube || status != ClippingSourceImporting ||
+		importAttempts != int64(expectedImportAttempt) || importLeaseUntil <= now) {
+		return ErrClippingInvalidState
 	}
 	if (status != ClippingSourceUploading && status != ClippingSourceImporting) || rightsAttested == 0 {
 		return ErrClippingInvalidState
@@ -959,14 +1041,27 @@ func (s *Store) MarkClippingSourceReady(id string, sizeBytes, durationMS int64, 
 	if kind == ClippingSourceYouTube {
 		var expectation youtubeImportExpectation
 		if expectationJSON == "" || json.Unmarshal([]byte(expectationJSON), &expectation) != nil || !validYouTubeImportExpectation(expectation) ||
-			expectation.SeparateTracks && !expectation.WorkspaceComplete || expectedSize != sizeBytes || !strings.EqualFold(expectedSHA, sha256Hex) {
+			(expectation.SeparateTracks || expectation.Version == clippingYouTubeExpectationVersion) && !expectation.WorkspaceComplete ||
+			expectedSize != sizeBytes || !strings.EqualFold(expectedSHA, sha256Hex) {
 			return ErrClippingInvalidState
 		}
 	}
-	now := time.Now().Unix()
-	_, err = tx.Exec(`UPDATE clipping_sources SET status='ready',reserved_size_bytes=?,size_bytes=?,upload_offset=?,duration_ms=?,sha256=?,failure='',next_import_at=0,import_lease_until=0,updated_at=? WHERE id=?`, sizeBytes, sizeBytes, sizeBytes, durationMS, strings.ToLower(sha256Hex), now, id)
+	query := `UPDATE clipping_sources SET status='ready',reserved_size_bytes=?,size_bytes=?,upload_offset=?,duration_ms=?,sha256=?,failure='',next_import_at=0,import_lease_until=0,updated_at=? WHERE id=? AND status=?`
+	args := []any{sizeBytes, sizeBytes, sizeBytes, durationMS, strings.ToLower(sha256Hex), now, id, status}
+	if expectedImportAttempt > 0 {
+		query += ` AND kind='youtube_original_file' AND import_attempts=? AND import_lease_until>?`
+		args = append(args, expectedImportAttempt, now)
+	}
+	result, err := tx.Exec(query, args...)
 	if err != nil {
 		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrClippingInvalidState
 	}
 	return tx.Commit()
 }
