@@ -2,7 +2,22 @@
   "use strict";
 
   const CONTENT_TYPES = ["general", "podcast", "comedy", "gaming", "movie"];
+  const GENERIC_IMPORT_ERROR_COPY = "This YouTube video could not be imported. Check that the public video is available and try again.";
   const IMPORT_ERROR_COPY = {
+    apify_config_missing: "Video importing is not configured. Ask the operator to set up the video provider.",
+    apify_auth_failed: "The video provider could not authenticate. Ask the operator to check its credentials.",
+    apify_actor_failed: "The video provider could not retrieve this video. Confirm it is publicly available and try again later.",
+    apify_timeout: "The video provider did not finish before its wait limit. Ask the operator to check the existing run before trying again.",
+    apify_rate_limited: "The video provider is busy. Wait a few minutes, then try importing again.",
+    apify_artifact_missing: "The video provider did not return a downloadable video for this link. Try another public video or contact the operator.",
+    apify_download_failed: "The saved video could not be downloaded. Ask the operator to check the existing run before starting another import.",
+    apify_download_expired: "The video download link expired before the file was saved. Ask the operator to check the existing run before retrying.",
+    apify_start_uncertain: "The provider may have started this import. Ask the operator to check the run before importing again.",
+    apify_actor_mismatch: "The video provider configuration does not match this importer. Ask the operator to check it.",
+    apify_invalid_response: "The video provider returned an unsupported response. Ask the operator to check the importer configuration.",
+    source_import_canceled: "This import was canceled. Start it again when you are ready.",
+    source_import_timed_out: "This import exceeded its time limit. Ask the operator to check the existing run before starting another import.",
+    storage_reservation_unavailable: "Not enough free storage is available for this import. Ask the operator to free storage before trying again.",
     youtube_import_unavailable: "The YouTube importer is unavailable right now. Try again later or ask the operator to check the importer setup.",
     youtube_bot_challenge: "YouTube requested verification of automated access from this server. This import cannot continue; try again later.",
     youtube_video_unavailable: "This video could not be opened from its public link. Check that it plays without signing in or age verification.",
@@ -13,6 +28,16 @@
     youtube_media_invalid: "The imported file did not pass video validation.",
     source_duration_limit_exceeded: "This video is longer than the four-hour import limit.",
     source_size_limit_exceeded: "This video is larger than the 20 GiB import limit."
+  };
+  const IMPORT_STAGE_COPY = {
+    import_dispatch: "Queued",
+    actor_start: "Starting acquisition",
+    actor_poll: "Acquiring video",
+    media_download: "Downloading media",
+    media_probe: "Validating media",
+    media_hash: "Validating media",
+    download_output_validation: "Validating media",
+    source_ready: "Validating media"
   };
   const JOB_STATUS_COPY = {
     queued: "Queued",
@@ -183,7 +208,17 @@
 
   function importErrorCopy(source) {
     const code = String(source && source.error || "");
-    return IMPORT_ERROR_COPY[code] || (code ? "This YouTube video could not be imported. Check that the public video is available and try again." : "");
+    if (Object.hasOwn(IMPORT_ERROR_COPY, code)) return IMPORT_ERROR_COPY[code];
+    return code || String(source && source.status || "").toLowerCase() === "failed"
+      ? GENERIC_IMPORT_ERROR_COPY
+      : "";
+  }
+
+  function importStageLabel(source) {
+    const diagnostics = Array.isArray(source && source.diagnostics) ? source.diagnostics : [];
+    const current = diagnostics.slice().reverse().find((item) => item && Object.hasOwn(IMPORT_STAGE_COPY, String(item.stage || "").toLowerCase()));
+    const stage = String(current && current.stage || "").toLowerCase();
+    return IMPORT_STAGE_COPY[stage] || "Importing video";
   }
 
   function sourceStatus(source) {
@@ -200,12 +235,6 @@
       return "Waiting for Modal worker setup";
     }
     return JOB_STATUS_COPY[status] || "Status unavailable";
-  }
-
-  function sourceProgress(source) {
-    const progress = Number(source && source.progress);
-    if (!Number.isFinite(progress)) return null;
-    return Math.max(0, Math.min(100, Math.round(progress <= 1 ? progress * 100 : progress)));
   }
 
   function api(path, options) {
@@ -364,13 +393,16 @@
     const percent = value === null ? null : value;
     const wrapper = element("div", "clipping-progress");
     const track = element("div", "clipping-progress-track");
-    const bar = element("div", "clipping-progress-bar");
-    bar.style.width = (percent === null ? 8 : percent) + "%";
+    const bar = element("div", "clipping-progress-bar progress-bar");
+    if (percent === null) bar.classList.add("indeterminate");
+    else bar.style.width = percent + "%";
     bar.setAttribute("role", "progressbar");
     bar.setAttribute("aria-label", label);
     bar.setAttribute("aria-valuemin", "0");
     bar.setAttribute("aria-valuemax", "100");
+    bar.setAttribute("aria-valuetext", label);
     if (percent !== null) bar.setAttribute("aria-valuenow", String(percent));
+    else bar.setAttribute("aria-busy", "true");
     track.append(bar);
     wrapper.append(track, element("span", "clipping-progress-copy", percent === null ? label : label + " · " + percent + "%"));
     parent.append(wrapper);
@@ -422,8 +454,8 @@
       main.append(heading);
       const duration = formatDuration(source.duration_ms);
       if (duration) main.append(element("p", "clipping-source-meta", "Duration " + duration));
-      if (status === "importing") renderProgress(main, "Importing video", sourceProgress(source));
-      const error = state.sourceActionErrors.get(id) || String(source.error_message || "").trim() || importErrorCopy(source);
+      if (status === "importing") renderProgress(main, importStageLabel(source), null);
+      const error = state.sourceActionErrors.get(id) || importErrorCopy(source);
       if (error) main.append(element("p", "clipping-row-error", error));
       const actions = element("div", "clipping-source-actions");
       const deleting = state.pendingDeleteSourceIDs.has(id);
@@ -757,7 +789,7 @@
           const status = String(source && source.status || "").toLowerCase();
           if (id && state.sourceConsoleStatuses.get(id) !== status) {
             const reason = String(source && source.error || "");
-            console.info("[clipper/youtube-import] source status", { source_id: id, status, reason_code: /^[a-z0-9_]{1,100}$/.test(reason) ? reason : "" });
+            console.info("[clipper/youtube-import] source status", { source_id: id, status, reason_code: Object.hasOwn(IMPORT_ERROR_COPY, reason) ? reason : "" });
             state.sourceConsoleStatuses.set(id, status);
           }
           if (status === "deleted") markSourceDeleted(source.id);

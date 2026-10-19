@@ -262,7 +262,7 @@ test("YouTube link parsing accepts one public video and rejects unsupported or a
   assert.equal(pure.formatDuration(3661000), "1:01:01");
 });
 
-test("YouTube import requires rights confirmation, sends only the import contract, and shows live source progress", async () => {
+test("YouTube import requires rights confirmation, sends only the import contract, and shows indeterminate stage progress", async () => {
   let sources = [];
   const handler = async (endpoint, options) => {
     if (endpoint === "/api/clipping/config") return { max_source_bytes: 20 * 1024 ** 3, max_duration_ms: 4 * 60 * 60 * 1000 };
@@ -273,7 +273,10 @@ test("YouTube import requires rights confirmation, sends only the import contrac
       const body = JSON.parse(options.body);
       assert.deepEqual(body, { url: "https://youtu.be/abcdefghijk", rights_attested: true });
       assert.equal(options.method, "POST");
-      const imported = { id: "clipsrc_1", kind: "youtube_original_file", status: "importing", title: "Example video", progress: 0.25 };
+      const imported = {
+        id: "clipsrc_1", kind: "youtube_original_file", status: "importing", title: "Example video", progress: 0.25,
+        diagnostics: [{ sequence: 1, stage: "actor_poll", status: "started", at: 1760000000 }]
+      };
       sources = [imported];
       return { source: imported };
     }
@@ -297,7 +300,13 @@ test("YouTube import requires rights confirmation, sends only the import contrac
   assert.equal(ui.elements.get("clipping-link-permission-check").checked, false);
   assert.equal(ui.elements.get("clipping-link-submit").disabled, true);
   assert.match(treeText(ui.elements.get("clipping-sources")), /Example video/);
-  assert.match(treeText(ui.elements.get("clipping-sources")), /25%/);
+  assert.match(treeText(ui.elements.get("clipping-sources")), /Acquiring video/);
+  assert.doesNotMatch(treeText(ui.elements.get("clipping-sources")), /25%|0\.25/);
+  const importProgress = findNode(ui.elements.get("clipping-sources"), (node) => node.getAttribute("role") === "progressbar");
+  assert.ok(importProgress);
+  assert.equal(importProgress.getAttribute("aria-valuenow"), null);
+  assert.equal(importProgress.getAttribute("aria-busy"), "true");
+  assert.equal(importProgress.classList.contains("indeterminate"), true);
   assert.match(ui.elements.get("clipping-workflow-status").textContent, /Import accepted/);
 });
 
@@ -339,9 +348,108 @@ test("YouTube bot challenge renders a specific safe error for a failed imported 
   assert.match(shown, /YouTube requested verification of automated access/);
   assert.doesNotMatch(shown, /extractor_exit_failure|signed-media-secret/);
 
-  challenged.error_message = "YouTube requested verification of automated access from this server.";
+  challenged.error_message = "run_id=apify-run-secret signed_url=https://media.example/private.mp4?sig=signed-media-secret token=apify-secret-token";
   await ui.api.refresh();
-  assert.match(treeText(ui.elements.get("clipping-sources")), /YouTube requested verification of automated access from this server/);
+  assert.match(treeText(ui.elements.get("clipping-sources")), /YouTube requested verification of automated access/);
+  assert.doesNotMatch(treeText(ui.elements.get("clipping-sources")), /apify-run-secret|signed-media-secret|apify-secret-token/);
+});
+
+test("Apify import stages map to fixed labels and remain indeterminate until Ready", async () => {
+  const stages = [
+    ["import_dispatch", "Queued"],
+    ["actor_start", "Starting acquisition"],
+    ["actor_poll", "Acquiring video"],
+    ["media_download", "Downloading media"],
+    ["media_probe", "Validating media"],
+    ["media_hash", "Validating media"],
+    ["download_output_validation", "Validating media"],
+    ["source_ready", "Validating media"]
+  ];
+  const sources = stages.map(([stage], index) => ({
+    id: "clipsrc_stage_" + index,
+    kind: "youtube_original_file",
+    status: "importing",
+    title: "Stage " + stage,
+    progress: (index + 1) * 20,
+    diagnostics: [{ sequence: 1, stage, status: "started", at: 1760000000 }]
+  }));
+  sources.push({
+    id: "clipsrc_stage_retrying",
+    kind: "youtube_original_file",
+    status: "importing",
+    title: "Retrying import",
+    progress: 89,
+    diagnostics: [
+      { sequence: 1, stage: "actor_poll", status: "started", at: 1760000000 },
+      { sequence: 2, stage: "import_dispatch", status: "retrying", at: 1760000001 }
+    ]
+  });
+  sources.push({
+    id: "clipsrc_stage_ready",
+    kind: "youtube_original_file",
+    status: "ready",
+    title: "Ready source",
+    progress: 100,
+    diagnostics: [{ sequence: 1, stage: "source_ready", status: "completed", at: 1760000000 }]
+  });
+  const ui = createUI(defaultHandler({ sources }));
+  await ui.api.start();
+
+  const text = treeText(ui.elements.get("clipping-sources"));
+  for (const [_stage, label] of stages) assert.match(text, new RegExp(label));
+  assert.match(text, /Ready to analyze/);
+  const retryingRow = findNode(ui.elements.get("clipping-sources"), (node) => node.dataset.sourceId === "clipsrc_stage_retrying");
+  assert.match(treeText(retryingRow), /Queued/);
+  assert.doesNotMatch(treeText(retryingRow), /Acquiring video/);
+  assert.doesNotMatch(text, /20%|40%|60%|80%|100%/);
+  const progressBars = findNodes(ui.elements.get("clipping-sources"), (node) => node.getAttribute("role") === "progressbar");
+  assert.equal(progressBars.length, stages.length + 1);
+  for (const progress of progressBars) {
+    assert.equal(progress.getAttribute("aria-valuenow"), null);
+    assert.equal(progress.getAttribute("aria-busy"), "true");
+    assert.equal(progress.classList.contains("indeterminate"), true);
+  }
+});
+
+test("Apify failure codes show safe actionable copy without provider details", async () => {
+  const failures = [
+    ["apify_config_missing", /not configured.*operator/i],
+    ["apify_auth_failed", /could not authenticate.*credentials/i],
+    ["apify_actor_failed", /could not retrieve this video/i],
+    ["apify_timeout", /did not finish before its wait limit.*check the existing run/i],
+    ["apify_rate_limited", /is busy.*wait a few minutes/i],
+    ["apify_artifact_missing", /did not return a downloadable video/i],
+    ["apify_download_failed", /could not be downloaded.*check the existing run before starting another import/i],
+    ["apify_download_expired", /download link expired.*check the existing run/i],
+    ["apify_start_uncertain", /may have started this import.*check the run before importing again/i],
+    ["apify_actor_mismatch", /video provider configuration does not match this importer.*operator/i],
+    ["apify_invalid_response", /unsupported response.*operator/i],
+    ["source_import_canceled", /import was canceled.*start it again/i],
+    ["source_import_timed_out", /exceeded its time limit.*check the existing run before starting another import/i],
+    ["storage_reservation_unavailable", /not enough free storage.*ask the operator to free storage/i]
+  ];
+  const leaked = "run_id=apify-run-secret signed_url=https://media.example/private.mp4?sig=signed-media-secret token=apify-secret-token";
+  const sources = failures.map(([code], index) => ({
+    id: "clipsrc_apify_" + index,
+    kind: "youtube_original_file",
+    status: "failed",
+    error: code,
+    error_message: leaked
+  }));
+  sources.push({
+    id: "clipsrc_apify_unknown",
+    kind: "youtube_original_file",
+    status: "failed",
+    error: "apify-run-secret",
+    error_message: leaked
+  });
+  const ui = createUI(defaultHandler({ sources }));
+  await ui.api.start();
+
+  const shown = treeText(ui.elements.get("clipping-sources"));
+  for (const [_code, expected] of failures) assert.match(shown, expected);
+  assert.match(shown, /This YouTube video could not be imported\. Check that the public video is available and try again\./);
+  assert.doesNotMatch(shown, /apify-run-secret|signed-media-secret|apify-secret-token|https:\/\/media\.example/);
 });
 
 test("ready sources expose a bounded analysis profile and queue a budget-free Modal job", async () => {
