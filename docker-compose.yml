@@ -31,6 +31,12 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Optional first-run bootstrap only. Prefer the authenticated Settings UI.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # Optional YouTube imports. Imports need a paid Apify plan with saveMedia
+      # entitlement; secrets stay in the server environment, never browser config.
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
+      APIFY_YOUTUBE_ACTOR_ID: ${APIFY_YOUTUBE_ACTOR_ID:-}
+      APIFY_REQUEST_TIMEOUT: ${APIFY_REQUEST_TIMEOUT:-60s}
+      APIFY_MAX_POLL_DURATION: ${APIFY_MAX_POLL_DURATION:-4h}
     volumes:
       - video_automation_data:/data
     depends_on:

@@ -56,9 +56,9 @@ Project story planning and project ideas use OpenRouter's Haiku model. Single-cl
 
 ## Use Clipping
 
-The **Clipping** tab imports one public YouTube video at a time. Confirm that you have permission to reuse and process the footage. When the video is ready, choose its analysis type and select **Analyze**. Importing a link does not start analysis.
+The **Clipping** tab imports one public YouTube video at a time through the `thenetaji/youtube-video-downloader` Apify actor. A paid Apify plan with the actor's `saveMedia` feature is required; without an operator-configured token and actor settings, the rest of FrameVault still starts but imports fail with an actionable configuration error. Confirm that you have permission to reuse and process the footage. When the video is ready, choose its analysis type and select **Analyze**. Importing a link does not start analysis.
 
-Links are limited to one video, four hours, and 20 GiB, and the original audio is kept. Availability and compatible formats are best-effort; use the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for supported links and failure details. Private or sign-in-only videos are not supported.
+FrameVault limits each source to one video, four hours, and 20 GiB. It keeps the actor's returned audio unchanged and verifies that the downloaded media has an audio stream, but the actor does not promise to preserve the original-language track and no real fixture has verified that behavior. The actor does not document a maximum duration or source size; FrameVault's limits do not guarantee the actor will process every admitted source. Availability and compatible formats are best-effort; see the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for setup, current contract evidence, pricing, limits, and failure details. Private or sign-in-only videos are not supported.
 
 Analysis requires the optional Modal worker and operator configuration described in [M3 setup](docs/clipping/M3-IMPLEMENTATION.md). The page shows saved transcript, context, and candidate results. It does not edit, render, export, or publish clips.
 
@@ -99,7 +99,7 @@ Enter it under **Forgot password?** on the sign-in screen. It expires after 15 m
 
 ## Development
 
-The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go and FFmpeg. Native YouTube imports also need the pinned yt-dlp/Deno runtime and ffprobe. See the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for runtime details.
+The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go, FFmpeg, and ffprobe. YouTube imports additionally need the Apify API configuration and a paid plan with `saveMedia` access. See the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for setup and actor contract details.
 
 Run locally with a writable data directory:
 

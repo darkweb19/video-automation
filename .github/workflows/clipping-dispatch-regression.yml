@@ -1,8 +1,8 @@
-name: Clipping uncertain-dispatch regression
+name: Clipping import and dispatch regression
 
 on:
   push:
-    branches: [fix/clipper-youtube-import-diagnostics]
+    branches: [fix/clipper-youtube-import-diagnostics, feat/clipper-ai]
     paths:
       - "internal/app/clipping_*.go"
       - "internal/app/processor.go"
@@ -11,6 +11,13 @@ on:
       - "tests/clipping-ui.test.cjs"
       - "go.mod"
       - "go.sum"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - ".env.example"
+      - "README.md"
+      - "docs/clipping/YOUTUBE-IMPORT.md"
+      - "docs/architecture/004-ai-clipping.md"
+      - "tools/clipping/**"
       - ".github/workflows/clipping-dispatch-regression.yml"
   pull_request:
     paths:
@@ -21,6 +28,13 @@ on:
       - "tests/clipping-ui.test.cjs"
       - "go.mod"
       - "go.sum"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - ".env.example"
+      - "README.md"
+      - "docs/clipping/YOUTUBE-IMPORT.md"
+      - "docs/architecture/004-ai-clipping.md"
+      - "tools/clipping/**"
       - ".github/workflows/clipping-dispatch-regression.yml"
 
 jobs:
