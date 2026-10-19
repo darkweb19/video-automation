@@ -6,6 +6,12 @@ On 2026-10-09 (America/Toronto), the user authorized M3/C3.1+C3.2 implementation
 
 M2 implementation was approved on 2026-10-08 with remaining M1 feasibility explicitly skipped. Commit/push of completed M2 to `feat/clipper-ai` was subsequently authorized; preserve that branch's prior M1 artifacts. This does not authorize paid provider calls, benchmarks, later milestones or deployment. See [TRACKER.md](TRACKER.md) for the current authorization and task states, [ADR-004](../architecture/004-ai-clipping.md) for the proposed architecture, and [AGENTS.md](../../AGENTS.md) for the execution workflow.
 
+## Current acquisition change — 2026-10-19
+
+The user authorized C2.APIFY: replace primary YouTube acquisition with the documented Apify video-download actor, implement and commit on `feat/clipper-ai`, using Luna Max agents with the main thread as orchestrator. This supersedes the C2.8 native yt-dlp/Deno acquisition decision below. Keep the existing durable source/import queue, lease and retry lifecycle, storage reservations, private streamed media, ffprobe/MP4/audio-video/timing validation, SHA-256 and atomic Ready transition. Preserve existing Ready sources and the Modal analysis pipeline. No local downloader fallback remains in the new path.
+
+Acceptance requires a documented actual-file actor contract, durable cost-aware run recovery without duplicate ambiguous paid starts, public destination/redirect protection, accurate dashboard stages, removed obsolete runtime dependencies, hermetic tests and independent review. The selected actor and configuration are documented in [YOUTUBE-IMPORT.md](YOUTUBE-IMPORT.md); its paid-plan entitlement, current pricing, upstream build changes, undocumented long-video limits and original-language audio uncertainty are explicit operator considerations. Mock success and local code verification do not establish a real import: live acceptance stays pending until an authorized configured actor successfully imports a real public video. No deployment, main merge or paid inference has been performed for this task.
+
 ## Current scope — 2026-10-14
 
 The user narrowed Clipping to two functions: YouTube-link import and analysis through the existing Modal worker. Rebuild acquisition without the application YoutubeProxy. Preserve the current full-source analysis, source-time transcript, context/events, candidate-selection algorithm, and worker protocol. Changes are authorized for implementation, local verification, independent Luna Max review, commit and fast-forward push only to `feat/clipper-ai`.
