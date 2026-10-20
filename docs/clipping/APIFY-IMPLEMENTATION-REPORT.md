@@ -1,6 +1,6 @@
 # Apify acquisition implementation report — 2026-10-19
 
-Code is implemented and locally committed on `feat/clipper-ai`. Main orchestrated; actual `gpt-6-luna` / `max` agents authored changes and independently reviewed them. No outstanding concrete review findings remain. Nothing was pushed or deployed; no main merge, paid actor run or GPU call occurred.
+Code is implemented and locally committed on `feat/clipper-ai`. Main orchestrated; actual `gpt-6-luna` / `max` agents authored changes and independently reviewed them. No outstanding concrete review findings remain. The four implementation commits were published to `origin/feat/clipper-ai` on 2026-10-20 after explicit user authorization; remote parity was verified at `cc4c484`. A documentation-only publication record follows. No deployment, main merge, paid actor run or GPU call occurred.
 
 **Live acceptance remains pending. No real video was imported with a configured Apify actor. Mocked success does not establish that the integration works in production.**
 
