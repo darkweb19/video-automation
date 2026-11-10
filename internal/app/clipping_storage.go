@@ -631,6 +631,9 @@ func (s *Store) CreateClippingSource(input ClippingSourceCreate) (ClippingSource
 	if !validClippingSourceKind(input.Kind) {
 		return ClippingSource{}, errors.New("invalid clipping source kind")
 	}
+	if input.Kind == ClippingSourceYouTubeURL {
+		return ClippingSource{}, errors.New("URL references require the protected reference creator")
+	}
 	if !input.RightsAttested {
 		return ClippingSource{}, errors.New("reuse and processing rights must be explicitly confirmed")
 	}

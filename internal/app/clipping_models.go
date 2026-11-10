@@ -23,6 +23,7 @@ type ClippingSourceKind string
 const (
 	ClippingSourceUpload      ClippingSourceKind = "upload"
 	ClippingSourceYouTube     ClippingSourceKind = "youtube_original_file"
+	ClippingSourceYouTubeURL  ClippingSourceKind = "youtube_url"
 	ClippingSourceGoogleDrive ClippingSourceKind = "google_drive_public"
 	ClippingSourceDropbox     ClippingSourceKind = "dropbox_public"
 )
@@ -200,7 +201,7 @@ type ClippingTimeRange struct {
 
 func validClippingSourceKind(kind ClippingSourceKind) bool {
 	switch kind {
-	case ClippingSourceUpload, ClippingSourceYouTube, ClippingSourceGoogleDrive, ClippingSourceDropbox:
+	case ClippingSourceUpload, ClippingSourceYouTube, ClippingSourceYouTubeURL, ClippingSourceGoogleDrive, ClippingSourceDropbox:
 		return true
 	default:
 		return false
