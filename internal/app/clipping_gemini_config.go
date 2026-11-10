@@ -8,10 +8,16 @@ import (
 )
 
 const (
-	clippingGeminiModel                  = "gemini-3.8-flash"
-	clippingGeminiDefaultLocation        = "global"
-	clippingGeminiMaxRequestDurationMS   = int64(40 * 60 * 1000)
-	clippingGeminiMaxProviderResponseLen = 1 << 20
+	clippingGeminiModel                        = "gemini-3.8-flash"
+	clippingGeminiAPIVersion                   = "v1"
+	clippingGeminiGenerationMode               = "generate_content_json_single_candidate_no_continuation"
+	clippingGeminiVideoProcessingMode          = string(genai.MediaProcessingStatic)
+	clippingGeminiInputMIMEType                = "video/mp4"
+	clippingGeminiResponseMIMEType             = "application/json"
+	clippingGeminiMaxOutputTokens        int32 = 32_768
+	clippingGeminiDefaultLocation              = "global"
+	clippingGeminiMaxRequestDurationMS         = int64(40 * 60 * 1000)
+	clippingGeminiMaxProviderResponseLen       = 1 << 20
 )
 
 var ErrClippingGeminiInvalidConfig = errors.New("invalid Gemini clipping configuration")
@@ -78,7 +84,7 @@ func clippingGeminiSDKConfig(config ClippingGeminiConfig) (*genai.ClientConfig, 
 		Location: config.Location,
 		HTTPOptions: genai.HTTPOptions{
 			BaseURL:    baseURL,
-			APIVersion: "v1",
+			APIVersion: clippingGeminiAPIVersion,
 			RetryOptions: &genai.HTTPRetryOptions{
 				Attempts: genai.Ptr[int32](1),
 			},
