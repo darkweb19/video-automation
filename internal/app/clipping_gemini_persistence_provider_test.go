@@ -10,7 +10,7 @@ func TestClippingLegacyQueueFiltersProviderBeforeLimit(t *testing.T) {
 	source := makeReadyClippingSource(t, store, 60_000)
 	for i := 0; i < 25; i++ {
 		job := makeClippingJob(t, store, source.ID, fmt.Sprintf("gemini-queue-%02d", i))
-		if _, err := store.db.Exec(`UPDATE clipping_jobs SET provider='gemini',created_at=1 WHERE id=?`, job.ID); err != nil {
+		if _, err := store.db.Exec(`UPDATE clipping_jobs SET provider='gemini',min_clip_seconds=NULL,max_clip_seconds=NULL,created_at=1 WHERE id=?`, job.ID); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -35,38 +35,12 @@ var clippingStageNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
 var clippingArtifactTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
 
 func (s *Store) migrateClipping() error {
+	var existingTables int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('clipping_sources','clipping_jobs')`).Scan(&existingTables); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS clipping_sources (
-			id TEXT PRIMARY KEY,
-			kind TEXT NOT NULL CHECK(kind IN ('upload','youtube_original_file','google_drive_public','dropbox_public')),
-			status TEXT NOT NULL CHECK(status IN ('uploading','importing','ready','failed','deleted')),
-			original_name TEXT NOT NULL DEFAULT '',
-			media_type TEXT NOT NULL DEFAULT '',
-			source_url TEXT NOT NULL DEFAULT '',
-			rights_attested INTEGER NOT NULL DEFAULT 0 CHECK(rights_attested IN (0,1)),
-			storage_path TEXT NOT NULL UNIQUE,
-			failure TEXT NOT NULL DEFAULT '',
-			declared_size_bytes INTEGER NOT NULL CHECK(declared_size_bytes BETWEEN 1 AND 21474836480),
-			reserved_size_bytes INTEGER NOT NULL CHECK(reserved_size_bytes >= 0),
-			size_bytes INTEGER NOT NULL DEFAULT 0 CHECK(size_bytes >= 0),
-			upload_offset INTEGER NOT NULL DEFAULT 0 CHECK(upload_offset >= 0),
-			duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(duration_ms >= 0),
-			sha256 TEXT NOT NULL DEFAULT '',
-			import_expectation_json TEXT NOT NULL DEFAULT '',
-			import_expected_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK(import_expected_size_bytes >= 0),
-			import_expected_sha256 TEXT NOT NULL DEFAULT '',
-			retain_until INTEGER NOT NULL DEFAULT 0,
-			import_attempts INTEGER NOT NULL DEFAULT 0 CHECK(import_attempts >= 0),
-			next_import_at INTEGER NOT NULL DEFAULT 0,
-			import_lease_until INTEGER NOT NULL DEFAULT 0,
-			media_lease_until INTEGER NOT NULL DEFAULT 0,
-			cleanup_complete INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_complete IN (0,1)),
-			diagnostics_json TEXT NOT NULL DEFAULT '[]',
-			diagnostics_sequence INTEGER NOT NULL DEFAULT 0 CHECK(diagnostics_sequence >= 0),
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			deleted_at INTEGER NOT NULL DEFAULT 0
-		);
+		CREATE TABLE IF NOT EXISTS clipping_sources ` + clippingSourcesTableDefinition + `;
 		CREATE INDEX IF NOT EXISTS clipping_sources_import_queue ON clipping_sources(status,next_import_at,import_lease_until,import_attempts);
 		CREATE INDEX IF NOT EXISTS clipping_sources_retention ON clipping_sources(status,retain_until,media_lease_until,cleanup_complete);
 		CREATE TABLE IF NOT EXISTS clipping_batches (
@@ -80,23 +54,7 @@ func (s *Store) migrateClipping() error {
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
 		);
-		CREATE TABLE IF NOT EXISTS clipping_jobs (
-			id TEXT PRIMARY KEY,
-			batch_id TEXT NOT NULL REFERENCES clipping_batches(id) ON DELETE RESTRICT,
-			source_id TEXT NOT NULL REFERENCES clipping_sources(id) ON DELETE RESTRICT,
-			provider TEXT NOT NULL DEFAULT 'modal_legacy' CHECK(provider IN ('modal_legacy','gemini')),
-			content_type TEXT NOT NULL DEFAULT 'general' CHECK(content_type IN ('general','podcast','comedy','gaming','movie')),
-			min_clip_seconds INTEGER NOT NULL DEFAULT 15 CHECK(min_clip_seconds BETWEEN 15 AND 180),
-			max_clip_seconds INTEGER NOT NULL DEFAULT 180 CHECK(max_clip_seconds BETWEEN 15 AND 180),
-			candidate_limit INTEGER NOT NULL DEFAULT 10 CHECK(candidate_limit BETWEEN 7 AND 10),
-			status TEXT NOT NULL CHECK(status IN ('queued','running','paused_budget','completed','failed','canceled')),
-			budget_limit_micro_usd INTEGER NOT NULL CHECK(budget_limit_micro_usd > 0),
-			reserved_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK(reserved_micro_usd >= 0),
-			spent_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK(spent_micro_usd >= 0),
-			error TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
-		);
+		CREATE TABLE IF NOT EXISTS clipping_jobs ` + clippingJobsTableDefinition + `;
 		CREATE INDEX IF NOT EXISTS clipping_jobs_batch ON clipping_jobs(batch_id,created_at,id);
 		CREATE INDEX IF NOT EXISTS clipping_jobs_source ON clipping_jobs(source_id,status);
 		CREATE TABLE IF NOT EXISTS clipping_stages (
@@ -233,6 +191,9 @@ func (s *Store) migrateClipping() error {
 	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS clipping_analysis_cache_revision ON clipping_analysis_cache(source_id,pipeline_revision,created_at DESC)`); err != nil {
 		return fmt.Errorf("index clipping analysis cache revision: %w", err)
+	}
+	if err := s.migrateClippingReferenceSchema(existingTables != 0); err != nil {
+		return fmt.Errorf("migrate clipping reference schema: %w", err)
 	}
 	if err := s.migrateClippingCompatibilityState(); err != nil {
 		return fmt.Errorf("migrate clipping compatibility state: %w", err)
@@ -649,13 +610,17 @@ type clippingRowScanner interface {
 
 func scanClippingSource(row clippingRowScanner) (ClippingSource, error) {
 	var source ClippingSource
+	var storagePath, sha256 sql.NullString
+	var declaredSize, size, duration sql.NullInt64
 	var cleanupComplete int
 	var rightsAttested int
 	var diagnosticsJSON string
 	var diagnosticsSequence int64
-	err := row.Scan(&source.ID, &source.Kind, &source.Status, &source.OriginalName, &source.MediaType, &source.SourceURL, &rightsAttested, &source.StoragePath, &source.Failure,
-		&source.DeclaredSizeBytes, &source.ReservedSizeBytes, &source.SizeBytes, &source.UploadOffset, &source.DurationMS, &source.SHA256, &source.ImportExpectation, &source.ImportExpectedSize, &source.ImportExpectedSHA, &source.RetainUntil,
+	err := row.Scan(&source.ID, &source.Kind, &source.Status, &source.OriginalName, &source.MediaType, &source.SourceURL, &rightsAttested, &storagePath, &source.Failure,
+		&declaredSize, &source.ReservedSizeBytes, &size, &source.UploadOffset, &duration, &sha256, &source.ImportExpectation, &source.ImportExpectedSize, &source.ImportExpectedSHA, &source.RetainUntil,
 		&source.ImportAttempts, &source.NextImportAt, &source.ImportLeaseUntil, &source.MediaLeaseUntil, &cleanupComplete, &diagnosticsJSON, &diagnosticsSequence, &source.CreatedAt, &source.UpdatedAt, &source.DeletedAt)
+	source.StoragePath, source.SHA256 = storagePath.String, sha256.String
+	source.DeclaredSizeBytes, source.SizeBytes, source.DurationMS = declaredSize.Int64, size.Int64, duration.Int64
 	source.CleanupComplete = cleanupComplete != 0
 	source.RightsAttested = rightsAttested != 0
 	source.Diagnostics = decodeClippingSourceDiagnostics(diagnosticsJSON)
@@ -1591,8 +1556,10 @@ func clippingJobColumns() string {
 
 func scanClippingJob(row clippingRowScanner) (ClippingJob, error) {
 	var job ClippingJob
+	var minSeconds, maxSeconds sql.NullInt64
 	var analysisDeleted int
-	err := row.Scan(&job.ID, &job.BatchID, &job.SourceID, &job.Provider, &job.ContentType, &job.MinClipSeconds, &job.MaxClipSeconds, &job.CandidateLimit, &job.Status, &job.BudgetLimitMicroUSD, &job.ReservedMicroUSD, &job.SpentMicroUSD, &analysisDeleted, &job.Error, &job.CreatedAt, &job.UpdatedAt)
+	err := row.Scan(&job.ID, &job.BatchID, &job.SourceID, &job.Provider, &job.ContentType, &minSeconds, &maxSeconds, &job.CandidateLimit, &job.Status, &job.BudgetLimitMicroUSD, &job.ReservedMicroUSD, &job.SpentMicroUSD, &analysisDeleted, &job.Error, &job.CreatedAt, &job.UpdatedAt)
+	job.MinClipSeconds, job.MaxClipSeconds = int(minSeconds.Int64), int(maxSeconds.Int64)
 	job.AnalysisDeleted = analysisDeleted != 0
 	return job, err
 }
