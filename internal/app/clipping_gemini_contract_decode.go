@@ -34,6 +34,9 @@ func DecodeClippingGeminiAnalysis(payload []byte, options ClippingGeminiOptions)
 	if err := validateClippingGeminiTimeline(analysis, options); err != nil {
 		return ClippingGeminiAnalysis{}, err
 	}
+	if err := validateClippingGeminiEditorial(analysis, options); err != nil {
+		return ClippingGeminiAnalysis{}, err
+	}
 	return analysis, nil
 }
 
