@@ -31,6 +31,9 @@ func DecodeClippingGeminiAnalysis(payload []byte, options ClippingGeminiOptions)
 	if analysis.Version != ClippingGeminiAnalysisVersion || analysis.SourceDurationProvenance != ClippingGeminiModelReportedDuration {
 		return ClippingGeminiAnalysis{}, fmt.Errorf("%w: unsupported version or duration provenance", ErrClippingGeminiInvalidAnalysis)
 	}
+	if err := validateClippingGeminiTimeline(analysis, options); err != nil {
+		return ClippingGeminiAnalysis{}, err
+	}
 	return analysis, nil
 }
 
