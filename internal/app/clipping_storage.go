@@ -730,15 +730,19 @@ func (s *Store) ClippingSourcePath(id string) (string, error) {
 	if !safeClippingSourceID(id) {
 		return "", ErrClippingSourceNotFound
 	}
-	var path string
-	if err := s.db.QueryRow(`SELECT storage_path FROM clipping_sources WHERE id=?`, id).Scan(&path); err != nil {
+	var kind ClippingSourceKind
+	var path sql.NullString
+	if err := s.db.QueryRow(`SELECT kind,storage_path FROM clipping_sources WHERE id=?`, id).Scan(&kind, &path); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", ErrClippingSourceNotFound
 		}
 		return "", err
 	}
+	if kind == ClippingSourceYouTubeURL || !path.Valid {
+		return "", fmt.Errorf("%w: reference has no local media", ErrClippingInvalidState)
+	}
 	expected := clippingStoragePath(s.clippingDir, id)
-	if filepath.Clean(path) != filepath.Clean(expected) {
+	if filepath.Clean(path.String) != filepath.Clean(expected) {
 		return "", errors.New("clipping source path failed storage containment check")
 	}
 	return expected, nil
@@ -1635,13 +1639,17 @@ func (s *Store) CreateClippingJob(input ClippingJobCreate, idempotencyKey string
 		return ClippingJob{}, false, err
 	}
 	var status ClippingSourceStatus
+	var kind ClippingSourceKind
 	var rightsAttested int
 	var retainUntil int64
-	if err := tx.QueryRow(`SELECT status,retain_until,rights_attested FROM clipping_sources WHERE id=?`, normalized.SourceID).Scan(&status, &retainUntil, &rightsAttested); err != nil {
+	if err := tx.QueryRow(`SELECT status,kind,retain_until,rights_attested FROM clipping_sources WHERE id=?`, normalized.SourceID).Scan(&status, &kind, &retainUntil, &rightsAttested); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ClippingJob{}, false, ErrClippingSourceNotFound
 		}
 		return ClippingJob{}, false, err
+	}
+	if kind == ClippingSourceYouTubeURL {
+		return ClippingJob{}, false, fmt.Errorf("%w: URL reference cannot use legacy analysis", ErrClippingInvalidState)
 	}
 	if status != ClippingSourceReady || rightsAttested == 0 || retainUntil > 0 && retainUntil <= now {
 		return ClippingJob{}, false, errors.New("clipping jobs require a ready source within its retention period")
