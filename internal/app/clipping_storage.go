@@ -84,6 +84,7 @@ func (s *Store) migrateClipping() error {
 			id TEXT PRIMARY KEY,
 			batch_id TEXT NOT NULL REFERENCES clipping_batches(id) ON DELETE RESTRICT,
 			source_id TEXT NOT NULL REFERENCES clipping_sources(id) ON DELETE RESTRICT,
+			provider TEXT NOT NULL DEFAULT 'modal_legacy' CHECK(provider IN ('modal_legacy','gemini')),
 			content_type TEXT NOT NULL DEFAULT 'general' CHECK(content_type IN ('general','podcast','comedy','gaming','movie')),
 			min_clip_seconds INTEGER NOT NULL DEFAULT 15 CHECK(min_clip_seconds BETWEEN 15 AND 180),
 			max_clip_seconds INTEGER NOT NULL DEFAULT 180 CHECK(max_clip_seconds BETWEEN 15 AND 180),
@@ -198,6 +199,7 @@ func (s *Store) migrateClipping() error {
 			"import_expected_sha256":     "TEXT NOT NULL DEFAULT ''",
 		},
 		"clipping_jobs": {
+			"provider":         "TEXT NOT NULL DEFAULT 'modal_legacy' CHECK(provider IN ('modal_legacy','gemini'))",
 			"content_type":     "TEXT NOT NULL DEFAULT 'general' CHECK(content_type IN ('general','podcast','comedy','gaming','movie'))",
 			"min_clip_seconds": "INTEGER NOT NULL DEFAULT 15 CHECK(min_clip_seconds BETWEEN 15 AND 180)",
 			"max_clip_seconds": "INTEGER NOT NULL DEFAULT 180 CHECK(max_clip_seconds BETWEEN 15 AND 180)",
@@ -1584,13 +1586,13 @@ type clippingQueryer interface {
 }
 
 func clippingJobColumns() string {
-	return `id,batch_id,source_id,content_type,min_clip_seconds,max_clip_seconds,candidate_limit,status,budget_limit_micro_usd,reserved_micro_usd,spent_micro_usd,analysis_deleted,error,created_at,updated_at`
+	return `id,batch_id,source_id,provider,content_type,min_clip_seconds,max_clip_seconds,candidate_limit,status,budget_limit_micro_usd,reserved_micro_usd,spent_micro_usd,analysis_deleted,error,created_at,updated_at`
 }
 
 func scanClippingJob(row clippingRowScanner) (ClippingJob, error) {
 	var job ClippingJob
 	var analysisDeleted int
-	err := row.Scan(&job.ID, &job.BatchID, &job.SourceID, &job.ContentType, &job.MinClipSeconds, &job.MaxClipSeconds, &job.CandidateLimit, &job.Status, &job.BudgetLimitMicroUSD, &job.ReservedMicroUSD, &job.SpentMicroUSD, &analysisDeleted, &job.Error, &job.CreatedAt, &job.UpdatedAt)
+	err := row.Scan(&job.ID, &job.BatchID, &job.SourceID, &job.Provider, &job.ContentType, &job.MinClipSeconds, &job.MaxClipSeconds, &job.CandidateLimit, &job.Status, &job.BudgetLimitMicroUSD, &job.ReservedMicroUSD, &job.SpentMicroUSD, &analysisDeleted, &job.Error, &job.CreatedAt, &job.UpdatedAt)
 	job.AnalysisDeleted = analysisDeleted != 0
 	return job, err
 }
@@ -1688,7 +1690,7 @@ func (s *Store) CreateClippingJob(input ClippingJobCreate, idempotencyKey string
 	if err := tx.Commit(); err != nil {
 		return ClippingJob{}, false, err
 	}
-	return ClippingJob{ID: jobID, BatchID: batchID, SourceID: normalized.SourceID, ContentType: normalized.ContentType,
+	return ClippingJob{ID: jobID, BatchID: batchID, SourceID: normalized.SourceID, Provider: ClippingProviderModalLegacy, ContentType: normalized.ContentType,
 		MinClipSeconds: normalized.MinClipSeconds, MaxClipSeconds: normalized.MaxClipSeconds,
 		CandidateLimit: normalized.CandidateLimit, Status: ClippingJobQueued, CreatedAt: now, UpdatedAt: now}, false, nil
 }

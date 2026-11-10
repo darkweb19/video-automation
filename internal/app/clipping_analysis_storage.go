@@ -170,7 +170,7 @@ func (s *Store) PendingClippingJobs(limit int) ([]ClippingJob, error) {
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	rows, err := s.db.Query(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE status='queued' AND analysis_deleted=0 ORDER BY created_at,id LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE provider='modal_legacy' AND status='queued' AND analysis_deleted=0 ORDER BY created_at,id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
