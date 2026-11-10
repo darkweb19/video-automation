@@ -1,0 +1,10 @@
+{
+  "version": "framevault.clipping.analysis.v3",
+  "source_duration_ms": 8000,
+  "source_duration_provenance": "model_reported",
+  "summary": "A brief indistinct visual sequence.",
+  "language_codes": ["und"],
+  "limitations": ["Speech and visual context could not be confidently identified."],
+  "candidates": [],
+  "fewer_candidates_reason": "The video is shorter than the requested minimum clip duration."
+}

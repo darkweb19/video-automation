@@ -1,0 +1,42 @@
+{
+  "version": "framevault.clipping.analysis.v3",
+  "source_duration_ms": 72000,
+  "source_duration_provenance": "model_reported",
+  "summary": "A speaker describes a small experiment and its outcome.",
+  "language_codes": ["en", "hi"],
+  "limitations": ["Visual details and timestamps are model estimates."],
+  "candidates": [
+    {
+      "rank": 1,
+      "start_ms": 30000,
+      "end_ms": 52000,
+      "title_variants": ["The unexpected result", "A small experiment pays off"],
+      "hook": "What happened after the experiment?",
+      "rationale": "A compact setup leads into a surprising outcome.",
+      "boundary_rationale": "Start with the setup and end after the reaction.",
+      "context": "The speaker introduced the experiment earlier.",
+      "editorial_score": 86,
+      "scores": {"hook": 84, "emotional_impact": 76, "retention_potential": 88, "shareability": 79, "standalone_context": 82},
+      "evidence": [
+        {"kind": "speech", "start_ms": 32000, "end_ms": 41000, "detail": "The speaker describes the outcome."},
+        {"kind": "visual", "start_ms": 45000, "end_ms": 50000, "detail": "A visible reaction follows."}
+      ]
+    },
+    {
+      "rank": 2,
+      "start_ms": 40000,
+      "end_ms": 60000,
+      "title_variants": ["Why the result mattered"],
+      "hook": "One result changed the next step.",
+      "rationale": "The explanation connects the outcome to the next step.",
+      "boundary_rationale": "Include the outcome and its explanation.",
+      "context": "This overlaps the first proposed clip by design.",
+      "editorial_score": 91,
+      "scores": {"hook": 75, "emotional_impact": 68, "retention_potential": 80, "shareability": 70, "standalone_context": 94},
+      "evidence": [
+        {"kind": "audio", "start_ms": 44000, "end_ms": 47000, "detail": "A reaction is audible."}
+      ]
+    }
+  ],
+  "fewer_candidates_reason": ""
+}
