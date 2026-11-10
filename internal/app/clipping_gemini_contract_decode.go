@@ -37,6 +37,14 @@ func DecodeClippingGeminiAnalysis(payload []byte, options ClippingGeminiOptions)
 	if err := validateClippingGeminiEditorial(analysis, options); err != nil {
 		return ClippingGeminiAnalysis{}, err
 	}
+	// The default Go JSON encoder escapes characters such as '<' and may
+	// substantially expand otherwise valid input. Bound that representation
+	// too, so any accepted result can be stored and decoded within the same
+	// limit without changing its text or editorial decisions.
+	encoded, err := json.Marshal(analysis)
+	if err != nil || len(encoded) > ClippingGeminiMaxAnalysisBytes {
+		return ClippingGeminiAnalysis{}, fmt.Errorf("%w: re-encoded JSON exceeds bounds", ErrClippingGeminiInvalidAnalysis)
+	}
 	return analysis, nil
 }
 

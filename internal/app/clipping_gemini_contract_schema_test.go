@@ -19,6 +19,10 @@ func TestClippingGeminiSchemaMatchesContract(t *testing.T) {
 	if err := json.Unmarshal(data, &schema); err != nil {
 		t.Fatal(err)
 	}
+	comment, ok := schema["$comment"].(string)
+	if !ok || !strings.Contains(comment, "default encoding/json Marshal") || !strings.Contains(comment, "256 KiB") {
+		t.Fatal("schema must document the raw and default encoded size limits")
+	}
 	object := func(value any) map[string]any {
 		t.Helper()
 		result, ok := value.(map[string]any)

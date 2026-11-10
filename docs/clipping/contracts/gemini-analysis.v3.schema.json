@@ -3,7 +3,7 @@
   "$id": "urn:framevault:clipping:analysis:v3",
   "title": "Gemini clipping analysis v3",
   "description": "Model-reported source duration and editorial clip proposals. Scores are estimates, timestamps are proposals, and observations are not verified transcripts or media metadata.",
-  "$comment": "The Go decoder is authoritative for raw JSON size, nesting, UTF-8 and escaped-surrogate validity, duplicate or missing keys, lexical integer fields, UTF-8 byte limits, nonblank text, source-time ranges, rank order, request-dependent candidate count and durations, and the explanation required for a shortfall. Standard maxLength counts Unicode characters; x-maxUtf8Bytes documents the stricter Go byte limit. The four-hour defensive ceiling is not a supported single-request duration claim.",
+  "$comment": "The Go decoder is authoritative for raw JSON size and the size of the default encoding/json Marshal representation (both at most 256 KiB), nesting, UTF-8 and escaped-surrogate validity, duplicate or missing keys, lexical integer fields, UTF-8 byte limits, nonblank text, source-time ranges, rank order, request-dependent candidate count and durations, and the explanation required for a shortfall. Standard maxLength counts Unicode characters; x-maxUtf8Bytes documents the stricter Go byte limit. The four-hour defensive ceiling is not a supported single-request duration claim.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "source_duration_ms", "source_duration_provenance", "summary", "language_codes", "limitations", "candidates", "fewer_candidates_reason"],
