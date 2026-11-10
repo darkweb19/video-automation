@@ -1,0 +1,41 @@
+name: Gemini clipping provider foundations
+
+on:
+  push:
+    branches:
+      - work
+      - feat/gemini-*
+    paths:
+      - "internal/app/clipping_gemini*.go"
+      - "docs/clipping/contracts/**"
+      - "testdata/clipping_gemini/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/clipping-gemini.yml"
+  pull_request:
+    paths:
+      - "internal/app/clipping_gemini*.go"
+      - "docs/clipping/contracts/**"
+      - "testdata/clipping_gemini/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/clipping-gemini.yml"
+
+jobs:
+  gemini-foundations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test Gemini clipping contracts and provider client
+        run: go test ./internal/app -run '^(Test.*ClippingGemini.*|Test.*Gemini.*)$' -count=1
+      - name: Run Gemini clipping race tests
+        run: go test -race ./internal/app -run '^(Test.*ClippingGemini.*|Test.*Gemini.*)$' -count=1
+      - name: Vet the application package
+        run: go vet ./internal/app
+      - name: Build the service
+        run: go build -o /tmp/video-automation ./cmd/video-automation
