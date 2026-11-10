@@ -14,6 +14,10 @@ import (
 // transaction, on the dedicated startup connection that will perform it.
 // The existing secret.key remains a separate, necessary part of a restore.
 func backupClippingDatabase(ctx context.Context, conn *sql.Conn, dataDir string) (string, error) {
+	return backupClippingDatabaseWithSync(ctx, conn, dataDir, syncClippingDirectory)
+}
+
+func backupClippingDatabaseWithSync(ctx context.Context, conn *sql.Conn, dataDir string, syncDirectory func(string) error) (string, error) {
 	backupDir := filepath.Join(dataDir, "clipping-migration-backups")
 	if err := os.Mkdir(backupDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", fmt.Errorf("create private clipping backup directory: %w", err)
@@ -21,6 +25,11 @@ func backupClippingDatabase(ctx context.Context, conn *sql.Conn, dataDir string)
 	info, err := os.Lstat(backupDir)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		return "", errors.New("clipping backup directory is not private")
+	}
+	// Persist the backup directory's entry before creating the snapshot; a
+	// sync of the backup directory alone does not make its parent entry durable.
+	if err := syncDirectory(dataDir); err != nil {
+		return "", fmt.Errorf("sync clipping backup parent directory: %w", err)
 	}
 	file, err := os.CreateTemp(backupDir, "before-gemini-*.sqlite")
 	if err != nil {
@@ -48,7 +57,7 @@ func backupClippingDatabase(ctx context.Context, conn *sql.Conn, dataDir string)
 	if syncErr != nil || closeErr != nil {
 		return "", fmt.Errorf("sync clipping backup: %w", errors.Join(syncErr, closeErr))
 	}
-	if err := syncClippingDirectory(backupDir); err != nil {
+	if err := syncDirectory(backupDir); err != nil {
 		return "", fmt.Errorf("sync clipping backup directory: %w", err)
 	}
 	keep = true

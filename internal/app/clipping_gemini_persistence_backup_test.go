@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,5 +60,30 @@ func TestClippingDatabaseBackupRejectsPublicDirectory(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("unexpected files in rejected backup directory: %v, %v", entries, err)
+	}
+}
+
+func TestClippingDatabaseBackupSyncsParentBeforeSnapshot(t *testing.T) {
+	store := newTestStore(t)
+	conn, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	wantErr := errors.New("synthetic parent sync failure")
+	var synced []string
+	_, err = backupClippingDatabaseWithSync(context.Background(), conn, store.dataDir, func(path string) error {
+		synced = append(synced, path)
+		if path == store.dataDir {
+			return wantErr
+		}
+		return nil
+	})
+	if !errors.Is(err, wantErr) || len(synced) != 1 || synced[0] != store.dataDir {
+		t.Fatalf("backup did not fail at parent sync before snapshot: paths=%v error=%v", synced, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(store.dataDir, "clipping-migration-backups"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("snapshot was created after failed parent sync: %v error=%v", entries, err)
 	}
 }
