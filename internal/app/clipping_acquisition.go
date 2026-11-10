@@ -8,9 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"hash"
 	"io"
+	"log/slog"
 	"math"
 	"math/big"
 	"net"
@@ -940,6 +940,18 @@ func (a *ClippingAcquisition) failAndRemove(sourceID, reason string) {
 }
 
 func (a *ClippingAcquisition) removeSourceFiles(sourceID string) error {
+	source, err := a.store.ClippingSource(sourceID)
+	if err != nil {
+		return err
+	}
+	if source.Kind == ClippingSourceYouTubeURL {
+		if source.Status != ClippingSourceDeleted {
+			return ErrClippingInvalidState
+		}
+		// URL references never own a media directory. Do not synthesize a path
+		// or remove files that happen to have the same source ID.
+		return nil
+	}
 	paths, err := a.sourcePaths(sourceID)
 	if err != nil {
 		return err
