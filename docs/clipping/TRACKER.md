@@ -4,6 +4,15 @@ Last updated: 2026-10-15 (America/Toronto). This file is the authoritative statu
 
 ## Current checkpoint
 
+### G1 — Gemini provider-feasibility foundations — 2026-11-10
+
+- User authorized phased implementation with >=15 meaningful commits per phase, Terra/LUNA Max agents and main as CTO. Current phase scope and gates: [GEMINI-MIGRATION.md](GEMINI-MIGRATION.md). This supersedes historical task-specific model/scope restrictions for the migration.
+- Baseline: clean local `work` branch at `c85d376ca761b4fcfdd3e1627edc0d9ed15ffcca`. Local commits only; no new remote publication, live paid inference, deployment, infrastructure mutation, merge/force-push or main changes authorized.
+- Actual implementation owners: `gemini_contracts` / `gpt-6.1-terra` / `max` (new contract/validator/schema/fixtures); `gemini_client` / `gpt-6-luna` / `max` (isolated SDK/config/prompt/request/response/client). Root owns central docs/Git/integration; independent reviewer to be assigned after substantive code exists. Shared contracts are agreed before edits; ownership is disjoint.
+- Status: in progress. No code checks or live feasibility passed yet. Production still uses the existing YouTube import/Modal clipping path. G1 must not activate its replacement.
+- Environment reports no Google identity/secrets and disallows Google inference endpoints. Live provider/quality/cost gates stay pending; no paid call is attempted. The installed `/usr/bin/go` is not the Go compiler; an official checksum-verified workspace toolchain is being provisioned for local checks.
+- Next action: complete and independently review the versioned contract and single-attempt ADC client through reviewable commit slices, then reconcile evidence/README/AGENTS/handoff.
+
 ### C2.9 — YouTube bot-challenge fail-fast — 2026-10-16
 
 - User authorized the scoped failure-handling repair; alternate import methods are deferred. Branch: `fix/clipper-youtube-import-diagnostics`. No deployment, live extraction, paid inference, merge to main, or anti-bot bypass.

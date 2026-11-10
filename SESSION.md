@@ -1,3 +1,12 @@
+# Session handoff — 2026-11-10, Gemini phased migration
+
+- User has now authorized implementation in phases, >=15 meaningful commits per phase, Terra and LUNA at max, and root as CTO/task owner. Read docs/clipping/GEMINI-MIGRATION.md and the newest TRACKER/AGENTS entries; prior task-specific restrictions are historical for this migration.
+- Baseline clean local work branch c85d376. Local commits only. No paid/live inference, deployments, infrastructure changes, remote publication, main changes, merge, force-push or extractor integration.
+- G1 in progress: isolated contracts/validator/schema/fixtures and official ADC-only SDK provider-feasibility foundations. No production UI/processor/persistence activation. Terra Max owns contracts; LUNA Max owns client; root owns architecture, docs, integration, Git; independent review pending.
+- No live Google identity/allowed inference endpoint is configured. Live feasibility, semantic quality, language/cost measurements and long-video capability remain pending. No tests have passed for this phase yet.
+
+---
+
 # Session handoff — 2026-10-16, C2.9 YouTube bot-challenge fail-fast
 
 - User explicitly requested the scoped bot-challenge handling fix, deferring alternative import methods. Branch: `fix/clipper-youtube-import-diagnostics`. Starting HEAD `d4feb54ff29495d4e2bf8d6c98acfdef3dd7768d`.
