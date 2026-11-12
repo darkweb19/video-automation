@@ -114,7 +114,7 @@ func TestClippingDatabaseBackupBoundsManagedSnapshotsAndPreservesUnknownFiles(t 
 			t.Fatal(err)
 		}
 		managed, err := readClippingBackupManifest(dir)
-		if err != nil || len(managed) != 1 || managed[0] != filepath.Base(latest) {
+		if err != nil || len(managed) != 1 || managed[0].Name != filepath.Base(latest) || !managed[0].Complete {
 			t.Fatalf("managed snapshots not bounded: %v error=%v", managed, err)
 		}
 	}
@@ -174,7 +174,7 @@ func TestClippingDatabaseBackupRecoversInterruptedAllocation(t *testing.T) {
 	}
 	dir := filepath.Dir(first)
 	interrupted := "before-gemini-0123456789abcdef0123456789abcdef.sqlite"
-	if err := writeClippingBackupManifest(dir, []string{filepath.Base(first), interrupted}, syncClippingDirectory); err != nil {
+	if err := writeClippingBackupManifest(dir, []clippingManagedBackup{{Name: filepath.Base(first), Complete: true}, {Name: interrupted}}, syncClippingDirectory); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, interrupted), []byte("partial"), 0o600); err != nil {
@@ -189,6 +189,9 @@ func TestClippingDatabaseBackupRecoversInterruptedAllocation(t *testing.T) {
 	if _, err := os.Stat(first); err != nil {
 		t.Fatalf("previous durable backup lost: %v", err)
 	}
+	if _, err := os.Lstat(filepath.Join(dir, interrupted)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial was not reclaimed before next snapshot: %v", err)
+	}
 	latest, err := backupClippingDatabase(context.Background(), conn, store.dataDir)
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +200,7 @@ func TestClippingDatabaseBackupRecoversInterruptedAllocation(t *testing.T) {
 		t.Fatalf("partial managed backup remains: %v", err)
 	}
 	managed, err := readClippingBackupManifest(dir)
-	if err != nil || len(managed) != 1 || managed[0] != filepath.Base(latest) {
+	if err != nil || len(managed) != 1 || managed[0].Name != filepath.Base(latest) || !managed[0].Complete {
 		t.Fatalf("manifest after recovery: %v, %v", managed, err)
 	}
 }

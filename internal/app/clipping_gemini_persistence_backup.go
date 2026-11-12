@@ -37,6 +37,21 @@ func backupClippingDatabaseWithSync(ctx context.Context, conn *sql.Conn, dataDir
 	if err != nil {
 		return "", err
 	}
+	// Reclaim only tracked incomplete allocations before attempting another
+	// full snapshot; the last complete backup stays available even on ENOSPC.
+	remaining := make([]clippingManagedBackup, 0, len(managed))
+	for _, item := range managed {
+		if item.Complete || !removeClippingManagedBackup(backupDir, item.Name) {
+			remaining = append(remaining, item)
+		}
+	}
+	if err := syncDirectory(backupDir); err != nil {
+		return "", err
+	}
+	if err := writeClippingBackupManifest(backupDir, remaining, syncDirectory); err != nil {
+		return "", err
+	}
+	managed = remaining
 	// Reserve a random, absent name in the durable manifest before creating a
 	// potentially large file. A crash during VACUUM is then recoverable without
 	// treating unrelated files as owned. The private directory and the app's
@@ -50,7 +65,7 @@ func backupClippingDatabaseWithSync(ctx context.Context, conn *sql.Conn, dataDir
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		return "", errors.New("clipping backup allocation already exists")
 	}
-	managed = append(managed, backupName)
+	managed = append(managed, clippingManagedBackup{Name: backupName})
 	if err := writeClippingBackupManifest(backupDir, managed, syncDirectory); err != nil {
 		return "", err
 	}
@@ -82,21 +97,19 @@ func backupClippingDatabaseWithSync(ctx context.Context, conn *sql.Conn, dataDir
 	if err := syncDirectory(backupDir); err != nil {
 		return "", fmt.Errorf("sync clipping backup directory: %w", err)
 	}
-	// Retain all previous managed snapshots until the new file is durable.
+	// Only mark complete after the file and its directory entry are durable.
+	managed[len(managed)-1].Complete = true
+	if err := writeClippingBackupManifest(backupDir, managed, syncDirectory); err != nil {
+		return "", err
+	}
 	keep = true
-	remaining := make([]string, 0, len(managed))
-	for _, name := range managed[:len(managed)-1] {
-		oldPath := filepath.Join(backupDir, name)
-		info, err := os.Lstat(oldPath)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		// Never follow or remove a symlink, directory, or untracked file.
-		if err != nil || !info.Mode().IsRegular() || os.Remove(oldPath) != nil {
-			remaining = append(remaining, name)
+	remaining = make([]clippingManagedBackup, 0, len(managed))
+	for _, item := range managed[:len(managed)-1] {
+		if !removeClippingManagedBackup(backupDir, item.Name) {
+			remaining = append(remaining, item)
 		}
 	}
-	remaining = append(remaining, filepath.Base(path))
+	remaining = append(remaining, managed[len(managed)-1])
 	// A failed cleanup or manifest rewrite is harmless: its prior durable
 	// manifest still tracks every managed backup for a later startup.
 	_ = syncDirectory(backupDir)
@@ -106,7 +119,22 @@ func backupClippingDatabaseWithSync(ctx context.Context, conn *sql.Conn, dataDir
 
 const clippingBackupManifest = "managed-backups.json"
 
-func readClippingBackupManifest(dir string) ([]string, error) {
+type clippingManagedBackup struct {
+	Name     string `json:"name"`
+	Complete bool   `json:"complete"`
+}
+
+// Only a manifest-owned regular file may be removed; a symlink is never followed or removed.
+func removeClippingManagedBackup(dir, name string) bool {
+	path := filepath.Join(dir, name)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	return err == nil && info.Mode().IsRegular() && os.Remove(path) == nil
+}
+
+func readClippingBackupManifest(dir string) ([]clippingManagedBackup, error) {
 	path := filepath.Join(dir, clippingBackupManifest)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -119,12 +147,13 @@ func readClippingBackupManifest(dir string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read clipping backup manifest: %w", err)
 	}
-	var names []string
+	var names []clippingManagedBackup
 	if err := json.Unmarshal(data, &names); err != nil {
 		return nil, errors.New("invalid clipping backup manifest")
 	}
 	seen := make(map[string]bool, len(names))
-	for _, name := range names {
+	for _, item := range names {
+		name := item.Name
 		if name != filepath.Base(name) || !strings.HasPrefix(name, "before-gemini-") || !strings.HasSuffix(name, ".sqlite") || seen[name] {
 			return nil, errors.New("invalid clipping backup manifest entry")
 		}
@@ -133,7 +162,7 @@ func readClippingBackupManifest(dir string) ([]string, error) {
 	return names, nil
 }
 
-func writeClippingBackupManifest(dir string, names []string, syncDirectory func(string) error) error {
+func writeClippingBackupManifest(dir string, names []clippingManagedBackup, syncDirectory func(string) error) error {
 	data, err := json.Marshal(names)
 	if err != nil {
 		return err
