@@ -42,16 +42,17 @@ func (a *dashboardApp) createClippingGeminiJob(w http.ResponseWriter, r *http.Re
 		writeError(w, status, message)
 		return
 	}
+	// Publishing replays is safe: the event hub deduplicates identical
+	// snapshots. It also lets a replay repair a previous post-commit read
+	// failure that prevented a client from seeing the saved source or job.
+	if input.YouTubeURL != "" {
+		a.store.PublishClippingSource(job.SourceID)
+	}
+	a.store.PublishClippingJob(job.ID)
 	view, err := a.clippingJobResponse(job, false)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "clipping job was saved but could not be reloaded")
 		return
-	}
-	if !duplicate {
-		if input.YouTubeURL != "" {
-			a.store.PublishClippingSource(job.SourceID)
-		}
-		a.store.PublishClippingJob(job.ID)
 	}
 	status := http.StatusCreated
 	if duplicate {

@@ -48,3 +48,28 @@ func TestClippingGeminiSubmitPublishesSourceAndJobOnce(t *testing.T) {
 	default:
 	}
 }
+
+func TestClippingGeminiReplayPublishesPersistedStateToNewSubscriber(t *testing.T) {
+	enableGeminiDashboard(t)
+	store, _, handler := directGeminiDashboardFixture(t)
+	first := postGeminiDashboard(handler, geminiDashboardURLBody(), "gemini-replay-events", nil)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", first.Code, first.Body.String())
+	}
+	events, unsubscribe := store.events.subscribe()
+	defer unsubscribe()
+	replay := postGeminiDashboard(handler, geminiDashboardURLBody(), "gemini-replay-events", nil)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
+	}
+	for _, expected := range []string{"clipping_source", "clipping_job"} {
+		select {
+		case event := <-events:
+			if event.name != expected || strings.Contains(string(event.data), "abcdefghijk") {
+				t.Fatalf("unexpected event: %s %s", event.name, event.data)
+			}
+		default:
+			t.Fatalf("missing %s event", expected)
+		}
+	}
+}
