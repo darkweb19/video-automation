@@ -198,6 +198,9 @@ func (s *Store) migrateClipping() error {
 	if err := s.migrateClippingGeminiRequests(); err != nil {
 		return fmt.Errorf("initialize Gemini request snapshots: %w", err)
 	}
+	if err := s.migrateClippingGeminiCache(); err != nil {
+		return fmt.Errorf("initialize Gemini analysis cache: %w", err)
+	}
 	if err := s.migrateClippingCompatibilityState(); err != nil {
 		return fmt.Errorf("migrate clipping compatibility state: %w", err)
 	}
@@ -1340,6 +1343,9 @@ func (s *Store) DeleteClippingSource(id string) ([]string, error) {
 	if _, err := tx.Exec(`DELETE FROM clipping_artifacts WHERE job_id IN (SELECT id FROM clipping_jobs WHERE source_id=?)`, id); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(`DELETE FROM clipping_gemini_cache WHERE source_id=?`, id); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, id); err != nil {
 		return nil, err
 	}
@@ -1460,6 +1466,9 @@ func (s *Store) tombstoneClippingSource(id string, now int64, automatic bool) er
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM clipping_artifacts WHERE job_id IN (SELECT id FROM clipping_jobs WHERE source_id=?)`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM clipping_gemini_cache WHERE source_id=?`, id); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, id); err != nil {

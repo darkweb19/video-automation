@@ -225,8 +225,14 @@ func (s *Store) DeleteClippingAnalysis(jobID string) error {
 	}
 	// The cache contains the source transcript and analysis core. Removing it
 	// prevents a later Analyze action from silently recreating deleted results.
-	if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, job.SourceID); err != nil {
-		return err
+	if job.Provider == ClippingProviderGemini {
+		if _, err := tx.Exec(`DELETE FROM clipping_gemini_cache WHERE source_id=? AND fingerprint=(SELECT fingerprint FROM clipping_gemini_requests WHERE job_id=?)`, job.SourceID, job.ID); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, job.SourceID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(`UPDATE clipping_jobs SET analysis_deleted=1,updated_at=? WHERE id=?`, time.Now().Unix(), jobID); err != nil {
 		return err
