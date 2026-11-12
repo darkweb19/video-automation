@@ -49,3 +49,29 @@ func TestClippingReferenceViewOmitsUnverifiedMediaFields(t *testing.T) {
 		}
 	}
 }
+
+func TestClippingGeminiJobViewOmitsLegacySeconds(t *testing.T) {
+	gemini := clippingJobSummary(ClippingJob{Provider: ClippingProviderGemini}, nil, nil)
+	encoded, err := json.Marshal(gemini)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view map[string]any
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := view["min_clip_seconds"]; ok {
+		t.Fatal("Gemini job view fabricated legacy minimum seconds")
+	}
+	if _, ok := view["max_clip_seconds"]; ok {
+		t.Fatal("Gemini job view fabricated legacy maximum seconds")
+	}
+	legacy := clippingJobSummary(ClippingJob{Provider: ClippingProviderModalLegacy, MinClipSeconds: 15, MaxClipSeconds: 180}, nil, nil)
+	encoded, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"min_clip_seconds":15`) || !strings.Contains(string(encoded), `"max_clip_seconds":180`) {
+		t.Fatalf("legacy seconds missing: %s", encoded)
+	}
+}

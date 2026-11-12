@@ -149,8 +149,8 @@ type ClippingJob struct {
 	SourceID            string                   `json:"source_id"`
 	Provider            ClippingAnalysisProvider `json:"provider"`
 	ContentType         string                   `json:"content_type"`
-	MinClipSeconds      int                      `json:"min_clip_seconds"`
-	MaxClipSeconds      int                      `json:"max_clip_seconds"`
+	MinClipSeconds      int                      `json:"min_clip_seconds,omitempty"`
+	MaxClipSeconds      int                      `json:"max_clip_seconds,omitempty"`
 	CandidateLimit      int                      `json:"candidate_limit"`
 	Status              ClippingJobStatus        `json:"status"`
 	BudgetLimitMicroUSD int64                    `json:"-"`

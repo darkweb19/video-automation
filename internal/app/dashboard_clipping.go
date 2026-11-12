@@ -65,20 +65,21 @@ type clippingStageView struct {
 }
 
 type clippingJobView struct {
-	ID              string              `json:"id"`
-	SourceID        string              `json:"source_id"`
-	ContentType     string              `json:"content_type"`
-	MinClipSeconds  int                 `json:"min_clip_seconds"`
-	MaxClipSeconds  int                 `json:"max_clip_seconds"`
-	CandidateLimit  int                 `json:"candidate_limit"`
-	Status          ClippingJobStatus   `json:"status"`
-	AnalysisDeleted bool                `json:"analysis_deleted,omitempty"`
-	Progress        int                 `json:"progress"`
-	Error           string              `json:"error,omitempty"`
-	Stages          []clippingStageView `json:"stages"`
-	Artifacts       []ClippingArtifact  `json:"artifacts,omitempty"`
-	CreatedAt       int64               `json:"created_at"`
-	UpdatedAt       int64               `json:"updated_at"`
+	ID              string                   `json:"id"`
+	SourceID        string                   `json:"source_id"`
+	Provider        ClippingAnalysisProvider `json:"provider"`
+	ContentType     string                   `json:"content_type"`
+	MinClipSeconds  *int                     `json:"min_clip_seconds,omitempty"`
+	MaxClipSeconds  *int                     `json:"max_clip_seconds,omitempty"`
+	CandidateLimit  int                      `json:"candidate_limit"`
+	Status          ClippingJobStatus        `json:"status"`
+	AnalysisDeleted bool                     `json:"analysis_deleted,omitempty"`
+	Progress        int                      `json:"progress"`
+	Error           string                   `json:"error,omitempty"`
+	Stages          []clippingStageView      `json:"stages"`
+	Artifacts       []ClippingArtifact       `json:"artifacts,omitempty"`
+	CreatedAt       int64                    `json:"created_at"`
+	UpdatedAt       int64                    `json:"updated_at"`
 }
 
 func (a *dashboardApp) retentionDeadline(now time.Time) int64 {
@@ -156,9 +157,13 @@ func clippingJobSummary(job ClippingJob, stages []ClippingStage, artifacts []Cli
 			UpdatedAt: stage.UpdatedAt,
 		})
 	}
+	var minSeconds, maxSeconds *int
+	if job.Provider == ClippingProviderModalLegacy {
+		minSeconds, maxSeconds = &job.MinClipSeconds, &job.MaxClipSeconds
+	}
 	return clippingJobView{
-		ID: job.ID, SourceID: job.SourceID, ContentType: job.ContentType,
-		MinClipSeconds: job.MinClipSeconds, MaxClipSeconds: job.MaxClipSeconds, CandidateLimit: job.CandidateLimit, Status: job.Status,
+		ID: job.ID, SourceID: job.SourceID, Provider: job.Provider, ContentType: job.ContentType,
+		MinClipSeconds: minSeconds, MaxClipSeconds: maxSeconds, CandidateLimit: job.CandidateLimit, Status: job.Status,
 		Progress: clippingJobProgress(stages, job.Status),
 		Error:    job.Error, AnalysisDeleted: job.AnalysisDeleted, Stages: stageViews, Artifacts: artifacts, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
 	}
