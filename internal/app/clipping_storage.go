@@ -195,6 +195,9 @@ func (s *Store) migrateClipping() error {
 	if err := s.migrateClippingReferenceSchema(existingTables != 0); err != nil {
 		return fmt.Errorf("migrate clipping reference schema: %w", err)
 	}
+	if err := s.migrateClippingGeminiRequests(); err != nil {
+		return fmt.Errorf("initialize Gemini request snapshots: %w", err)
+	}
 	if err := s.migrateClippingCompatibilityState(); err != nil {
 		return fmt.Errorf("migrate clipping compatibility state: %w", err)
 	}
