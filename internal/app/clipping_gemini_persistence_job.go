@@ -99,10 +99,9 @@ func (s *Store) CreateClippingGeminiJob(security *Security, input ClippingGemini
 	// never its URL-bearing input, is persisted in the compatibility batch.
 	hashMaterial, err := json.Marshal(struct {
 		Version, SourceID, URL string
-		RetainUntil            int64
 		Config                 ClippingGeminiConfig
 		Options                ClippingGeminiOptions
-	}{"gemini-job-v1", input.SourceID, canonicalURL, input.RetainUntil, input.Config, input.Options})
+	}{"gemini-job-v1", input.SourceID, canonicalURL, input.Config, input.Options})
 	if err != nil {
 		return ClippingJob{}, false, err
 	}

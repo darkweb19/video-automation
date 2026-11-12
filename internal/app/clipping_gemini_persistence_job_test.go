@@ -85,6 +85,16 @@ func TestClippingGeminiJobAtomicIdempotencyAndSnapshot(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT (SELECT COUNT(*) FROM clipping_sources),(SELECT COUNT(*) FROM clipping_jobs),(SELECT COUNT(*) FROM clipping_gemini_requests)`).Scan(&sources, &jobs, &snapshots); err != nil || sources != 1 || jobs != 1 || snapshots != 1 {
 		t.Fatalf("creation not atomic/idempotent: %d %d %d %v", sources, jobs, snapshots, err)
 	}
+	retry := input
+	retry.RetainUntil += 60
+	replayed, duplicate, err := store.CreateClippingGeminiJob(security, retry, "gemini-concurrent")
+	if err != nil || !duplicate || replayed.ID != job.ID || replayed.SourceID != job.SourceID {
+		t.Fatalf("retention-derived replay changed identity: %+v %v %v", replayed, duplicate, err)
+	}
+	originalSource, err := store.ClippingSource(job.SourceID)
+	if err != nil || originalSource.RetainUntil != input.RetainUntil {
+		t.Fatalf("replay changed retention: %+v %v", originalSource, err)
+	}
 	changed := input
 	changed.Options.MinClipMS++
 	if _, _, err := store.CreateClippingGeminiJob(security, changed, "gemini-concurrent"); !errors.Is(err, ErrClippingIdempotencyConflict) {
