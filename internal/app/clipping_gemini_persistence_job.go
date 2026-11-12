@@ -222,3 +222,23 @@ func (s *Store) ClippingGeminiRequestSnapshot(jobID string) (ClippingGeminiSnaps
 	}
 	return snapshot, nil
 }
+
+// prepareClippingGeminiSnapshotRequest fails closed if code/configuration has
+// changed since the durable request was created. The caller decrypts the
+// source URL only immediately before use and must separately fence job/source
+// state and its current attempt in its transaction.
+func prepareClippingGeminiSnapshotRequest(snapshot ClippingGeminiSnapshot, sourceURL string) (*clippingGeminiPreparedRequest, error) {
+	prepared, err := prepareClippingGeminiRequest(snapshot.Config, ClippingGeminiRequest{YouTubeURL: sourceURL, Options: snapshot.Options})
+	if err != nil {
+		return nil, ErrClippingGeminiInvalidRequest
+	}
+	if snapshot.FingerprintVersion != clippingGeminiFingerprintVersion || snapshot.Fingerprint != prepared.Fingerprint ||
+		snapshot.Backend != "gemini_enterprise_agent_platform" || snapshot.Model != prepared.Model ||
+		snapshot.APIVersion != clippingGeminiAPIVersion || snapshot.GenerationMode != clippingGeminiGenerationMode ||
+		snapshot.VideoProcessing != clippingGeminiVideoProcessingMode || snapshot.PromptVersion != prepared.PromptVersion ||
+		snapshot.PromptSHA256 != prepared.PromptSHA256 || snapshot.SchemaVersion != prepared.SchemaVersion ||
+		snapshot.SchemaSHA256 != prepared.SchemaSHA256 {
+		return nil, ErrClippingGeminiInvalidRequest
+	}
+	return prepared, nil
+}

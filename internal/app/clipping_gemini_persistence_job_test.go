@@ -165,3 +165,48 @@ func TestClippingGeminiJobRequiresAvailableMigration(t *testing.T) {
 		t.Fatalf("unavailable migration wrote source: %d %v", count, err)
 	}
 }
+
+func TestClippingGeminiSnapshotReprepareFailsClosedOnDrift(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := geminiJobInput()
+	job, _, err := store.CreateClippingGeminiJob(security, input, "gemini-reprepare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.ClippingGeminiRequestSnapshot(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.ClippingSource(job.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, err := security.DecryptSetting(clippingSourceURLSetting, source.SourceURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareClippingGeminiSnapshotRequest(snapshot, url); err != nil {
+		t.Fatalf("unchanged intent rejected: %v", err)
+	}
+	mutations := []func(*ClippingGeminiSnapshot){
+		func(s *ClippingGeminiSnapshot) { s.Options.MinClipMS++ },
+		func(s *ClippingGeminiSnapshot) { s.Config.ProjectID = "changed-project" },
+		func(s *ClippingGeminiSnapshot) { s.PromptSHA256 = strings.Repeat("a", 64) },
+		func(s *ClippingGeminiSnapshot) { s.SchemaSHA256 = strings.Repeat("b", 64) },
+		func(s *ClippingGeminiSnapshot) { s.GenerationMode = "changed" },
+	}
+	for i, mutate := range mutations {
+		changed := snapshot
+		mutate(&changed)
+		if _, err := prepareClippingGeminiSnapshotRequest(changed, url); err == nil {
+			t.Errorf("drift %d was accepted", i)
+		}
+	}
+	if _, err := prepareClippingGeminiSnapshotRequest(snapshot, "https://youtu.be/lmnopqrstuv"); err == nil {
+		t.Fatal("different source URL was accepted")
+	}
+}
