@@ -189,19 +189,26 @@ func (a *dashboardApp) clippingJobResponse(job ClippingJob, includeArtifacts boo
 	if err != nil {
 		return clippingJobView{}, err
 	}
-	var artifacts []ClippingArtifact
+	view := clippingJobSummary(job, stages, nil)
+	if err := a.store.enrichClippingGeminiJob(&view, job); err != nil {
+		return clippingJobView{}, err
+	}
 	if includeArtifacts {
-		artifacts, err = a.store.ClippingArtifacts(job.ID)
+		artifacts, err := a.store.ClippingArtifacts(job.ID)
 		if err != nil {
 			return clippingJobView{}, err
 		}
-		for index := range artifacts {
-			artifacts[index] = sanitizeClippingArtifactForPublic(artifacts[index])
+		if job.Provider == ClippingProviderGemini {
+			artifacts, err = clippingGeminiPublicArtifacts(job.ID, *view.Options, artifacts)
+			if err != nil {
+				return clippingJobView{}, err
+			}
+		} else {
+			for index := range artifacts {
+				artifacts[index] = sanitizeClippingArtifactForPublic(artifacts[index])
+			}
 		}
-	}
-	view := clippingJobSummary(job, stages, artifacts)
-	if err := a.store.enrichClippingGeminiJob(&view, job); err != nil {
-		return clippingJobView{}, err
+		view.Artifacts = artifacts
 	}
 	return view, nil
 }
@@ -433,15 +440,12 @@ func (a *dashboardApp) clippingJobResults(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "clipping job not found")
 		return
 	}
-	artifacts, err := a.store.ClippingArtifacts(job.ID)
+	view, err := a.clippingJobResponse(job, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load clipping job results")
 		return
 	}
-	for index := range artifacts {
-		artifacts[index] = sanitizeClippingArtifactForPublic(artifacts[index])
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"job_id": job.ID, "source_id": job.SourceID, "artifacts": artifacts})
+	writeJSON(w, http.StatusOK, map[string]any{"job_id": job.ID, "source_id": job.SourceID, "artifacts": view.Artifacts})
 }
 
 func (a *dashboardApp) deleteClippingAnalysis(w http.ResponseWriter, r *http.Request) {
