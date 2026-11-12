@@ -54,4 +54,20 @@ func TestSyntheticCorpusCannotClaimRightsAttestation(t *testing.T) {
 	}
 }
 
+func TestPartialSourceReviewCannotLabelOutsideItsReviewedRange(t *testing.T) {
+	duration, start, reviewedEnd := int64(120_000), int64(0), int64(60_000)
+	source := CorpusSource{ID: "source-1", Status: "pending", RightsStatus: "unknown", ContentType: "general", HumanDurationMS: &duration}
+	review := SourceReview{
+		SourceID: source.ID, CoverageStatus: "partial", ReviewedStartMS: &start, ReviewedEndMS: &reviewedEnd,
+		ReviewerIDs: []string{"reviewer-1"}, AdjudicationStatus: "pending",
+		Opportunities: []Opportunity{{
+			ID: "outside-range", StartMS: 101_000, EndMS: 117_000, Kinds: []string{"visual_only"}, LanguageCodes: []string{},
+			Exportable: true, Humor: "unknown", Emotion: "unknown", Context: "unknown",
+		}},
+	}
+	if err := validateSourceReview(review, source); err == nil {
+		t.Fatal("partial review accepted an opportunity outside its reviewed interval")
+	}
+}
+
 func intPointer(value int) *int { return &value }

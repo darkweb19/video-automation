@@ -168,7 +168,7 @@ func validateSourceReview(review SourceReview, source CorpusSource) error {
 	}
 	seen := make(map[string]struct{}, len(review.Opportunities))
 	for _, opportunity := range review.Opportunities {
-		if err := validateOpportunity(opportunity, source); err != nil {
+		if err := validateOpportunity(opportunity, source); err != nil || opportunity.StartMS < *review.ReviewedStartMS || opportunity.EndMS > *review.ReviewedEndMS {
 			return errInvalidDataset
 		}
 		if _, exists := seen[opportunity.ID]; exists {
