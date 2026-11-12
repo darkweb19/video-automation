@@ -74,6 +74,10 @@ func (s *Store) CreateClippingGeminiJob(security *Security, input ClippingGemini
 	if strings.TrimSpace(idempotencyKey) == "" || len(idempotencyKey) > 128 || strings.ContainsAny(idempotencyKey, "\r\n\x00") {
 		return ClippingJob{}, false, errors.New("clipping job idempotency key is required and must be at most 128 bytes")
 	}
+	// A caller may supply sensitive text as an idempotency key. Store only a
+	// domain-separated digest so a URL can remain protected in the source row.
+	keyDigest := sha256.Sum256([]byte("framevault.clipping.gemini.idempotency.v1\x00" + idempotencyKey))
+	storedKey := "gemini-v1:" + hex.EncodeToString(keyDigest[:])
 	if err := ValidateClippingGeminiConfig(input.Config); err != nil {
 		return ClippingJob{}, false, err
 	}
@@ -129,7 +133,7 @@ func (s *Store) CreateClippingGeminiJob(security *Security, input ClippingGemini
 	}
 	defer tx.Rollback()
 	var existingBatch, existingHash string
-	err = tx.QueryRow(`SELECT id,request_hash FROM clipping_batches WHERE idempotency_key=?`, idempotencyKey).Scan(&existingBatch, &existingHash)
+	err = tx.QueryRow(`SELECT id,request_hash FROM clipping_batches WHERE idempotency_key=?`, storedKey).Scan(&existingBatch, &existingHash)
 	if err == nil {
 		if existingHash != requestHash {
 			return ClippingJob{}, false, ErrClippingIdempotencyConflict
@@ -181,7 +185,7 @@ func (s *Store) CreateClippingGeminiJob(security *Security, input ClippingGemini
 	if err != nil {
 		return ClippingJob{}, false, err
 	}
-	if _, err := tx.Exec(`INSERT INTO clipping_batches(id,idempotency_key,request_hash,status,budget_limit_micro_usd,created_at,updated_at) VALUES(?,?,?,'queued',1,?,?)`, batchID, idempotencyKey, requestHash, now, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO clipping_batches(id,idempotency_key,request_hash,status,budget_limit_micro_usd,created_at,updated_at) VALUES(?,?,?,'queued',1,?,?)`, batchID, storedKey, requestHash, now, now); err != nil {
 		return ClippingJob{}, false, err
 	}
 	if _, err := tx.Exec(`INSERT INTO clipping_jobs(id,batch_id,source_id,provider,content_type,min_clip_seconds,max_clip_seconds,candidate_limit,status,budget_limit_micro_usd,created_at,updated_at) VALUES(?,?,?,'gemini',?,NULL,NULL,?,'queued',1,?,?)`, jobID, batchID, sourceID, input.Options.ContentType, input.Options.CandidateLimit, now, now); err != nil {

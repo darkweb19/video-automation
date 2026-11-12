@@ -220,3 +220,27 @@ func TestClippingGeminiSnapshotReprepareFailsClosedOnDrift(t *testing.T) {
 		t.Fatal("different source URL was accepted")
 	}
 }
+
+func TestClippingGeminiIdempotencyKeyDoesNotExposeURL(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := geminiJobInput()
+	key := "https://www.youtube.com/watch?v=abcdefghijk"
+	job, _, err := store.CreateClippingGeminiJob(security, input, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted string
+	if err := store.db.QueryRow(`SELECT idempotency_key FROM clipping_batches WHERE id=?`, job.BatchID).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(persisted, "abcdefghijk") || strings.Contains(persisted, "youtube.com") || persisted == key {
+		t.Fatal("idempotency key exposed URL")
+	}
+	if replayed, duplicate, err := store.CreateClippingGeminiJob(security, input, key); err != nil || !duplicate || replayed.ID != job.ID {
+		t.Fatalf("protected key did not replay: %+v %v %v", replayed, duplicate, err)
+	}
+}
