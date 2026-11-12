@@ -6,7 +6,7 @@ Authorized 2026-11-10 (America/Toronto). Baseline: `c85d376` on the local `work`
 
 The user authorized implementation in phases, at least 15 meaningful non-empty commits per phase, Terra and LUNA agents at maximum reasoning, and the main thread as CTO/task owner. Each phase requires current README.md and AGENTS.md, relevant passing checks, independent review, and a reconciled tracker/handoff. The user subsequently explicitly selected automatic continuation through all phases; do not ask for approval at each phase boundary. Root coordinates architecture, integration, Git and central records; agents author implementation and tests. Actual requested models are `gpt-6.1-terra` / `max` and `gpt-6-luna` / `max`.
 
-Local implementation and commits are authorized. This instruction does not authorize deployment, infrastructure changes, live paid inference, source downloads, extractor integration, merge, force-push, main-branch changes, or remote publication of this migration. Integration stays on the supplied local `work` branch. The CTO may assign isolated local worktrees/branches for dependency-ready drafts and integrate their reviewed commits in phase order. Do not reuse historical task-specific push permissions. Do not pad commit counts with empty commits or arbitrary formatting changes.
+Local implementation and commits are authorized. On 2026-11-12 the user additionally authorized pushing each completed phase to a feature branch; the selected target is `origin/feat/gemini-video-analysis`. This does not authorize deployment, infrastructure changes, live paid inference, source downloads, extractor integration, merge, force-push or main-branch changes. Integration stays on the supplied local `work` branch. The CTO may assign isolated local worktrees/branches for dependency-ready drafts and integrate their reviewed commits in phase order. Use the current phase-push authorization; do not infer deployment or main-branch permissions from it. Do not pad commit counts with empty commits or arbitrary formatting changes.
 
 ## Architectural decisions
 
@@ -33,7 +33,7 @@ Dependency-ready offline tasks may proceed while external gates are pending. Do 
 
 ## G1 delivery checkpoint
 
-Completed offline on 2026-11-12 with 22 meaningful local commits including the closure record. Final code checkpoint `fc821f4` passed the full Go suite, focused race checks, vet, static build, 106 browser-unit checks, Python callback regression and independent Terra Max review. README and AGENTS are current. No production activation or live feasibility is claimed. G2 persistence is in progress; dependency-ready G3/G5 drafts remain isolated until their integration gates.
+Completed offline on 2026-11-12 with 22 meaningful local commits including the closure record. Final code checkpoint `fc821f4` passed the full Go suite, focused race checks, vet, static build, 106 browser-unit checks, Python callback regression and independent Terra Max review. README and AGENTS are current. No production activation or live feasibility is claimed. G2 persistence is also complete offline (2026-11-12): 27 meaningful commits including closure, final code `15cfea1`, full Go suite /broad race/vet/build and independent Terra Max review passed; README/AGENTS and persistence guide are current. G3 execution, G4 dashboard/API and G5 evaluation drafts remain isolated until their integration gates.
 
 ## G1 reviewable slices
 

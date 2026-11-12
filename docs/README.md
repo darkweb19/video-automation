@@ -5,6 +5,7 @@ Start with the repository [README](../README.md) for setup and everyday workflow
 ## Clipping
 
 - [Gemini migration](clipping/GEMINI-MIGRATION.md) — current phased migration, architectural decisions and acceptance gates; production routing remains legacy during the foundation phase.
+- [Gemini persistence](clipping/GEMINI-PERSISTENCE.md) — reference sources, constraint migration, immutable intent and cache provenance.
 - [Gemini provider contract](clipping/GEMINI-PROVIDER.md) — ADC integration, request limits, outcome handling and documentation sources.
 
 - [Implementation plan](clipping/PLAN.md) — product scope and milestone acceptance criteria. The tracker records what is complete.
