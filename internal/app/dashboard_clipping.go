@@ -492,12 +492,21 @@ func (a *dashboardApp) retryClippingJob(w http.ResponseWriter, r *http.Request) 
 	if input.StageName == "" {
 		input.StageName = ClippingStageAnalysis
 	}
+	job, err := a.store.ClippingJob(id)
+	if err != nil {
+		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "clipping job not found"))
+		return
+	}
+	if job.Provider == ClippingProviderGemini {
+		writeError(w, http.StatusConflict, "Gemini analysis retries are managed automatically")
+		return
+	}
 	stage, err := a.store.RetryClippingStage(id, input.StageName)
 	if err != nil {
 		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "clipping stage cannot be retried"))
 		return
 	}
-	job, err := a.store.ClippingJob(id)
+	job, err = a.store.ClippingJob(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "stage was queued but job could not be reloaded")
 		return
