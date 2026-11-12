@@ -24,6 +24,9 @@ func TestDecodeDatasetRejectsInvalidOrAmbiguousInput(t *testing.T) {
 	validWithDuplicateVersion := `{"version":"framevault.clipping.gemini.evaluation.v1","version":"framevault.clipping.gemini.evaluation.v1","corpus":[],"runs":[]}`
 	unknownField := `{"version":"framevault.clipping.gemini.evaluation.v1","corpus":[],"runs":[],"url":"https://example.invalid/video"}`
 	duplicateEscapedKey := `{"version":"framevault.clipping.gemini.evaluation.v1","corpus":[],"runs":[],"\u0075rl":"secret"}`
+	wrongCaseField := `{"VERSION":"framevault.clipping.gemini.evaluation.v1","corpus":[],"runs":[]}`
+	missingNestedField := `{"version":"framevault.clipping.gemini.evaluation.v1","corpus":[{"id":"s1","status":"pending","rights_status":"unknown","content_type":"general"}],"runs":[]}`
+	wrongCaseNestedField := `{"version":"framevault.clipping.gemini.evaluation.v1","corpus":[{"ID":"s1","status":"pending","rights_status":"unknown","content_type":"general","language_codes":[]}],"runs":[]}`
 	wrongVersion := `{"version":"evaluation.v99","corpus":[],"runs":[]}`
 	missingArrays := `{"version":"framevault.clipping.gemini.evaluation.v1"}`
 	nullArrays := `{"version":"framevault.clipping.gemini.evaluation.v1","corpus":null,"runs":[]}`
@@ -37,6 +40,9 @@ func TestDecodeDatasetRejectsInvalidOrAmbiguousInput(t *testing.T) {
 		"duplicate field":            []byte(validWithDuplicateVersion),
 		"unknown field":              []byte(unknownField),
 		"duplicate escaped field":    []byte(duplicateEscapedKey),
+		"wrong case top-level field": []byte(wrongCaseField),
+		"missing nested field":       []byte(missingNestedField),
+		"wrong case nested field":    []byte(wrongCaseNestedField),
 		"wrong version":              []byte(wrongVersion),
 		"missing required arrays":    []byte(missingArrays),
 		"null required array":        []byte(nullArrays),

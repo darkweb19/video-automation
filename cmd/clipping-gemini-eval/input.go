@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -22,6 +24,9 @@ func decodeDataset(reader io.Reader) (Dataset, error) {
 	if err := validateUniqueJSON(payload); err != nil {
 		return data, errInvalidDataset
 	}
+	if err := validateEvaluationShape(payload, reflect.TypeOf(Dataset{}), 0); err != nil {
+		return data, errInvalidDataset
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&data); err != nil {
@@ -34,6 +39,74 @@ func decodeDataset(reader io.Reader) (Dataset, error) {
 		return Dataset{}, errInvalidDataset
 	}
 	return data, nil
+}
+
+// validateEvaluationShape applies exact, case-sensitive JSON field names and
+// requires every field without the `omitempty` tag. encoding/json alone accepts
+// case-insensitive field matches and silently supplies zero values for missing
+// fields, which would make signed review records ambiguous.
+func validateEvaluationShape(payload []byte, target reflect.Type, depth int) error {
+	if depth > 64 {
+		return errors.New("JSON nesting limit exceeded")
+	}
+	if target == reflect.TypeOf(json.RawMessage{}) {
+		return nil // The saved analysis has its own stricter application decoder.
+	}
+	for target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	switch target.Kind() {
+	case reflect.Struct:
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil || fields == nil {
+			return errors.New("expected object")
+		}
+		for key := range fields {
+			if _, ok := target.FieldByNameFunc(func(name string) bool {
+				field, _ := target.FieldByName(name)
+				jsonName := strings.Split(field.Tag.Get("json"), ",")[0]
+				return jsonName == key
+			}); !ok {
+				return errors.New("unknown or incorrectly cased field")
+			}
+		}
+		for index := 0; index < target.NumField(); index++ {
+			field := target.Field(index)
+			parts := strings.Split(field.Tag.Get("json"), ",")
+			name := parts[0]
+			if name == "" {
+				name = field.Name
+			}
+			if name == "-" {
+				continue
+			}
+			raw, present := fields[name]
+			optional := len(parts) > 1 && strings.Contains(parts[1], "omitempty")
+			if !present {
+				if !optional {
+					return errors.New("required field is missing")
+				}
+				continue
+			}
+			if err := validateEvaluationShape(raw, field.Type, depth+1); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		if bytes.Equal(bytes.TrimSpace(payload), []byte("null")) {
+			return errors.New("null array")
+		}
+		var values []json.RawMessage
+		if err := json.Unmarshal(payload, &values); err != nil || values == nil {
+			return errors.New("expected array")
+		}
+		for _, value := range values {
+			if err := validateEvaluationShape(value, target.Elem(), depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // validateUniqueJSON rejects duplicate object keys and excessive nesting
