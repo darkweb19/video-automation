@@ -31,6 +31,30 @@ func TestClippingGeminiCancellationRegistryIsSharedAcrossWrappers(t *testing.T) 
 	}
 }
 
+func TestStoreOwnsOneSharedGeminiCancellationRegistry(t *testing.T) {
+	store := newTestStore(t)
+	dashboardView := store.clippingGeminiCancellationRegistry()
+	processorView := store.clippingGeminiCancellationRegistry()
+	if dashboardView == nil || dashboardView != processorView {
+		t.Fatal("Store wrappers did not share the same Gemini cancellation registry")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release, ok := processorView.register("clipjob_store", "clipatt_store", cancel)
+	if !ok {
+		t.Fatal("processor could not register attempt")
+	}
+	defer release()
+	if !dashboardView.cancelJob("clipjob_store") {
+		t.Fatal("request-side registry did not find processor attempt")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Store-owned cancellation did not reach active inference")
+	}
+}
+
 func TestClippingGeminiCancellationRegistryFencesDuplicateAndStaleRelease(t *testing.T) {
 	registry := newClippingGeminiCancellationRegistry()
 	firstCtx, firstCancel := context.WithCancel(context.Background())

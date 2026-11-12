@@ -22,6 +22,16 @@ func newClippingGeminiCancellationRegistry() *clippingGeminiCancellationRegistry
 	return &clippingGeminiCancellationRegistry{active: make(map[string]clippingGeminiActiveCancellation)}
 }
 
+func (s *Store) clippingGeminiCancellationRegistry() *clippingGeminiCancellationRegistry {
+	if s == nil {
+		return nil
+	}
+	if s.clippingGeminiCancellations == nil {
+		s.clippingGeminiCancellations = newClippingGeminiCancellationRegistry()
+	}
+	return s.clippingGeminiCancellations
+}
+
 // register installs one active context per job. The returned release function
 // is idempotent and removes only the matching attempt, so a late cleanup cannot
 // erase a newer registration.
