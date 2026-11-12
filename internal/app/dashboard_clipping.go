@@ -845,7 +845,7 @@ func (a *dashboardApp) clippingWorkerMedia(w http.ResponseWriter, r *http.Reques
 
 func (a *dashboardApp) workerStage(jobID, attemptID string) (ClippingJob, ClippingStage, ClippingSource, bool) {
 	job, err := a.store.ClippingJob(jobID)
-	if err != nil {
+	if err != nil || job.Provider != ClippingProviderModalLegacy {
 		return ClippingJob{}, ClippingStage{}, ClippingSource{}, false
 	}
 	stages, err := a.store.ClippingStages(jobID)

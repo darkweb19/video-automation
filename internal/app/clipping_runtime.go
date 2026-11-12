@@ -31,16 +31,16 @@ const (
 	// Modal's /dispatch waits for ledger admission and a durable spawn before
 	// responding 202. The previous 8s header deadline raced observed ~7.5s
 	// cold submissions; keep both deadlines finite but allow bounded overhead.
-	clippingWorkerSubmitTimeout                   = 30 * time.Second
-	clippingWorkerResponseHeaderTimeout           = 25 * time.Second
-	maxClippingWorkerConfigBodyBytes              = 8 << 10
-	maxClippingWorkerDispatchBodyBytes            = 32 << 10
-	maxClippingWorkerResponseBodyBytes            = 64 << 10
-	maxClippingWorkerTokenBytes                   = 4096
-	clippingWorkerUserAgent                       = "FrameVault-Clipping/2.0"
-	clippingWorkerMediaCapabilityHeader           = "X-FrameVault-Media-Capability"
-	clippingWorkerCallbackCapabilityHeader        = "X-FrameVault-Callback-Capability"
-	clippingWorkerConfigVersion                   = 3
+	clippingWorkerSubmitTimeout            = 30 * time.Second
+	clippingWorkerResponseHeaderTimeout    = 25 * time.Second
+	maxClippingWorkerConfigBodyBytes       = 8 << 10
+	maxClippingWorkerDispatchBodyBytes     = 32 << 10
+	maxClippingWorkerResponseBodyBytes     = 64 << 10
+	maxClippingWorkerTokenBytes            = 4096
+	clippingWorkerUserAgent                = "FrameVault-Clipping/2.0"
+	clippingWorkerMediaCapabilityHeader    = "X-FrameVault-Media-Capability"
+	clippingWorkerCallbackCapabilityHeader = "X-FrameVault-Callback-Capability"
+	clippingWorkerConfigVersion            = 3
 )
 
 var (
@@ -314,7 +314,7 @@ func (a *dashboardApp) checkClippingWorkerAttemptCurrent(ctx context.Context, di
 	}
 	defer tx.Rollback()
 	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, dispatch.JobID))
-	if err != nil || job.Status != ClippingJobRunning || job.BatchID != dispatch.BatchID || job.SourceID != dispatch.SourceID {
+	if err != nil || job.Provider != ClippingProviderModalLegacy || job.Status != ClippingJobRunning || job.BatchID != dispatch.BatchID || job.SourceID != dispatch.SourceID {
 		return errors.New("clipping worker attempt is no longer current")
 	}
 	stage, err := readClippingStage(tx, dispatch.JobID, dispatch.Stage)

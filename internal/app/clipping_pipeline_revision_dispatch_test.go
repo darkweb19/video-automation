@@ -142,7 +142,7 @@ func TestClippingStageDispatchCallbackExpiryUsesCapabilityGrace(t *testing.T) {
 	batchID := "clipbatch_0123456789abcdef0123456789abcdef"
 	sourceID := "clipsrc_0123456789abcdef0123456789abcdef"
 	job := ClippingJob{
-		ID: jobID, BatchID: batchID, SourceID: sourceID,
+		ID: jobID, BatchID: batchID, SourceID: sourceID, Provider: ClippingProviderModalLegacy,
 		ContentType: "general", MinClipSeconds: 15, MaxClipSeconds: 180, CandidateLimit: 10, Status: ClippingJobRunning,
 	}
 	stage := ClippingStage{

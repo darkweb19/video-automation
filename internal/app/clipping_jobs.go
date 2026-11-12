@@ -43,7 +43,7 @@ type clippingStageDispatch struct {
 // work. A future dispatcher can send this only after the attempt capabilities
 // have been encrypted by persistClippingDispatchCapabilities.
 func buildClippingStageDispatch(job ClippingJob, stage ClippingStage, source ClippingSource, origin string, now time.Time) (clippingStageDispatch, error) {
-	if !safeID(job.ID) || !safeID(job.BatchID) || !safeID(source.ID) || !safeID(stage.AttemptID) || job.SourceID != source.ID || job.Status != ClippingJobRunning ||
+	if job.Provider != ClippingProviderModalLegacy || !safeID(job.ID) || !safeID(job.BatchID) || !safeID(source.ID) || !safeID(stage.AttemptID) || job.SourceID != source.ID || job.Status != ClippingJobRunning ||
 		stage.JobID != job.ID || stage.Name != ClippingStageAnalysis || stage.Status != ClippingStageRunning ||
 		stage.IdempotencyKey != job.ID+":"+stage.Name || stage.LeaseExpiresAt <= now.Unix() ||
 		source.Status != ClippingSourceReady || !source.RightsAttested || source.DurationMS < 1 || source.DurationMS > MaxClippingSourceDurationMS {

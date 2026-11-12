@@ -213,6 +213,7 @@ func (s *Store) migrateClippingCompatibilityState() error {
 	rows, err := tx.Query(`SELECT attempt.job_id,attempt.stage_name,attempt.attempt_id,attempt.reserved_micro_usd
 		FROM clipping_stage_attempts AS attempt
 		JOIN clipping_stages AS stage ON stage.job_id=attempt.job_id AND stage.name=attempt.stage_name
+		JOIN clipping_jobs AS job ON job.id=attempt.job_id AND job.provider='modal_legacy'
 		WHERE attempt.callback_received_at>0 AND attempt.cost_reconciled=0 AND attempt.settled_at=0
 		AND attempt.reserved_micro_usd>0`)
 	if err != nil {
@@ -282,12 +283,12 @@ func (s *Store) migrateClippingCompatibilityState() error {
 			SELECT attempt.attempt_id FROM clipping_stage_attempts AS attempt
 			JOIN clipping_stages AS stage ON stage.job_id=attempt.job_id AND stage.name=attempt.stage_name
 			JOIN clipping_jobs AS job ON job.id=attempt.job_id
-			WHERE stage.status='paused_budget' AND job.status='paused_budget' AND stage.attempt_id=attempt.attempt_id
+			WHERE job.provider='modal_legacy' AND stage.status='paused_budget' AND job.status='paused_budget' AND stage.attempt_id=attempt.attempt_id
 		)`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE clipping_stages SET status='uncertain',error='Worker dispatch outcome is unknown; waiting for its callback window',updated_at=?
-		WHERE status='paused_budget' AND EXISTS(
+		WHERE status='paused_budget' AND EXISTS(SELECT 1 FROM clipping_jobs WHERE id=clipping_stages.job_id AND provider='modal_legacy') AND EXISTS(
 			SELECT 1 FROM clipping_stage_attempts AS attempt WHERE attempt.job_id=clipping_stages.job_id
 			AND attempt.stage_name=clipping_stages.name AND attempt.attempt_id=clipping_stages.attempt_id
 			AND attempt.status='expired' AND attempt.callback_received_at=0 AND attempt.settled_at=0
@@ -295,7 +296,7 @@ func (s *Store) migrateClippingCompatibilityState() error {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE clipping_stages SET status='completed',lease_expires_at=0,error='',updated_at=?
-		WHERE status='paused_budget' AND EXISTS(
+		WHERE status='paused_budget' AND EXISTS(SELECT 1 FROM clipping_jobs WHERE id=clipping_stages.job_id AND provider='modal_legacy') AND EXISTS(
 			SELECT 1 FROM clipping_stage_attempts AS attempt WHERE attempt.job_id=clipping_stages.job_id
 			AND attempt.stage_name=clipping_stages.name AND attempt.attempt_id=clipping_stages.attempt_id
 			AND attempt.status='completed' AND attempt.callback_received_at>0
@@ -303,7 +304,7 @@ func (s *Store) migrateClippingCompatibilityState() error {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE clipping_stages SET status='failed',lease_expires_at=0,error='Worker reported a failure',updated_at=?
-		WHERE status='paused_budget' AND EXISTS(
+		WHERE status='paused_budget' AND EXISTS(SELECT 1 FROM clipping_jobs WHERE id=clipping_stages.job_id AND provider='modal_legacy') AND EXISTS(
 			SELECT 1 FROM clipping_stage_attempts AS attempt WHERE attempt.job_id=clipping_stages.job_id
 			AND attempt.stage_name=clipping_stages.name AND attempt.attempt_id=clipping_stages.attempt_id
 			AND attempt.status='failed' AND attempt.callback_received_at>0
@@ -311,14 +312,14 @@ func (s *Store) migrateClippingCompatibilityState() error {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE clipping_stages SET status='queued',reserved_micro_usd=0,lease_expires_at=0,error='',updated_at=?
-		WHERE status='paused_budget' AND NOT EXISTS(
+		WHERE status='paused_budget' AND EXISTS(SELECT 1 FROM clipping_jobs WHERE id=clipping_stages.job_id AND provider='modal_legacy') AND NOT EXISTS(
 			SELECT 1 FROM clipping_stage_attempts AS attempt WHERE attempt.job_id=clipping_stages.job_id
 			AND attempt.stage_name=clipping_stages.name AND attempt.attempt_id=clipping_stages.attempt_id
 			AND attempt.status IN ('running','expired') AND attempt.callback_received_at=0 AND attempt.settled_at=0
 		)`, now); err != nil {
 		return err
 	}
-	rows, err = tx.Query(`SELECT id FROM clipping_jobs WHERE status='paused_budget'`)
+	rows, err = tx.Query(`SELECT id FROM clipping_jobs WHERE provider='modal_legacy' AND status='paused_budget'`)
 	if err != nil {
 		return err
 	}
@@ -1367,6 +1368,9 @@ func (s *Store) FailQueuedClippingJob(jobID, reason string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if job.Provider != ClippingProviderModalLegacy {
+		return false, ErrClippingInvalidState
+	}
 	if job.Status != ClippingJobQueued || job.AnalysisDeleted {
 		return false, nil
 	}
@@ -1858,6 +1862,9 @@ func (s *Store) ClaimClippingStage(jobID, name string, reserveMicroUSD int64, le
 	if err != nil {
 		return ClippingStage{}, false, err
 	}
+	if job.Provider != ClippingProviderModalLegacy {
+		return ClippingStage{}, false, ErrClippingInvalidState
+	}
 	// Preserve the legacy parameter for in-process compatibility, but never
 	// reserve against it. New analysis runs have no user budget or spend gate.
 	reserveMicroUSD = 0
@@ -1953,7 +1960,7 @@ func (s *Store) RecoverExpiredClippingStages(now int64) error {
 	}
 	defer tx.Rollback()
 	rows, err := tx.Query(`SELECT stage.job_id,stage.name,stage.attempt_id FROM clipping_stages AS stage
-		WHERE stage.status='running' AND stage.attempt_id<>'' AND (
+		WHERE EXISTS(SELECT 1 FROM clipping_jobs WHERE id=stage.job_id AND provider='modal_legacy') AND stage.status='running' AND stage.attempt_id<>'' AND (
 			stage.lease_expires_at<=? OR EXISTS(
 				SELECT 1 FROM clipping_stage_attempts AS attempt
 				WHERE attempt.job_id=stage.job_id AND attempt.stage_name=stage.name AND attempt.attempt_id=stage.attempt_id
@@ -1999,7 +2006,7 @@ func (s *Store) RecoverExpiredClippingStages(now int64) error {
 	rows, err = tx.Query(`SELECT attempt.job_id,attempt.stage_name,attempt.attempt_id
 		FROM clipping_stage_attempts AS attempt
 		JOIN clipping_stages AS stage ON stage.job_id=attempt.job_id AND stage.name=attempt.stage_name
-		WHERE stage.status='uncertain' AND stage.attempt_id=attempt.attempt_id
+		WHERE EXISTS(SELECT 1 FROM clipping_jobs WHERE id=stage.job_id AND provider='modal_legacy') AND stage.status='uncertain' AND stage.attempt_id=attempt.attempt_id
 		AND attempt.callback_received_at=0 AND attempt.status='expired'
 		AND COALESCE((SELECT expiry.expires_at FROM clipping_capability_expiry_index AS expiry
 			WHERE expiry.job_id=attempt.job_id AND expiry.attempt_id=attempt.attempt_id),
@@ -2065,7 +2072,7 @@ func (s *Store) RecoverExpiredClippingStages(now int64) error {
 	rows, err = tx.Query(`SELECT attempt.job_id,attempt.stage_name,attempt.attempt_id
 		FROM clipping_stage_attempts AS attempt
 		JOIN clipping_stages AS stage ON stage.job_id=attempt.job_id AND stage.name=attempt.stage_name
-		WHERE stage.status='canceled' AND stage.attempt_id=attempt.attempt_id
+		WHERE EXISTS(SELECT 1 FROM clipping_jobs WHERE id=stage.job_id AND provider='modal_legacy') AND stage.status='canceled' AND stage.attempt_id=attempt.attempt_id
 		AND attempt.status='canceled' AND attempt.callback_received_at=0
 		AND attempt.reconciliation_reference<>'known_no_submission'
 		AND COALESCE((SELECT expiry.expires_at FROM clipping_capability_expiry_index AS expiry
@@ -2115,7 +2122,7 @@ func (s *Store) RecoverExpiredClippingStages(now int64) error {
 	rows, err = tx.Query(`SELECT attempt.job_id,attempt.stage_name,attempt.attempt_id
 		FROM clipping_stage_attempts AS attempt
 		JOIN clipping_stages AS stage ON stage.job_id=attempt.job_id AND stage.name=attempt.stage_name
-		WHERE stage.status='failed' AND stage.attempt_id=attempt.attempt_id
+		WHERE EXISTS(SELECT 1 FROM clipping_jobs WHERE id=stage.job_id AND provider='modal_legacy') AND stage.status='failed' AND stage.attempt_id=attempt.attempt_id
 		AND attempt.status='failed' AND attempt.callback_received_at=0
 		AND attempt.reconciliation_reference NOT IN ('known_no_submission','callback_window_expired')
 		AND COALESCE((SELECT expiry.expires_at FROM clipping_capability_expiry_index AS expiry
@@ -2181,7 +2188,7 @@ func (s *Store) ExpiredClippingStages(now int64, limit int) ([]ClippingStage, er
 		limit = 100
 	}
 	rows, err := s.db.Query(`SELECT `+clippingStageColumns()+` FROM clipping_stages AS stage
-		WHERE (stage.status='running' AND (stage.lease_expires_at<=? OR EXISTS(
+		WHERE EXISTS(SELECT 1 FROM clipping_jobs WHERE id=stage.job_id AND provider='modal_legacy') AND ((stage.status='running' AND (stage.lease_expires_at<=? OR EXISTS(
 			SELECT 1 FROM clipping_stage_attempts AS attempt
 			WHERE attempt.job_id=stage.job_id AND attempt.stage_name=stage.name AND attempt.attempt_id=stage.attempt_id
 			AND attempt.callback_received_at=0 AND attempt.status IN ('running','expired')
@@ -2193,7 +2200,7 @@ func (s *Store) ExpiredClippingStages(now int64, limit int) ([]ClippingStage, er
 			WHERE attempt.attempt_id=stage.attempt_id AND attempt.callback_received_at=0 AND attempt.status='expired'
 			AND COALESCE((SELECT expiry.expires_at FROM clipping_capability_expiry_index AS expiry
 				WHERE expiry.job_id=attempt.job_id AND expiry.attempt_id=attempt.attempt_id),
-				attempt.lease_expires_at+?)<=?))
+				attempt.lease_expires_at+?)<=?)))
 		ORDER BY stage.lease_expires_at,stage.job_id,stage.name LIMIT ?`,
 		now, int64(clippingCallbackCapabilityGrace.Seconds()), now, int64(clippingCallbackCapabilityGrace.Seconds()), now, limit)
 	if err != nil {
@@ -2222,6 +2229,9 @@ func (s *Store) RenewClippingStageLease(jobID, name, attemptID, leaseToken strin
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireLegacyClippingJobTx(tx, jobID); err != nil {
+		return ErrClippingInvalidState
+	}
 	var storedHash, attemptStatus string
 	var oldLease int64
 	if err := tx.QueryRow(`SELECT token_hash,status,lease_expires_at FROM clipping_stage_attempts WHERE attempt_id=? AND job_id=? AND stage_name=?`, attemptID, jobID, name).Scan(&storedHash, &attemptStatus, &oldLease); err != nil {
@@ -2270,6 +2280,9 @@ func (s *Store) RetryClippingStage(jobID, name string) (ClippingStage, error) {
 	}
 	if err != nil {
 		return ClippingStage{}, err
+	}
+	if job.Provider != ClippingProviderModalLegacy {
+		return ClippingStage{}, ErrClippingInvalidState
 	}
 	if job.AnalysisDeleted || job.Status == ClippingJobCanceled || job.Status == ClippingJobCompleted {
 		return ClippingStage{}, ErrClippingJobTerminal
@@ -2487,6 +2500,9 @@ func (s *Store) NoteClippingStageSubmissionUncertain(jobID, name, attemptID, lea
 		return ClippingStage{}, err
 	}
 	defer tx.Rollback()
+	if err := requireLegacyClippingJobTx(tx, jobID); err != nil {
+		return ClippingStage{}, ErrClippingInvalidState
+	}
 	attempt, err := readClippingAttempt(tx, jobID, name, attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClippingStage{}, ErrClippingStaleAttempt
@@ -2558,6 +2574,9 @@ func (s *Store) failClippingStage(jobID, name, attemptID, leaseToken, reason str
 		return ClippingStage{}, err
 	}
 	defer tx.Rollback()
+	if err := requireLegacyClippingJobTx(tx, jobID); err != nil {
+		return ClippingStage{}, ErrClippingInvalidState
+	}
 	attempt, err := readClippingAttempt(tx, jobID, name, attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClippingStage{}, ErrClippingStaleAttempt
@@ -2738,4 +2757,16 @@ func (s *Store) ClippingArtifacts(jobID string) ([]ClippingArtifact, error) {
 		}
 	}
 	return artifacts, nil
+}
+
+// Legacy worker operations must never claim or mutate another provider's job.
+func requireLegacyClippingJobTx(tx *sql.Tx, jobID string) error {
+	var provider ClippingAnalysisProvider
+	if err := tx.QueryRow(`SELECT provider FROM clipping_jobs WHERE id=?`, jobID).Scan(&provider); err != nil {
+		return err
+	}
+	if provider != ClippingProviderModalLegacy {
+		return ErrClippingInvalidState
+	}
+	return nil
 }
