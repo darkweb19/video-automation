@@ -44,6 +44,11 @@ func TestClippingReferenceSchemaMigratesPopulatedForeignKeysAndRestoresBackup(t 
 		{`INSERT INTO clipping_artifacts(job_id,artifact_type,schema_version,version,source_duration_ms,time_ranges_json,payload_json,created_at) VALUES(?,'clipping.analysis','2',1,60000,'[]','{}',1)`, []any{jobID}},
 		{`CREATE INDEX clipping_user_source_name ON clipping_sources(original_name)`, nil},
 		{`CREATE TRIGGER clipping_user_source_update AFTER UPDATE ON clipping_sources BEGIN SELECT 1; END`, nil},
+		{`CREATE VIEW "source view" AS SELECT id FROM clipping_sources`, nil},
+		{`CREATE VIEW job_view AS SELECT id FROM clipping_jobs`, nil},
+		{`CREATE VIEW nested_view AS SELECT id FROM "source view"`, nil},
+		{`CREATE TABLE other_table(value TEXT)`, nil},
+		{`CREATE TRIGGER "other trigger" AFTER INSERT ON other_table BEGIN SELECT id FROM clipping_jobs; SELECT id FROM "source view"; END`, nil},
 	} {
 		if _, err := db.Exec(query.sql, query.args...); err != nil {
 			t.Fatal(err)
@@ -70,11 +75,18 @@ func TestClippingReferenceSchemaMigratesPopulatedForeignKeysAndRestoresBackup(t 
 			t.Fatalf("legacy %s count=%d error=%v", table, count, err)
 		}
 	}
-	for _, name := range []string{"clipping_sources_import_queue", "clipping_sources_retention", "clipping_jobs_batch", "clipping_jobs_source", "clipping_user_source_name", "clipping_user_source_update"} {
+	for _, name := range []string{"clipping_sources_import_queue", "clipping_sources_retention", "clipping_jobs_batch", "clipping_jobs_source", "clipping_user_source_name", "clipping_user_source_update", "source view", "job_view", "nested_view", "other trigger"} {
 		var count int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name=?`, name).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("schema object %q lost: count=%d error=%v", name, count, err)
 		}
+	}
+	if _, err := store.db.Exec(`INSERT INTO other_table VALUES('ok')`); err != nil {
+		t.Fatalf("restored cross-table trigger failed: %v", err)
+	}
+	var viewCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM nested_view`).Scan(&viewCount); err != nil || viewCount != 1 {
+		t.Fatalf("restored nested view count=%d error=%v", viewCount, err)
 	}
 	assertClippingForeignKeys(t, store.db)
 	backups, err := filepath.Glob(filepath.Join(dataDir, "clipping-migration-backups", "before-gemini-*.sqlite"))
@@ -142,6 +154,15 @@ func TestClippingReferenceMigrationRollbackPreservesOriginalTables(t *testing.T)
 	store := newTestStore(t)
 	source := makeReadyClippingSource(t, store, 60_000)
 	job := makeClippingJob(t, store, source.ID, "rollback-legacy-job")
+	for _, statement := range []string{
+		`CREATE VIEW rollback_view AS SELECT id FROM clipping_sources`,
+		`CREATE TABLE rollback_other(value TEXT)`,
+		`CREATE TRIGGER rollback_trigger AFTER INSERT ON rollback_other BEGIN SELECT id FROM clipping_jobs; END`,
+	} {
+		if _, err := store.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := store.db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +188,13 @@ func TestClippingReferenceMigrationRollbackPreservesOriginalTables(t *testing.T)
 	var leftovers int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('clipping_sources_new','clipping_jobs_new')`).Scan(&leftovers); err != nil || leftovers != 0 {
 		t.Fatalf("partial rebuild persisted: %d error=%v", leftovers, err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM rollback_view`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("rollback lost view: count=%d error=%v", count, err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO rollback_other VALUES('ok')`); err != nil {
+		t.Fatalf("rollback lost cross-table trigger: %v", err)
 	}
 	assertClippingForeignKeys(t, store.db)
 }

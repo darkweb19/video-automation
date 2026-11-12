@@ -85,8 +85,9 @@ const clippingJobsTableDefinition = `(
 )`
 
 type clippingMigrationSchemaObject struct {
-	name string
-	sql  string
+	typeName string
+	name     string
+	sql      string
 }
 
 // migrateClippingReferenceSchema rebuilds both parent tables as one atomic
@@ -153,6 +154,18 @@ func (s *Store) migrateClippingReferenceSchema(existing bool) (resultErr error) 
 	objects, err := clippingMigrationSchemaObjects(ctx, tx)
 	if err != nil {
 		return err
+	}
+	// SQLite validates the entire schema during ALTER TABLE. Even views and
+	// triggers owned by unrelated tables can mention the parents being rebuilt.
+	// Drop them transactionally, then restore their exact definitions after both
+	// parent names exist again. Rollback restores every object on any failure.
+	for _, object := range objects {
+		if object.typeName == "view" || object.typeName == "trigger" {
+			quotedName := `"` + strings.ReplaceAll(object.name, `"`, `""`) + `"`
+			if _, err := tx.ExecContext(ctx, `DROP `+strings.ToUpper(object.typeName)+` `+quotedName); err != nil {
+				return fmt.Errorf("drop clipping dependent schema object %q: %w", object.name, err)
+			}
+		}
 	}
 	for _, statement := range []string{
 		`CREATE TABLE clipping_sources_new ` + clippingSourcesTableDefinition,
@@ -227,7 +240,10 @@ func validateClippingMigrationColumns(ctx context.Context, conn *sql.Conn, table
 }
 
 func clippingMigrationSchemaObjects(ctx context.Context, tx *sql.Tx) ([]clippingMigrationSchemaObject, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT name,sql FROM sqlite_schema WHERE tbl_name IN ('clipping_sources','clipping_jobs') AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name`)
+	rows, err := tx.QueryContext(ctx, `SELECT type,name,sql FROM sqlite_schema
+		WHERE sql IS NOT NULL AND (type IN ('view','trigger') OR
+		(type='index' AND tbl_name IN ('clipping_sources','clipping_jobs')))
+		ORDER BY CASE type WHEN 'view' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +251,7 @@ func clippingMigrationSchemaObjects(ctx context.Context, tx *sql.Tx) ([]clipping
 	var objects []clippingMigrationSchemaObject
 	for rows.Next() {
 		var object clippingMigrationSchemaObject
-		if err := rows.Scan(&object.name, &object.sql); err != nil {
+		if err := rows.Scan(&object.typeName, &object.name, &object.sql); err != nil {
 			return nil, err
 		}
 		objects = append(objects, object)
