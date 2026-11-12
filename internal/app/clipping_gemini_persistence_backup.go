@@ -37,11 +37,27 @@ func backupClippingDatabaseWithSync(ctx context.Context, conn *sql.Conn, dataDir
 	if err != nil {
 		return "", err
 	}
-	file, err := os.CreateTemp(backupDir, "before-gemini-*.sqlite")
+	// Reserve a random, absent name in the durable manifest before creating a
+	// potentially large file. A crash during VACUUM is then recoverable without
+	// treating unrelated files as owned. The private directory and the app's
+	// single-owner invariant prevent concurrent allocation by another process.
+	backupName, err := newClippingStorageID("before-gemini-")
+	if err != nil {
+		return "", err
+	}
+	backupName += ".sqlite"
+	path := filepath.Join(backupDir, backupName)
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("clipping backup allocation already exists")
+	}
+	managed = append(managed, backupName)
+	if err := writeClippingBackupManifest(backupDir, managed, syncDirectory); err != nil {
+		return "", err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("create clipping backup: %w", err)
 	}
-	path := file.Name()
 	keep := false
 	defer func() {
 		if !keep {
@@ -66,12 +82,7 @@ func backupClippingDatabaseWithSync(ctx context.Context, conn *sql.Conn, dataDir
 	if err := syncDirectory(backupDir); err != nil {
 		return "", fmt.Errorf("sync clipping backup directory: %w", err)
 	}
-	// Record ownership only after the snapshot itself is durable. Previous
-	// managed snapshots remain until this new backup and manifest are durable.
-	managed = append(managed, filepath.Base(path))
-	if err := writeClippingBackupManifest(backupDir, managed, syncDirectory); err != nil {
-		return "", err
-	}
+	// Retain all previous managed snapshots until the new file is durable.
 	keep = true
 	remaining := make([]string, 0, len(managed))
 	for _, name := range managed[:len(managed)-1] {

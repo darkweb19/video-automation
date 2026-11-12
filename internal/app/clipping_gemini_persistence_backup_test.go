@@ -160,3 +160,44 @@ func TestClippingDatabaseBackupNeverRemovesReplacedManagedSymlink(t *testing.T) 
 		t.Fatalf("symlink target changed: %q %v", data, err)
 	}
 }
+
+func TestClippingDatabaseBackupRecoversInterruptedAllocation(t *testing.T) {
+	store := newTestStore(t)
+	conn, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	first, err := backupClippingDatabase(context.Background(), conn, store.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(first)
+	interrupted := "before-gemini-0123456789abcdef0123456789abcdef.sqlite"
+	if err := writeClippingBackupManifest(dir, []string{filepath.Base(first), interrupted}, syncClippingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, interrupted), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A failed new snapshot must leave the previous complete backup intact.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := backupClippingDatabase(ctx, conn, store.dataDir); err == nil {
+		t.Fatal("expected canceled snapshot")
+	}
+	if _, err := os.Stat(first); err != nil {
+		t.Fatalf("previous durable backup lost: %v", err)
+	}
+	latest, err := backupClippingDatabase(context.Background(), conn, store.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, interrupted)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial managed backup remains: %v", err)
+	}
+	managed, err := readClippingBackupManifest(dir)
+	if err != nil || len(managed) != 1 || managed[0] != filepath.Base(latest) {
+		t.Fatalf("manifest after recovery: %v, %v", managed, err)
+	}
+}
