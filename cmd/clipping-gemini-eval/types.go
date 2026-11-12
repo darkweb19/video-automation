@@ -126,8 +126,19 @@ type EvaluationReport struct {
 	LocalStatus       string            `json:"local_status"`
 	Corpus            CorpusSummary     `json:"corpus"`
 	Runs              []RunSummary      `json:"runs"`
+	RankSummary       []RankSummary     `json:"rank_summary"`
 	Strata            []StratumSummary  `json:"strata"`
 	ExternalReadiness ExternalReadiness `json:"external_readiness"`
+}
+
+type RankSummary struct {
+	Rank            int      `json:"rank"`
+	ReturnedOutputs int      `json:"returned_outputs"`
+	ReviewedOutputs int      `json:"reviewed_outputs"`
+	UsableOutputs   int      `json:"usable_outputs"`
+	MatchedUsable   int      `json:"matched_usable"`
+	UsabilityRate   *float64 `json:"usability_rate,omitempty"`
+	EvidenceStatus  string   `json:"evidence_status"`
 }
 
 type CorpusSummary struct {
@@ -167,6 +178,7 @@ type TopKSummary struct {
 	K               int      `json:"k"`
 	ReviewedOutputs int      `json:"reviewed_outputs"`
 	ReturnedOutputs int      `json:"returned_outputs"`
+	UsableOutputs   int      `json:"usable_outputs"`
 	MatchedUsable   int      `json:"matched_usable"`
 	Precision       *float64 `json:"precision,omitempty"`
 	Recall          *float64 `json:"recall,omitempty"`
