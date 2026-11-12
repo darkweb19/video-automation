@@ -51,6 +51,13 @@ type ClippingGeminiAttempt struct {
 	UpdatedAt    int64
 }
 
+type clippingGeminiAttemptLease struct {
+	Attempt    ClippingGeminiAttempt
+	LeaseToken string
+}
+
+var errClippingGeminiFingerprintBusy = errors.New("Gemini request fingerprint has an active or uncertain attempt")
+
 func (s *Store) migrateClippingGeminiLifecycle() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS clipping_gemini_attempts (
 		attempt_id TEXT PRIMARY KEY,
@@ -61,7 +68,7 @@ func (s *Store) migrateClippingGeminiLifecycle() error {
 		failure_code TEXT NOT NULL DEFAULT '',
 		http_status INTEGER NOT NULL DEFAULT 0 CHECK(http_status BETWEEN 0 AND 599),
 		retry_at INTEGER NOT NULL DEFAULT 0 CHECK(retry_at>=0),
-		lease_token_hash TEXT NOT NULL CHECK(length(lease_token_hash)=64),
+		lease_token_hash TEXT NOT NULL CHECK(length(lease_token_hash)=43),
 		lease_expires_at INTEGER NOT NULL CHECK(lease_expires_at>0),
 		usage_available INTEGER NOT NULL DEFAULT 0 CHECK(usage_available IN (0,1)),
 		prompt_tokens INTEGER NOT NULL DEFAULT 0 CHECK(prompt_tokens>=0),
