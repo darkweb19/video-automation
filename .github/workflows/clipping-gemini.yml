@@ -1,4 +1,4 @@
-name: Gemini clipping provider foundations
+name: Gemini clipping provider and persistence
 
 on:
   push:
@@ -6,7 +6,10 @@ on:
       - work
       - feat/gemini-*
     paths:
-      - "internal/app/clipping_gemini*.go"
+      - "internal/app/*clipping*.go"
+      - "internal/app/dashboard*.go"
+      - "internal/app/storage*.go"
+      - "internal/app/security*.go"
       - "docs/clipping/contracts/**"
       - "testdata/clipping_gemini/**"
       - "go.mod"
@@ -14,7 +17,10 @@ on:
       - ".github/workflows/clipping-gemini.yml"
   pull_request:
     paths:
-      - "internal/app/clipping_gemini*.go"
+      - "internal/app/*clipping*.go"
+      - "internal/app/dashboard*.go"
+      - "internal/app/storage*.go"
+      - "internal/app/security*.go"
       - "docs/clipping/contracts/**"
       - "testdata/clipping_gemini/**"
       - "go.mod"
@@ -35,10 +41,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Test Gemini clipping contracts and provider client
-        run: go test ./internal/app -run '^(Test.*ClippingGemini.*|Test.*Gemini.*)$' -count=1
-      - name: Run Gemini clipping race tests
-        run: go test -race ./internal/app -run '^(Test.*ClippingGemini.*|Test.*Gemini.*)$' -count=1
+      - name: Install FFmpeg for offline media fixtures
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Test clipping provider and persistence compatibility
+        run: go test ./internal/app -run '^Test.*(Clipping|Gemini)' -count=1
+      - name: Run clipping provider and persistence race tests
+        run: go test -race ./internal/app -run '^Test.*(Clipping|Gemini)' -count=1
       - name: Fuzz Gemini analysis decoding
         run: go test ./internal/app -run '^$' -fuzz '^FuzzDecodeClippingGeminiAnalysis$' -fuzztime=10s -parallel=2
       - name: Vet the application package
