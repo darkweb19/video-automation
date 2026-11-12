@@ -26,9 +26,6 @@ func (s *Store) clippingGeminiCancellationRegistry() *clippingGeminiCancellation
 	if s == nil {
 		return nil
 	}
-	if s.clippingGeminiCancellations == nil {
-		s.clippingGeminiCancellations = newClippingGeminiCancellationRegistry()
-	}
 	return s.clippingGeminiCancellations
 }
 
