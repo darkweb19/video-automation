@@ -175,6 +175,7 @@ type TopKSummary struct {
 }
 
 type RubricSummary struct {
+	Status                string             `json:"status"`
 	RatedCandidateCount   int                `json:"rated_candidate_count"`
 	DimensionMeans        map[string]float64 `json:"dimension_means,omitempty"`
 	DimensionRatingCounts map[string]int     `json:"dimension_rating_counts,omitempty"`

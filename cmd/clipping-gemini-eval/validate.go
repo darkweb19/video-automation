@@ -73,7 +73,7 @@ func validateDataset(data Dataset) error {
 	for _, review := range data.RunReviews {
 		run, exists := runs[review.RunID]
 		analysis, analysisExists := analyses[review.RunID]
-		if !exists || !analysisExists || validateRunReview(review, run, analysis, sourceReviews[run.SourceID]) != nil {
+		if !exists || !analysisExists || validateRunReview(review, analysis, sourceReviews[run.SourceID]) != nil {
 			return errInvalidDataset
 		}
 		if _, exists := seenRunReviews[review.RunID]; exists {
@@ -88,6 +88,9 @@ func validateCorpusSource(source CorpusSource) error {
 	if !validEvaluationID(source.ID) || !oneOf(source.Status, "synthetic", "pending", "ready", "excluded") ||
 		!oneOf(source.RightsStatus, "unknown", "confirmed", "denied") ||
 		!validContentType(source.ContentType) || !validLanguageCodes(source.LanguageCodes, 8) {
+		return errInvalidDataset
+	}
+	if source.Status == "synthetic" && source.RightsStatus != "unknown" {
 		return errInvalidDataset
 	}
 	if source.HumanDurationMS != nil && (*source.HumanDurationMS < 1 || *source.HumanDurationMS > app.ClippingGeminiMaxSourceDurationMS) {
@@ -190,7 +193,7 @@ func validateOpportunity(opportunity Opportunity, source CorpusSource) error {
 	return nil
 }
 
-func validateRunReview(review RunReview, run SavedRun, analysis app.ClippingGeminiAnalysis, sourceReview SourceReview) error {
+func validateRunReview(review RunReview, analysis app.ClippingGeminiAnalysis, sourceReview SourceReview) error {
 	if !validEvaluationID(review.RunID) || !oneOf(review.AdjudicationStatus, "complete", "pending", "not_started", "not_required") ||
 		!validReviewerIDs(review.ReviewerIDs) || len(review.CandidateReviews) > maxEvaluationCandidates {
 		return errInvalidDataset
@@ -233,7 +236,6 @@ func validateRunReview(review RunReview, run SavedRun, analysis app.ClippingGemi
 		}
 		seenOpportunities[opportunity.ID] = struct{}{}
 	}
-	_ = run // Keep source/run linkage explicit at the validation boundary.
 	return nil
 }
 
@@ -251,6 +253,9 @@ func validateCandidateReview(review CandidateReview) error {
 	if review.Status == "reviewed" && review.Usability == "not_rated" {
 		return errInvalidDataset
 	}
+	if review.Status == "reviewed" && (!allDimensionsPresent(review.Dimensions) || review.StartBoundaryFit == "unknown" || review.EndBoundaryFit == "unknown") {
+		return errInvalidDataset
+	}
 	if review.Status == "uncertain" && review.Usability != "uncertain" && review.Usability != "not_rated" {
 		return errInvalidDataset
 	}
@@ -258,6 +263,11 @@ func validateCandidateReview(review CandidateReview) error {
 		return errInvalidDataset
 	}
 	return nil
+}
+
+func allDimensionsPresent(dimensions ReviewDimensions) bool {
+	return dimensions.Completeness != nil && dimensions.Context != nil && dimensions.Hook != nil && dimensions.Emotion != nil &&
+		dimensions.Humor != nil && dimensions.VisualEvidence != nil && dimensions.Standalone != nil
 }
 
 func validDimensions(dimensions ReviewDimensions) bool {
@@ -272,6 +282,23 @@ func validDimensions(dimensions ReviewDimensions) bool {
 func hasDimensions(dimensions ReviewDimensions) bool {
 	return dimensions.Completeness != nil || dimensions.Context != nil || dimensions.Hook != nil || dimensions.Emotion != nil ||
 		dimensions.Humor != nil || dimensions.VisualEvidence != nil || dimensions.Standalone != nil
+}
+
+// intervalIoU is used only as a plausibility guard after a reviewer has
+// explicitly confirmed that two ranges refer to the same moment. It never
+// creates or chooses a match itself.
+func intervalIoU(startA, endA, startB, endB int64) float64 {
+	intersectionStart := max(startA, startB)
+	intersectionEnd := min(endA, endB)
+	if intersectionEnd <= intersectionStart {
+		return 0
+	}
+	intersection := intersectionEnd - intersectionStart
+	union := max(endA, endB) - min(startA, startB)
+	if union <= 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
 }
 
 func validReviewerIDs(ids []string) bool {
