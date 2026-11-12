@@ -65,21 +65,23 @@ type clippingStageView struct {
 }
 
 type clippingJobView struct {
-	ID              string                   `json:"id"`
-	SourceID        string                   `json:"source_id"`
-	Provider        ClippingAnalysisProvider `json:"provider"`
-	ContentType     string                   `json:"content_type"`
-	MinClipSeconds  *int                     `json:"min_clip_seconds,omitempty"`
-	MaxClipSeconds  *int                     `json:"max_clip_seconds,omitempty"`
-	CandidateLimit  int                      `json:"candidate_limit"`
-	Status          ClippingJobStatus        `json:"status"`
-	AnalysisDeleted bool                     `json:"analysis_deleted,omitempty"`
-	Progress        int                      `json:"progress"`
-	Error           string                   `json:"error,omitempty"`
-	Stages          []clippingStageView      `json:"stages"`
-	Artifacts       []ClippingArtifact       `json:"artifacts,omitempty"`
-	CreatedAt       int64                    `json:"created_at"`
-	UpdatedAt       int64                    `json:"updated_at"`
+	ID             string                   `json:"id"`
+	SourceID       string                   `json:"source_id"`
+	Provider       ClippingAnalysisProvider `json:"provider"`
+	ContentType    string                   `json:"content_type"`
+	MinClipSeconds *int                     `json:"min_clip_seconds,omitempty"`
+	MaxClipSeconds *int                     `json:"max_clip_seconds,omitempty"`
+	CandidateLimit int                      `json:"candidate_limit"`
+	Options        *ClippingGeminiOptions   `json:"options,omitempty"`
+	*ClippingGeminiLifecycleView
+	Status          ClippingJobStatus   `json:"status"`
+	AnalysisDeleted bool                `json:"analysis_deleted,omitempty"`
+	Progress        int                 `json:"progress"`
+	Error           string              `json:"error,omitempty"`
+	Stages          []clippingStageView `json:"stages"`
+	Artifacts       []ClippingArtifact  `json:"artifacts,omitempty"`
+	CreatedAt       int64               `json:"created_at"`
+	UpdatedAt       int64               `json:"updated_at"`
 }
 
 func (a *dashboardApp) retentionDeadline(now time.Time) int64 {
@@ -151,21 +153,34 @@ func clippingJobProgress(stages []ClippingStage, status ClippingJobStatus) int {
 func clippingJobSummary(job ClippingJob, stages []ClippingStage, artifacts []ClippingArtifact) clippingJobView {
 	stageViews := make([]clippingStageView, 0, len(stages))
 	for _, stage := range stages {
+		stageError := stage.Error
+		if job.Provider == ClippingProviderGemini {
+			stageError = safeClippingGeminiFailureCode(stageError)
+			if stage.Status == ClippingStageCanceled {
+				stageError = ""
+			}
+		}
 		stageViews = append(stageViews, clippingStageView{
 			JobID: stage.JobID, Name: stage.Name, Status: stage.Status, AttemptID: stage.AttemptID, Attempt: stage.Attempt,
-			LeaseExpiresAt: stage.LeaseExpiresAt, Error: stage.Error, CreatedAt: stage.CreatedAt,
+			LeaseExpiresAt: stage.LeaseExpiresAt, Error: stageError, CreatedAt: stage.CreatedAt,
 			UpdatedAt: stage.UpdatedAt,
 		})
 	}
 	var minSeconds, maxSeconds *int
+	jobError := job.Error
 	if job.Provider == ClippingProviderModalLegacy {
 		minSeconds, maxSeconds = &job.MinClipSeconds, &job.MaxClipSeconds
+	} else if job.Provider == ClippingProviderGemini {
+		jobError = safeClippingGeminiFailureCode(jobError)
+		if job.Status == ClippingJobCanceled {
+			jobError = ""
+		}
 	}
 	return clippingJobView{
 		ID: job.ID, SourceID: job.SourceID, Provider: job.Provider, ContentType: job.ContentType,
 		MinClipSeconds: minSeconds, MaxClipSeconds: maxSeconds, CandidateLimit: job.CandidateLimit, Status: job.Status,
 		Progress: clippingJobProgress(stages, job.Status),
-		Error:    job.Error, AnalysisDeleted: job.AnalysisDeleted, Stages: stageViews, Artifacts: artifacts, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
+		Error:    jobError, AnalysisDeleted: job.AnalysisDeleted, Stages: stageViews, Artifacts: artifacts, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
 	}
 }
 
@@ -184,7 +199,11 @@ func (a *dashboardApp) clippingJobResponse(job ClippingJob, includeArtifacts boo
 			artifacts[index] = sanitizeClippingArtifactForPublic(artifacts[index])
 		}
 	}
-	return clippingJobSummary(job, stages, artifacts), nil
+	view := clippingJobSummary(job, stages, artifacts)
+	if err := a.store.enrichClippingGeminiJob(&view, job); err != nil {
+		return clippingJobView{}, err
+	}
+	return view, nil
 }
 
 func sanitizeClippingArtifactForPublic(artifact ClippingArtifact) ClippingArtifact {
@@ -468,7 +487,12 @@ func (a *dashboardApp) cancelClippingJob(w http.ResponseWriter, r *http.Request)
 	}
 	a.deleteClippingCapabilities(job.ID)
 	a.store.PublishClippingJob(job.ID)
-	writeJSON(w, http.StatusOK, map[string]any{"job": clippingJobSummary(job, nil, nil)})
+	view, err := a.clippingJobResponse(job, false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "job was canceled but could not be reloaded")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": view})
 }
 
 func (a *dashboardApp) retryClippingJob(w http.ResponseWriter, r *http.Request) {
@@ -806,6 +830,9 @@ func (s *Store) PublishClippingJob(id string) {
 		return
 	}
 	view := clippingJobSummary(job, stages, nil)
+	if err := s.enrichClippingGeminiJob(&view, job); err != nil {
+		return
+	}
 	fingerprint, err := snapshotFingerprint(view)
 	if err == nil {
 		s.events.publishSnapshot("clipping_job", id, fingerprint, map[string]any{"id": id, "job": view})
