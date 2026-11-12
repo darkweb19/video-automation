@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -15,6 +16,9 @@ func TestClippingReferenceViewOmitsUnverifiedMediaFields(t *testing.T) {
 	response := clippingDashboardRequest(handler, http.MethodGet, "/api/clipping/sources/"+source.ID, "", cookie, "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("reference detail: %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "abcdefghijk") || strings.Contains(response.Body.String(), "youtube.com/watch") {
+		t.Fatal("reference detail exposed URL or video ID")
 	}
 	var body struct {
 		Source map[string]any `json:"source"`

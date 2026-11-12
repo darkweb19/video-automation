@@ -58,7 +58,7 @@ func insertClippingYouTubeReferenceTx(tx *sql.Tx, security *Security, id, canoni
 	if err != nil {
 		return ClippingSource{}, errors.New("could not protect public source URL")
 	}
-	name := "youtube-" + canonicalURL[len(canonicalURL)-11:]
+	name := "YouTube reference"
 	_, err = tx.Exec(`INSERT INTO clipping_sources(id,kind,status,original_name,source_url,rights_attested,storage_path,declared_size_bytes,reserved_size_bytes,size_bytes,duration_ms,sha256,retain_until,created_at,updated_at)
 		VALUES(?,'youtube_url','ready',?,?,1,NULL,NULL,0,NULL,NULL,NULL,?,?,?)`, id, name, encryptedURL, retainUntil, now, now)
 	if err != nil {

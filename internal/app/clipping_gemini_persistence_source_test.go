@@ -29,11 +29,42 @@ func TestCreateClippingYouTubeReferenceProtectsURLWithoutMedia(t *testing.T) {
 	if err != nil || plaintext != "https://www.youtube.com/watch?v=abcdefghijk" {
 		t.Fatalf("canonical encrypted URL unavailable: %v", err)
 	}
-	if strings.Contains(loaded.SourceURL, "abcdefghijk") {
-		t.Fatal("source URL was stored in plaintext")
+	rows, err := store.db.Query(`SELECT * FROM clipping_sources WHERE id=?`, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make([]any, len(columns))
+	pointers := make([]any, len(values))
+	for i := range values {
+		pointers[i] = &values[i]
+	}
+	if !rows.Next() {
+		t.Fatal("missing stored source")
+	}
+	if err := rows.Scan(pointers...); err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i, value := range values {
+		var text string
+		switch v := value.(type) {
+		case string:
+			text = v
+		case []byte:
+			text = string(v)
+		}
+		if strings.Contains(text, "abcdefghijk") || strings.Contains(text, plaintext) {
+			t.Errorf("source column %s reveals URL or video ID", columns[i])
+		}
 	}
 	encoded, err := json.Marshal(loaded)
-	if err != nil || strings.Contains(string(encoded), loaded.SourceURL) || strings.Contains(string(encoded), plaintext) {
+	if err != nil || strings.Contains(string(encoded), loaded.SourceURL) || strings.Contains(string(encoded), plaintext) || strings.Contains(string(encoded), "abcdefghijk") {
 		t.Fatalf("serialized source exposed protected URL: %v", err)
 	}
 	entries, err := os.ReadDir(store.clippingDir)
