@@ -85,12 +85,24 @@ func TestClippingGeminiCacheIsScopedToSourceFingerprintRetentionAndOrigin(t *tes
 	now := time.Now().Unix()
 	publishGeminiCacheFixture(t, store, origin, now)
 	artifact, found, err := loadGeminiCacheFixture(t, store, target.ID, now+1)
-	if err != nil || !found || artifact.Artifact.JobID != target.ID || artifact.Artifact.SchemaVersion != ClippingGeminiAnalysisVersion || artifact.OriginJobID != origin.ID {
+	if err != nil || !found || artifact.Artifact.JobID != target.ID || artifact.Artifact.SchemaVersion != ClippingGeminiAnalysisVersion || artifact.OriginJobID != origin.ID || artifact.OriginCreatedAt != now {
 		t.Fatalf("cache reuse: %+v %v %v", artifact, found, err)
 	}
 	var created, expires int64
 	if err := store.db.QueryRow(`SELECT created_at,expires_at FROM clipping_gemini_cache WHERE origin_job_id=?`, origin.ID).Scan(&created, &expires); err != nil || expires-created > 86400 {
 		t.Fatalf("invalid TTL: %d %d %v", created, expires, err)
+	}
+	if artifact.ExpiresAt != expires {
+		t.Fatalf("cache hit changed origin expiration: %d != %d", artifact.ExpiresAt, expires)
+	}
+	if _, err := store.db.Exec(`UPDATE clipping_gemini_cache SET created_at=created_at-1 WHERE origin_job_id=?`, origin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := loadGeminiCacheFixture(t, store, target.ID, now+1); found || !errors.Is(err, ErrClippingInvalidArtifact) {
+		t.Fatalf("mismatched artifact creation time reused: %v %v", found, err)
+	}
+	if _, err := store.db.Exec(`UPDATE clipping_gemini_cache SET created_at=? WHERE origin_job_id=?`, created, origin.ID); err != nil {
+		t.Fatal(err)
 	}
 	if _, found, err := loadGeminiCacheFixture(t, store, target.ID, expires); (err != nil && !errors.Is(err, ErrClippingInvalidState)) || found {
 		t.Fatalf("expired cache reused: %v %v", found, err)
@@ -119,6 +131,9 @@ func TestClippingGeminiCacheIsScopedToSourceFingerprintRetentionAndOrigin(t *tes
 	if _, found, err := loadGeminiCacheFixture(t, store, other.ID, now+1); err != nil || found {
 		t.Fatalf("different source reused: %v %v", found, err)
 	}
+	if _, err := store.db.Exec(`UPDATE clipping_gemini_cache SET expires_at=created_at+86401 WHERE origin_job_id=?`, origin.ID); err == nil {
+		t.Fatal("database accepted >24h cache")
+	}
 	for _, state := range []struct {
 		status  string
 		deleted int
@@ -138,9 +153,6 @@ func TestClippingGeminiCacheIsScopedToSourceFingerprintRetentionAndOrigin(t *tes
 	}
 	if _, found, err := loadGeminiCacheFixture(t, store, target.ID, now+1); found || !errors.Is(err, ErrClippingInvalidState) {
 		t.Fatalf("expired source reused: %v %v", found, err)
-	}
-	if _, err := store.db.Exec(`UPDATE clipping_gemini_cache SET expires_at=created_at+86401 WHERE origin_job_id=?`, origin.ID); err == nil {
-		t.Fatal("database accepted >24h cache")
 	}
 }
 
@@ -264,5 +276,143 @@ func TestClippingGeminiCacheReindexCannotExtendOrLaunderReuse(t *testing.T) {
 	var count int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM clipping_gemini_cache WHERE source_id=?`, origin.SourceID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("deleting reuse left matching cache: %d %v", count, err)
+	}
+}
+
+func TestClippingGeminiCacheDeletedReuseCannotBeReindexed(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, target := geminiCacheJobs(t, store, security, "")
+	now := time.Now().Unix()
+	publishGeminiCacheFixture(t, store, origin, now)
+	input := geminiJobInput()
+	input.SourceID, input.YouTubeURL, input.RetainUntil = origin.SourceID, "", 0
+	input.Options = testClippingGeminiRequest("").Options
+	input.Options.CandidateLimit = 2
+
+	// An independently cached request on the same source must remain reusable.
+	otherInput := input
+	otherInput.Options.MinClipMS++
+	otherOrigin, _, err := store.CreateClippingGeminiJob(security, otherInput, "cache-other-origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTarget, _, err := store.CreateClippingGeminiJob(security, otherInput, "cache-other-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishGeminiCacheFixture(t, store, otherOrigin, now)
+
+	tx, err := store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit, found, err := loadClippingGeminiCacheTx(tx, target.ID, now+1)
+	if err != nil || !found {
+		t.Fatalf("initial cache hit: %+v %v %v", hit, found, err)
+	}
+	ranges, err := validateClippingArtifact(hit.Artifact, target.ID, hit.Artifact.SourceDurationMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertClippingArtifact(tx, hit.Artifact, ranges, now+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE clipping_jobs SET status='completed' WHERE id=?`, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteClippingAnalysis(target.ID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = storeClippingGeminiCacheTx(tx, origin.ID, now+2)
+	if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		t.Fatal(rollbackErr)
+	}
+	if !errors.Is(err, ErrClippingInvalidState) {
+		t.Fatalf("deleted reuse allowed the old origin to be reindexed: %v", err)
+	}
+	third, _, err := store.CreateClippingGeminiJob(security, input, "cache-third-after-delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := loadGeminiCacheFixture(t, store, third.ID, now+2); err != nil || found {
+		t.Fatalf("deleted result was reused: %v %v", found, err)
+	}
+	if hit, found, err := loadGeminiCacheFixture(t, store, otherTarget.ID, now+2); err != nil || !found || hit.OriginJobID != otherOrigin.ID {
+		t.Fatalf("deletion invalidated a different fingerprint: %+v %v %v", hit, found, err)
+	}
+
+	fresh, _, err := store.CreateClippingGeminiJob(security, input, "cache-fresh-after-delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishGeminiCacheFixture(t, store, fresh, now+3)
+	if hit, found, err := loadGeminiCacheFixture(t, store, third.ID, now+4); err != nil || !found || hit.OriginJobID != fresh.ID {
+		t.Fatalf("fresh result was not cacheable after deletion: %+v %v %v", hit, found, err)
+	}
+}
+
+func TestClippingGeminiCacheCannotReviveAfterRetentionIsShortened(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, target := geminiCacheJobs(t, store, security, "")
+	now := time.Now().Unix()
+	publishGeminiCacheFixture(t, store, origin, now)
+
+	// Replace the cached origin, then shorten retention. Both the current and
+	// displaced completed origin must remain ineligible for reindexing later.
+	input := geminiJobInput()
+	input.SourceID, input.YouTubeURL, input.RetainUntil = origin.SourceID, "", 0
+	input.Options = testClippingGeminiRequest("").Options
+	input.Options.CandidateLimit = 2
+	newer, _, err := store.CreateClippingGeminiJob(security, input, "cache-newer-origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishGeminiCacheFixture(t, store, newer, now+1)
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET retain_until=? WHERE id=?`, now+300, origin.SourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET retain_until=? WHERE id=?`, now+7200, origin.SourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := loadGeminiCacheFixture(t, store, target.ID, now+301); err != nil || found {
+		t.Fatalf("shortened cache was revived after extending retention: %v %v", found, err)
+	}
+	for _, previous := range []ClippingJob{origin, newer} {
+		tx, err := store.db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = storeClippingGeminiCacheTx(tx, previous.ID, now+301)
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			t.Fatal(rollbackErr)
+		}
+		if !errors.Is(err, ErrClippingInvalidState) {
+			t.Fatalf("completed origin %s was reindexed after shortening: %v", previous.ID, err)
+		}
+	}
+
+	// New inference after the extension can establish its own bounded cache.
+	fresh, _, err := store.CreateClippingGeminiJob(security, input, "cache-fresh-after-extension")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishGeminiCacheFixture(t, store, fresh, now+302)
+	if hit, found, err := loadGeminiCacheFixture(t, store, target.ID, now+303); err != nil || !found || hit.OriginJobID != fresh.ID {
+		t.Fatalf("fresh result was not cacheable: %+v %v %v", hit, found, err)
 	}
 }

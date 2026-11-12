@@ -10,6 +10,9 @@ import (
 const clippingGeminiCacheTTLSeconds = int64((24 * time.Hour) / time.Second)
 
 func (s *Store) migrateClippingGeminiCache() error {
+	// A shortened source lifetime invalidates all already-completed results,
+	// including older origins displaced in the cache. Recording them prevents
+	// reindexing from reviving their cache entries after a later extension.
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS clipping_gemini_cache (
 		source_id TEXT NOT NULL REFERENCES clipping_sources(id) ON DELETE RESTRICT,
 		fingerprint TEXT NOT NULL CHECK(length(fingerprint)=64),
@@ -22,7 +25,31 @@ func (s *Store) migrateClippingGeminiCache() error {
 		job_id TEXT PRIMARY KEY REFERENCES clipping_jobs(id) ON DELETE RESTRICT,
 		origin_job_id TEXT NOT NULL REFERENCES clipping_jobs(id) ON DELETE RESTRICT,
 		created_at INTEGER NOT NULL CHECK(created_at>0)
-	);`)
+	);
+	CREATE TABLE IF NOT EXISTS clipping_gemini_cache_invalidated_origins (
+		job_id TEXT PRIMARY KEY REFERENCES clipping_jobs(id) ON DELETE RESTRICT
+	);
+	CREATE TRIGGER IF NOT EXISTS clipping_gemini_cache_retention_shortened
+	AFTER UPDATE OF retain_until ON clipping_sources
+	WHEN NEW.retain_until>0 AND (OLD.retain_until=0 OR NEW.retain_until<OLD.retain_until)
+	BEGIN
+		INSERT OR IGNORE INTO clipping_gemini_cache_invalidated_origins(job_id)
+		SELECT id FROM clipping_jobs WHERE source_id=NEW.id AND provider='gemini' AND status='completed';
+		DELETE FROM clipping_gemini_cache WHERE source_id=NEW.id;
+	END;
+	CREATE TRIGGER IF NOT EXISTS clipping_gemini_cache_analysis_deleted
+	AFTER UPDATE OF analysis_deleted ON clipping_jobs
+	WHEN NEW.provider='gemini' AND OLD.analysis_deleted=0 AND NEW.analysis_deleted=1
+	BEGIN
+		INSERT OR IGNORE INTO clipping_gemini_cache_invalidated_origins(job_id)
+		SELECT origin.id FROM clipping_jobs AS origin
+		JOIN clipping_gemini_requests AS origin_request ON origin_request.job_id=origin.id
+		JOIN clipping_gemini_requests AS deleted_request ON deleted_request.job_id=NEW.id
+		WHERE origin.source_id=NEW.source_id AND origin.provider='gemini' AND origin.status='completed'
+		AND origin_request.fingerprint=deleted_request.fingerprint;
+		DELETE FROM clipping_gemini_cache WHERE source_id=NEW.source_id
+		AND fingerprint=(SELECT fingerprint FROM clipping_gemini_requests WHERE job_id=NEW.id);
+	END;`)
 	return err
 }
 
@@ -66,11 +93,12 @@ func storeClippingGeminiCacheTx(tx *sql.Tx, jobID string, now int64) error {
 	if job.Status != ClippingJobCompleted {
 		return ErrClippingInvalidState
 	}
-	var reused int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM clipping_gemini_cache_reuses WHERE job_id=?`, job.ID).Scan(&reused); err != nil {
+	var ineligible int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM clipping_gemini_cache_reuses WHERE job_id=?)
+		OR EXISTS(SELECT 1 FROM clipping_gemini_cache_invalidated_origins WHERE job_id=?)`, job.ID, job.ID).Scan(&ineligible); err != nil {
 		return err
 	}
-	if reused != 0 {
+	if ineligible != 0 {
 		return ErrClippingInvalidState
 	}
 	artifact, err := clippingGeminiOriginArtifactTx(tx, job.ID)
@@ -118,9 +146,10 @@ func clippingGeminiOriginArtifactTx(tx *sql.Tx, jobID string) (ClippingArtifact,
 // clippingGeminiCacheHit records the original fresh-inference job and expiry;
 // a reused result must never be presented as a new provider inference.
 type clippingGeminiCacheHit struct {
-	OriginJobID string
-	ExpiresAt   int64
-	Artifact    ClippingArtifact
+	OriginJobID     string
+	OriginCreatedAt int64
+	ExpiresAt       int64
+	Artifact        ClippingArtifact
 }
 
 // loadClippingGeminiCacheTx records reuse in the caller's transaction before
@@ -138,11 +167,11 @@ func loadClippingGeminiCacheTx(tx *sql.Tx, jobID string, now int64) (clippingGem
 		return clippingGeminiCacheHit{}, false, ErrClippingInvalidState
 	}
 	var hit clippingGeminiCacheHit
-	err = tx.QueryRow(`SELECT cache.origin_job_id,cache.expires_at FROM clipping_gemini_cache AS cache
+	err = tx.QueryRow(`SELECT cache.origin_job_id,cache.created_at,cache.expires_at FROM clipping_gemini_cache AS cache
 		JOIN clipping_jobs AS origin ON origin.id=cache.origin_job_id
 		JOIN clipping_gemini_requests AS request ON request.job_id=origin.id
 		WHERE cache.source_id=? AND cache.fingerprint=? AND cache.created_at<=? AND cache.expires_at>? AND cache.expires_at<=cache.created_at+86400
-		AND origin.source_id=cache.source_id AND origin.provider='gemini' AND origin.status='completed' AND origin.analysis_deleted=0 AND request.fingerprint=cache.fingerprint`, job.SourceID, fingerprint, now, now).Scan(&hit.OriginJobID, &hit.ExpiresAt)
+		AND origin.source_id=cache.source_id AND origin.provider='gemini' AND origin.status='completed' AND origin.analysis_deleted=0 AND request.fingerprint=cache.fingerprint`, job.SourceID, fingerprint, now, now).Scan(&hit.OriginJobID, &hit.OriginCreatedAt, &hit.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return clippingGeminiCacheHit{}, false, nil
 	}
@@ -152,6 +181,9 @@ func loadClippingGeminiCacheTx(tx *sql.Tx, jobID string, now int64) (clippingGem
 	artifact, err := clippingGeminiOriginArtifactTx(tx, hit.OriginJobID)
 	if err != nil {
 		return clippingGeminiCacheHit{}, false, err
+	}
+	if artifact.CreatedAt != hit.OriginCreatedAt {
+		return clippingGeminiCacheHit{}, false, ErrClippingInvalidArtifact
 	}
 	if _, err := decodeClippingGeminiArtifact(artifact, options); err != nil {
 		return clippingGeminiCacheHit{}, false, err
