@@ -48,6 +48,9 @@ func (a *dashboardApp) createClippingGeminiJob(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !duplicate {
+		if input.YouTubeURL != "" {
+			a.store.PublishClippingSource(job.SourceID)
+		}
 		a.store.PublishClippingJob(job.ID)
 	}
 	status := http.StatusCreated
