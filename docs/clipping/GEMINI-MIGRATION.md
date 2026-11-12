@@ -31,7 +31,11 @@ Local implementation and commits are authorized. This instruction does not autho
 
 Dependency-ready offline tasks may proceed while external gates are pending. Do not activate or retire a production path while its provider/release gates remain unverified. Runtime needs no engineering paid calls to execute its mock tests.
 
-## G1 planned reviewable slices
+## G1 delivery checkpoint
+
+Completed offline on 2026-11-12 with 22 meaningful local commits including the closure record. Final code checkpoint `fc821f4` passed the full Go suite, focused race checks, vet, static build, 106 browser-unit checks, Python callback regression and independent Terra Max review. README and AGENTS are current. No production activation or live feasibility is claimed. G2 persistence is in progress; dependency-ready G3/G5 drafts remain isolated until their integration gates.
+
+## G1 reviewable slices
 
 1. Record migration decisions, phase gates and authorization.
 2. Add typed schema-v3 request/result contract.

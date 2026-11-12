@@ -16,7 +16,7 @@ The optional analysis worker is not deployed by default. Candidate selection is 
 
 ## Gemini migration in progress
 
-The [phased migration](docs/clipping/GEMINI-MIGRATION.md) adds direct public YouTube analysis through Google Cloud Gemini with Application Default Credentials. In the target workflow Gemini selects and ranks clips, and the backend validates and stores its decisions. The isolated provider foundation is implemented, with final client review underway. The dashboard still uses the legacy workflow described below until the persistence, orchestration and dashboard phases are integrated.
+The [phased migration](docs/clipping/GEMINI-MIGRATION.md) adds direct public YouTube analysis through Google Cloud Gemini with Application Default Credentials. In the target workflow Gemini selects and ranks clips, and the backend validates and stores its decisions. Phase G1 is complete: its isolated provider foundation passed offline tests and independent review. Phase G2 is implementing compatible URL-reference persistence. The dashboard still uses the legacy workflow described below until the persistence, orchestration and dashboard phases are integrated.
 
 Offline tests do not establish live YouTube availability or editorial quality. Google’s YouTube input support is Preview; the initial Gemini path targets videos up to 40 minutes, not the legacy four-hour import limit. Scores are editorial estimates and timestamps are proposed boundaries. Media extraction and `youtube-extractor-rs` integration remain outside this migration phase.
 
