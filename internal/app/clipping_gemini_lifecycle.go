@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-type clippingGeminiAttemptPhase string
+type ClippingGeminiAttemptPhase string
 type clippingGeminiClaimState string
 
 const (
-	clippingGeminiAttemptClaimed    clippingGeminiAttemptPhase = "claimed"
-	clippingGeminiAttemptSubmitting clippingGeminiAttemptPhase = "submitting"
-	clippingGeminiAttemptSettled    clippingGeminiAttemptPhase = "settled"
+	ClippingGeminiAttemptClaimed    ClippingGeminiAttemptPhase = "claimed"
+	ClippingGeminiAttemptSubmitting ClippingGeminiAttemptPhase = "submitting"
+	ClippingGeminiAttemptSettled    ClippingGeminiAttemptPhase = "settled"
 
 	clippingGeminiClaimActive    clippingGeminiClaimState = "active"
 	clippingGeminiClaimRetryWait clippingGeminiClaimState = "retry_wait"
@@ -37,7 +37,7 @@ type ClippingGeminiAttempt struct {
 	JobID        string
 	AttemptID    string
 	Attempt      int
-	Phase        clippingGeminiAttemptPhase
+	Phase        ClippingGeminiAttemptPhase
 	Outcome      clippingGeminiPersistedOutcome
 	FailureCode  string
 	HTTPStatus   int
