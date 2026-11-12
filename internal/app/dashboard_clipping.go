@@ -212,6 +212,7 @@ func (a *dashboardApp) clippingConfig(w http.ResponseWriter, _ *http.Request) {
 		"max_source_bytes":     MaxClippingSourceBytes,
 		"max_duration_ms":      MaxClippingSourceDurationMS,
 		"allowed_import_kinds": []ClippingSourceKind{ClippingSourceYouTube},
+		"gemini":               clippingGeminiDescriptor(os.Getenv),
 	})
 }
 
