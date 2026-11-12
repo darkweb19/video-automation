@@ -4,6 +4,9 @@ Start with the repository [README](../README.md) for setup and everyday workflow
 
 ## Clipping
 
+- [Gemini migration](clipping/GEMINI-MIGRATION.md) — current phased migration, architectural decisions and acceptance gates; production routing remains legacy during the foundation phase.
+- [Gemini provider contract](clipping/GEMINI-PROVIDER.md) — ADC integration, request limits, outcome handling and documentation sources.
+
 - [Implementation plan](clipping/PLAN.md) — product scope and milestone acceptance criteria. The tracker records what is complete.
 - [M2 source and job workflow](clipping/M2-IMPLEMENTATION.md) — historical source, upload, batch, budget, and API design; superseded by the current YouTube-only Clipping workflow.
 - [Public YouTube import](clipping/YOUTUBE-IMPORT.md) — current URL rules, media handling, transfer limits, diagnostics, and support limits.

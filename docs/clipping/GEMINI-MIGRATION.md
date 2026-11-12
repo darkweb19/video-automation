@@ -4,9 +4,9 @@ Authorized 2026-11-10 (America/Toronto). Baseline: `c85d376` on the local `work`
 
 ## Execution and authorization
 
-The user authorized implementation in phases, at least 15 meaningful non-empty commits per phase, Terra and LUNA agents at maximum reasoning, and the main thread as CTO/task owner. Each phase requires current README.md and AGENTS.md, relevant passing checks, independent review, and a reconciled tracker/handoff. Root coordinates architecture, integration, Git and central records; agents author implementation and tests. Actual requested models are `gpt-6.1-terra` / `max` and `gpt-6-luna` / `max`.
+The user authorized implementation in phases, at least 15 meaningful non-empty commits per phase, Terra and LUNA agents at maximum reasoning, and the main thread as CTO/task owner. Each phase requires current README.md and AGENTS.md, relevant passing checks, independent review, and a reconciled tracker/handoff. The user subsequently explicitly selected automatic continuation through all phases; do not ask for approval at each phase boundary. Root coordinates architecture, integration, Git and central records; agents author implementation and tests. Actual requested models are `gpt-6.1-terra` / `max` and `gpt-6-luna` / `max`.
 
-Local implementation and commits are authorized. This instruction does not authorize deployment, infrastructure changes, live paid inference, source downloads, extractor integration, merge, force-push, main-branch changes, or remote publication of this migration. Work stays on the supplied local `work` branch. Do not reuse historical task-specific push permissions. Do not pad commit counts with empty commits or arbitrary formatting changes.
+Local implementation and commits are authorized. This instruction does not authorize deployment, infrastructure changes, live paid inference, source downloads, extractor integration, merge, force-push, main-branch changes, or remote publication of this migration. Integration stays on the supplied local `work` branch. The CTO may assign isolated local worktrees/branches for dependency-ready drafts and integrate their reviewed commits in phase order. Do not reuse historical task-specific push permissions. Do not pad commit counts with empty commits or arbitrary formatting changes.
 
 ## Architectural decisions
 

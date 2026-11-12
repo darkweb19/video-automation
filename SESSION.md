@@ -1,9 +1,15 @@
-# Session handoff — 2026-11-10, Gemini phased migration
+# Session handoff — 2026-11-12, Gemini phased migration
+
+- Latest steering: automatic continuation through all phases is explicitly authorized; no phase permission prompts. Integrate verified commits on local `work`; isolated agent worktrees/commits are allowed. No remote publication, paid inference, deployment or infrastructure changes.
+- Following a session restart, actual replacement agents are client_finish (LUNA Max), wire_finish (Terra Max), persistence_finish (Terra Max), review_finish (Terra Max) and orchestration_plan (LUNA Max, read-only G3 design). Previous agent files and commits were retained.
+- G1 currently has 18 meaningful commits through `188aa4a`; ADC client/wire finalization remains. LUNA Max owns client; Terra Max owns wire tests; separate Terra Max reviewer. Core contracts/request/response/transport are reviewed. Full Go/race/vet/static build passed at foundation checkpoint `cefaef5`, not yet final client. Toolchain Go1.27.3 under /workspace/work/toolchains/go; GOPATH /workspace/work/go, GOCACHE /workspace/work/go-cache, GOMAXPROCS=2, GOTOOLCHAIN=local.
+- G2 dependency-ready draft is authorized in /workspace/work/gemini-g2 (branch codex/gemini-g2, base188aa4a), owned by Terra Max agent gemini_contracts. Agent may make >=15 meaningful local commits. Root integrates after G1 acceptance and G2 independent review. Draft scope is URL reference constraints/migration/backup, nullable file metadata, encrypted canonical references, immutable provider snapshots/jobs, provider guards, cache and v3 artifacts; no runtime/API activation. Root owns central docs.
+- Stable shared key helper: clippingGeminiRequestFingerprint(config ClippingGeminiConfig, request ClippingGeminiRequest), derived from canonical URL/config/model/static settings/options and exact prompt/schema digests. It is not a media hash. G2 snapshots exclude URL, which stays encrypted/source-owned; legacy YouTube file IDs may be reanalyzed remotely using their stored URL without reading local media.
 
 - User has now authorized implementation in phases, >=15 meaningful commits per phase, Terra and LUNA at max, and root as CTO/task owner. Read docs/clipping/GEMINI-MIGRATION.md and the newest TRACKER/AGENTS entries; prior task-specific restrictions are historical for this migration.
 - Baseline clean local work branch c85d376. Local commits only. No paid/live inference, deployments, infrastructure changes, remote publication, main changes, merge, force-push or extractor integration.
 - G1 in progress: isolated contracts/validator/schema/fixtures and official ADC-only SDK provider-feasibility foundations. No production UI/processor/persistence activation. Terra Max owns contracts; LUNA Max owns client; root owns architecture, docs, integration, Git; independent review pending.
-- No live Google identity/allowed inference endpoint is configured. Live feasibility, semantic quality, language/cost measurements and long-video capability remain pending. No tests have passed for this phase yet.
+- No live Google identity/allowed inference endpoint is configured. Live feasibility, semantic quality, language/cost measurements and long-video capability remain pending. Offline foundation checks are recorded above.
 
 ---
 

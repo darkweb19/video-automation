@@ -1,15 +1,21 @@
 # AI clipping tracker
 
-Last updated: 2026-10-15 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
+Last updated: 2026-11-12 (America/Toronto). This file is the authoritative status and authorization record. Scope/acceptance: [PLAN.md](PLAN.md). Architecture: [ADR-004](../architecture/004-ai-clipping.md). Agent workflow: [AGENTS.md](../../AGENTS.md).
 
 ## Current checkpoint
 
 ### G1 — Gemini provider-feasibility foundations — 2026-11-10
 
+- Follow-up authorization: user explicitly selected “Continue automatically through all phases” and said “continue”. Local implementation continues without phase permission prompts; external paid/deploy/publication limits remain unchanged.
+- G2 dependency-ready draft assignment: `gemini_contracts` / actual `gpt-6.1-terra` / `max`, isolated `/workspace/work/gemini-g2`, local branch `codex/gemini-g2`, base `188aa4a`. Owns source migration, reference persistence, immutable Gemini jobs/cache/provider isolation and tests. Authorized >=15 meaningful local commits on that branch; root integrates only after G1 acceptance and independent G2 review. No source/production activation on integration branch yet. The G1 fingerprint contract is stable; the G2 draft does not depend on unfinished ADC construction.
+- Other actual G1 contributors: `gemini_ci` / LUNA Max (credential-free CI); `gemini_transport` / Terra Max (bounded fixed-origin HTTP transport, response adapter and wire tests); `gemini_review` / Terra Max (independent read-only review). Root remains architecture/Git/docs/integration owner.
+- G1 progress: 18 meaningful commits through `188aa4a`. Core contract/schema/request/response/transport review is complete; ADC factory and final wire verification are in progress. Review found and fixed default JSON escaping size expansion (`e8605ef`) and neutral prompt-feedback handling (included in `548e4f0`).
+- Verified foundation checkpoint at `cefaef5` in isolated verification worktree: full Go suite passes (app 45.940s), focused Gemini race tests pass (1.590s), vet and CGO-disabled service build pass. Earlier legacy dashboard tests pass 106/106 and Python callback delivery passes. These do not establish unexecuted final-client checks or any live feasibility.
+
 - User authorized phased implementation with >=15 meaningful commits per phase, Terra/LUNA Max agents and main as CTO. Current phase scope and gates: [GEMINI-MIGRATION.md](GEMINI-MIGRATION.md). This supersedes historical task-specific model/scope restrictions for the migration.
 - Baseline: clean local `work` branch at `c85d376ca761b4fcfdd3e1627edc0d9ed15ffcca`. Local commits only; no new remote publication, live paid inference, deployment, infrastructure mutation, merge/force-push or main changes authorized.
 - Actual implementation owners: `gemini_contracts` / `gpt-6.1-terra` / `max` (new contract/validator/schema/fixtures); `gemini_client` / `gpt-6-luna` / `max` (isolated SDK/config/prompt/request/response/client). Root owns central docs/Git/integration; independent reviewer to be assigned after substantive code exists. Shared contracts are agreed before edits; ownership is disjoint.
-- Status: in progress. No code checks or live feasibility passed yet. Production still uses the existing YouTube import/Modal clipping path. G1 must not activate its replacement.
+- Status: in progress. Offline foundation checks are recorded above; live feasibility remains unverified. Production still uses the existing YouTube import/Modal clipping path. G1 must not activate its replacement.
 - Environment reports no Google identity/secrets and disallows Google inference endpoints. Live provider/quality/cost gates stay pending; no paid call is attempted. The installed `/usr/bin/go` is not the Go compiler; an official checksum-verified workspace toolchain is being provisioned for local checks.
 - Next action: complete and independently review the versioned contract and single-attempt ADC client through reviewable commit slices, then reconcile evidence/README/AGENTS/handoff.
 

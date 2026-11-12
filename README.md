@@ -14,6 +14,12 @@ Jump to [Quick start](#quick-start), [Create videos](#create-videos), [Clipping]
 
 The optional analysis worker is not deployed by default. Candidate selection is heuristic. M1 remains skipped, not passed: its remaining real-media feasibility work was waived, so quality and language performance remain unmeasured. Clipping currently supports public YouTube links only; live import success has not been verified and availability is best-effort. The Clipping page does not edit or export candidate videos. See the [clipping plan](docs/clipping/PLAN.md) and [documentation index](docs/README.md) for status and operator guides.
 
+## Gemini migration in progress
+
+The [phased migration](docs/clipping/GEMINI-MIGRATION.md) adds direct public YouTube analysis through Google Cloud Gemini with Application Default Credentials. In the target workflow Gemini selects and ranks clips, and the backend validates and stores its decisions. The isolated provider foundation is implemented, with final client review underway. The dashboard still uses the legacy workflow described below until the persistence, orchestration and dashboard phases are integrated.
+
+Offline tests do not establish live YouTube availability or editorial quality. Google’s YouTube input support is Preview; the initial Gemini path targets videos up to 40 minutes, not the legacy four-hour import limit. Scores are editorial estimates and timestamps are proposed boundaries. Media extraction and `youtube-extractor-rs` integration remain outside this migration phase.
+
 ## Quick start
 
 Install Docker with Compose, then start the app:
@@ -99,7 +105,7 @@ Enter it under **Forgot password?** on the sign-in screen. It expires after 15 m
 
 ## Development
 
-The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go and FFmpeg. Native YouTube imports also need the pinned yt-dlp/Deno runtime and ffprobe. See the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for runtime details.
+The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go 1.24 or newer and FFmpeg. Native YouTube imports also need the pinned yt-dlp/Deno runtime and ffprobe. See the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for runtime details.
 
 Run locally with a writable data directory:
 
