@@ -201,6 +201,9 @@ func (s *Store) migrateClipping() error {
 	if err := s.migrateClippingGeminiCache(); err != nil {
 		return fmt.Errorf("initialize Gemini analysis cache: %w", err)
 	}
+	if err := s.migrateClippingGeminiLifecycle(); err != nil {
+		return fmt.Errorf("initialize Gemini attempt lifecycle: %w", err)
+	}
 	if err := s.migrateClippingCompatibilityState(); err != nil {
 		return fmt.Errorf("migrate clipping compatibility state: %w", err)
 	}
