@@ -39,9 +39,9 @@ type clippingSourceView struct {
 	Status         ClippingSourceStatus       `json:"status"`
 	RightsAttested bool                       `json:"rights_attested"`
 	OriginalName   string                     `json:"original_name"`
-	MediaType      string                     `json:"media_type"`
-	SizeBytes      int64                      `json:"size_bytes"`
-	DurationMS     int64                      `json:"duration_ms"`
+	MediaType      *string                    `json:"media_type,omitempty"`
+	SizeBytes      *int64                     `json:"size_bytes,omitempty"`
+	DurationMS     *int64                     `json:"duration_ms,omitempty"`
 	SHA256         string                     `json:"sha256,omitempty"`
 	Progress       int                        `json:"progress"`
 	Error          string                     `json:"error,omitempty"`
@@ -91,13 +91,18 @@ func clippingSourceSummary(source ClippingSource) clippingSourceView {
 		progress = 100
 	}
 	mediaURL := ""
-	if source.Status == ClippingSourceReady {
+	var mediaType *string
+	var sizeBytes, durationMS *int64
+	if source.Kind != ClippingSourceYouTubeURL {
+		mediaType, sizeBytes, durationMS = &source.MediaType, &source.SizeBytes, &source.DurationMS
+	}
+	if source.Status == ClippingSourceReady && source.Kind != ClippingSourceYouTubeURL {
 		mediaURL = "/api/clipping/sources/" + source.ID + "/media"
 	}
 	return clippingSourceView{
 		ID: source.ID, Kind: source.Kind, Status: source.Status, RightsAttested: source.RightsAttested, OriginalName: source.OriginalName,
-		MediaType: source.MediaType, SizeBytes: source.SizeBytes,
-		DurationMS: source.DurationMS, SHA256: source.SHA256,
+		MediaType: mediaType, SizeBytes: sizeBytes,
+		DurationMS: durationMS, SHA256: source.SHA256,
 		Progress: progress, Error: source.Failure, ErrorMessage: clippingSourceErrorMessage(source.Failure), Diagnostics: source.Diagnostics, MediaURL: mediaURL,
 		CreatedAt: source.CreatedAt, UpdatedAt: source.UpdatedAt,
 	}
@@ -296,7 +301,7 @@ func (a *dashboardApp) clippingSourceMedia(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	source, err := a.store.ClippingSource(id)
-	if err != nil || source.Status != ClippingSourceReady {
+	if err != nil || source.Status != ClippingSourceReady || source.Kind == ClippingSourceYouTubeURL {
 		writeError(w, http.StatusNotFound, "clipping source media not found")
 		return
 	}
