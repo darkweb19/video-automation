@@ -27,8 +27,8 @@ const (
 )
 
 const (
-	clippingWorkerRustVisualEventsVersion = "rust-scene-v1-gray-histogram-motion"
-	clippingWorkerRustCandidateInspectionVersion = "rust-scene-dense-v1"
+	clippingWorkerRustVisualEventsVersion          = "rust-scene-v1-gray-histogram-motion"
+	clippingWorkerRustCandidateInspectionVersion   = "rust-scene-dense-v1"
 	clippingWorkerFFmpegCandidateInspectionVersion = "ffmpeg-dense-candidate-window-v2-profile-pool"
 )
 
@@ -376,14 +376,6 @@ func validClippingAnalysisProvenance(core clippingAnalysisCore) bool {
 
 func validClippingPipelineRevision(value string) bool {
 	return clippingPipelineRevisionPattern.MatchString(value)
-}
-
-func validLowerHexDigest(value string) bool {
-	if len(value) != 64 || strings.ToLower(value) != value {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
 }
 
 func validTimelineRange(start, end, duration int64) bool {
