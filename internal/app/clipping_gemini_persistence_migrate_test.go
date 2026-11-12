@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -212,5 +214,36 @@ func assertClippingForeignKeys(t *testing.T, db *sql.DB) {
 	defer rows.Close()
 	if rows.Next() || rows.Err() != nil {
 		t.Fatalf("foreign key violations after migration: %v", rows.Err())
+	}
+}
+
+func TestClippingReferenceBackupFailureCanDeferWithoutEnablingWrites(t *testing.T) {
+	store := newTestStore(t)
+	security, err := NewSecurity(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := makeReadyClippingSource(t, store, 60_000)
+	if _, err := store.db.Exec(`DELETE FROM clipping_schema_migrations WHERE version=?`, clippingReferenceMigrationVersion); err != nil {
+		t.Fatal(err)
+	}
+	backupFailure := func(context.Context, *sql.Conn, string) (string, error) { return "", errors.New("backup unavailable") }
+	if err := store.migrateClippingReferenceSchemaWithBackup(true, backupFailure, true); err != nil {
+		t.Fatalf("deferred migration: %v", err)
+	}
+	if _, err := store.ClippingSource(source.ID); err != nil {
+		t.Fatalf("legacy source unavailable: %v", err)
+	}
+	if _, err := store.CreateClippingYouTubeReference(security, "https://youtu.be/abcdefghijk", true, 0); !errors.Is(err, ErrClippingGeminiPersistenceUnavailable) {
+		t.Fatalf("deferred migration permitted reference write: %v", err)
+	}
+	if err := store.migrateClippingReferenceSchemaWithBackup(true, backupFailure, false); err == nil {
+		t.Fatal("non-deferred backup failure was ignored")
+	}
+	if err := store.migrateClippingReferenceSchema(true); err != nil {
+		t.Fatalf("retry migration: %v", err)
+	}
+	if _, err := store.CreateClippingYouTubeReference(security, "https://youtu.be/abcdefghijk", true, 0); err != nil {
+		t.Fatalf("reference after successful migration: %v", err)
 	}
 }

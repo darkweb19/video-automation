@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -93,7 +94,14 @@ type clippingMigrationSchemaObject struct {
 // migrateClippingReferenceSchema rebuilds both parent tables as one atomic
 // operation. SQLite's foreign-key pragma is connection-local and must be
 // changed outside the transaction; all child references retain their names.
-func (s *Store) migrateClippingReferenceSchema(existing bool) (resultErr error) {
+func (s *Store) migrateClippingReferenceSchema(existing bool) error {
+	return s.migrateClippingReferenceSchemaWithBackup(existing, backupClippingDatabase, runtime.GOOS == "windows")
+}
+
+// On Windows the existing app must remain usable when a durable private
+// backup cannot be established. The migration marker remains absent and all
+// Gemini persistence entry points reject writes until a migration succeeds.
+func (s *Store) migrateClippingReferenceSchemaWithBackup(existing bool, backup func(context.Context, *sql.Conn, string) (string, error), deferBackupFailure bool) (resultErr error) {
 	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -120,7 +128,10 @@ func (s *Store) migrateClippingReferenceSchema(existing bool) (resultErr error) 
 	if err := validateClippingMigrationColumns(ctx, conn, "clipping_jobs", clippingJobColumns()); err != nil {
 		return err
 	}
-	if _, err := backupClippingDatabase(ctx, conn, s.dataDir); err != nil {
+	if _, err := backup(ctx, conn, s.dataDir); err != nil {
+		if deferBackupFailure {
+			return nil
+		}
 		return err
 	}
 	var enabled int
@@ -258,3 +269,18 @@ func clippingMigrationSchemaObjects(ctx context.Context, tx *sql.Tx) ([]clipping
 	}
 	return objects, rows.Err()
 }
+
+// requireClippingGeminiPersistence prevents reference and snapshot writes on
+// a legacy database for which the reference rebuild was deferred.
+func (s *Store) requireClippingGeminiPersistence() error {
+	if s == nil || s.db == nil {
+		return ErrClippingGeminiPersistenceUnavailable
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM clipping_schema_migrations WHERE version=?`, clippingReferenceMigrationVersion).Scan(&count); err != nil || count != 1 {
+		return ErrClippingGeminiPersistenceUnavailable
+	}
+	return nil
+}
+
+var ErrClippingGeminiPersistenceUnavailable = errors.New("Gemini clipping persistence is unavailable until its database migration succeeds")

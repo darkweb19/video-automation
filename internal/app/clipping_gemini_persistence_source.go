@@ -10,7 +10,10 @@ import (
 // without acquiring media. Ready means the reference is accepted, not that
 // Gemini or YouTube has verified the video or its duration.
 func (s *Store) CreateClippingYouTubeReference(security *Security, rawURL string, rightsAttested bool, retainUntil int64) (ClippingSource, error) {
-	if s == nil || security == nil || security.store != s {
+	if err := s.requireClippingGeminiPersistence(); err != nil {
+		return ClippingSource{}, err
+	}
+	if security == nil || security.store != s {
 		return ClippingSource{}, errors.New("source URL encryption is unavailable")
 	}
 	if !rightsAttested {
