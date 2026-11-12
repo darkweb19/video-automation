@@ -39,7 +39,10 @@ func clippingGeminiPolicyForAttempt(err error, attempt int) clippingGeminiAttemp
 	case clippingGeminiAttemptNotSubmitted:
 		policy.Outcome = clippingGeminiOutcomeNotSubmitted
 		policy.FailureCode = "request_not_submitted"
-		policy.MayRetryWithoutDuplicate = true
+		if attempt >= 1 && attempt < clippingGeminiMaxSubmissionAttempts && clippingGeminiNotSubmittedMayRetry(attemptErr) {
+			policy.MayRetryWithoutDuplicate = true
+			policy.RetryDelaySeconds = int64(clippingGeminiNotSubmittedRetryDelay.Seconds())
+		}
 	case clippingGeminiAttemptExplicitRejection:
 		policy.Outcome = clippingGeminiOutcomeExplicitRejection
 		policy.FailureCode = "provider_rejected_request"
@@ -61,6 +64,26 @@ func clippingGeminiPolicyForAttempt(err error, attempt int) clippingGeminiAttemp
 		policy.FailureCode = "outcome_unknown"
 	}
 	return policy
+}
+
+func clippingGeminiNotSubmittedMayRetry(attemptErr *clippingGeminiAttemptError) bool {
+	if attemptErr == nil {
+		return false
+	}
+	for _, permanent := range []error{
+		ErrClippingGeminiInvalidConfig,
+		ErrClippingGeminiInvalidOptions,
+		ErrClippingGeminiInvalidRequest,
+		errClippingGeminiCredentialsUnavailable,
+		errClippingGeminiClientUnavailable,
+		errClippingGeminiInvalidDestination,
+		errClippingGeminiSourceTooLong,
+	} {
+		if errors.Is(attemptErr.reason, permanent) {
+			return false
+		}
+	}
+	return true
 }
 
 func safeClippingGeminiHTTPStatus(status int) int {

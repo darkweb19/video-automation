@@ -9,6 +9,7 @@ import (
 const (
 	clippingGeminiWorkerCount             = 2
 	clippingGeminiMaxSubmissionAttempts   = 4
+	clippingGeminiNotSubmittedRetryDelay  = 15 * time.Second
 	clippingGemini429BackoffBase          = 30 * time.Second
 	clippingGemini429BackoffMaximum       = 15 * time.Minute
 	clippingGeminiSubmissionLeaseDuration = clippingGeminiRequestTimeout + 30*time.Second

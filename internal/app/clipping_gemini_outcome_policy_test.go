@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -20,7 +21,19 @@ func TestClippingGeminiPolicyPreservesSafeOutcomeClasses(t *testing.T) {
 		{
 			name: "not submitted",
 			err:  &clippingGeminiAttemptError{outcome: clippingGeminiAttemptNotSubmitted, reason: errClippingGeminiCredentialsUnavailable},
-			want: clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeNotSubmitted, FailureCode: "request_not_submitted", MayRetryWithoutDuplicate: true},
+			want: clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeNotSubmitted, FailureCode: "request_not_submitted"},
+		},
+		{
+			name:    "transient preflight",
+			err:     &clippingGeminiAttemptError{outcome: clippingGeminiAttemptNotSubmitted, reason: context.Canceled},
+			attempt: 1,
+			want:    clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeNotSubmitted, FailureCode: "request_not_submitted", MayRetryWithoutDuplicate: true, RetryDelaySeconds: int64(clippingGeminiNotSubmittedRetryDelay.Seconds())},
+		},
+		{
+			name:    "last not submitted attempt is terminal",
+			err:     &clippingGeminiAttemptError{outcome: clippingGeminiAttemptNotSubmitted},
+			attempt: clippingGeminiMaxSubmissionAttempts,
+			want:    clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeNotSubmitted, FailureCode: "request_not_submitted"},
 		},
 		{
 			name:    "429 retry",
