@@ -39,6 +39,16 @@ func TestUncertainAndUnreviewedCandidatesCannotCarryRubricScores(t *testing.T) {
 			t.Fatalf("candidate status %q accepted ratings without a completed review", candidate.Status)
 		}
 	}
+	reviewedButUncertain := CandidateReview{
+		Rank: 1, Status: "reviewed", Usability: "uncertain", StartBoundaryFit: "within", EndBoundaryFit: "within",
+		Dimensions: ReviewDimensions{
+			Completeness: intPointer(3), Context: intPointer(3), Hook: intPointer(3), Emotion: intPointer(3),
+			Humor: intPointer(3), VisualEvidence: intPointer(3), Standalone: intPointer(3),
+		},
+	}
+	if err := validateCandidateReview(reviewedButUncertain); err == nil {
+		t.Fatal("candidate with uncertain usability was allowed as a completed binary review")
+	}
 }
 
 func TestSyntheticCorpusCannotClaimRightsAttestation(t *testing.T) {

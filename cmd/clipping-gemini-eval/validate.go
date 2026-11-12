@@ -250,7 +250,7 @@ func validateCandidateReview(review CandidateReview) error {
 		review.SameMomentConfirmed || review.StartBoundaryFit != "unknown" || review.EndBoundaryFit != "unknown" || hasDimensions(review.Dimensions)) {
 		return errInvalidDataset
 	}
-	if review.Status == "reviewed" && review.Usability == "not_rated" {
+	if review.Status == "reviewed" && review.Usability != "usable" && review.Usability != "not_usable" {
 		return errInvalidDataset
 	}
 	if review.Status == "reviewed" && (!allDimensionsPresent(review.Dimensions) || review.StartBoundaryFit == "unknown" || review.EndBoundaryFit == "unknown") {
