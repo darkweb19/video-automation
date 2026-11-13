@@ -237,7 +237,13 @@ func (s *Store) DeleteClippingAnalysis(jobID string) error {
 	if _, err := tx.Exec(`UPDATE clipping_jobs SET analysis_deleted=1,updated_at=? WHERE id=?`, time.Now().Unix(), jobID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if job.Provider == ClippingProviderGemini {
+		s.clippingGeminiCancellationRegistry().cancelJob(jobID)
+	}
+	return nil
 }
 
 func loadClippingAnalysisCacheTx(tx *sql.Tx, source ClippingSource, revision string) (clippingAnalysisCore, bool, error) {

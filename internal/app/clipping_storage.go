@@ -1358,6 +1358,7 @@ func (s *Store) DeleteClippingSource(id string) ([]string, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	s.clippingGeminiCancellationRegistry().cancelJobs(jobIDs)
 	return jobIDs, nil
 }
 
@@ -2692,12 +2693,21 @@ func (s *Store) CancelClippingJob(id string) error {
 	if err := cancelClippingJobTx(tx, &job, now); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if job.Provider == ClippingProviderGemini {
+		s.clippingGeminiCancellationRegistry().cancelJob(id)
+	}
+	return nil
 }
 
 func cancelClippingJobTx(tx *sql.Tx, job *ClippingJob, now int64) error {
 	if clippingJobTerminal(job.Status) {
 		return nil
+	}
+	if job.Provider == ClippingProviderGemini {
+		return cancelClippingGeminiJobTx(tx, job, now)
 	}
 	rows, err := tx.Query(`SELECT `+clippingStageColumns()+` FROM clipping_stages WHERE job_id=? AND status IN ('queued','running','paused_budget','uncertain')`, job.ID)
 	if err != nil {
