@@ -1098,7 +1098,7 @@ func (s *Store) FailedClippingSources(limit int) ([]ClippingSource, error) {
 		limit = 100
 	}
 	rows, err := s.db.Query(`SELECT `+clippingSourceColumns()+` FROM clipping_sources
-		WHERE status='failed' AND reserved_size_bytes>0 AND failure<>'legacy_source_import_unsupported'
+		WHERE status='failed' AND reserved_size_bytes>0 AND failure NOT IN ('legacy_source_import_unsupported','legacy_source_import_retired')
 		ORDER BY updated_at,created_at,id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err

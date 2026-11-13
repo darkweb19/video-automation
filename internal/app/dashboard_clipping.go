@@ -125,6 +125,8 @@ func clippingSourceErrorMessage(code string) string {
 		return "The YouTube import was interrupted. Try importing it again."
 	case "legacy_source_import_unsupported":
 		return "This source came from a removed import workflow. Import a public YouTube video to continue."
+	case "legacy_source_import_retired":
+		return "This import was stopped because legacy clipping was retired. Submit the public YouTube link for Gemini analysis."
 	case "track_transfer_aborted":
 		return "A YouTube media stream stopped before the source was complete. Retry the import."
 	case "":
