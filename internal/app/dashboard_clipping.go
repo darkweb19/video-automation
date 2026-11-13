@@ -248,7 +248,7 @@ func (a *dashboardApp) clippingConfig(w http.ResponseWriter, _ *http.Request) {
 		"worker_state":         "unavailable",
 		"max_source_bytes":     MaxClippingSourceBytes,
 		"max_duration_ms":      MaxClippingSourceDurationMS,
-		"allowed_import_kinds": []ClippingSourceKind{ClippingSourceYouTube},
+		"allowed_import_kinds": []ClippingSourceKind{},
 		"gemini":               clippingGeminiDescriptor(os.Getenv),
 	})
 }
@@ -309,34 +309,6 @@ func (a *dashboardApp) deleteClippingSource(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *dashboardApp) createClippingImport(w http.ResponseWriter, r *http.Request) {
-	if !mutationAllowed(w, r) {
-		return
-	}
-	if !isJSON(r.Header.Get("Content-Type")) {
-		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
-	}
-	var input struct {
-		URL            string `json:"url"`
-		RightsAttested bool   `json:"rights_attested"`
-	}
-	if decodeJSONBody(w, r, &input) != nil {
-		return
-	}
-	if !input.RightsAttested {
-		writeError(w, http.StatusUnprocessableEntity, "confirm that you have permission to reuse and process this source")
-		return
-	}
-	source, err := a.clippingAcquisition.CreatePublicImport(r.Context(), input.RightsAttested, input.URL, a.retentionDeadline(time.Now()))
-	if err != nil {
-		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "this source cannot be imported from its public link"))
-		return
-	}
-	a.store.PublishClippingSource(source.ID)
-	writeJSON(w, http.StatusAccepted, map[string]any{"source": clippingSourceSummary(source)})
-}
-
 func (a *dashboardApp) clippingSourceMedia(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !safeID(id) {
@@ -389,55 +361,6 @@ func (a *dashboardApp) clippingJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job": view})
-}
-
-func (a *dashboardApp) createClippingJob(w http.ResponseWriter, r *http.Request) {
-	if !mutationAllowed(w, r) {
-		return
-	}
-	if !isJSON(r.Header.Get("Content-Type")) {
-		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
-	}
-	var input struct {
-		SourceID       string `json:"source_id"`
-		ContentType    string `json:"content_type"`
-		MinClipSeconds int    `json:"min_clip_seconds"`
-		MaxClipSeconds int    `json:"max_clip_seconds"`
-		CandidateLimit int    `json:"candidate_limit"`
-	}
-	if decodeJSONBody(w, r, &input) != nil {
-		return
-	}
-	key, ok := clippingIdempotencyKey(w, r)
-	if !ok {
-		return
-	}
-	selection, selectionErr := normalizeClippingSelection(ClippingJobCreate{
-		SourceID:    input.SourceID,
-		ContentType: input.ContentType, MinClipSeconds: input.MinClipSeconds,
-		MaxClipSeconds: input.MaxClipSeconds, CandidateLimit: input.CandidateLimit,
-	})
-	if selectionErr != nil {
-		writeError(w, http.StatusBadRequest, selectionErr.Error())
-		return
-	}
-	job, duplicate, err := a.store.CreateClippingJob(selection, key)
-	if err != nil {
-		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "could not queue clipping job"))
-		return
-	}
-	view, err := a.clippingJobResponse(job, false)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "clipping job was saved but could not be reloaded")
-		return
-	}
-	a.store.PublishClippingJob(job.ID)
-	status := http.StatusCreated
-	if duplicate {
-		status = http.StatusOK
-	}
-	writeJSON(w, status, map[string]any{"job": view, "duplicate": duplicate})
 }
 
 func (a *dashboardApp) clippingJobResults(w http.ResponseWriter, r *http.Request) {
@@ -541,24 +464,7 @@ func (a *dashboardApp) retryClippingJob(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "Gemini analysis retries are managed automatically")
 		return
 	}
-	stage, err := a.store.RetryClippingStage(id, input.StageName)
-	if err != nil {
-		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "clipping stage cannot be retried"))
-		return
-	}
-	job, err = a.store.ClippingJob(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stage was queued but job could not be reloaded")
-		return
-	}
-	_ = stage
-	view, err := a.clippingJobResponse(job, false)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stage was queued but job could not be reloaded")
-		return
-	}
-	a.store.PublishClippingJob(id)
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": view})
+	writeError(w, http.StatusGone, "Legacy clipping analysis and retries have been retired")
 }
 
 func clippingIdempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
