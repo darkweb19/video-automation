@@ -22,6 +22,10 @@ func TestEvaluateDatasetUsesHumanMatchesAndPreservesModelRanks(t *testing.T) {
 		report.Corpus.CoverageStatusCounts["complete"] != 1 || report.Corpus.CoverageStatusCounts["not_reviewed"] != 0 {
 		t.Fatalf("corpus lifecycle and coverage counts = %#v", report.Corpus)
 	}
+	if report.Corpus.OpportunityCount != 2 || report.Corpus.ExportableOpportunityCount != 2 ||
+		report.Corpus.OpportunityKindCounts["speech"] != 2 || report.Corpus.OpportunityLanguageCounts["en"] != 2 {
+		t.Fatalf("human opportunity summary = %#v", report.Corpus)
+	}
 	if len(report.Runs) != 1 {
 		t.Fatalf("run summaries = %#v", report.Runs)
 	}
@@ -113,7 +117,11 @@ func TestEvaluateDatasetWithholdsRecallWhenSourceCoverageIsPartial(t *testing.T)
 	if err := validateDataset(dataset); err != nil {
 		t.Fatalf("validate partial dataset: %v", err)
 	}
-	run := evaluateDataset(dataset).Runs[0]
+	result := evaluateDataset(dataset)
+	run := result.Runs[0]
+	if result.Corpus.OpportunityCount != 1 || result.Corpus.CoverageStatusCounts["partial"] != 1 {
+		t.Fatalf("partial coverage denominator was hidden: %#v", result.Corpus)
+	}
 	if run.HumanReviewStatus != "partial" || run.TopK.Recall != nil || run.TopK.RecallStatus != "insufficient_evidence" {
 		t.Fatalf("partial source coverage was treated as complete: %#v", run)
 	}

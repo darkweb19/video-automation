@@ -163,6 +163,10 @@ type CorpusSummary struct {
 	SourceStatusCounts          map[string]int `json:"source_status_counts"`
 	RightsStatusCounts          map[string]int `json:"rights_status_counts"`
 	CoverageStatusCounts        map[string]int `json:"coverage_status_counts"`
+	OpportunityCount            int            `json:"opportunity_count"`
+	ExportableOpportunityCount  int            `json:"exportable_opportunity_count"`
+	OpportunityKindCounts       map[string]int `json:"opportunity_kind_counts"`
+	OpportunityLanguageCounts   map[string]int `json:"opportunity_language_counts"`
 	OperatorRightsAttestedCount int            `json:"operator_rights_attested_count"`
 	HumanDurationCount          int            `json:"human_duration_count"`
 	CompleteSourceReviewCount   int            `json:"complete_source_review_count"`

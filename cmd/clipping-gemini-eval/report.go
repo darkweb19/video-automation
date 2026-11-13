@@ -30,9 +30,11 @@ func evaluateDataset(data Dataset) EvaluationReport {
 		Runs:        make([]RunSummary, 0, len(data.Runs)),
 		RankSummary: make([]RankSummary, 0),
 		Corpus: CorpusSummary{
-			SourceStatusCounts:   emptyCounts("synthetic", "pending", "ready", "excluded"),
-			RightsStatusCounts:   emptyCounts("unknown", "confirmed", "denied"),
-			CoverageStatusCounts: emptyCounts("not_reviewed", "partial", "complete"),
+			SourceStatusCounts:        emptyCounts("synthetic", "pending", "ready", "excluded"),
+			RightsStatusCounts:        emptyCounts("unknown", "confirmed", "denied"),
+			CoverageStatusCounts:      emptyCounts("not_reviewed", "partial", "complete"),
+			OpportunityKindCounts:     emptyCounts("speech", "non_speech_audio", "visual_only"),
+			OpportunityLanguageCounts: make(map[string]int),
 		},
 		ExternalReadiness: ExternalReadiness{
 			ProviderAvailability: "unverified_live",
@@ -57,6 +59,22 @@ func evaluateDataset(data Dataset) EvaluationReport {
 		coverageStatus := "not_reviewed"
 		if hasReview {
 			coverageStatus = review.CoverageStatus
+			for _, opportunity := range review.Opportunities {
+				report.Corpus.OpportunityCount++
+				if opportunity.Exportable {
+					report.Corpus.ExportableOpportunityCount++
+				}
+				for _, kind := range opportunity.Kinds {
+					report.Corpus.OpportunityKindCounts[kind]++
+				}
+				if len(opportunity.LanguageCodes) == 0 {
+					report.Corpus.OpportunityLanguageCounts["unknown"]++
+				} else {
+					for _, language := range opportunity.LanguageCodes {
+						report.Corpus.OpportunityLanguageCounts[strings.ToLower(language)]++
+					}
+				}
+			}
 		}
 		report.Corpus.CoverageStatusCounts[coverageStatus]++
 		if hasReview && sourceReviewComplete(review, source) {
