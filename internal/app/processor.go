@@ -255,6 +255,13 @@ func (p *Processor) runClippingStageRecovery(ctx context.Context) {
 
 func (p *Processor) recoverClippingStages() error {
 	now := time.Now().Unix()
+	expiredGemini, err := p.app.store.ExpireQueuedClippingGeminiJobs(now)
+	if err != nil {
+		return err
+	}
+	for _, jobID := range expiredGemini {
+		p.app.store.PublishClippingJob(jobID)
+	}
 	expired, err := p.app.store.ExpiredClippingStages(now, 100)
 	if err != nil {
 		return err
