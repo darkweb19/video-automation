@@ -7,17 +7,18 @@ import (
 )
 
 const (
-	evaluationInputVersion  = "framevault.clipping.gemini.evaluation.v1"
-	evaluationReportVersion = "framevault.clipping.gemini.evaluation-report.v1"
-	maxEvaluationInputBytes = 8 << 20
-	maxEvaluationSources    = 256
-	maxEvaluationRuns       = 512
-	maxEvaluationReviews    = 512
-	maxEvaluationLabels     = 64
-	minimumReviewers        = 2
-	maxEvaluationEvents     = 20_000
-	maxEvaluationCandidates = 10
-	topK                    = 10
+	evaluationInputVersion   = "framevault.clipping.gemini.evaluation.v1"
+	evaluationReportVersion  = "framevault.clipping.gemini.evaluation-report.v1"
+	maxEvaluationInputBytes  = 8 << 20
+	maxEvaluationReportBytes = 4 << 20
+	maxEvaluationSources     = 256
+	maxEvaluationRuns        = 512
+	maxEvaluationReviews     = 512
+	maxEvaluationLabels      = 64
+	minimumReviewers         = 2
+	maxEvaluationEvents      = 20_000
+	maxEvaluationCandidates  = 10
+	topK                     = 10
 )
 
 const (

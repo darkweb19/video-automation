@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -47,10 +48,26 @@ func run(args []string, stdin io.Reader, output io.Writer) error {
 	if err != nil {
 		return errEvaluationCLI
 	}
-	encoder := json.NewEncoder(output)
+	report := boundedReportBuffer{limit: maxEvaluationReportBytes}
+	encoder := json.NewEncoder(&report)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(evaluateDataset(dataset)); err != nil {
 		return errEvaluationCLI
 	}
+	if _, err := io.Copy(output, bytes.NewReader(report.buffer.Bytes())); err != nil {
+		return errEvaluationCLI
+	}
 	return nil
+}
+
+type boundedReportBuffer struct {
+	buffer bytes.Buffer
+	limit  int
+}
+
+func (b *boundedReportBuffer) Write(value []byte) (int, error) {
+	if b.limit < 0 || len(value) > b.limit-b.buffer.Len() {
+		return 0, errors.New("evaluation report size limit exceeded")
+	}
+	return b.buffer.Write(value)
 }

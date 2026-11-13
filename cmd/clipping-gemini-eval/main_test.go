@@ -83,3 +83,16 @@ func TestRunRejectsMissingStdinAndHidesOutputWriterErrors(t *testing.T) {
 		t.Fatalf("writer error = %v", err)
 	}
 }
+
+func TestBoundedReportBufferStopsOversizedOutputWithoutPartialJSON(t *testing.T) {
+	report := boundedReportBuffer{limit: 4}
+	if _, err := report.Write([]byte("1234")); err != nil {
+		t.Fatalf("write within report limit: %v", err)
+	}
+	if _, err := report.Write([]byte("5")); err == nil {
+		t.Fatal("report buffer accepted bytes beyond its limit")
+	}
+	if got := report.buffer.String(); got != "1234" {
+		t.Fatalf("oversized write changed the report buffer: %q", got)
+	}
+}
