@@ -33,6 +33,9 @@ Business and API documents define data policy. This file describes what the brow
 ## Shared interaction rules
 
 - API requests remain authenticated and same-origin. Existing logout lifecycle invalidation, stale-list response protection, SSE updates, and deleted-record tombstones remain active.
+- Clipping content type and suggestion count use native `<select>` controls; the browser or operating system owns their popup geometry and keyboard behavior. Their values remain part of the labeled analysis form.
+- While a submission's HTTP outcome is unresolved, keep its body and idempotency key only in memory. An explicit resend uses those exact values even if the visible options have changed; no automatic submission is made. Block other new submissions until that response is recovered because an unacknowledged link cannot yet be associated with a saved source. Known video-to-source associations stay in memory for the current session so the link form cannot bypass a visible active or unknown provider outcome.
+- Canceling an analysis is an app-owned confirmation and changes the saved local job. It does not assert that Google has stopped work already submitted. Deletion has a separate confirmation.
 - Forms use `novalidate`, associated labels, inline errors, preserved non-sensitive values, and duplicate-submit protection. Disabled states do not trigger actions.
 - Empty, loading, stale, and error states stay within their owning panel. Status text is visible and announced without moving the primary controls.
 - The page follows the existing responsive dashboard shell, visible focus style, keyboard-operable controls, and reduced-motion behavior. Browser-native `alert()`, `confirm()`, and `prompt()` are not product UI.

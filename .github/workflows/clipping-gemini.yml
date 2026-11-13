@@ -12,6 +12,12 @@ on:
       - "internal/app/security*.go"
       - "docs/clipping/contracts/**"
       - "testdata/clipping_gemini/**"
+      - "internal/webui/static/app.js"
+      - "internal/webui/static/clipping.js"
+      - "internal/webui/static/clipping.css"
+      - "internal/webui/static/index.html"
+      - "tests/clipping-ui.test.cjs"
+      - "tests/dashboard-ui.test.cjs"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/clipping-gemini.yml"
@@ -23,6 +29,12 @@ on:
       - "internal/app/security*.go"
       - "docs/clipping/contracts/**"
       - "testdata/clipping_gemini/**"
+      - "internal/webui/static/app.js"
+      - "internal/webui/static/clipping.js"
+      - "internal/webui/static/clipping.css"
+      - "internal/webui/static/index.html"
+      - "tests/clipping-ui.test.cjs"
+      - "tests/dashboard-ui.test.cjs"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/clipping-gemini.yml"
@@ -41,6 +53,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check dashboard JavaScript syntax
+        run: |
+          node --check internal/webui/static/app.js
+          node --check internal/webui/static/clipping.js
+      - name: Test clipping and dashboard interactions
+        run: node --test tests/clipping-ui.test.cjs tests/dashboard-ui.test.cjs
       - name: Install FFmpeg for offline media fixtures
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Test clipping provider and persistence compatibility
