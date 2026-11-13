@@ -98,3 +98,33 @@ func clippingRetirementIDs(tx *sql.Tx, query string, limit int) ([]string, error
 	}
 	return ids, rows.Err()
 }
+
+// reconcileRetiredClipping runs with the existing recovery cadence, without a
+// downloader or worker dispatch loop. Batches are bounded and repeatable.
+func (p *Processor) reconcileRetiredClipping(now int64) error {
+	const batchSize = 100
+	for {
+		ids, err := p.app.store.retirePendingClippingImports(now, batchSize)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			p.app.store.PublishClippingSource(id)
+		}
+		if len(ids) < batchSize {
+			break
+		}
+	}
+	for {
+		ids, err := p.app.store.retireNeverIssuedClippingJobs(now, batchSize)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			p.app.store.PublishClippingJob(id)
+		}
+		if len(ids) < batchSize {
+			return nil
+		}
+	}
+}

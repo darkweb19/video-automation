@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -280,7 +278,7 @@ func TestClippingCurrentAttemptResultErrorsFailAnalysis(t *testing.T) {
 func TestClippingRustSceneWorkerCallbackReconcilesDashboard(t *testing.T) {
 	for _, tc := range []struct {
 		name, visual, inspection string
-		completed bool
+		completed                bool
 	}{
 		{"rust-pair", clippingWorkerRustVisualEventsVersion, clippingWorkerRustCandidateInspectionVersion, true},
 		{"mixed-engine", clippingWorkerRustVisualEventsVersion, clippingWorkerFFmpegCandidateInspectionVersion, false},
@@ -341,8 +339,8 @@ func TestClippingRustSceneWorkerCallbackReconcilesDashboard(t *testing.T) {
 // truncated audio or incomplete visual scans must fail with a safe reason.
 func TestClippingAudioCoverageCallbackPublishesOnlyBoundedTail(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		audioGap int64
+		name      string
+		audioGap  int64
 		visualGap int64
 		completed bool
 	}{
@@ -448,26 +446,5 @@ func clippingAcceptDeleteFailureTestDispatch(t *testing.T, store *Store, securit
 	app := &dashboardApp{store: store, security: security}
 	if err := app.dispatchPreparedClippingStageWithDispatcher(context.Background(), prepared, dispatcher); err != nil {
 		t.Fatalf("submit clipping test attempt: %v", err)
-	}
-}
-
-func TestProcessorConfigurationErrorFailsQueuedAnalysis(t *testing.T) {
-	store, security, handler, cookie := clippingDashboardFixture(t)
-	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "processor-config-error-001")
-	if err := store.SetSetting(clippingWorkerConfigSetting, "invalid encrypted configuration"); err != nil {
-		t.Fatal(err)
-	}
-	processor := &Processor{app: &dashboardApp{store: store, security: security}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	worked, err := processor.processNextClippingAnalysis(context.Background())
-	if err != nil || worked {
-		t.Fatalf("processor handling queued config error: worked=%v error=%v", worked, err)
-	}
-	job, err := store.ClippingJob(jobView.ID)
-	if err != nil || job.Status != ClippingJobFailed || !strings.Contains(job.Error, "configuration") {
-		t.Fatalf("queued analysis did not fail visibly on configuration error: job=%+v error=%v", job, err)
-	}
-	if err := store.SetSetting(clippingWorkerConfigSetting, ""); err != nil {
-		t.Fatal(err)
 	}
 }
