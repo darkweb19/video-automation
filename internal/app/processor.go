@@ -262,6 +262,13 @@ func (p *Processor) recoverClippingStages() error {
 	for _, jobID := range expiredGemini {
 		p.app.store.PublishClippingJob(jobID)
 	}
+	quarantined, err := p.app.store.QuarantineQueuedClippingGeminiJobs(now)
+	if err != nil {
+		return err
+	}
+	for _, jobID := range quarantined {
+		p.app.store.PublishClippingJob(jobID)
+	}
 	expired, err := p.app.store.ExpiredClippingStages(now, 100)
 	if err != nil {
 		return err

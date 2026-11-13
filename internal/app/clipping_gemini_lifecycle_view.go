@@ -44,9 +44,8 @@ func (s *Store) ClippingGeminiLifecycle(jobID string, now int64) (ClippingGemini
 		return view, err
 	}
 	view.Attempts = len(attempts)
-	if len(attempts) == 0 {
-		err := s.db.QueryRow(`SELECT origin_job_id FROM clipping_gemini_cache_reuses WHERE job_id=?`, jobID).
-			Scan(&view.CacheOriginID)
+	if job.Status == ClippingJobCompleted {
+		err := s.db.QueryRow(`SELECT origin_job_id FROM clipping_gemini_cache_reuses WHERE job_id=?`, jobID).Scan(&view.CacheOriginID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return ClippingGeminiLifecycleView{}, err
 		}
@@ -54,10 +53,15 @@ func (s *Store) ClippingGeminiLifecycle(jobID string, now int64) (ClippingGemini
 			view.RetrySafety = ClippingGeminiRetrySafetyNone
 			return view, nil
 		}
+	}
+	if len(attempts) == 0 {
 		view.RetrySafety = ClippingGeminiRetrySafetyNone
 		if job.Status == ClippingJobFailed && job.Error != "" {
 			view.RetrySafety = ClippingGeminiRetrySafetyTerminal
 			view.ErrorCode = safeClippingGeminiFailureCode(job.Error)
+			if job.Error == "outcome_unknown" {
+				view.RetrySafety = ClippingGeminiRetrySafetyUnknownNoReplay
+			}
 		}
 		return view, nil
 	}
