@@ -1,0 +1,80 @@
+name: Gemini clipping container regression
+
+on:
+  push:
+    branches: [work, 'feat/gemini-*']
+    paths:
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
+      - '.dockerignore'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'assets/**'
+      - '.github/workflows/gemini-container.yml'
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
+      - '.dockerignore'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'assets/**'
+      - '.github/workflows/gemini-container.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  container-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build image without publishing
+        run: docker build -t framevault-gemini-ci:local .
+      - name: Check runtime and local FFmpeg encoding
+        run: |
+          docker run --rm --network none --entrypoint /bin/sh framevault-gemini-ci:local -euc '
+            test -x /usr/local/bin/docker-entrypoint.sh
+            test -s /etc/ssl/certs/ca-certificates.crt
+            command -v ffmpeg >/dev/null
+            command -v ffprobe >/dev/null
+            command -v su-exec >/dev/null
+            for tool in yt-dlp deno python python3 pip pip3; do
+              if command -v "$tool" >/dev/null 2>&1; then
+                echo "unexpected clipping runtime: $tool" >&2
+                exit 1
+              fi
+            done
+            ffmpeg -hide_banner -nostdin -loglevel error -f lavfi -i color=c=black:s=160x160:d=1 \
+              -frames:v 2 -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p -y /tmp/smoke.mp4
+            test "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+              -of default=noprint_wrappers=1:nokey=1 /tmp/smoke.mp4)" = h264
+          '
+      - name: Start with temporary state and check health
+        run: |
+          container_id=$(docker run -d --network none --tmpfs /data:rw,mode=0700 framevault-gemini-ci:local)
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            if docker exec "$container_id" wget -q -O /dev/null http://127.0.0.1:8080/health; then
+              ready=1
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$container_id")" != true ]; then
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs "$container_id"
+            exit 1
+          fi
+          docker exec "$container_id" sh -ec 'test "$(stat -c %u /proc/1)" = "$(id -u app)"'
+          docker exec --user app "$container_id" sh -ec 'test -w /data && test -w /data/videos && test -w /data/projects && test -r /data/app.db'
