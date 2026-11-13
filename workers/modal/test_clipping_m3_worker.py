@@ -282,7 +282,7 @@ class ClippingM3WorkerTests(unittest.TestCase):
     def test_video_only_source_core_wire_fixture_matches_worker_output(self):
         payload = video_only_source_core_wire_payload()
         self.assertEqual(payload["algorithm_versions"]["audio_events"], "not-run-no-audio-stream-v1")
-        fixture_path = Path(__file__).parent / "testdata" / "video_only_source_core.v2.json"
+        fixture_path = Path(__file__).resolve().parents[2] / "testdata" / "clipping_legacy" / "video_only_source_core.v2.json"
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         self.assertEqual(payload, fixture)
 

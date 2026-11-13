@@ -392,7 +392,7 @@ func TestClippingVideoOnlyAnalysisAcceptsNoAudioProvenanceAndSelectsVisualEviden
 }
 
 func TestClippingVideoOnlyPythonWireArtifactPassesGoCallback(t *testing.T) {
-	fixture, err := os.ReadFile("../../workers/modal/testdata/video_only_source_core.v2.json")
+	fixture, err := os.ReadFile("../../testdata/clipping_legacy/video_only_source_core.v2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
