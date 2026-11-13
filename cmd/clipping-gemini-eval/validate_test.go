@@ -80,4 +80,33 @@ func TestPartialSourceReviewCannotLabelOutsideItsReviewedRange(t *testing.T) {
 	}
 }
 
+func TestCompleteAdjudicationRequiresTwoReviewersAndAllCandidates(t *testing.T) {
+	cases := map[string]func(*Dataset){
+		"source panel has one reviewer": func(data *Dataset) {
+			data.SourceReviews[0].ReviewerIDs = []string{"reviewer-1"}
+		},
+		"candidate panel has one reviewer": func(data *Dataset) {
+			data.RunReviews[0].ReviewerIDs = []string{"reviewer-1"}
+		},
+		"candidate review omits a returned rank": func(data *Dataset) {
+			data.RunReviews[0].CandidateReviews = data.RunReviews[0].CandidateReviews[:1]
+		},
+		"complete review leaves a candidate unreviewed": func(data *Dataset) {
+			data.RunReviews[0].CandidateReviews[0] = CandidateReview{
+				Rank: 1, Status: "not_reviewed", Usability: "not_rated",
+				StartBoundaryFit: "unknown", EndBoundaryFit: "unknown",
+			}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			data := completeEvaluationDatasetForTest(t)
+			mutate(&data)
+			if err := validateDataset(data); err == nil {
+				t.Fatal("incomplete review panel was accepted as fully adjudicated")
+			}
+		})
+	}
+}
+
 func intPointer(value int) *int { return &value }

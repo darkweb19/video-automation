@@ -166,6 +166,9 @@ func validateSourceReview(review SourceReview, source CorpusSource) error {
 	if review.CoverageStatus == "complete" && (source.HumanDurationMS == nil || *review.ReviewedStartMS != 0 || *review.ReviewedEndMS != *source.HumanDurationMS) {
 		return errInvalidDataset
 	}
+	if review.CoverageStatus == "complete" && review.AdjudicationStatus == "complete" && len(review.ReviewerIDs) < minimumReviewers {
+		return errInvalidDataset
+	}
 	seen := make(map[string]struct{}, len(review.Opportunities))
 	for _, opportunity := range review.Opportunities {
 		if err := validateOpportunity(opportunity, source); err != nil || opportunity.StartMS < *review.ReviewedStartMS || opportunity.EndMS > *review.ReviewedEndMS {
@@ -201,6 +204,10 @@ func validateRunReview(review RunReview, analysis app.ClippingGeminiAnalysis, so
 	if len(review.CandidateReviews) > 0 && (len(review.ReviewerIDs) == 0 || review.AdjudicationStatus == "not_started") {
 		return errInvalidDataset
 	}
+	if review.AdjudicationStatus == "complete" && len(analysis.Candidates) > 0 &&
+		(len(review.ReviewerIDs) < minimumReviewers || len(review.CandidateReviews) != len(analysis.Candidates)) {
+		return errInvalidDataset
+	}
 	byRank := make(map[int]app.ClippingGeminiCandidate, len(analysis.Candidates))
 	for _, candidate := range analysis.Candidates {
 		byRank[candidate.Rank] = candidate
@@ -214,6 +221,9 @@ func validateRunReview(review RunReview, analysis app.ClippingGeminiAnalysis, so
 	for _, candidateReview := range review.CandidateReviews {
 		candidate, exists := byRank[candidateReview.Rank]
 		if !exists || validateCandidateReview(candidateReview) != nil {
+			return errInvalidDataset
+		}
+		if review.AdjudicationStatus == "complete" && candidateReview.Status == "not_reviewed" {
 			return errInvalidDataset
 		}
 		if _, exists := seenRanks[candidateReview.Rank]; exists {

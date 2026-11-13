@@ -399,7 +399,7 @@ func runCandidateReviewsComplete(analysis app.ClippingGeminiAnalysis, review Run
 	if len(analysis.Candidates) == 0 {
 		return true
 	}
-	if !hasReview || review.AdjudicationStatus != "complete" || len(review.ReviewerIDs) == 0 || len(review.CandidateReviews) != len(analysis.Candidates) {
+	if !hasReview || review.AdjudicationStatus != "complete" || len(review.ReviewerIDs) < minimumReviewers || len(review.CandidateReviews) != len(analysis.Candidates) {
 		return false
 	}
 	for _, candidateReview := range review.CandidateReviews {
@@ -482,7 +482,7 @@ func addSourceToStratum(groups map[string]*StratumSummary, groupID, kind, key st
 }
 
 func sourceReviewComplete(review SourceReview, source CorpusSource) bool {
-	return review.CoverageStatus == "complete" && review.AdjudicationStatus == "complete" && len(review.ReviewerIDs) > 0 &&
+	return review.CoverageStatus == "complete" && review.AdjudicationStatus == "complete" && len(review.ReviewerIDs) >= minimumReviewers &&
 		source.HumanDurationMS != nil && review.ReviewedStartMS != nil && review.ReviewedEndMS != nil &&
 		*review.ReviewedStartMS == 0 && *review.ReviewedEndMS == *source.HumanDurationMS
 }

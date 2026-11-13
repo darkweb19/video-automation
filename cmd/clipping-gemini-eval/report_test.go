@@ -134,6 +134,29 @@ func TestEvaluateDatasetLeavesMissingHumanEvidenceUnknown(t *testing.T) {
 	}
 }
 
+func TestEvaluateDatasetWithholdsMetricsForUncertainCandidateLabels(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.RunReviews[0].CandidateReviews[0] = CandidateReview{
+		Rank: 1, Status: "uncertain", Usability: "uncertain",
+		StartBoundaryFit: "unknown", EndBoundaryFit: "unknown",
+	}
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate fully covered but uncertain review: %v", err)
+	}
+	result := evaluateDataset(dataset)
+	run := result.Runs[0]
+	if run.HumanReviewStatus != "partial" || run.TopK.Precision != nil || run.TopK.Recall != nil ||
+		run.TopK.PrecisionStatus != "insufficient_evidence" || run.TopK.RecallStatus != "insufficient_evidence" {
+		t.Fatalf("uncertain candidate label contributed to top-k metrics: %#v", run)
+	}
+	if run.Rubric.Status != "partial" || run.Rubric.RatedCandidateCount != 1 {
+		t.Fatalf("uncertain candidate label contributed to rubric completion: %#v", run.Rubric)
+	}
+	if gate := readinessGateForTest(t, result, "human_quality"); gate.Status != "insufficient_evidence" {
+		t.Fatalf("uncertain label passed human quality gate: %#v", gate)
+	}
+}
+
 func TestReadinessGatesKeepEmptyAndSyntheticDataOutOfReleaseClaims(t *testing.T) {
 	empty, err := decodeDataset(strings.NewReader(validEmptyDataset))
 	if err != nil {

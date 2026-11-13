@@ -14,6 +14,7 @@ const (
 	maxEvaluationRuns       = 512
 	maxEvaluationReviews    = 512
 	maxEvaluationLabels     = 64
+	minimumReviewers        = 2
 	maxEvaluationEvents     = 20_000
 	maxEvaluationCandidates = 10
 	topK                    = 10
