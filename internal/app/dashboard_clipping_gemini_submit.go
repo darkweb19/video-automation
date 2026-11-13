@@ -9,7 +9,7 @@ import (
 // createClippingGeminiJob queues durable intent only. The processor owns any
 // later provider work; neither source acquisition nor an ADC check occurs here.
 func (a *dashboardApp) createClippingGeminiJob(w http.ResponseWriter, r *http.Request) {
-	if !mutationAllowed(w, r) {
+	if !clippingGeminiMutationAllowed(w, r) {
 		return
 	}
 	if !isJSON(r.Header.Get("Content-Type")) {
