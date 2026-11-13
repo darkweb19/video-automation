@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -22,6 +24,22 @@ func TestLegacyStoreEntryPointsCannotCreateOrRetryWork(t *testing.T) {
 	if _, err := store.RetryClippingStage(job.ID, ClippingStageAnalysis); !errors.Is(err, ErrClippingLegacyRetired) {
 		t.Fatalf("retry: %v", err)
 	}
+	if _, err := store.BeginClippingImport(source.ID, 0, time.Hour); !errors.Is(err, ErrClippingLegacyRetired) {
+		t.Fatalf("import claim: %v", err)
+	}
+	if err := store.RetryClippingImport(source.ID, 1, time.Now().Unix(), "retry"); !errors.Is(err, ErrClippingLegacyRetired) {
+		t.Fatalf("import retry: %v", err)
+	}
+	if err := store.MarkClippingSourceReady(source.ID, source.SizeBytes, source.DurationMS, source.SHA256); !errors.Is(err, ErrClippingLegacyRetired) {
+		t.Fatalf("import finalization: %v", err)
+	}
+	acquisition := NewClippingAcquisition(store, nil)
+	if _, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0); !errors.Is(err, ErrClippingLegacyRetired) {
+		t.Fatalf("import creation: %v", err)
+	}
+	if worked, err := acquisition.ProcessNextImport(context.Background()); worked || !errors.Is(err, ErrClippingLegacyRetired) {
+		t.Fatalf("import processing=%v error=%v", worked, err)
+	}
 	app := &dashboardApp{store: store}
 	if _, claimed, err := app.prepareClippingStageDispatch(job.ID, 0, "https://example.invalid"); claimed || !errors.Is(err, ErrClippingLegacyRetired) {
 		t.Fatalf("dispatch preparation=%v error=%v", claimed, err)
@@ -29,5 +47,22 @@ func TestLegacyStoreEntryPointsCannotCreateOrRetryWork(t *testing.T) {
 	stored, err := store.ClippingJob(job.ID)
 	if err != nil || stored.Status != ClippingJobQueued {
 		t.Fatalf("retired entry points changed job=%+v error=%v", stored, err)
+	}
+}
+
+func TestLegacyDispatcherCannotSendEvenWhenCalledDirectly(t *testing.T) {
+	called := false
+	dispatcher := newClippingWorkerDispatcher(nil, nil, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return nil, errors.New("unexpected network request")
+	})})
+	if err := dispatcher.dispatch(context.Background(), clippingWorkerConfig{}, clippingPreparedDispatch{}); !errors.Is(err, ErrClippingLegacyRetired) {
+		t.Fatalf("direct dispatch: %v", err)
+	}
+	if err := (&dashboardApp{}).dispatchPreparedClippingStageWithDispatcher(context.Background(), clippingPreparedDispatch{}, dispatcher); !errors.Is(err, ErrClippingLegacyRetired) {
+		t.Fatalf("prepared dispatch: %v", err)
+	}
+	if called {
+		t.Fatal("retired dispatch attempted a network request")
 	}
 }

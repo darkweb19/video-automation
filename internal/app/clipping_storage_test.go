@@ -251,10 +251,10 @@ func TestClippingUploadProgressAndActualDurationBounds(t *testing.T) {
 	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceUploading, 50, 50); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkClippingSourceReady(source.ID, 50, MaxClippingSourceDurationMS+1, strings.Repeat("b", 64)); err == nil {
+	if err := store.historicalMarkClippingSourceReady(source.ID, 50, MaxClippingSourceDurationMS+1, strings.Repeat("b", 64)); err == nil {
 		t.Fatal("source longer than four hours was accepted")
 	}
-	if err := store.MarkClippingSourceReady(source.ID, 50, MaxClippingSourceDurationMS, strings.Repeat("b", 64)); err != nil {
+	if err := store.historicalMarkClippingSourceReady(source.ID, 50, MaxClippingSourceDurationMS, strings.Repeat("b", 64)); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := store.ClippingSource(source.ID)
@@ -273,7 +273,7 @@ func TestClippingImportLeaseRenewalGuardsAutomaticExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := store.BeginClippingImport(source.ID, 0, time.Minute)
+	claimed, err := store.historicalBeginClippingImport(source.ID, 0, time.Minute)
 	if err != nil || claimed.ImportAttempts != 1 {
 		t.Fatalf("begin import=%+v error=%v", claimed, err)
 	}

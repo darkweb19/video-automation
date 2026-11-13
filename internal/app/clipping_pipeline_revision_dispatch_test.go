@@ -40,7 +40,7 @@ func clippingRevisionTestSource(t *testing.T, store *Store, name, content string
 	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceImporting, 0, int64(len(data))); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkClippingSourceReady(source.ID, int64(len(data)), durationMS, digestHex); err != nil {
+	if err := store.historicalMarkClippingSourceReady(source.ID, int64(len(data)), durationMS, digestHex); err != nil {
 		t.Fatal(err)
 	}
 	ready, err := store.ClippingSource(source.ID)

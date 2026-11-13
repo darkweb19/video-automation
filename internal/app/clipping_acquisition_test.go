@@ -128,7 +128,7 @@ func TestClippingAttemptFiveCrashIsFailedAndCleanedAfterRestart(t *testing.T) {
 	}
 	for attempt := 0; attempt < MaxClippingImportAttempts; attempt++ {
 		store.clippingMu.Lock()
-		claimed, err := store.BeginClippingImport(source.ID, attempt, time.Minute)
+		claimed, err := store.historicalBeginClippingImport(source.ID, attempt, time.Minute)
 		if err == nil && claimed.ImportAttempts != attempt+1 {
 			err = fmt.Errorf("claimed attempt %d, want %d", claimed.ImportAttempts, attempt+1)
 		}
@@ -184,7 +184,7 @@ func TestClippingImportLeaseKeepaliveRenewsActiveAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.clippingMu.Lock()
-	claimed, err := store.BeginClippingImport(source.ID, 0, time.Minute)
+	claimed, err := store.historicalBeginClippingImport(source.ID, 0, time.Minute)
 	if err == nil {
 		shortExpiry := time.Now().Add(time.Second).Unix()
 		_, err = store.db.Exec(`UPDATE clipping_sources SET import_lease_until=?,next_import_at=? WHERE id=?`, shortExpiry, shortExpiry, source.ID)
@@ -290,7 +290,7 @@ func TestClippingImportExpectationRemainsSanitized(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.clippingMu.Lock()
-	claimed, err := store.BeginClippingImport(source.ID, 0, clippingImportLeaseDuration)
+	claimed, err := store.historicalBeginClippingImport(source.ID, 0, clippingImportLeaseDuration)
 	if err == nil {
 		err = store.SetClippingSourceImportExpectation(claimed.ID, youtubeImportExpectation{Version: clippingYouTubeExpectationVersion, SeparateTracks: true})
 	}
