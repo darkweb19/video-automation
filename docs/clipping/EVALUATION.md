@@ -83,3 +83,42 @@ Report median and p90 end-to-end wall time, peak memory, temporary and retained 
 The contracts live in contracts/ and use JSON Schema draft 2020-12. The source metadata reference is ai-clip.source.v1. Every downstream object repeats source ID, exact-byte SHA-256, duration in milliseconds, timebase, and half-open interval semantics so stale or mismatched artifacts can be rejected. Transcripts preserve the source's original script and code-switching. Speaker identity may be missing or null. Word records use Unicode code-point character offsets into the exact original segment text, with nullable times for unaligned words; aligned times must fall within that segment. An immutable run-manifest hash links model, prompt, alignment, and parameter versions. Silence, non-speech audio, and visual-only evidence can be represented without invented dialogue. Candidates carry evidence references, rank and dedup versions, and five editorial score components. All candidate intervals are contiguous excerpts in original source order; generated speech and dialogue reordering are explicitly forbidden.
 
 The local checker supports the JSON Schema keywords used by these checked-in schemas plus cross-artifact semantic checks; it is not a general JSON Schema implementation or a production ingestion validator. It does not compute the benchmark quality metrics or run ASR. Schemas and fixtures are checked using only Python's standard library. From the repository root, run **python3 tools/clipping/evaluation_validate.py --offline**. The fixture examples are synthetic contract examples; they are not real media, human labels, benchmark inputs, measurements, or quality evidence. Each source fixture uses C1.1's simulation wrapper with a true simulated marker outside the source metadata; its upload route, attestation state, and fake stream summaries are fictional values. The source hash is over a small adjacent text sentinel, explicitly marked as not media, only to exercise hash linkage offline.
+
+## G5 Gemini offline evaluation
+
+This section describes the separate, local-only Gemini analysis evaluator in `cmd/clipping-gemini-eval`. It accepts a versioned JSON dataset, validates saved schema-v3 candidate analyses and human review labels, then emits a bounded JSON summary. It does not initialize an SDK, call a provider, download or open media, access a database, resolve source URLs, or choose or modify candidates. It is not the older M1 artifact checker described above.
+
+Run it with one explicit local input file or with standard input:
+
+```sh
+go run ./cmd/clipping-gemini-eval --input ./evaluation.json
+cat ./evaluation.json | go run ./cmd/clipping-gemini-eval --input -
+```
+
+The input contract is `framevault.clipping.gemini.evaluation.v1`; the output contract is `framevault.clipping.gemini.evaluation-report.v1`. Input is limited to 8 MiB and report output to 4 MiB. Errors use one fixed message and do not echo a path or input value. Keep the input file private: its saved analysis field contains model text, even though the report intentionally emits only bounded identifiers, enums, counts, token counts, operator-entered actual cost, ranks, and a payload digest. The report never echoes a source URL, API key, provider envelope, transcript, title, hook, rationale, or evidence text.
+
+Build the dataset from stable pseudonymous source/run IDs, the exact saved analysis object, immutable provider/prompt/schema version identifiers and digests, declared corpus metadata, optional usage/cost records, and human labels. Do not place URLs, credentials, transcripts, source media, reviewer names, or provider envelopes in it. Keep source references and any rights evidence in the operator's separate controlled records. `rights_status: confirmed` means only that the operator recorded an attestation; the tool cannot verify permission. Synthetic rows must use `status: synthetic` and `rights_status: unknown`, and they do not count as approved or eligible sources.
+
+### Human source and candidate review
+
+Use two independent reviewers with stable pseudonymous IDs. Hide provider, model, run identity, candidate rank, and cost while candidates are reviewed; randomize display order outside this report tool, then restore the model's original ranks in the dataset. Record the review interval in source-time milliseconds using half-open `[start_ms,end_ms)` boundaries. A full source review must cover exactly `[0,human_duration_ms)`; otherwise label it partial. Opportunity labels outside the reviewed interval are rejected.
+
+For each source opportunity, label one or more kinds (`speech`, `non_speech_audio`, `visual_only`), language codes when known, whether it is exportable, and the presence or absence of humor/emotion plus context needs. Use `unknown` when a quality cannot be judged; do not infer that unreviewed time contains no opportunities. Adjudicate disagreements before using complete labels.
+
+For every returned candidate, record one of `reviewed`, `uncertain`, or `not_reviewed`. A complete candidate panel must account for every returned rank and at least two reviewers. `uncertain` is a valid annotation, but it makes the candidate-level metrics incomplete. Do not convert uncertainty or missing labels to a negative result.
+
+For a reviewed candidate, use `usable` only when the contiguous source excerpt can stand alone as an export after ordinary editorial polish; use `not_usable` otherwise. Match it to a human opportunity only when both reviewers confirm it is the same moment. The evaluator applies an interval-overlap plausibility check to that explicit human match; it never proposes or infers the match.
+
+Rate all seven rubric dimensions from 1 to 5: completeness, context, hook, emotion, humor, visual evidence, and standalone value. Use 1 for unusable, 3 for acceptable with ordinary edits, and 5 for strong without a material repair; use 2 or 4 for intermediate judgments. Score the candidate as returned. Mark each start/end boundary `within` when it falls inside the human-accepted window for the matched opportunity, and `outside` otherwise. Record a full set of seven ratings and both known boundary judgments for any `reviewed` candidate. Uncertain or not-reviewed candidates carry no rubric scores.
+
+### Reading the report
+
+- The report preserves model-returned rank order and reports per-rank counts. It does not sort, rescore, repair, deduplicate, select, or fill candidate results.
+- Candidate usability precision is reported only when every returned candidate has a complete, adjudicated review. Opportunity recall is reported only when the full source interval and all returned candidates have complete reviews and at least one exportable opportunity exists. Both are descriptive for these sources; neither is a release pass.
+- Corpus coverage counts show source status, rights status, full/partial/unreviewed source coverage, observed opportunities, opportunity kinds, and annotated opportunity languages. Partial-source opportunity counts describe observed labels only; they are not a recall denominator. Language/content strata have small or nonrepresentative denominators unless the report and separately approved study establish otherwise.
+- Late opportunities are those beginning in the final 20% of the human-measured source duration. The report withholds late-event conclusions when duration or full source review is missing.
+- Model-reported language codes and duration are compared with operator-entered metadata. A match is only agreement between those fields, not independent validation of source language, duration, or quality. The report flags sources over the initial 40-minute target; it never verifies support for them.
+- Optional token counts are provider-reported usage only. Actual cost is included only when an operator records a numeric amount and a safe evidence ID. Missing cost remains unknown; an operator record is not invoice verification, a quote, or an estimate.
+- Readiness gates use `not_run`, `blocked`, `insufficient_evidence`, `unverified`, or `descriptive_only`. No offline result can pass live provider availability, ADC authentication, rights, quality, cost, long-video, deployment, or backup gates.
+
+This Gemini evaluator does not calculate transcript quality, ASR coverage, word error rate (WER), character error rate (CER), alignment accuracy, or full-transcript metrics. It evaluates candidate outputs and explicitly entered human evidence only. The historical M1 thresholds above remain proposals and are not applied by this tool.
