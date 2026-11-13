@@ -16,9 +16,9 @@ The optional analysis worker is not deployed by default. Candidate selection is 
 
 ## Gemini migration in progress
 
-The [phased migration](docs/clipping/GEMINI-MIGRATION.md) adds direct public YouTube analysis through Google Cloud Gemini with Application Default Credentials. In the target workflow Gemini selects and ranks clips, and the backend validates and stores its decisions. Phases G1 and G2 are complete: the isolated provider foundation and compatible URL-reference persistence passed offline tests and independent review. Phase G3 is implementing durable job execution. The dashboard still uses the legacy workflow described below until the persistence, orchestration and dashboard phases are integrated.
+The [phased migration](docs/clipping/GEMINI-MIGRATION.md) adds direct public YouTube analysis through Google Cloud Gemini with Application Default Credentials. In the target workflow Gemini selects and ranks clips, and the backend validates and stores its decisions. Phases G1–G3 are complete: the provider foundation, compatible URL-reference persistence and durable job executor passed offline tests and independent review. Gemini execution is opt-in and defaults off. Phase G4 is adding direct URL submission and model-ranked results to the dashboard; until then, the dashboard still uses the legacy workflow described below.
 
-Offline tests do not establish live YouTube availability or editorial quality. Google’s YouTube input support is Preview; the initial Gemini path targets videos up to 40 minutes, not the legacy four-hour import limit. Scores are editorial estimates and timestamps are proposed boundaries. Media extraction and `youtube-extractor-rs` integration remain outside this migration phase.
+Offline tests do not establish live YouTube availability or editorial quality. Google’s YouTube input support is Preview; the initial Gemini path targets videos up to 40 minutes, not the legacy four-hour import limit. Scores are editorial estimates and timestamps are proposed boundaries. Media extraction and `youtube-extractor-rs` integration remain outside this migration phase. See the [execution contract](docs/clipping/GEMINI-EXECUTION.md) for ADC configuration and lifecycle behavior.
 
 ## Quick start
 

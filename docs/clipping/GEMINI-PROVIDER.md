@@ -1,6 +1,6 @@
 # Gemini provider foundation
 
-The provider foundation is isolated from the production processor and dashboard in G1. It sends one canonical public YouTube watch URL directly as a video part. It never acquires the source file. The official Go SDK is pinned to `google.golang.org/genai v1.77.0`; the module requires Go 1.24 or newer.
+G1 introduced an isolated provider foundation. G3 connects it to the opt-in Go executor; public dashboard/API submission follows in G4. It sends one canonical public YouTube watch URL directly as a video part. It never acquires the source file. The official Go SDK is pinned to `google.golang.org/genai v1.77.0`; the module requires Go 1.24 or newer.
 
 ## Request and authentication
 
@@ -16,9 +16,9 @@ Google's YouTube input support is Preview. A request contains one public video; 
 
 A valid result is a proposed editorial analysis. Source duration is explicitly model-reported, scores are editorial estimates, and clip timestamps require independent media verification during future extraction. Token usage and model-response identifiers are retained when available; missing usage is unknown and no invoice amount is invented.
 
-Errors distinguish work known not to have been submitted, explicit rejection, a received but unusable result, and an unknown outcome after submission. An ambiguous timeout, transport failure, or malformed outer response must not cause automatic inference replay. G3 will add orchestration and durable outcome handling. No automatic correction request is implemented in G1.
+Errors distinguish work known not to have been submitted, explicit rejection, a received but unusable result, and an unknown outcome after submission. An ambiguous timeout, transport failure, or malformed outer response must not cause automatic inference replay. G3 implements orchestration and durable outcome handling. No automatic correction request is implemented in G1.
 
-The deterministic request fingerprint includes the canonical URL, routing, model, options, static settings and exact prompt/schema digests. It identifies a request, not downloaded media. Changes to video content at the same URL cannot be detected from that digest alone; G2 will add bounded cache lifetimes and source-scoped identity.
+The deterministic request fingerprint includes the canonical URL, routing, model, options, static settings and exact prompt/schema digests. It identifies a request, not downloaded media. Changes to video content at the same URL cannot be detected from that digest alone; G2 implements bounded cache lifetimes and source-scoped identity.
 
 ## Primary documentation
 

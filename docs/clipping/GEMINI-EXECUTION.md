@@ -1,6 +1,6 @@
 # Durable Gemini execution contract
 
-G3 is in development. This document records the accepted lifecycle behavior; the [tracker](TRACKER.md) records implementation, tests and publication. It is not evidence of live Google access.
+G3 is implemented and verified offline. The public submission route and lifecycle projection are added in G4; this checkpoint has no new Gemini dashboard entry point. This document records the lifecycle behavior; the [tracker](TRACKER.md) records implementation, tests and publication. It is not evidence of live Google access.
 
 ## Submission and recovery
 
@@ -21,7 +21,7 @@ Requests use the G1 single-attempt client and its fixed deadline. A lease fences
 | Response received | Persist available usage even when validation fails; no automatic correction inference. |
 | Unknown after submission | Persist uncertainty and prevent automatic replay, including after restart or deletion. |
 
-There is no manual Gemini stage-retry endpoint in this phase. The existing legacy retry helper remains provider-fenced. Public `retry_safety` states describe automatic lifecycle behavior: `not_submitted_retryable`, `rate_limited_wait`, `response_received_terminal`, `outcome_unknown_no_replay`, `terminal`, or `none`. `retry_at`, when present, is a persisted deadline, not a browser countdown. The dashboard must not offer a manual retry button merely because safe automatic retry remains possible.
+There is no manual Gemini stage-retry endpoint in this phase. The existing legacy retry helper remains provider-fenced. G4 will expose `retry_safety` states describing automatic lifecycle behavior: `not_submitted_retryable`, `rate_limited_wait`, `response_received_terminal`, `outcome_unknown_no_replay`, `terminal`, or `none`. `retry_at`, when present, is a persisted deadline, not a browser countdown. The dashboard must not offer a manual retry button merely because safe automatic retry remains possible.
 
 ## Cancellation, completion and usage
 
