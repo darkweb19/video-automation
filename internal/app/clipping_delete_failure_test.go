@@ -17,7 +17,7 @@ import (
 func TestClippingDashboardDeleteAnalysisCancelsAndSettlesLateCallback(t *testing.T) {
 	store, security, handler, cookie := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "delete-analysis-active-001")
+	jobView, _ := clippingCreateJob(t, store, source.ID, "delete-analysis-active-001")
 	job, err := store.ClippingJob(jobView.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestClippingDashboardDeleteAnalysisCancelsAndSettlesLateCallback(t *testing
 func TestClippingDashboardDeleteSourceRemovesMediaAndHidesAnalyses(t *testing.T) {
 	store, _, handler, cookie := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "delete-source-job-001")
+	jobView, _ := clippingCreateJob(t, store, source.ID, "delete-source-job-001")
 	if response := clippingDashboardRequest(handler, http.MethodDelete, "/api/clipping/sources/"+source.ID, "", nil, ""); response.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated source delete=%d %s", response.Code, response.Body.String())
 	}
@@ -176,9 +176,9 @@ func TestDeleteSourceDefersFileCleanupUntilCanceledImportStops(t *testing.T) {
 }
 
 func TestAmbiguousFailedAnalysisClaimReleasesAfterCallbackExpiry(t *testing.T) {
-	store, security, handler, cookie := clippingDashboardFixture(t)
+	store, security, _, _ := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "ambiguous-failure-old-job-001")
+	jobView, _ := clippingCreateJob(t, store, source.ID, "ambiguous-failure-old-job-001")
 	job, err := store.ClippingJob(jobView.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +200,7 @@ func TestAmbiguousFailedAnalysisClaimReleasesAfterCallbackExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	newJob := clippingM3CreateJob(t, store, source.ID, "ambiguous-failure-new-job-001")
-	if _, err := store.RetryClippingStage(job.ID, ClippingStageAnalysis); !errors.Is(err, ErrClippingJobTerminal) {
+	if _, err := store.historicalRetryClippingStage(job.ID, ClippingStageAnalysis); !errors.Is(err, ErrClippingJobTerminal) {
 		t.Fatalf("deleted failed analysis retry result=%v", err)
 	}
 	if claimed, err := store.ClaimClippingAnalysisSource(newJob.ID); err != nil || claimed {

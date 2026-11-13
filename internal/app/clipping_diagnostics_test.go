@@ -82,7 +82,7 @@ func TestClippingSourceDiagnosticsStayBoundedAndMonotonicAfterRestart(t *testing
 
 func TestClippingSourceListResponseIncludesSafeDiagnostics(t *testing.T) {
 	store, _, handler, cookie := clippingDashboardFixture(t, true)
-	source, err := store.CreateClippingSource(ClippingSourceCreate{
+	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 		Kind: ClippingSourceUpload, OriginalName: "meeting.mp4", MediaType: "video/mp4",
 		DeclaredSizeBytes: 64, RightsAttested: true,
 	})

@@ -55,7 +55,7 @@ func TestClippingCapabilityCleanupUsesPersistedExpiryAfterRestart(t *testing.T) 
 	store, security, _, _ := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
 	job := clippingM3CreateJob(t, store, source.ID, "simple-capability-cleanup-restart")
-	stage, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute)
+	stage, claimed, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("claim capability cleanup stage: stage=%+v claimed=%v error=%v", stage, claimed, err)
 	}

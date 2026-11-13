@@ -118,14 +118,7 @@ func clippingM3Candidates(t *testing.T, artifact ClippingArtifact) []clippingCan
 // Keep lifecycle fixtures on the same one-job storage API as the dashboard.
 func clippingM3CreateJob(t *testing.T, store *Store, sourceID, key string) ClippingJob {
 	t.Helper()
-	job, duplicate, err := store.CreateClippingJob(ClippingJobCreate{
-		SourceID: sourceID, ContentType: "general", MinClipSeconds: 15,
-		MaxClipSeconds: 180, CandidateLimit: 10,
-	}, key)
-	if err != nil || duplicate {
-		t.Fatalf("create single analysis job: job=%+v duplicate=%v error=%v", job, duplicate, err)
-	}
-	return job
+	return makeClippingJob(t, store, sourceID, key)
 }
 
 func clippingM3ClaimAttempt(t *testing.T, store *Store, jobID string) ClippingStage {
@@ -133,7 +126,7 @@ func clippingM3ClaimAttempt(t *testing.T, store *Store, jobID string) ClippingSt
 	if claimed, err := store.ClaimClippingAnalysisSource(jobID); err != nil || !claimed {
 		t.Fatalf("claim source analysis for %s: claimed=%v error=%v", jobID, claimed, err)
 	}
-	stage, claimed, err := store.ClaimClippingStage(jobID, ClippingStageAnalysis, 0, time.Minute)
+	stage, claimed, err := store.historicalClaimClippingStage(jobID, ClippingStageAnalysis, 0, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("claim analysis stage for %s: stage=%+v claimed=%v error=%v", jobID, stage, claimed, err)
 	}
@@ -450,7 +443,7 @@ func TestClippingM3RustSceneProvenanceVersionPair(t *testing.T) {
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
 	for _, tc := range []struct {
 		name, visual, inspection string
-		accepted bool
+		accepted                 bool
 	}{
 		{"rust pair", clippingWorkerRustVisualEventsVersion, clippingWorkerRustCandidateInspectionVersion, true},
 		{"legacy ffmpeg pair", clippingWorkerVisualEventsVersion, clippingWorkerFFmpegCandidateInspectionVersion, true},
@@ -504,12 +497,15 @@ func TestClippingAnalysisAudioCoverageAllowsOnlyShortDecodedTail(t *testing.T) {
 func TestClippingAnalysisAudioTailToleranceIsProportionalForShortSources(t *testing.T) {
 	// A 6-second source must not accept an arbitrary 250-ms missing tail.
 	core := clippingAnalysisCore{
-		MediaStreams: clippingMediaStreams{HasAudio: true, HasVideo: true},
+		MediaStreams:        clippingMediaStreams{HasAudio: true, HasVideo: true},
 		AudioAnalysisStatus: "complete",
-		Transcript: clippingTranscript{Available: true, Status: "complete"},
-		Coverage: clippingAnalysisCoverage{VisualScannedDurationMS: 6_000},
+		Transcript:          clippingTranscript{Available: true, Status: "complete"},
+		Coverage:            clippingAnalysisCoverage{VisualScannedDurationMS: 6_000},
 	}
-	for _, tc := range []struct{ gap int64; accept bool }{
+	for _, tc := range []struct {
+		gap    int64
+		accept bool
+	}{
 		{0, true}, {60, true}, {61, false}, {250, false},
 	} {
 		core.Coverage.AudioScannedDurationMS = 6_000 - tc.gap

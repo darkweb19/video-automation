@@ -54,7 +54,7 @@ func clippingSimpleCallback(t *testing.T, source ClippingSource, job ClippingJob
 func TestClippingSimpleCallbackStoresRuntimeAndServesReadOnlyResults(t *testing.T) {
 	store, security, handler, cookie := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "simple-callback-job")
+	jobView, _ := clippingCreateJob(t, store, source.ID, "simple-callback-job")
 	job, err := store.ClippingJob(jobView.ID)
 	if err != nil {
 		t.Fatal(err)

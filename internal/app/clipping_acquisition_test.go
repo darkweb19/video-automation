@@ -257,7 +257,7 @@ func TestClippingCleanupResumesDeletedTombstone(t *testing.T) {
 
 func TestClippingUnsupportedLegacyImportIsFailedWithoutDeletingSourceFiles(t *testing.T) {
 	_, store, security, acquisition := newClippingAcquisitionFixture(t)
-	source, err := store.CreateClippingSource(ClippingSourceCreate{
+	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 		Kind: ClippingSourceGoogleDrive, OriginalName: "legacy.mp4", MediaType: "video/mp4",
 		DeclaredSizeBytes: 1024, RightsAttested: true, SourceURL: "encrypted-legacy-reference",
 	})

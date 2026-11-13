@@ -10,37 +10,58 @@ import (
 	"time"
 )
 
+// Historical fixtures are inserted directly; production no longer creates
+// legacy file sources or Modal jobs.
 func makeReadyClippingSource(t *testing.T, store *Store, durationMS int64) ClippingSource {
 	t.Helper()
 	content := []byte("synthetic source media")
-	source, err := store.CreateClippingSource(ClippingSourceCreate{
-		Kind: ClippingSourceUpload, OriginalName: "talk.mp4", MediaType: "video/mp4",
-		DeclaredSizeBytes: int64(len(content)), RightsAttested: true, RetainUntil: time.Now().Add(24 * time.Hour).Unix(),
-	})
+	id, err := newClippingStorageID("clipsrc_")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(source.StoragePath, content, 0o600); err != nil {
+	dir := clippingSourceDir(store.clippingDir, id)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceUploading, int64(len(content)), int64(len(content))); err != nil {
+	path := clippingStoragePath(store.clippingDir, id)
+	if err := os.WriteFile(path, content, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkClippingSourceReady(source.ID, int64(len(content)), durationMS, strings.Repeat("a", 64)); err != nil {
-		t.Fatal(err)
-	}
-	ready, err := store.ClippingSource(source.ID)
+	now := time.Now().Unix()
+	_, err = store.db.Exec(`INSERT INTO clipping_sources(id,kind,status,original_name,media_type,rights_attested,storage_path,declared_size_bytes,reserved_size_bytes,size_bytes,upload_offset,duration_ms,sha256,retain_until,created_at,updated_at) VALUES(?,'upload','ready','talk.mp4','video/mp4',1,?,?,?,?,?,?,?,?,?,?)`, id, path, len(content), len(content), len(content), len(content), durationMS, strings.Repeat("a", 64), now+86400, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ready
+	source, err := store.ClippingSource(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source
 }
 
 func makeClippingJob(t *testing.T, store *Store, sourceID, key string) ClippingJob {
 	t.Helper()
-	job, duplicate, err := store.CreateClippingJob(ClippingJobCreate{SourceID: sourceID}, key)
-	if err != nil || duplicate {
-		t.Fatalf("create clipping job: duplicate=%v error=%v", duplicate, err)
+	jobID, err := newClippingStorageID("clipjob_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchID, err := newClippingStorageID("clipbatch_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if _, err := store.db.Exec(`INSERT INTO clipping_batches(id,idempotency_key,request_hash,status,budget_limit_micro_usd,created_at,updated_at) VALUES(?,?,?,'queued',1,?,?)`, batchID, key, "historical", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO clipping_jobs(id,batch_id,source_id,provider,content_type,min_clip_seconds,max_clip_seconds,candidate_limit,status,budget_limit_micro_usd,created_at,updated_at) VALUES(?,?,?,'modal_legacy','general',15,180,10,'queued',1,?,?)`, jobID, batchID, sourceID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO clipping_stages(job_id,name,status,idempotency_key,created_at,updated_at) VALUES(?,'analysis','queued',?,?,?)`, jobID, jobID+":analysis", now, now); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClippingJob(jobID)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return job
 }
@@ -158,21 +179,21 @@ func TestClippingCapabilityCleanupRetainsIssuedExpiryUntilRecovery(t *testing.T)
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&remaining); err != nil || remaining != 0 {
 		t.Fatalf("recovered attempt retained callback expiry index: count=%d error=%v", remaining, err)
 	}
-	if _, err := store.RetryClippingStage(job.ID, ClippingStageAnalysis); err != nil {
+	if _, err := store.historicalRetryClippingStage(job.ID, ClippingStageAnalysis); err != nil {
 		t.Fatalf("explicit retry after callback expiry: %v", err)
 	}
 }
 
 func TestClippingSourceRightsPathBoundsAndStorageReservation(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.CreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 10}); err == nil {
+	if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 10}); err == nil {
 		t.Fatal("source was created without explicit rights attestation")
 	}
-	if _, err := store.CreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: MaxClippingSourceBytes + 1, RightsAttested: true}); err == nil {
+	if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: MaxClippingSourceBytes + 1, RightsAttested: true}); err == nil {
 		t.Fatal("source above the 20 GiB limit was accepted")
 	}
 	for index := 0; index < 5; index++ {
-		_, err := store.CreateClippingSource(ClippingSourceCreate{
+		_, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 			Kind: ClippingSourceUpload, OriginalName: "../../unsafe.mp4", DeclaredSizeBytes: MaxClippingSourceBytes,
 			RightsAttested: true, RetainUntil: time.Now().Add(time.Hour).Unix(),
 		})
@@ -180,7 +201,7 @@ func TestClippingSourceRightsPathBoundsAndStorageReservation(t *testing.T) {
 			t.Fatalf("reserve source %d of 5: %v", index+1, err)
 		}
 	}
-	if _, err := store.CreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 1, RightsAttested: true}); err == nil {
+	if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 1, RightsAttested: true}); err == nil {
 		t.Fatal("aggregate 100 GiB reservation limit was exceeded")
 	}
 	var reserved int64
@@ -212,7 +233,7 @@ func TestClippingSourceRightsPathBoundsAndStorageReservation(t *testing.T) {
 
 func TestClippingUploadProgressAndActualDurationBounds(t *testing.T) {
 	store := newTestStore(t)
-	source, err := store.CreateClippingSource(ClippingSourceCreate{
+	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 		Kind: ClippingSourceUpload, DeclaredSizeBytes: 50, RightsAttested: true,
 	})
 	if err != nil {
@@ -245,7 +266,7 @@ func TestClippingUploadProgressAndActualDurationBounds(t *testing.T) {
 func TestClippingImportLeaseRenewalGuardsAutomaticExpiry(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().Unix()
-	source, err := store.CreateClippingSource(ClippingSourceCreate{
+	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 		Kind: ClippingSourceGoogleDrive, SourceURL: "encrypted-url",
 		DeclaredSizeBytes: 100, RightsAttested: true, RetainUntil: now - 1,
 	})
@@ -284,7 +305,7 @@ func TestFailedClippingSourceReleasesReservationOnlyAfterRemoval(t *testing.T) {
 	store := newTestStore(t)
 	sources := make([]ClippingSource, 0, 5)
 	for index := 0; index < 5; index++ {
-		source, err := store.CreateClippingSource(ClippingSourceCreate{
+		source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 			Kind: ClippingSourceUpload, OriginalName: "failed-upload.mp4",
 			DeclaredSizeBytes: MaxClippingSourceBytes, RightsAttested: true,
 		})
@@ -300,7 +321,7 @@ func TestFailedClippingSourceReleasesReservationOnlyAfterRemoval(t *testing.T) {
 	if err := store.UpdateClippingSourceProgress(sources[0].ID, ClippingSourceUploading, int64(len(partial)), int64(len(partial))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 1, RightsAttested: true}); err == nil {
+	if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 1, RightsAttested: true}); err == nil {
 		t.Fatal("five active reservations should exhaust the 100 GiB limit")
 	}
 	if failed, err := store.FailedClippingSources(10); err != nil || len(failed) != 0 {
@@ -358,20 +379,20 @@ func TestFailedClippingSourceReleasesReservationOnlyAfterRemoval(t *testing.T) {
 	if failed, err := store.FailedClippingSources(10); err != nil || len(failed) != 0 {
 		t.Fatalf("failed-source cleanup list after release=%+v error=%v", failed, err)
 	}
-	newSource, err := store.CreateClippingSource(ClippingSourceCreate{
+	newSource, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 		Kind: ClippingSourceUpload, DeclaredSizeBytes: MaxClippingSourceBytes, RightsAttested: true,
 	})
 	if err != nil {
 		t.Fatalf("released failed sources did not restore aggregate capacity: %v", err)
 	}
 	for index := 1; index < 5; index++ {
-		if _, err := store.CreateClippingSource(ClippingSourceCreate{
+		if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 			Kind: ClippingSourceUpload, DeclaredSizeBytes: MaxClippingSourceBytes, RightsAttested: true,
 		}); err != nil {
 			t.Fatalf("restored capacity rejected source %d: %v", index+1, err)
 		}
 	}
-	if _, err := store.CreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 1, RightsAttested: true}); err == nil {
+	if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 1, RightsAttested: true}); err == nil {
 		t.Fatal("restored capacity exceeded 100 GiB")
 	}
 	var reserved int64

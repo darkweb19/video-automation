@@ -12,7 +12,7 @@ func TestClippingDispatchUsesStableVersionedSafeEnvelope(t *testing.T) {
 	store := newTestStore(t)
 	source := makeReadyClippingSource(t, store, 90_000)
 	job := makeClippingJob(t, store, source.ID, "dispatch-contract")
-	stage, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Hour)
+	stage, claimed, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Hour)
 	if err != nil || !claimed {
 		t.Fatalf("stage claim=%+v claimed=%v error=%v", stage, claimed, err)
 	}
@@ -52,7 +52,7 @@ func TestClippingPendingStageAndEncryptedCapabilitiesSurviveRestart(t *testing.T
 	}
 	source := makeReadyClippingSource(t, store, 45_000)
 	job := makeClippingJob(t, store, source.ID, "restart-pending-stage")
-	stage, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, 12*time.Hour)
+	stage, claimed, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, 12*time.Hour)
 	if err != nil || !claimed {
 		_ = store.Close()
 		t.Fatalf("stage claim=%+v claimed=%v error=%v", stage, claimed, err)
@@ -105,7 +105,7 @@ func TestProcessorMarksExpiredClippingAttemptUncertainWithoutRedispatch(t *testi
 	store := newTestStore(t)
 	source := makeReadyClippingSource(t, store, 30_000)
 	job := makeClippingJob(t, store, source.ID, "processor-stage-recovery")
-	stage, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute)
+	stage, claimed, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("stage claim=%+v claimed=%v error=%v", stage, claimed, err)
 	}
@@ -130,7 +130,7 @@ func TestProcessorMarksExpiredClippingAttemptUncertainWithoutRedispatch(t *testi
 	if _, err := os.Stat(source.StoragePath); err != nil {
 		t.Fatalf("recovery affected source media: %v", err)
 	}
-	if _, claimedAgain, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute); err != nil || claimedAgain {
+	if _, claimedAgain, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute); err != nil || claimedAgain {
 		t.Fatalf("uncertain attempt was redispatched: claimed=%v error=%v", claimedAgain, err)
 	}
 }
@@ -143,7 +143,7 @@ func TestCanceledPreSubmitAttemptReleasesSourceClaim(t *testing.T) {
 	if err != nil || !claimedSource {
 		t.Fatalf("claim source=%v error=%v", claimedSource, err)
 	}
-	stage, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute)
+	stage, claimed, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("claim stage=%+v claimed=%v error=%v", stage, claimed, err)
 	}

@@ -36,7 +36,7 @@ func TestClippingLegacyWorkersRejectGeminiJobsUsingLegacySource(t *testing.T) {
 	source := makeReadyClippingSource(t, store, 60_000)
 	queued := makeClippingJob(t, store, source.ID, "gemini-legacy-source-queued")
 	running := makeClippingJob(t, store, source.ID, "gemini-legacy-source-running")
-	stage, claimed, err := store.ClaimClippingStage(running.ID, ClippingStageAnalysis, 0, time.Hour)
+	stage, claimed, err := store.historicalClaimClippingStage(running.ID, ClippingStageAnalysis, 0, time.Hour)
 	if err != nil || !claimed {
 		t.Fatalf("legacy setup: %v %v", claimed, err)
 	}
@@ -59,7 +59,7 @@ func TestClippingLegacyWorkersRejectGeminiJobsUsingLegacySource(t *testing.T) {
 	if _, err := store.TryCompleteClippingJobFromAnalysisCache(queued.ID); !errors.Is(err, ErrClippingInvalidState) {
 		t.Errorf("legacy cache accepted Gemini: %v", err)
 	}
-	if _, _, err := store.ClaimClippingStage(queued.ID, ClippingStageAnalysis, 0, time.Hour); !errors.Is(err, ErrClippingInvalidState) {
+	if _, _, err := store.historicalClaimClippingStage(queued.ID, ClippingStageAnalysis, 0, time.Hour); !errors.Is(err, ErrClippingInvalidState) {
 		t.Errorf("legacy stage claim accepted Gemini: %v", err)
 	}
 	if _, err := store.FailQueuedClippingJob(queued.ID, "legacy failure"); !errors.Is(err, ErrClippingInvalidState) {
@@ -94,7 +94,7 @@ func TestClippingLegacyWorkersRejectGeminiJobsUsingLegacySource(t *testing.T) {
 	if _, err := store.db.Exec(`UPDATE clipping_stages SET status='failed' WHERE job_id=?`, queued.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RetryClippingStage(queued.ID, ClippingStageAnalysis); !errors.Is(err, ErrClippingInvalidState) {
+	if _, err := store.historicalRetryClippingStage(queued.ID, ClippingStageAnalysis); !errors.Is(err, ErrClippingInvalidState) {
 		t.Errorf("legacy retry accepted Gemini: %v", err)
 	}
 }
@@ -105,7 +105,7 @@ func TestClippingLegacyRecoverySkipsGeminiBeforeLimitAndOnStartup(t *testing.T) 
 	gemini := makeClippingJob(t, store, source.ID, "gemini-recovery")
 	legacy := makeClippingJob(t, store, source.ID, "legacy-recovery")
 	for _, job := range []ClippingJob{gemini, legacy} {
-		if _, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Second); err != nil || !claimed {
+		if _, claimed, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Second); err != nil || !claimed {
 			t.Fatalf("setup stage: %v %v", claimed, err)
 		}
 	}

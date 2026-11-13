@@ -15,7 +15,7 @@ func clippingRevisionTestSource(t *testing.T, store *Store, name, content string
 	data := []byte(content)
 	digest := sha256.Sum256(data)
 	digestHex := hex.EncodeToString(digest[:])
-	source, err := store.CreateClippingSource(ClippingSourceCreate{
+	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
 		Kind: ClippingSourceYouTube, OriginalName: name, MediaType: "video/mp4",
 		DeclaredSizeBytes: int64(len(data)), SourceURL: "https://www.youtube.com/watch?v=abcdefghijk",
 		RightsAttested: true,

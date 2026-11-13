@@ -414,15 +414,15 @@ func TestClippingWorkerDispatchTransportErrorRemainsAmbiguous(t *testing.T) {
 }
 
 func TestClippingWorkerCancelBeforeSubmitPreventsModalRequest(t *testing.T) {
-	store, security, handler, cookie := clippingDashboardFixture(t)
+	store, security, _, _ := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	job, _ := clippingCreateJob(t, handler, cookie, source.ID, "cancel-before-modal-submit")
+	job, _ := clippingCreateJob(t, store, source.ID, "cancel-before-modal-submit")
 	config := clippingCreateWorkerConfigForTest(t, store, security)
 	if claimed, err := store.ClaimClippingAnalysisSource(job.ID); err != nil || !claimed {
 		t.Fatalf("claim analysis source=%v error=%v", claimed, err)
 	}
 	app := &dashboardApp{store: store, security: security}
-	prepared, claimed, err := app.prepareClippingStageDispatch(job.ID, 0, "https://framevault.dev")
+	prepared, claimed, err := app.historicalPrepareClippingStageDispatch(job.ID, 0, "https://framevault.dev")
 	if err != nil || !claimed {
 		t.Fatalf("prepare dispatch=%+v claimed=%v error=%v", prepared, claimed, err)
 	}
