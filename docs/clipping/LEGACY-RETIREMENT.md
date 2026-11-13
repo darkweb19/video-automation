@@ -34,8 +34,8 @@ production deployment or retirement has been performed by this work.
 
 `Store.LegacyClippingDrainInventory` reads a consistent SQLite snapshot and
 returns aggregate counts, without reading capability values or modifying
-state. Its authenticated operator endpoint is planned for integration with the
-G4 API; it is not present in this staged checkpoint. The inventory has these
+state. The authenticated `GET /api/clipping/legacy-drain` operator endpoint
+returns this aggregate snapshot without changing state. The inventory has these
 fields:
 
 | Field | Meaning |

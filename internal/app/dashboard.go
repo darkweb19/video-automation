@@ -80,6 +80,7 @@ func newDashboardHandler(app *dashboardApp) http.Handler {
 	mux.Handle("GET /api/generations", app.requirePasswordChanged(http.HandlerFunc(app.history)))
 	mux.Handle("GET /api/events", app.requirePasswordChanged(http.HandlerFunc(app.events)))
 	mux.Handle("GET /api/clipping/config", app.requirePasswordChanged(http.HandlerFunc(app.clippingConfig)))
+	mux.Handle("GET /api/clipping/legacy-drain", app.requirePasswordChanged(http.HandlerFunc(app.clippingLegacyDrain)))
 	mux.Handle("GET /api/clipping/config/worker", app.requirePasswordChanged(http.HandlerFunc(app.clippingWorkerConfig)))
 	mux.Handle("PUT /api/clipping/config/worker", app.requirePasswordChanged(http.HandlerFunc(app.updateClippingWorkerConfig)))
 	mux.Handle("GET /api/clipping/sources", app.requirePasswordChanged(http.HandlerFunc(app.clippingSources)))
