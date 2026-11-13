@@ -1,12 +1,18 @@
 # YouTube source import
 
+> Historical implementation record. The staged Gemini retirement removes the
+> downloader runtime and its checker from this branch; remaining legacy routes
+> are being fenced separately. Do not deploy the staged image or follow these
+> old setup instructions. See [legacy retirement](LEGACY-RETIREMENT.md) for the
+> replacement and drain gates.
+
 Clipping accepts one public YouTube video link, downloads it to a validated MP4, and then sends the ready source through the existing Modal analysis worker. The public source API is `POST /api/clipping/sources/import` with `{ "url": "…", "rights_attested": true }`. Inputs include a video ID, a YouTube `watch`, `shorts`, `embed`, `live`, or `/v/` link, or a `youtu.be` link. The server validates the ID and stores only the canonical `https://www.youtube.com/watch?v=…` URL, encrypted at rest. Playlist parameters and non-YouTube providers are rejected.
 
 There is no upload endpoint in the current source flow, and Drive/Dropbox imports are no longer accepted. Existing Ready sources remain available to existing analysis jobs. On upgrade, queued legacy upload, Drive, and Dropbox imports are marked `legacy_source_import_unsupported`; their files are retained and are not automatically removed.
 
 ## Downloader and media contract
 
-The runtime uses the SHA-256 pinned `yt-dlp` and `yt-dlp-ejs` wheels in [requirements-youtube.lock](../../tools/clipping/requirements-youtube.lock), a pinned Alpine Deno package for yt-dlp's YouTube JavaScript challenge support, and the installed FFmpeg/ffprobe binaries. `yt-dlp` selects its native best-video/original-audio formats. The application does not parse extractor format metadata or choose track IDs. It asks yt-dlp to merge to MP4 and remux the fixed output path `source.mp4`; the application then probes the actual container and streams before admitting the source.
+The runtime used SHA-256 pinned `yt-dlp` and `yt-dlp-ejs` wheels in `requirements-youtube.lock`, a pinned Alpine Deno package for yt-dlp's YouTube JavaScript challenge support, and the installed FFmpeg/ffprobe binaries. `yt-dlp` selected its native best-video/original-audio formats. The application did not parse extractor format metadata or choose track IDs. It asked yt-dlp to merge to MP4 and remux the fixed output path `source.mp4`; the application then probed the actual container and streams before admitting the source. The removed lock and checker remain available in repository history.
 
 The downloader runs with a fixed argument list, no user configuration, plugins, cookies, browser profiles, login, or shared cache, and a private temporary Deno cache. It accepts only public, non-live videos with a known duration of at most four hours. The downloaded source is capped at 20 GiB. yt-dlp and FFmpeg intermediates share a bounded 40 GiB workspace, with a 4 GiB physical free-space floor and the existing 100 GiB source-reservation ceiling. The workspace is limited to 4,096 entries. Per-file size limits and a workspace monitor stop oversized work; the importer removes its generated partial files on failure, cancellation, and retry.
 

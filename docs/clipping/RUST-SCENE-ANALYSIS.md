@@ -1,5 +1,10 @@
 # Rust scene analyzer: M3 visual worker
 
+> Historical implementation record. The staged Gemini retirement removes this
+> clipping-only Rust analyzer and its worker integration from the branch. See
+> [legacy retirement](LEGACY-RETIREMENT.md) for the remaining release and drain
+> gates; this removal does not retire a production worker.
+
 ## Scope
 
 The new model-free scene engine lives under workers/modal/scene-analyzer.
