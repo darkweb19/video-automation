@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"math"
@@ -12,7 +13,8 @@ import (
 // public creation and dispatch of legacy jobs have been fenced off.
 func legacyDrainAttemptFixture(t *testing.T, store *Store, name, provider, jobStatus, attemptStatus string, lease int64, issued *int64) {
 	t.Helper()
-	sourceID, batchID, jobID, attemptID := "source_"+name, "batch_"+name, "job_"+name, "attempt_"+name
+	sourceID, batchID := "source_"+name, "batch_"+name
+	jobID, attemptID := legacyDrainFixtureIDs(name)
 	for _, item := range []struct {
 		query string
 		args  []any
@@ -37,6 +39,11 @@ func legacyDrainAttemptFixture(t *testing.T, store *Store, name, provider, jobSt
 			t.Fatal(err)
 		}
 	}
+}
+
+func legacyDrainFixtureIDs(name string) (string, string) {
+	digest := sha256.Sum256([]byte(name))
+	return fmt.Sprintf("clipjob_%x", digest[:16]), fmt.Sprintf("clipatt_%x", digest[:16])
 }
 
 func legacyDrainSeconds(provider string, value int) any {
@@ -95,12 +102,13 @@ func TestLegacyClippingDrainCountsTerminalAndPreIndexCallbacks(t *testing.T) {
 func TestLegacyClippingDrainRejectsInvalidPersistedExpiry(t *testing.T) {
 	store := newTestStore(t)
 	legacyDrainAttemptFixture(t, store, "invalid-index", "modal_legacy", "failed", "failed", 1, nil)
+	jobID, attemptID := legacyDrainFixtureIDs("invalid-index")
 	// Exercise corrupted or externally migrated data despite the current schema
 	// constraint: an invalid issued expiry must not fall back to an old lease.
 	if _, err := store.db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`INSERT INTO clipping_capability_expiry_index(job_id,attempt_id,expires_at) VALUES('job_invalid-index','attempt_invalid-index',0)`); err != nil {
+	if _, err := store.db.Exec(`INSERT INTO clipping_capability_expiry_index(job_id,attempt_id,expires_at) VALUES(?,?,0)`, jobID, attemptID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
@@ -118,6 +126,7 @@ func TestLegacyClippingDrainCountsImportClaimsAndOrphanedCapabilities(t *testing
 	issued := now + 100
 	legacyDrainAttemptFixture(t, store, "legacy", "modal_legacy", "canceled", "canceled", now, &issued)
 	legacyDrainAttemptFixture(t, store, "gemini", "gemini", "running", "running", now+100, nil)
+	jobID, attemptID := legacyDrainFixtureIDs("legacy")
 	for _, item := range []struct {
 		name, status string
 		lease        int64
@@ -133,14 +142,16 @@ func TestLegacyClippingDrainCountsImportClaimsAndOrphanedCapabilities(t *testing
 		}
 	}
 	if _, err := store.db.Exec(`INSERT INTO clipping_analysis_claims(source_id,source_sha256,pipeline_key,job_id,attempt_id,claimed_at) VALUES(?,?,?,?,?,1)`,
-		"source_legacy", fmt.Sprintf("%064d", 1), "legacy", "job_legacy", "attempt_legacy"); err != nil {
+		"source_legacy", fmt.Sprintf("%064d", 1), "legacy", jobID, attemptID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.Exec(`INSERT INTO clipping_capability_expiry_index(job_id,attempt_id,expires_at) VALUES('missing_job','missing_attempt',?)`, issued); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range []string{
-		"clipping_cap_job_legacy_attempt_legacy_callback",
+		"clipping_cap_" + jobID + "_" + attemptID + "_callback",
+		"clipping_cap_" + jobID + "_" + attemptID + "_callback_expiry",
+		"clipping_cap_wrong_job_" + attemptID + "_callback",
 		"clipping_cap_missing_job_missing_attempt_callback_expiry",
 		"unrelated_setting",
 	} {
@@ -163,7 +174,7 @@ func TestLegacyClippingDrainCountsImportClaimsAndOrphanedCapabilities(t *testing
 		t.Fatalf("inventory mutated database: changes before=%d after=%d", before, after)
 	}
 	if inventory.PendingImports != 2 || inventory.ActiveImportLeases != 2 || inventory.UnexpiredCallbackWindows != 1 ||
-		inventory.UnknownCallbackExpiry != 0 || inventory.UnresolvedClaims != 1 || inventory.InconsistentCapabilityRows != 2 {
+		inventory.UnknownCallbackExpiry != 0 || inventory.UnresolvedClaims != 1 || inventory.InconsistentCapabilityRows != 3 {
 		t.Fatalf("unexpected aggregate inventory: %+v", inventory)
 	}
 }

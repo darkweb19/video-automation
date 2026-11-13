@@ -99,8 +99,9 @@ func (s *Store) LegacyClippingDrainInventory(now int64) (ClippingLegacyDrainInve
 	}
 	inventory.InconsistentCapabilityRows += orphanedIndexes
 
-	// Inspect keys only, never encrypted values. A callback setting without a
-	// matching legacy attempt could otherwise escape both expiry calculations.
+	// Inspect keys only, never encrypted values. The fixed-length generated
+	// attempt ID allows an indexed lookup; the exact reconstructed key check
+	// also treats malformed or mismatched keys as inconsistent.
 	var orphanedSettings int64
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM settings AS setting
 		WHERE substr(setting.key,1,13)='clipping_cap_'
@@ -108,7 +109,9 @@ func (s *Store) LegacyClippingDrainInventory(now int64) (ClippingLegacyDrainInve
 		AND NOT EXISTS (
 			SELECT 1 FROM clipping_stage_attempts AS attempt
 			JOIN clipping_jobs AS job ON job.id=attempt.job_id AND job.provider='modal_legacy'
-			WHERE setting.key IN (
+			WHERE attempt.attempt_id=substr(setting.key,
+				length(setting.key)-CASE WHEN substr(setting.key,-16)='_callback_expiry' THEN 16 ELSE 9 END-39,40)
+			AND setting.key IN (
 				'clipping_cap_' || attempt.job_id || '_' || attempt.attempt_id || '_callback',
 				'clipping_cap_' || attempt.job_id || '_' || attempt.attempt_id || '_callback_expiry'))`).Scan(&orphanedSettings); err != nil {
 		return ClippingLegacyDrainInventory{}, err
