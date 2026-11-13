@@ -91,7 +91,67 @@ func evaluateDataset(data Dataset) EvaluationReport {
 		report.ExternalReadiness.ActualCost = "partial_operator_records_other_runs_unknown"
 	}
 	report.Strata = summarizeStrata(data.Corpus, sourceReviews)
+	report.ReadinessGates = summarizeReadinessGates(data, report)
 	return report
+}
+
+func summarizeReadinessGates(data Dataset, report EvaluationReport) []ReadinessGate {
+	runs := len(data.Runs)
+	if runs == 0 {
+		return []ReadinessGate{
+			{Name: "provider_availability", Status: "unverified", ReasonCode: "live_inference_not_run"},
+			{Name: "live_authentication", Status: "unverified", ReasonCode: "live_authentication_not_run"},
+			{Name: "corpus_rights", Status: "blocked", ReasonCode: "no_operator_rights_attestations"},
+			{Name: "human_quality", Status: "not_run", ReasonCode: "no_saved_runs"},
+			{Name: "provider_usage", Status: "not_run", ReasonCode: "no_saved_runs"},
+			{Name: "actual_cost", Status: "not_run", ReasonCode: "no_saved_runs"},
+			{Name: "long_video_support", Status: "unverified", ReasonCode: "preview_40_minute_gate_not_run"},
+			{Name: "deployment_backup", Status: "not_run", ReasonCode: "offline_tool_does_not_verify_operations"},
+		}
+	}
+
+	gate := []ReadinessGate{
+		{Name: "provider_availability", Status: "unverified", ReasonCode: "live_inference_not_run"},
+		{Name: "live_authentication", Status: "unverified", ReasonCode: "live_authentication_not_run"},
+		{Name: "long_video_support", Status: "unverified", ReasonCode: "preview_40_minute_gate_not_run"},
+		{Name: "deployment_backup", Status: "not_run", ReasonCode: "offline_tool_does_not_verify_operations"},
+	}
+	if report.Corpus.OperatorRightsAttestedCount == 0 {
+		gate = append(gate, ReadinessGate{Name: "corpus_rights", Status: "blocked", ReasonCode: "no_operator_rights_attestations"})
+	} else {
+		gate = append(gate, ReadinessGate{Name: "corpus_rights", Status: "unverified", ReasonCode: "operator_attestation_not_independently_verified"})
+	}
+
+	completeHumanReviews := 0
+	completeUsageRecords := 0
+	completeCostRecords := 0
+	for _, run := range report.Runs {
+		if run.HumanReviewStatus == "complete" {
+			completeHumanReviews++
+		}
+		if run.UsageStatus == "reported" {
+			completeUsageRecords++
+		}
+		if run.CostStatus == "operator_recorded_not_independently_verified" {
+			completeCostRecords++
+		}
+	}
+	if completeHumanReviews == runs && hasAnyRubricRatings(report.Runs) {
+		gate = append(gate, ReadinessGate{Name: "human_quality", Status: "descriptive_only", ReasonCode: "human_labels_are_not_a_release_pass"})
+	} else {
+		gate = append(gate, ReadinessGate{Name: "human_quality", Status: "insufficient_evidence", ReasonCode: "complete_adjudicated_reviews_missing"})
+	}
+	if completeUsageRecords == runs {
+		gate = append(gate, ReadinessGate{Name: "provider_usage", Status: "unverified", ReasonCode: "provider_reported_counts_not_independently_verified"})
+	} else {
+		gate = append(gate, ReadinessGate{Name: "provider_usage", Status: "insufficient_evidence", ReasonCode: "provider_usage_missing_or_partial"})
+	}
+	if completeCostRecords == runs {
+		gate = append(gate, ReadinessGate{Name: "actual_cost", Status: "unverified", ReasonCode: "operator_cost_records_not_invoice_verified"})
+	} else {
+		gate = append(gate, ReadinessGate{Name: "actual_cost", Status: "insufficient_evidence", ReasonCode: "actual_cost_missing_or_partial"})
+	}
+	return gate
 }
 
 func addRunRankEvidence(summaries map[int]*RankSummary, analysis app.ClippingGeminiAnalysis, sourceReview SourceReview, hasSourceReview bool, runReview RunReview, hasRunReview bool) {

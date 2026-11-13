@@ -49,6 +49,18 @@ func TestEvaluateDatasetUsesHumanMatchesAndPreservesModelRanks(t *testing.T) {
 	if report.ExternalReadiness.ProviderAvailability != "unverified_live" || report.ExternalReadiness.LiveAuthentication != "unverified" || report.ExternalReadiness.LongVideoSupport != "preview_and_40_minute_gate_unverified" || report.ExternalReadiness.DeploymentBackup != "not_verified_by_offline_tool" {
 		t.Fatalf("external readiness = %#v", report.ExternalReadiness)
 	}
+	if gate := readinessGateForTest(t, report, "human_quality"); gate.Status != "descriptive_only" || gate.ReasonCode != "human_labels_are_not_a_release_pass" {
+		t.Fatalf("human quality gate = %#v", gate)
+	}
+	if gate := readinessGateForTest(t, report, "corpus_rights"); gate.Status != "unverified" || gate.ReasonCode != "operator_attestation_not_independently_verified" {
+		t.Fatalf("rights gate = %#v", gate)
+	}
+	if gate := readinessGateForTest(t, report, "provider_usage"); gate.Status != "unverified" || gate.ReasonCode != "provider_reported_counts_not_independently_verified" {
+		t.Fatalf("usage gate = %#v", gate)
+	}
+	if gate := readinessGateForTest(t, report, "actual_cost"); gate.Status != "insufficient_evidence" || gate.ReasonCode != "actual_cost_missing_or_partial" {
+		t.Fatalf("cost gate = %#v", gate)
+	}
 	if len(report.Strata) != 2 || report.Strata[0].Kind != "content_type" || report.Strata[1].Kind != "language" {
 		t.Fatalf("strata = %#v", report.Strata)
 	}
@@ -117,6 +129,55 @@ func TestEvaluateDatasetLeavesMissingHumanEvidenceUnknown(t *testing.T) {
 	if run.Rubric.Status != "insufficient_evidence" || result.Corpus.EligibleSourceCount != 0 || result.Corpus.EvidenceStatus != "insufficient_evidence" {
 		t.Fatalf("missing coverage was treated as evidence: %#v / %#v", run.Rubric, result.Corpus)
 	}
+	if gate := readinessGateForTest(t, result, "human_quality"); gate.Status != "insufficient_evidence" {
+		t.Fatalf("missing human labels produced readiness: %#v", gate)
+	}
+}
+
+func TestReadinessGatesKeepEmptyAndSyntheticDataOutOfReleaseClaims(t *testing.T) {
+	empty, err := decodeDataset(strings.NewReader(validEmptyDataset))
+	if err != nil {
+		t.Fatalf("decode empty dataset: %v", err)
+	}
+	emptyReport := evaluateDataset(empty)
+	for _, name := range []string{"human_quality", "provider_usage", "actual_cost", "deployment_backup"} {
+		if gate := readinessGateForTest(t, emptyReport, name); gate.Status != "not_run" {
+			t.Errorf("empty dataset %s gate = %#v", name, gate)
+		}
+	}
+	if gate := readinessGateForTest(t, emptyReport, "corpus_rights"); gate.Status != "blocked" {
+		t.Errorf("empty corpus rights gate = %#v", gate)
+	}
+	for _, gate := range emptyReport.ReadinessGates {
+		if gate.Status == "passed" || gate.Status == "ready" || gate.Status == "verified" {
+			t.Fatalf("empty dataset received success-shaped gate: %#v", gate)
+		}
+	}
+
+	synthetic := completeEvaluationDatasetForTest(t)
+	synthetic.Corpus[0].Status = "synthetic"
+	synthetic.Corpus[0].RightsStatus = "unknown"
+	if err := validateDataset(synthetic); err != nil {
+		t.Fatalf("validate synthetic dataset: %v", err)
+	}
+	syntheticReport := evaluateDataset(synthetic)
+	if gate := readinessGateForTest(t, syntheticReport, "corpus_rights"); gate.Status != "blocked" {
+		t.Fatalf("synthetic fixture was treated as approved corpus: %#v", gate)
+	}
+	if syntheticReport.Corpus.EligibleSourceCount != 0 {
+		t.Fatalf("synthetic fixture counted as eligible: %#v", syntheticReport.Corpus)
+	}
+}
+
+func readinessGateForTest(t *testing.T, report EvaluationReport, name string) ReadinessGate {
+	t.Helper()
+	for _, gate := range report.ReadinessGates {
+		if gate.Name == name {
+			return gate
+		}
+	}
+	t.Fatalf("readiness gate %q missing from %#v", name, report.ReadinessGates)
+	return ReadinessGate{}
 }
 
 func completeEvaluationDatasetForTest(t *testing.T) Dataset {

@@ -128,7 +128,17 @@ type EvaluationReport struct {
 	Runs              []RunSummary      `json:"runs"`
 	RankSummary       []RankSummary     `json:"rank_summary"`
 	Strata            []StratumSummary  `json:"strata"`
+	ReadinessGates    []ReadinessGate   `json:"readiness_gates"`
 	ExternalReadiness ExternalReadiness `json:"external_readiness"`
+}
+
+// ReadinessGate names one release prerequisite and records only a bounded
+// status plus a stable reason code. No gate in an offline report can claim a
+// live provider, rights, cost, quality, long-video, or deployment pass.
+type ReadinessGate struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	ReasonCode string `json:"reason_code"`
 }
 
 type RankSummary struct {
