@@ -25,6 +25,10 @@ func TestEvaluateDatasetUsesHumanMatchesAndPreservesModelRanks(t *testing.T) {
 	if run.HumanReviewStatus != "complete" || run.AnalysisStatus != "valid" || run.CandidateCount != 2 {
 		t.Fatalf("run review state = %#v", run)
 	}
+	if run.DurationComparisonStatus != "within_1s" || run.DurationTargetStatus != "within_40_min_target_unverified" ||
+		run.ContentTypeComparisonStatus != "matches_declared_content_type" || run.LanguageComparisonStatus != "matches_operator_metadata" {
+		t.Fatalf("source metadata comparisons = %#v", run)
+	}
 	if len(run.RanksAsReturned) != 2 || run.RanksAsReturned[0] != 1 || run.RanksAsReturned[1] != 2 {
 		t.Fatalf("ranks as returned = %v", run.RanksAsReturned)
 	}
@@ -154,6 +158,41 @@ func TestEvaluateDatasetWithholdsMetricsForUncertainCandidateLabels(t *testing.T
 	}
 	if gate := readinessGateForTest(t, result, "human_quality"); gate.Status != "insufficient_evidence" {
 		t.Fatalf("uncertain label passed human quality gate: %#v", gate)
+	}
+}
+
+func TestEvaluateDatasetFlagsDurationAndMetadataDifferencesWithoutPassingLongVideo(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.SourceReviews = nil
+	dataset.RunReviews = nil
+	duration := int64(41 * 60 * 1000)
+	dataset.Corpus[0].HumanDurationMS = &duration
+	dataset.Runs[0].Options.ContentType = "gaming"
+	var analysis app.ClippingGeminiAnalysis
+	if err := json.Unmarshal(dataset.Runs[0].Analysis, &analysis); err != nil {
+		t.Fatalf("decode fixture analysis: %v", err)
+	}
+	analysis.LanguageCodes = []string{"hi"}
+	encoded, err := json.Marshal(analysis)
+	if err != nil {
+		t.Fatalf("encode fixture analysis: %v", err)
+	}
+	dataset.Runs[0].Analysis = encoded
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate metadata comparison fixture: %v", err)
+	}
+
+	report := evaluateDataset(dataset)
+	run := report.Runs[0]
+	if run.DurationComparisonStatus != "differs_over_1s" || run.DurationTargetStatus != "above_40_min_target" ||
+		run.ContentTypeComparisonStatus != "differs_from_declared_content_type" || run.LanguageComparisonStatus != "differs_from_operator_metadata" {
+		t.Fatalf("metadata mismatch diagnostics = %#v", run)
+	}
+	if run.OperatorHumanDurationMS == nil || *run.OperatorHumanDurationMS != duration || len(run.ModelReportedLanguageCodes) != 1 || run.ModelReportedLanguageCodes[0] != "hi" {
+		t.Fatalf("duration/language evidence missing: %#v", run)
+	}
+	if report.ExternalReadiness.LongVideoSupport != "preview_and_40_minute_gate_unverified" || readinessGateForTest(t, report, "long_video_support").Status != "unverified" {
+		t.Fatalf("reported duration was treated as long-video verification: %#v", report.ExternalReadiness)
 	}
 }
 

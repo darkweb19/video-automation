@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"math"
 	"sort"
+	"strings"
 
 	"video-automation/internal/app"
 )
@@ -213,17 +214,25 @@ func finalizeRankEvidence(summaries map[int]*RankSummary) []RankSummary {
 func summarizeRun(run SavedRun, analysis app.ClippingGeminiAnalysis, source CorpusSource, sourceReview SourceReview, hasSourceReview bool, runReview RunReview, hasRunReview bool) RunSummary {
 	digest := sha256.Sum256(run.Analysis)
 	summary := RunSummary{
-		RunID:                   run.ID,
-		SourceID:                run.SourceID,
-		AnalysisPayloadSHA256:   hex.EncodeToString(digest[:]),
-		AnalysisStatus:          "valid",
-		ModelReportedDurationMS: analysis.SourceDurationMS,
-		CandidateCount:          len(analysis.Candidates),
-		RanksAsReturned:         make([]int, 0, len(analysis.Candidates)),
-		UsageStatus:             "unknown",
-		CostStatus:              "unknown",
-		HumanReviewStatus:       "not_reviewed",
-		LateEventStatus:         "unknown",
+		RunID:                       run.ID,
+		SourceID:                    run.SourceID,
+		AnalysisPayloadSHA256:       hex.EncodeToString(digest[:]),
+		AnalysisStatus:              "valid",
+		ModelReportedDurationMS:     analysis.SourceDurationMS,
+		OperatorHumanDurationMS:     cloneInt64(source.HumanDurationMS),
+		DurationComparisonStatus:    compareDurations(source.HumanDurationMS, analysis.SourceDurationMS),
+		DurationTargetStatus:        geminiDurationTargetStatus(source.HumanDurationMS),
+		DeclaredContentType:         source.ContentType,
+		RequestedContentType:        run.Options.ContentType,
+		ContentTypeComparisonStatus: compareContentTypes(source.ContentType, run.Options.ContentType),
+		ModelReportedLanguageCodes:  append([]string{}, analysis.LanguageCodes...),
+		LanguageComparisonStatus:    compareLanguages(source.LanguageCodes, analysis.LanguageCodes),
+		CandidateCount:              len(analysis.Candidates),
+		RanksAsReturned:             make([]int, 0, len(analysis.Candidates)),
+		UsageStatus:                 "unknown",
+		CostStatus:                  "unknown",
+		HumanReviewStatus:           "not_reviewed",
+		LateEventStatus:             "unknown",
 		TopK: TopKSummary{
 			K:               topK,
 			PrecisionStatus: "insufficient_evidence",
@@ -353,6 +362,66 @@ func summarizeRunReview(summary *RunSummary, analysis app.ClippingGeminiAnalysis
 			summary.TopK.RecallStatus = "descriptive_only"
 		}
 	}
+}
+
+func compareDurations(operatorDuration *int64, modelDuration int64) string {
+	if operatorDuration == nil {
+		return "operator_duration_unknown"
+	}
+	difference := *operatorDuration - modelDuration
+	if difference < 0 {
+		difference = -difference
+	}
+	if difference <= durationMatchToleranceMS {
+		return "within_1s"
+	}
+	return "differs_over_1s"
+}
+
+func geminiDurationTargetStatus(operatorDuration *int64) string {
+	if operatorDuration == nil {
+		return "operator_duration_unknown"
+	}
+	if *operatorDuration > maxGeminiTargetDurationMS {
+		return "above_40_min_target"
+	}
+	return "within_40_min_target_unverified"
+}
+
+func compareContentTypes(declared, requested string) string {
+	if declared == requested {
+		return "matches_declared_content_type"
+	}
+	return "differs_from_declared_content_type"
+}
+
+func compareLanguages(operatorLanguages, modelLanguages []string) string {
+	if len(operatorLanguages) == 0 {
+		return "operator_language_metadata_missing"
+	}
+	if len(modelLanguages) == 0 {
+		return "model_reported_language_unknown"
+	}
+	if sameLanguageSet(operatorLanguages, modelLanguages) {
+		return "matches_operator_metadata"
+	}
+	return "differs_from_operator_metadata"
+}
+
+func sameLanguageSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	values := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		values[strings.ToLower(value)] = struct{}{}
+	}
+	for _, value := range right {
+		if _, exists := values[strings.ToLower(value)]; !exists {
+			return false
+		}
+	}
+	return true
 }
 
 func summarizeDimensions(summary *RunSummary, dimensions ReviewDimensions) {

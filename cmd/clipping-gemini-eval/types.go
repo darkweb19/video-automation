@@ -20,6 +20,11 @@ const (
 	topK                    = 10
 )
 
+const (
+	maxGeminiTargetDurationMS int64 = 40 * 60 * 1000
+	durationMatchToleranceMS  int64 = 1000
+)
+
 // Dataset contains saved analyses and human annotations. It has no URL,
 // credential, API-key, or source-media fields. Source references remain with
 // the operator; an optional media digest requires a human-verification marker
@@ -167,6 +172,14 @@ type RunSummary struct {
 	AnalysisPayloadSHA256       string        `json:"analysis_payload_sha256"`
 	AnalysisStatus              string        `json:"analysis_status"`
 	ModelReportedDurationMS     int64         `json:"model_reported_duration_ms,omitempty"`
+	OperatorHumanDurationMS     *int64        `json:"operator_human_duration_ms,omitempty"`
+	DurationComparisonStatus    string        `json:"duration_comparison_status"`
+	DurationTargetStatus        string        `json:"duration_target_status"`
+	DeclaredContentType         string        `json:"declared_content_type"`
+	RequestedContentType        string        `json:"requested_content_type"`
+	ContentTypeComparisonStatus string        `json:"content_type_comparison_status"`
+	ModelReportedLanguageCodes  []string      `json:"model_reported_language_codes"`
+	LanguageComparisonStatus    string        `json:"language_comparison_status"`
 	CandidateCount              int           `json:"candidate_count"`
 	RanksAsReturned             []int         `json:"ranks_as_returned"`
 	UsageStatus                 string        `json:"usage_status"`
