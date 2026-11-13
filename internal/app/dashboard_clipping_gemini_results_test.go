@@ -43,14 +43,33 @@ func TestClippingGeminiResultsPreserveDirectV3Artifact(t *testing.T) {
 	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &jobDetail) != nil || len(jobDetail.Job.Artifacts) != 1 || jobDetail.Job.Artifacts[0].PayloadJSON != artifact.PayloadJSON {
 		t.Fatalf("detail artifact changed: %d %s", detail.Code, detail.Body.String())
 	}
-	if _, err := store.db.Exec(`UPDATE clipping_artifacts SET payload_json=? WHERE job_id=?`, `{"version":"framevault.clipping.analysis.v3","url":"https://provider.example/private"}`, origin.ID); err != nil {
+	ranges, err := json.Marshal(artifact.TimeRanges)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{path, "/api/clipping/jobs/" + origin.ID} {
-		bad := clippingDashboardRequest(handler, http.MethodGet, target, "", cookie, "")
-		if bad.Code != http.StatusInternalServerError || strings.Contains(bad.Body.String(), "provider.example") {
-			t.Fatalf("corrupted artifact exposed: %d %s", bad.Code, bad.Body.String())
-		}
+	for _, tc := range []struct {
+		name, update string
+		value        any
+	}{
+		{"payload", `UPDATE clipping_artifacts SET payload_json=? WHERE job_id=?`, `{"version":"framevault.clipping.analysis.v3","url":"https://provider.example/private"}`},
+		{"schema", `UPDATE clipping_artifacts SET schema_version=? WHERE job_id=?`, "2"},
+		{"duration", `UPDATE clipping_artifacts SET source_duration_ms=? WHERE job_id=?`, artifact.SourceDurationMS + 1},
+		{"ranges", `UPDATE clipping_artifacts SET time_ranges_json=? WHERE job_id=?`, `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.db.Exec(`UPDATE clipping_artifacts SET schema_version=?,source_duration_ms=?,time_ranges_json=?,payload_json=? WHERE job_id=?`, artifact.SchemaVersion, artifact.SourceDurationMS, string(ranges), artifact.PayloadJSON, origin.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(tc.update, tc.value, origin.ID); err != nil {
+				t.Fatal(err)
+			}
+			for _, target := range []string{path, "/api/clipping/jobs/" + origin.ID} {
+				bad := clippingDashboardRequest(handler, http.MethodGet, target, "", cookie, "")
+				if bad.Code != http.StatusInternalServerError || strings.Contains(bad.Body.String(), "provider.example") {
+					t.Fatalf("corrupted artifact exposed: %d %s", bad.Code, bad.Body.String())
+				}
+			}
+		})
 	}
 }
 
