@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"testing"
 	"time"
 )
@@ -23,7 +22,7 @@ func TestExpireQueuedGeminiJobsClearsRetryWaitAndUnblocksRetention(t *testing.T)
 	if err != nil || !ok {
 		t.Fatalf("claim %v %v", ok, err)
 	}
-	_, err = store.settleClippingGeminiKnownRejection(job.ID, lease.Attempt.AttemptID, lease.LeaseToken, clippingGeminiNotSubmittedError(context.Canceled), now)
+	_, err = store.settleClippingGeminiKnownRejection(job.ID, lease.Attempt.AttemptID, lease.LeaseToken, &clippingGeminiAttemptError{outcome: clippingGeminiAttemptExplicitRejection, httpStatus: 429}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +33,10 @@ func TestExpireQueuedGeminiJobsClearsRetryWaitAndUnblocksRetention(t *testing.T)
 	got, _ := store.ClippingJob(job.ID)
 	if got.Status != ClippingJobFailed || got.Error != "source_inaccessible" {
 		t.Fatalf("job %+v", got)
+	}
+	view, err := store.ClippingGeminiLifecycle(job.ID, now.Add(2*time.Minute).Unix())
+	if err != nil || view.ErrorCode != "source_inaccessible" || view.RetrySafety != ClippingGeminiRetrySafetyTerminal {
+		t.Fatalf("expired retry view %+v error=%v", view, err)
 	}
 	var count int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM clipping_gemini_execution_claims WHERE job_id=?`, job.ID).Scan(&count); err != nil || count != 0 {

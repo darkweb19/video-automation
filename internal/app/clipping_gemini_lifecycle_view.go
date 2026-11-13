@@ -46,9 +46,23 @@ func (s *Store) ClippingGeminiLifecycle(jobID string, now int64) (ClippingGemini
 		return view, err
 	}
 	view.Attempts = len(attempts)
-	if job.Status == ClippingJobFailed && job.Error == "outcome_unknown" {
-		view.RetrySafety = ClippingGeminiRetrySafetyUnknownNoReplay
-		view.ErrorCode = "outcome_unknown"
+	if job.Status == ClippingJobCanceled {
+		view.RetrySafety, view.ErrorCode = ClippingGeminiRetrySafetyTerminal, "canceled"
+		if len(attempts) > 0 {
+			latest := attempts[len(attempts)-1]
+			view.Attempt, view.Usage = latest.Attempt, latest.Usage
+			if latest.Outcome == clippingGeminiOutcomeUnknown {
+				view.RetrySafety, view.ErrorCode = ClippingGeminiRetrySafetyUnknownNoReplay, "outcome_unknown"
+			}
+		}
+		return view, nil
+	}
+	if job.Status == ClippingJobFailed && (job.Error == "outcome_unknown" || job.Error == "source_inaccessible") {
+		view.RetrySafety = ClippingGeminiRetrySafetyTerminal
+		if job.Error == "outcome_unknown" {
+			view.RetrySafety = ClippingGeminiRetrySafetyUnknownNoReplay
+		}
+		view.ErrorCode = job.Error
 		if len(attempts) > 0 {
 			latest := attempts[len(attempts)-1]
 			view.Attempt, view.Usage = latest.Attempt, latest.Usage
