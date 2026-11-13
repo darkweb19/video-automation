@@ -18,13 +18,15 @@ const (
 // separate route owner. RetrySafety is a fact about durable inference outcome,
 // not a promise that provider execution stopped when local cancellation ran.
 type ClippingGeminiLifecycleView struct {
-	RetrySafety   string              `json:"retry_safety"`
-	RetryAt       int64               `json:"retry_at,omitempty"`
-	ErrorCode     string              `json:"error_code,omitempty"`
-	Attempt       int                 `json:"attempt,omitempty"`
-	Attempts      int                 `json:"attempts"`
-	Usage         ClippingGeminiUsage `json:"usage"`
-	CacheOriginID string              `json:"cache_origin_job_id,omitempty"`
+	RetrySafety          string              `json:"retry_safety"`
+	RetryAt              int64               `json:"retry_at,omitempty"`
+	ErrorCode            string              `json:"error_code,omitempty"`
+	Attempt              int                 `json:"attempt,omitempty"`
+	Attempts             int                 `json:"attempts"`
+	Usage                ClippingGeminiUsage `json:"usage"`
+	CacheOriginID        string              `json:"cache_origin_job_id,omitempty"`
+	CacheOriginCreatedAt int64               `json:"cache_origin_created_at,omitempty"`
+	CacheOriginExpiresAt int64               `json:"cache_origin_expires_at,omitempty"`
 }
 
 func (s *Store) ClippingGeminiLifecycle(jobID string, now int64) (ClippingGeminiLifecycleView, error) {
@@ -54,7 +56,8 @@ func (s *Store) ClippingGeminiLifecycle(jobID string, now int64) (ClippingGemini
 		return view, nil
 	}
 	if job.Status == ClippingJobCompleted {
-		err := s.db.QueryRow(`SELECT origin_job_id FROM clipping_gemini_cache_reuses WHERE job_id=?`, jobID).Scan(&view.CacheOriginID)
+		err := s.db.QueryRow(`SELECT reuse.origin_job_id,COALESCE(provenance.origin_created_at,0),COALESCE(provenance.origin_expires_at,0)
+			FROM clipping_gemini_cache_reuses AS reuse LEFT JOIN clipping_gemini_cache_reuse_provenance AS provenance ON provenance.job_id=reuse.job_id WHERE reuse.job_id=?`, jobID).Scan(&view.CacheOriginID, &view.CacheOriginCreatedAt, &view.CacheOriginExpiresAt)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return ClippingGeminiLifecycleView{}, err
 		}

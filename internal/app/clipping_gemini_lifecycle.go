@@ -96,7 +96,12 @@ func (s *Store) migrateClippingGeminiLifecycle() error {
 		created_at INTEGER NOT NULL CHECK(created_at>0),
 		updated_at INTEGER NOT NULL CHECK(updated_at>0)
 	);
-	CREATE INDEX IF NOT EXISTS clipping_gemini_claims_job ON clipping_gemini_execution_claims(job_id,state);`)
+	CREATE INDEX IF NOT EXISTS clipping_gemini_claims_job ON clipping_gemini_execution_claims(job_id,state);
+	CREATE TABLE IF NOT EXISTS clipping_gemini_cache_reuse_provenance (
+		job_id TEXT PRIMARY KEY REFERENCES clipping_gemini_cache_reuses(job_id) ON DELETE RESTRICT,
+		origin_created_at INTEGER NOT NULL CHECK(origin_created_at>0),
+		origin_expires_at INTEGER NOT NULL CHECK(origin_expires_at>origin_created_at)
+	);`)
 	return err
 }
 

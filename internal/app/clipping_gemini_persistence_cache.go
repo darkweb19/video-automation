@@ -195,6 +195,13 @@ func loadClippingGeminiCacheTx(tx *sql.Tx, jobID string, now int64) (clippingGem
 	if err := tx.QueryRow(`SELECT origin_job_id FROM clipping_gemini_cache_reuses WHERE job_id=?`, job.ID).Scan(&recordedOrigin); err != nil || recordedOrigin != hit.OriginJobID {
 		return clippingGeminiCacheHit{}, false, ErrClippingInvalidState
 	}
+	if _, err := tx.Exec(`INSERT INTO clipping_gemini_cache_reuse_provenance(job_id,origin_created_at,origin_expires_at) VALUES(?,?,?) ON CONFLICT(job_id) DO NOTHING`, job.ID, hit.OriginCreatedAt, hit.ExpiresAt); err != nil {
+		return clippingGeminiCacheHit{}, false, err
+	}
+	var originCreated, originExpires int64
+	if err := tx.QueryRow(`SELECT origin_created_at,origin_expires_at FROM clipping_gemini_cache_reuse_provenance WHERE job_id=?`, job.ID).Scan(&originCreated, &originExpires); err != nil || originCreated != hit.OriginCreatedAt || originExpires != hit.ExpiresAt {
+		return clippingGeminiCacheHit{}, false, ErrClippingInvalidState
+	}
 	artifact.JobID, artifact.CreatedAt = jobID, 0
 	hit.Artifact = artifact
 	return hit, true, nil

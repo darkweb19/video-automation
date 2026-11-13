@@ -30,6 +30,16 @@ func TestGeminiCacheHitAfterSafeRetryPublishesOriginAndNoNewUsage(t *testing.T) 
 	if err != nil || view.CacheOriginID != origin.ID || view.RetrySafety != ClippingGeminiRetrySafetyNone || view.ErrorCode != "" || view.Usage.Available || view.Attempts != 1 {
 		t.Fatalf("view %+v %v", view, err)
 	}
+	if view.CacheOriginCreatedAt != now.Unix() || view.CacheOriginExpiresAt <= view.CacheOriginCreatedAt {
+		t.Fatalf("missing cache origin timestamps %+v", view)
+	}
+	if _, err := store.db.Exec(`DELETE FROM clipping_gemini_cache WHERE origin_job_id=?`, origin.ID); err != nil {
+		t.Fatal(err)
+	}
+	afterEviction, err := store.ClippingGeminiLifecycle(target.ID, now.Unix())
+	if err != nil || afterEviction.CacheOriginCreatedAt != view.CacheOriginCreatedAt || afterEviction.CacheOriginExpiresAt != view.CacheOriginExpiresAt {
+		t.Fatalf("lost provenance after eviction %+v %v", afterEviction, err)
+	}
 	var count int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM clipping_gemini_execution_claims WHERE job_id=?`, target.ID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("guard %d %v", count, err)
