@@ -159,44 +159,56 @@ type RankSummary struct {
 }
 
 type CorpusSummary struct {
-	SourceCount                 int    `json:"source_count"`
-	OperatorRightsAttestedCount int    `json:"operator_rights_attested_count"`
-	HumanDurationCount          int    `json:"human_duration_count"`
-	CompleteSourceReviewCount   int    `json:"complete_source_review_count"`
-	EligibleSourceCount         int    `json:"eligible_source_count"`
-	EvidenceStatus              string `json:"evidence_status"`
+	SourceCount                 int            `json:"source_count"`
+	SourceStatusCounts          map[string]int `json:"source_status_counts"`
+	RightsStatusCounts          map[string]int `json:"rights_status_counts"`
+	CoverageStatusCounts        map[string]int `json:"coverage_status_counts"`
+	OperatorRightsAttestedCount int            `json:"operator_rights_attested_count"`
+	HumanDurationCount          int            `json:"human_duration_count"`
+	CompleteSourceReviewCount   int            `json:"complete_source_review_count"`
+	EligibleSourceCount         int            `json:"eligible_source_count"`
+	EvidenceStatus              string         `json:"evidence_status"`
 }
 
 type RunSummary struct {
-	RunID                       string        `json:"run_id"`
-	SourceID                    string        `json:"source_id"`
-	AnalysisPayloadSHA256       string        `json:"analysis_payload_sha256"`
-	AnalysisStatus              string        `json:"analysis_status"`
-	ModelReportedDurationMS     int64         `json:"model_reported_duration_ms,omitempty"`
-	OperatorHumanDurationMS     *int64        `json:"operator_human_duration_ms,omitempty"`
-	DurationComparisonStatus    string        `json:"duration_comparison_status"`
-	DurationTargetStatus        string        `json:"duration_target_status"`
-	DeclaredContentType         string        `json:"declared_content_type"`
-	RequestedContentType        string        `json:"requested_content_type"`
-	ContentTypeComparisonStatus string        `json:"content_type_comparison_status"`
-	ModelReportedLanguageCodes  []string      `json:"model_reported_language_codes"`
-	LanguageComparisonStatus    string        `json:"language_comparison_status"`
-	CandidateCount              int           `json:"candidate_count"`
-	RanksAsReturned             []int         `json:"ranks_as_returned"`
-	UsageStatus                 string        `json:"usage_status"`
-	PromptTokens                *int64        `json:"prompt_tokens,omitempty"`
-	OutputTokens                *int64        `json:"output_tokens,omitempty"`
-	TotalTokens                 *int64        `json:"total_tokens,omitempty"`
-	CostStatus                  string        `json:"cost_status"`
-	ActualCostUSD               *float64      `json:"actual_cost_usd,omitempty"`
-	HumanReviewStatus           string        `json:"human_review_status"`
-	ReviewedOpportunityCount    int           `json:"reviewed_opportunity_count"`
-	UsableOpportunityCount      int           `json:"usable_opportunity_count"`
-	LateEventStatus             string        `json:"late_event_status"`
-	LateOpportunityCount        int           `json:"late_opportunity_count"`
-	LateMatchedOpportunityCount int           `json:"late_matched_opportunity_count"`
-	TopK                        TopKSummary   `json:"top_k"`
-	Rubric                      RubricSummary `json:"rubric"`
+	RunID                       string                `json:"run_id"`
+	SourceID                    string                `json:"source_id"`
+	AnalysisPayloadSHA256       string                `json:"analysis_payload_sha256"`
+	AnalysisStatus              string                `json:"analysis_status"`
+	ModelReportedDurationMS     int64                 `json:"model_reported_duration_ms,omitempty"`
+	OperatorHumanDurationMS     *int64                `json:"operator_human_duration_ms,omitempty"`
+	DurationComparisonStatus    string                `json:"duration_comparison_status"`
+	DurationTargetStatus        string                `json:"duration_target_status"`
+	DeclaredContentType         string                `json:"declared_content_type"`
+	RequestedContentType        string                `json:"requested_content_type"`
+	ContentTypeComparisonStatus string                `json:"content_type_comparison_status"`
+	ModelReportedLanguageCodes  []string              `json:"model_reported_language_codes"`
+	LanguageComparisonStatus    string                `json:"language_comparison_status"`
+	CandidateCount              int                   `json:"candidate_count"`
+	CandidateReviews            CandidateReviewCounts `json:"candidate_reviews"`
+	RanksAsReturned             []int                 `json:"ranks_as_returned"`
+	UsageStatus                 string                `json:"usage_status"`
+	PromptTokens                *int64                `json:"prompt_tokens,omitempty"`
+	OutputTokens                *int64                `json:"output_tokens,omitempty"`
+	TotalTokens                 *int64                `json:"total_tokens,omitempty"`
+	CostStatus                  string                `json:"cost_status"`
+	ActualCostUSD               *float64              `json:"actual_cost_usd,omitempty"`
+	HumanReviewStatus           string                `json:"human_review_status"`
+	ReviewedOpportunityCount    int                   `json:"reviewed_opportunity_count"`
+	UsableOpportunityCount      int                   `json:"usable_opportunity_count"`
+	LateEventStatus             string                `json:"late_event_status"`
+	LateOpportunityCount        int                   `json:"late_opportunity_count"`
+	LateMatchedOpportunityCount int                   `json:"late_matched_opportunity_count"`
+	TopK                        TopKSummary           `json:"top_k"`
+	Rubric                      RubricSummary         `json:"rubric"`
+}
+
+type CandidateReviewCounts struct {
+	Returned    int `json:"returned"`
+	Reviewed    int `json:"reviewed"`
+	Uncertain   int `json:"uncertain"`
+	NotReviewed int `json:"not_reviewed"`
+	Missing     int `json:"missing"`
 }
 
 type TopKSummary struct {

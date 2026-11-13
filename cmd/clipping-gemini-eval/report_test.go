@@ -18,12 +18,19 @@ func TestEvaluateDatasetUsesHumanMatchesAndPreservesModelRanks(t *testing.T) {
 	if report.Corpus.SourceCount != 1 || report.Corpus.EligibleSourceCount != 1 || report.Corpus.CompleteSourceReviewCount != 1 || report.Corpus.EvidenceStatus != "descriptive_only" {
 		t.Fatalf("corpus summary = %#v", report.Corpus)
 	}
+	if report.Corpus.SourceStatusCounts["ready"] != 1 || report.Corpus.RightsStatusCounts["confirmed"] != 1 ||
+		report.Corpus.CoverageStatusCounts["complete"] != 1 || report.Corpus.CoverageStatusCounts["not_reviewed"] != 0 {
+		t.Fatalf("corpus lifecycle and coverage counts = %#v", report.Corpus)
+	}
 	if len(report.Runs) != 1 {
 		t.Fatalf("run summaries = %#v", report.Runs)
 	}
 	run := report.Runs[0]
 	if run.HumanReviewStatus != "complete" || run.AnalysisStatus != "valid" || run.CandidateCount != 2 {
 		t.Fatalf("run review state = %#v", run)
+	}
+	if run.CandidateReviews.Returned != 2 || run.CandidateReviews.Reviewed != 2 || run.CandidateReviews.Uncertain != 0 || run.CandidateReviews.Missing != 0 {
+		t.Fatalf("candidate review coverage = %#v", run.CandidateReviews)
 	}
 	if run.DurationComparisonStatus != "within_1s" || run.DurationTargetStatus != "within_40_min_target_unverified" ||
 		run.ContentTypeComparisonStatus != "matches_declared_content_type" || run.LanguageComparisonStatus != "matches_operator_metadata" {
@@ -156,8 +163,24 @@ func TestEvaluateDatasetWithholdsMetricsForUncertainCandidateLabels(t *testing.T
 	if run.Rubric.Status != "partial" || run.Rubric.RatedCandidateCount != 1 {
 		t.Fatalf("uncertain candidate label contributed to rubric completion: %#v", run.Rubric)
 	}
+	if run.CandidateReviews.Returned != 2 || run.CandidateReviews.Reviewed != 1 || run.CandidateReviews.Uncertain != 1 || run.CandidateReviews.Missing != 0 {
+		t.Fatalf("uncertain candidate review count = %#v", run.CandidateReviews)
+	}
 	if gate := readinessGateForTest(t, result, "human_quality"); gate.Status != "insufficient_evidence" {
 		t.Fatalf("uncertain label passed human quality gate: %#v", gate)
+	}
+}
+
+func TestEvaluateDatasetCountsMissingCandidateReviewsExplicitly(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.RunReviews[0].AdjudicationStatus = "pending"
+	dataset.RunReviews[0].CandidateReviews = dataset.RunReviews[0].CandidateReviews[:1]
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate partial candidate reviews: %v", err)
+	}
+	run := evaluateDataset(dataset).Runs[0]
+	if run.CandidateReviews.Returned != 2 || run.CandidateReviews.Reviewed != 1 || run.CandidateReviews.Missing != 1 || run.CandidateReviews.Uncertain != 0 {
+		t.Fatalf("missing candidate review was hidden: %#v", run.CandidateReviews)
 	}
 }
 
@@ -228,6 +251,9 @@ func TestReadinessGatesKeepEmptyAndSyntheticDataOutOfReleaseClaims(t *testing.T)
 	}
 	if syntheticReport.Corpus.EligibleSourceCount != 0 {
 		t.Fatalf("synthetic fixture counted as eligible: %#v", syntheticReport.Corpus)
+	}
+	if syntheticReport.Corpus.SourceStatusCounts["synthetic"] != 1 || syntheticReport.Corpus.RightsStatusCounts["unknown"] != 1 {
+		t.Fatalf("synthetic and unknown-rights status disappeared: %#v", syntheticReport.Corpus)
 	}
 }
 

@@ -29,6 +29,11 @@ func evaluateDataset(data Dataset) EvaluationReport {
 		LocalStatus: "offline_validation_complete",
 		Runs:        make([]RunSummary, 0, len(data.Runs)),
 		RankSummary: make([]RankSummary, 0),
+		Corpus: CorpusSummary{
+			SourceStatusCounts:   emptyCounts("synthetic", "pending", "ready", "excluded"),
+			RightsStatusCounts:   emptyCounts("unknown", "confirmed", "denied"),
+			CoverageStatusCounts: emptyCounts("not_reviewed", "partial", "complete"),
+		},
 		ExternalReadiness: ExternalReadiness{
 			ProviderAvailability: "unverified_live",
 			LiveAuthentication:   "unverified",
@@ -40,6 +45,8 @@ func evaluateDataset(data Dataset) EvaluationReport {
 		},
 	}
 	for _, source := range data.Corpus {
+		report.Corpus.SourceStatusCounts[source.Status]++
+		report.Corpus.RightsStatusCounts[source.RightsStatus]++
 		if source.RightsStatus == "confirmed" {
 			report.Corpus.OperatorRightsAttestedCount++
 		}
@@ -47,6 +54,11 @@ func evaluateDataset(data Dataset) EvaluationReport {
 			report.Corpus.HumanDurationCount++
 		}
 		review, hasReview := sourceReviews[source.ID]
+		coverageStatus := "not_reviewed"
+		if hasReview {
+			coverageStatus = review.CoverageStatus
+		}
+		report.Corpus.CoverageStatusCounts[coverageStatus]++
 		if hasReview && sourceReviewComplete(review, source) {
 			report.Corpus.CompleteSourceReviewCount++
 			if source.Status == "ready" && source.RightsStatus == "confirmed" && source.HumanDurationMS != nil {
@@ -228,6 +240,7 @@ func summarizeRun(run SavedRun, analysis app.ClippingGeminiAnalysis, source Corp
 		ModelReportedLanguageCodes:  append([]string{}, analysis.LanguageCodes...),
 		LanguageComparisonStatus:    compareLanguages(source.LanguageCodes, analysis.LanguageCodes),
 		CandidateCount:              len(analysis.Candidates),
+		CandidateReviews:            summarizeCandidateReviewCounts(analysis, runReview, hasRunReview),
 		RanksAsReturned:             make([]int, 0, len(analysis.Candidates)),
 		UsageStatus:                 "unknown",
 		CostStatus:                  "unknown",
@@ -302,6 +315,40 @@ func summarizeRun(run SavedRun, analysis app.ClippingGeminiAnalysis, source Corp
 		summary.HumanReviewStatus = "partial"
 	}
 	return summary
+}
+
+func summarizeCandidateReviewCounts(analysis app.ClippingGeminiAnalysis, review RunReview, hasReview bool) CandidateReviewCounts {
+	counts := CandidateReviewCounts{Returned: len(analysis.Candidates)}
+	reviews := make(map[int]CandidateReview, len(review.CandidateReviews))
+	if hasReview {
+		for _, candidateReview := range review.CandidateReviews {
+			reviews[candidateReview.Rank] = candidateReview
+		}
+	}
+	for _, candidate := range analysis.Candidates {
+		candidateReview, exists := reviews[candidate.Rank]
+		if !exists {
+			counts.Missing++
+			continue
+		}
+		switch candidateReview.Status {
+		case "reviewed":
+			counts.Reviewed++
+		case "uncertain":
+			counts.Uncertain++
+		case "not_reviewed":
+			counts.NotReviewed++
+		}
+	}
+	return counts
+}
+
+func emptyCounts(keys ...string) map[string]int {
+	counts := make(map[string]int, len(keys))
+	for _, key := range keys {
+		counts[key] = 0
+	}
+	return counts
 }
 
 func summarizeRunReview(summary *RunSummary, analysis app.ClippingGeminiAnalysis, sourceReview SourceReview, hasSourceReview bool, review RunReview, hasRunReview bool) {
