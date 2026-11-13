@@ -184,13 +184,24 @@ func clippingJobSummary(job ClippingJob, stages []ClippingStage, artifacts []Cli
 	}
 }
 
-func (a *dashboardApp) clippingJobResponse(job ClippingJob, includeArtifacts bool) (clippingJobView, error) {
-	stages, err := a.store.ClippingStages(job.ID)
+// clippingJobProjection is the shared summary used for HTTP and live events.
+// Keep provider-specific enrichment here so every consumer sees the same
+// immutable options and safe lifecycle fields.
+func (s *Store) clippingJobProjection(job ClippingJob) (clippingJobView, error) {
+	stages, err := s.ClippingStages(job.ID)
 	if err != nil {
 		return clippingJobView{}, err
 	}
 	view := clippingJobSummary(job, stages, nil)
-	if err := a.store.enrichClippingGeminiJob(&view, job); err != nil {
+	if err := s.enrichClippingGeminiJob(&view, job); err != nil {
+		return clippingJobView{}, err
+	}
+	return view, nil
+}
+
+func (a *dashboardApp) clippingJobResponse(job ClippingJob, includeArtifacts bool) (clippingJobView, error) {
+	view, err := a.store.clippingJobProjection(job)
+	if err != nil {
 		return clippingJobView{}, err
 	}
 	if includeArtifacts {
@@ -829,12 +840,8 @@ func (s *Store) PublishClippingJob(id string) {
 	if err != nil {
 		return
 	}
-	stages, err := s.ClippingStages(id)
+	view, err := s.clippingJobProjection(job)
 	if err != nil {
-		return
-	}
-	view := clippingJobSummary(job, stages, nil)
-	if err := s.enrichClippingGeminiJob(&view, job); err != nil {
 		return
 	}
 	fingerprint, err := snapshotFingerprint(view)

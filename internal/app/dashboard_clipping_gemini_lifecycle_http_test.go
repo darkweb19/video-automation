@@ -33,7 +33,7 @@ func TestClippingGeminiLifecycleHTTPPreservesRetrySafety(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err := store.db.Exec(`INSERT INTO clipping_gemini_attempts(attempt_id,job_id,attempt_no,phase,outcome,failure_code,http_status,retry_at,lease_token_hash,lease_expires_at,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-				"clipattempt_"+string(rune('a'+i)), job.ID, tc.attempt, tc.phase, tc.outcome, tc.failure, tc.httpStatus, tc.retryAt, strings.Repeat("a", 64), now+3600, now, now)
+				"clipattempt_"+string(rune('a'+i)), job.ID, tc.attempt, tc.phase, tc.outcome, tc.failure, tc.httpStatus, tc.retryAt, tokenHash("test-lease"), now+3600, now, now)
 			if err != nil {
 				t.Fatal(err)
 			}
