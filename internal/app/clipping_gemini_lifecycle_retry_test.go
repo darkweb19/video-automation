@@ -72,7 +72,7 @@ func TestGeminiCredentialFailureIsTerminalWithoutHotRetryLoop(t *testing.T) {
 	}
 	latest, err := store.settleClippingGeminiKnownRejection(job.ID, claim.Attempt.AttemptID, claim.LeaseToken,
 		&clippingGeminiAttemptError{outcome: clippingGeminiAttemptNotSubmitted, reason: errClippingGeminiCredentialsUnavailable}, now)
-	if err != nil || latest.FailureCode != "request_not_submitted" || latest.Outcome != clippingGeminiOutcomeNotSubmitted {
+	if err != nil || latest.FailureCode != "credentials_unavailable" || latest.Outcome != clippingGeminiOutcomeNotSubmitted {
 		t.Fatalf("credential settlement=%+v error=%v", latest, err)
 	}
 	failed, err := store.ClippingJob(job.ID)

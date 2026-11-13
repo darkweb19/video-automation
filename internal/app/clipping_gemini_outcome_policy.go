@@ -39,6 +39,14 @@ func clippingGeminiPolicyForAttempt(err error, attempt int) clippingGeminiAttemp
 	case clippingGeminiAttemptNotSubmitted:
 		policy.Outcome = clippingGeminiOutcomeNotSubmitted
 		policy.FailureCode = "request_not_submitted"
+		switch {
+		case errors.Is(attemptErr.reason, errClippingGeminiConfigDrift):
+			policy.FailureCode = "config_drift"
+		case errors.Is(attemptErr.reason, errClippingGeminiSourceInaccessible):
+			policy.FailureCode = "source_inaccessible"
+		case errors.Is(attemptErr.reason, errClippingGeminiCredentialsUnavailable):
+			policy.FailureCode = "credentials_unavailable"
+		}
 		if attempt >= 1 && attempt < clippingGeminiMaxSubmissionAttempts && clippingGeminiNotSubmittedMayRetry(attemptErr) {
 			policy.MayRetryWithoutDuplicate = true
 			policy.RetryDelaySeconds = int64(clippingGeminiNotSubmittedRetryDelay.Seconds())
@@ -71,6 +79,8 @@ func clippingGeminiNotSubmittedMayRetry(attemptErr *clippingGeminiAttemptError) 
 		return false
 	}
 	for _, permanent := range []error{
+		errClippingGeminiConfigDrift,
+		errClippingGeminiSourceInaccessible,
 		ErrClippingGeminiInvalidConfig,
 		ErrClippingGeminiInvalidOptions,
 		ErrClippingGeminiInvalidRequest,

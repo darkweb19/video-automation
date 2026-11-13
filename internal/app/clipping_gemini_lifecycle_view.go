@@ -44,6 +44,15 @@ func (s *Store) ClippingGeminiLifecycle(jobID string, now int64) (ClippingGemini
 		return view, err
 	}
 	view.Attempts = len(attempts)
+	if job.Status == ClippingJobFailed && job.Error == "outcome_unknown" {
+		view.RetrySafety = ClippingGeminiRetrySafetyUnknownNoReplay
+		view.ErrorCode = "outcome_unknown"
+		if len(attempts) > 0 {
+			latest := attempts[len(attempts)-1]
+			view.Attempt, view.Usage = latest.Attempt, latest.Usage
+		}
+		return view, nil
+	}
 	if job.Status == ClippingJobCompleted {
 		err := s.db.QueryRow(`SELECT origin_job_id FROM clipping_gemini_cache_reuses WHERE job_id=?`, jobID).Scan(&view.CacheOriginID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
