@@ -1068,10 +1068,11 @@ func (s *Store) conservativeClippingCallbackExpiry(jobID, attemptID string) (int
 // so it must not shorten an already-issued callback window. Attempts predating
 // the index use the full lease-plus-grace bound conservatively.
 func clippingIssuedCallbackExpiryTx(tx *sql.Tx, attempt clippingAttemptRecord, source ClippingSource) (int64, error) {
-	var expiresAt int64
-	err := tx.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, attempt.JobID, attempt.AttemptID).Scan(&expiresAt)
+	var stored any
+	err := tx.QueryRow(`SELECT expires_at FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, attempt.JobID, attempt.AttemptID).Scan(&stored)
 	if err == nil {
-		if expiresAt <= 0 {
+		expiresAt, ok := stored.(int64)
+		if !ok || expiresAt <= 0 {
 			return 0, ErrClippingInvalidState
 		}
 		return expiresAt, nil
@@ -1079,7 +1080,7 @@ func clippingIssuedCallbackExpiryTx(tx *sql.Tx, attempt clippingAttemptRecord, s
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
-	expiresAt = clippingConservativeCallbackExpiry(attempt, source)
+	expiresAt := clippingConservativeCallbackExpiry(attempt, source)
 	if expiresAt <= 0 {
 		return 0, ErrClippingInvalidState
 	}
@@ -1302,12 +1303,14 @@ func (s *Store) tombstoneClippingSource(id string, now int64, automatic bool) er
 	if err != nil {
 		return err
 	}
-	callbackActive, err := clippingSourceHasActiveCallbackWindowTx(tx, source, now)
-	if err != nil {
-		return err
-	}
-	if callbackActive {
-		return errors.New("clipping source is protected until every worker callback window expires")
+	if automatic {
+		callbackActive, err := clippingSourceHasActiveCallbackWindowTx(tx, source, now)
+		if err != nil {
+			return err
+		}
+		if callbackActive {
+			return errors.New("clipping source is protected until every worker callback window expires")
+		}
 	}
 	// Source-derived artifacts can contain transcripts and analysis content;
 	// erase them with the media while keeping job, stage, and cost audit rows.
@@ -1355,56 +1358,67 @@ func (s *Store) ExpiredClippingSources(now int64, limit int) ([]ClippingSource, 
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	scanLimit := limit * 5
-	if scanLimit > 500 {
-		scanLimit = 500
+	pageSize := limit * 5
+	if pageSize > 500 {
+		pageSize = 500
 	}
-	rows, err := s.db.Query(`SELECT `+clippingSourceColumns()+` FROM clipping_sources AS src WHERE
-		(src.status='deleted' AND src.cleanup_complete=0) OR
-		(src.status<>'deleted' AND src.retain_until>0 AND src.retain_until<=? AND src.media_lease_until<=? AND src.import_lease_until<=? AND NOT EXISTS (
-			SELECT 1 FROM clipping_jobs AS job WHERE job.source_id=src.id AND job.status IN ('queued','running')
-		)) ORDER BY CASE WHEN src.status='deleted' THEN 0 ELSE 1 END,src.retain_until,src.created_at LIMIT ?`, now, now, now, scanLimit)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	candidates := make([]ClippingSource, 0, scanLimit)
-	for rows.Next() {
-		source, err := scanClippingSource(rows)
+	defer tx.Rollback()
+	sources := make([]ClippingSource, 0, limit)
+	// Continue past protected or malformed legacy records; one unresolved
+	// source must not prevent normal retention of unrelated sources.
+	for offset := 0; ; offset += pageSize {
+		rows, err := tx.Query(`SELECT `+clippingSourceColumns()+` FROM clipping_sources AS src WHERE
+   (src.status='deleted' AND src.cleanup_complete=0) OR
+   (src.status<>'deleted' AND src.retain_until>0 AND src.retain_until<=? AND src.media_lease_until<=? AND src.import_lease_until<=? AND NOT EXISTS (
+    SELECT 1 FROM clipping_jobs AS job WHERE job.source_id=src.id AND job.status IN ('queued','running')
+   )) ORDER BY CASE WHEN src.status='deleted' THEN 0 ELSE 1 END,src.retain_until,src.created_at,src.id LIMIT ? OFFSET ?`, now, now, now, pageSize, offset)
 		if err != nil {
 			return nil, err
 		}
-		candidates = append(candidates, source)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	sources := make([]ClippingSource, 0, limit)
-	for _, source := range candidates {
-		if source.Status != ClippingSourceDeleted {
-			tx, err := s.db.Begin()
+		candidates := make([]ClippingSource, 0, pageSize)
+		for rows.Next() {
+			source, err := scanClippingSource(rows)
 			if err != nil {
+				rows.Close()
 				return nil, err
 			}
-			blocked, checkErr := clippingSourceHasActiveCallbackWindowTx(tx, source, now)
-			rollbackErr := tx.Rollback()
-			if checkErr != nil {
-				return nil, checkErr
+			candidates = append(candidates, source)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		for _, source := range candidates {
+			if source.Status != ClippingSourceDeleted {
+				blocked, err := clippingSourceHasActiveCallbackWindowTx(tx, source, now)
+				if errors.Is(err, ErrClippingInvalidState) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				if blocked {
+					continue
+				}
 			}
-			if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-				return nil, rollbackErr
-			}
-			if blocked {
-				continue
+			sources = append(sources, source)
+			if len(sources) == limit {
+				break
 			}
 		}
-		sources = append(sources, source)
-		if len(sources) >= limit {
+		if len(sources) == limit || len(candidates) < pageSize {
 			break
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return sources, nil
 }

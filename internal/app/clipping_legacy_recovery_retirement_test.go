@@ -135,3 +135,35 @@ func TestLegacyRecoveredJobDoesNotOfferRetiredRetry(t *testing.T) {
 		t.Fatalf("recovered job guidance=%d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestUnknownLegacyExpiryDoesNotBlockUnrelatedRetention(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().Unix()
+	// More unknown records than a one-result page verifies that the scan
+	// continues past a full page of protected sources.
+	for i := 0; i < 6; i++ {
+		name := string(rune('a' + i))
+		legacyDrainAttemptFixture(t, store, name, "modal_legacy", "canceled", "canceled", 0, nil)
+		jobID, _ := legacyDrainFixtureIDs(name)
+		if _, err := store.db.Exec(`UPDATE clipping_stages SET status='canceled' WHERE job_id=?`, jobID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clean := makeReadyClippingSource(t, store, 60_000)
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET retain_until=1 WHERE id=?`, clean.ID); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := store.ExpiredClippingSources(now, 1)
+	if err != nil || len(expired) != 1 || expired[0].ID != clean.ID {
+		t.Fatalf("unknown expiry blocked unrelated retention: sources=%+v error=%v", expired, err)
+	}
+	if err := store.ExpireClippingSource(clean.ID, now); err != nil {
+		t.Fatalf("could not expire unrelated source: %v", err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE clipping_capability_expiry_index`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ExpiredClippingSources(now, 100); err == nil {
+		t.Fatal("real database failure was treated as an unknown expiry")
+	}
+}
