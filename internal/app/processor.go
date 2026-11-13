@@ -40,18 +40,11 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 }
 
 func (p *Processor) Run(ctx context.Context) {
-	// Recover abandoned provider intent before any Gemini worker can claim it.
-	if ids, err := p.app.store.RecoverClippingGeminiAttempts(time.Now().Unix(), true); err != nil {
-		p.logger.Error("Gemini clipping startup recovery failed")
-	} else {
-		for _, id := range ids {
-			p.app.store.PublishClippingJob(id)
-		}
-	}
 	go p.runClippingImportWorker(ctx)
 	go p.runClippingRetentionCleanup(ctx)
 	go p.runClippingStageRecovery(ctx)
 	go p.runClippingAnalysisWorker(ctx)
+	go p.runClippingGeminiWorkers(ctx)
 	p.process(ctx)
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
