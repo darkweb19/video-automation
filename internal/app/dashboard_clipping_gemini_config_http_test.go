@@ -27,7 +27,10 @@ func TestClippingConfigDescribesGeminiWithoutReadinessProbe(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Gemini.Configured || !result.Gemini.Enabled || result.Gemini.Verification != "unverified" || result.Gemini.Limits.MaxSourceDurationMS != clippingGeminiMaxRequestDurationMS || result.WorkerState != "unavailable" {
+	if !result.Gemini.Configured || !result.Gemini.Enabled || result.Gemini.Verification != "unverified" ||
+		result.Gemini.Limits.MinClipMS != ClippingGeminiMinClipMS || result.Gemini.Limits.MaxClipMS != ClippingGeminiMaxClipMS ||
+		result.Gemini.Limits.MaxCandidates != ClippingGeminiMaxCandidates || result.Gemini.Limits.MaxSourceDurationMS != clippingGeminiMaxRequestDurationMS ||
+		result.WorkerState != "unavailable" {
 		t.Fatalf("config = %+v", result)
 	}
 	for _, forbidden := range []string{"private-project-name", "/nonexistent/credentials-file", "global", "aiplatform"} {
@@ -39,5 +42,16 @@ func TestClippingConfigDescribesGeminiWithoutReadinessProbe(t *testing.T) {
 	response = clippingDashboardRequest(handler, http.MethodGet, "/api/clipping/config", "", cookie, "")
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || !result.Gemini.Configured || result.Gemini.Enabled {
 		t.Fatalf("disabled config = %+v, %v", result.Gemini, err)
+	}
+	t.Setenv(clippingGeminiEnabledEnv, "true")
+	t.Setenv(clippingGeminiLocationEnv, "https://provider.invalid/private")
+	response = clippingDashboardRequest(handler, http.MethodGet, "/api/clipping/config", "", cookie, "")
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result.Gemini.Configured || !result.Gemini.Enabled || result.Gemini.Verification != "unverified" {
+		t.Fatalf("invalid config = %+v, %v", result.Gemini, err)
+	}
+	for _, forbidden := range []string{"provider.invalid", "private-project-name", "/nonexistent/credentials-file"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Errorf("invalid config exposes %q: %s", forbidden, response.Body.String())
+		}
 	}
 }
