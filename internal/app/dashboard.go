@@ -89,6 +89,7 @@ func newDashboardHandler(app *dashboardApp) http.Handler {
 	mux.Handle("GET /api/clipping/sources/{id}/media", app.requirePasswordChanged(http.HandlerFunc(app.clippingSourceMedia)))
 	mux.Handle("GET /api/clipping/jobs", app.requirePasswordChanged(http.HandlerFunc(app.clippingJobs)))
 	mux.Handle("POST /api/clipping/jobs", app.requirePasswordChanged(http.HandlerFunc(app.createClippingJob)))
+	mux.Handle("POST /api/clipping/gemini/jobs", app.requirePasswordChanged(http.HandlerFunc(app.createClippingGeminiJob)))
 	mux.Handle("DELETE /api/clipping/jobs/{id}", app.requirePasswordChanged(http.HandlerFunc(app.deleteClippingAnalysis)))
 	mux.Handle("GET /api/clipping/jobs/{id}", app.requirePasswordChanged(http.HandlerFunc(app.clippingJob)))
 	mux.Handle("GET /api/clipping/jobs/{id}/results", app.requirePasswordChanged(http.HandlerFunc(app.clippingJobResults)))
