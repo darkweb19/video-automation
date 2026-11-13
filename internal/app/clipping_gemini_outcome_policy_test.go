@@ -19,9 +19,21 @@ func TestClippingGeminiPolicyPreservesSafeOutcomeClasses(t *testing.T) {
 			want: clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeResponseReceived},
 		},
 		{
-			name: "not submitted",
+			name: "credentials unavailable",
 			err:  &clippingGeminiAttemptError{outcome: clippingGeminiAttemptNotSubmitted, reason: errClippingGeminiCredentialsUnavailable},
-			want: clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeNotSubmitted, FailureCode: "request_not_submitted"},
+			want: clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeNotSubmitted, FailureCode: "credentials_unavailable"},
+		},
+		{
+			name:    "configuration drift is terminal",
+			err:     clippingGeminiNotSubmittedError(errClippingGeminiConfigDrift),
+			attempt: 1,
+			want:    clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeNotSubmitted, FailureCode: "config_drift"},
+		},
+		{
+			name:    "source unavailable is terminal",
+			err:     clippingGeminiNotSubmittedError(errClippingGeminiSourceInaccessible),
+			attempt: 1,
+			want:    clippingGeminiAttemptPolicy{Outcome: clippingGeminiOutcomeNotSubmitted, FailureCode: "source_inaccessible"},
 		},
 		{
 			name:    "transient preflight",
