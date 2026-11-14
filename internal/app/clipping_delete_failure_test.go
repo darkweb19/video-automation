@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -260,7 +259,7 @@ func TestClippingCurrentAttemptResultErrorsFailAnalysis(t *testing.T) {
 			}
 			callback := clippingSimpleCallback(t, source, job, stage, config.PipelineRevision, computeSeconds)
 			testCase.mutate(t, &callback)
-			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 			response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
 			if response.Code != http.StatusNoContent {
 				t.Fatalf("invalid current result callback=%d %s", response.Code, response.Body.String())
@@ -305,7 +304,7 @@ func TestClippingRustSceneWorkerCallbackReconcilesDashboard(t *testing.T) {
 				t.Fatal(err)
 			}
 			callback.Artifact.Payload = encoded
-			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 			for i := 0; i < 2; i++ {
 				response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
 				if response.Code != http.StatusNoContent {
@@ -372,7 +371,7 @@ func TestClippingAudioCoverageCallbackPublishesOnlyBoundedTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			callback.Artifact.Payload = encoded
-			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 			for i := 0; i < 2; i++ {
 				response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
 				if response.Code != http.StatusNoContent {
@@ -414,7 +413,7 @@ func TestClippingOversizeCurrentCallbackFailsAnalysis(t *testing.T) {
 			clippingCreateWorkerConfigForTest(t, store, security)
 			job := clippingM3CreateJob(t, store, source.ID, "oversize-callback-"+name+"-001")
 			prepared, stage := clippingStartSimpleJobAttempt(t, store, security, job.ID)
-			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 			body := strings.NewReader(strings.Repeat("x", maxClippingCallbackBodyBytes+1))
 			request := httptest.NewRequest(http.MethodPost, "/api/clipping/worker-callbacks/"+job.ID+"/"+stage.AttemptID, body)
 			if !contentLengthKnown {
@@ -435,16 +434,20 @@ func TestClippingOversizeCurrentCallbackFailsAnalysis(t *testing.T) {
 	}
 }
 
-func clippingAcceptDeleteFailureTestDispatch(t *testing.T, store *Store, security *Security, prepared clippingPreparedDispatch) {
+// The callback represents work issued before retirement. Seed the immutable
+// worker constraints that were persisted before the original submission.
+func seedHistoricalClippingDispatchConstraints(t *testing.T, store *Store, security *Security, prepared clippingPreparedDispatch) {
 	t.Helper()
-	client := &http.Client{Transport: clippingRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
-		return clippingRuntimeResponse(request, http.StatusAccepted,
-			`{"accepted":true,"job_id":"`+prepared.Payload.JobID+`","attempt_id":"`+prepared.Payload.AttemptID+`","dispatch_id":"`+prepared.Payload.DispatchID+`"}`), nil
-	})}
-	dispatcher := newClippingWorkerDispatcher(
-		&clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}, nil, client)
-	app := &dashboardApp{store: store, security: security}
-	if err := app.dispatchPreparedClippingStageWithDispatcher(context.Background(), prepared, dispatcher); err != nil {
-		t.Fatalf("submit clipping test attempt: %v", err)
+	config, configured, err := loadClippingWorkerConfig(store, security)
+	if err != nil || !configured {
+		t.Fatalf("load historical worker configuration: configured=%v error=%v", configured, err)
+	}
+	result, err := store.db.Exec(`UPDATE clipping_stage_attempts SET pipeline_revision=?,max_compute_seconds=? WHERE job_id=? AND attempt_id=?`,
+		config.PipelineRevision, config.MaxComputeSeconds, prepared.Payload.JobID, prepared.Payload.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		t.Fatalf("seed issued attempt count=%d error=%v", count, err)
 	}
 }

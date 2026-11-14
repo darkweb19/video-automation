@@ -1,10 +1,7 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
-	"io"
-	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -61,26 +58,7 @@ func TestClippingSimpleCallbackStoresRuntimeAndServesReadOnlyResults(t *testing.
 	}
 	config := clippingCreateWorkerConfigForTest(t, store, security)
 	prepared, stage := clippingStartSimpleJobAttempt(t, store, security, job.ID)
-	app := &dashboardApp{store: store, security: security}
-	var dispatchBody []byte
-	client := &http.Client{Transport: clippingRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
-		if request.Body != nil {
-			dispatchBody, _ = io.ReadAll(request.Body)
-		}
-		return clippingRuntimeResponse(request, http.StatusAccepted,
-			`{"accepted":true,"job_id":"`+job.ID+`","attempt_id":"`+stage.AttemptID+`","dispatch_id":"`+stage.IdempotencyKey+`"}`), nil
-	})}
-	dispatcher := newClippingWorkerDispatcher(&clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}, nil, client)
-	if err := app.dispatchPreparedClippingStageWithDispatcher(context.Background(), prepared, dispatcher); err != nil {
-		t.Fatalf("mock Modal dispatch: %v", err)
-	}
-	var wire map[string]any
-	if err := json.Unmarshal(dispatchBody, &wire); err != nil {
-		t.Fatal(err)
-	}
-	if wire["rate_micro_usd_per_second"] != float64(1) || wire["max_compute_seconds"] != float64(config.MaxComputeSeconds) {
-		t.Fatalf("dispatch did not use the bounded v2 compatibility fields: %s", dispatchBody)
-	}
+	seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 
 	callback := clippingSimpleCallback(t, source, job, stage, config.PipelineRevision, 42)
 	if response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, "", callback); response.Code != http.StatusUnauthorized {
