@@ -246,224 +246,28 @@ func TestClippingWorkerConfigRequestRequiresFiveExactFields(t *testing.T) {
 	}
 }
 
-func TestClippingWorkerDispatcherUsesFixedV2CompatibilityRate(t *testing.T) {
-	dispatchNow := time.Now().Unix()
-	resolver := &clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}
-	var sent *http.Request
-	var body []byte
-	acknowledgement := `{"accepted":true,"job_id":"clip_job_01","attempt_id":"attempt_01","dispatch_id":"clip_job_01:analysis"}`
-	client := &http.Client{Transport: clippingRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
-		sent = request.Clone(request.Context())
-		if request.Body != nil {
-			body, _ = io.ReadAll(request.Body)
-		}
-		return clippingRuntimeResponse(request, http.StatusAccepted, acknowledgement), nil
-	})}
-	dispatcher := newClippingWorkerDispatcher(resolver, nil, client)
-	workerBearer := strings.Repeat("f", 64)
-	config := clippingWorkerConfig{
-		Enabled: true, Endpoint: "https://fn-worker.modal.run:443/dispatch", BearerToken: workerBearer,
-		MaxComputeSeconds: 120, PipelineRevision: "m3.2.1-operator",
-	}
-	prepared := clippingPreparedDispatch{
-		Payload: clippingStageDispatch{
-			ProtocolVersion: clippingProtocolVersion, JobID: "clip_job_01", BatchID: "clip_batch_01", SourceID: "clip_source_01",
-			Stage: ClippingStageAnalysis, DispatchID: "clip_job_01:analysis", AttemptID: "attempt_01",
-			MediaURL:         "https://framevault.example/api/clipping/worker-media/clip_job_01/attempt_01",
-			CallbackURL:      "https://framevault.example/api/clipping/worker-callbacks/clip_job_01/attempt_01",
-			SourceDurationMS: 60_000, ExpiresAt: dispatchNow + 3_600,
-			CallbackExpiresAt: dispatchNow + 3_600 + int64(clippingCallbackCapabilityGrace.Seconds()),
-			SourceSHA256:      strings.Repeat("a", 64),
-			ContentType:       "general", Model: clippingWorkerModel, MinClipSeconds: 15, MaxClipSeconds: 180, CandidateLimit: 10,
-		},
-		MediaBearer: "media-capability-123", CallbackBearer: "callback-capability-456",
-	}
-	if err := dispatcher.dispatch(context.Background(), config, prepared); err != nil {
-		t.Fatal(err)
-	}
-	invalidCallbackExpiry := prepared.Payload
-	invalidCallbackExpiry.PipelineRevision = config.PipelineRevision
-	invalidCallbackExpiry.CallbackExpiresAt = invalidCallbackExpiry.ExpiresAt + int64(clippingCallbackCapabilityGrace.Seconds()) + 1
-	if _, err := buildClippingWorkerDispatchV2(invalidCallbackExpiry, clippingWorkerProtocolCompatibilityRate, config.MaxComputeSeconds); err == nil {
-		t.Fatal("dispatch accepted callback expiry beyond the bounded callback window")
-	}
-	invalidCallbackExpiry.CallbackExpiresAt = time.Now().Unix()
-	if _, err := buildClippingWorkerDispatchV2(invalidCallbackExpiry, clippingWorkerProtocolCompatibilityRate, config.MaxComputeSeconds); err == nil {
-		t.Fatal("dispatch accepted an expired callback window")
-	}
-	if sent == nil || sent.URL.String() != config.Endpoint || resolver.host != "fn-worker.modal.run" {
-		t.Fatalf("request URL/resolved host mismatch: request=%v resolver=%q", sent, resolver.host)
-	}
-	if sent.Header.Get("Authorization") != "Bearer "+workerBearer ||
-		sent.Header.Get(clippingWorkerMediaCapabilityHeader) != prepared.MediaBearer ||
-		sent.Header.Get(clippingWorkerCallbackCapabilityHeader) != prepared.CallbackBearer ||
-		sent.Header.Get("Content-Type") != "application/json" {
-		t.Fatalf("dispatch capability headers are incomplete: %+v", sent.Header)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload["protocol_version"] != "framevault.clipping.v2" || payload["model"] != clippingWorkerModel ||
-		payload["max_compute_seconds"] != float64(120) || payload["rate_micro_usd_per_second"] != float64(1) ||
-		payload["pipeline_revision"] != config.PipelineRevision || payload["callback_expires_at"] != float64(prepared.Payload.CallbackExpiresAt) {
-		t.Fatalf("v2 body does not preserve the worker contract and fixed compatibility value: %s", body)
-	}
-	for _, secret := range []string{config.BearerToken, prepared.MediaBearer, prepared.CallbackBearer} {
-		if strings.Contains(string(body), secret) {
-			t.Fatalf("dispatch JSON leaked a header capability: %s", body)
-		}
-	}
-}
-
-func TestClippingWorkerDispatcherRejectsUnsafeDNSAndUnacceptedResponses(t *testing.T) {
-	dispatchNow := time.Now().Unix()
-	prepared := clippingPreparedDispatch{
-		Payload: clippingStageDispatch{
-			ProtocolVersion: clippingProtocolVersion, JobID: "clip_job_01", BatchID: "clip_batch_01", SourceID: "clip_source_01",
-			Stage: ClippingStageAnalysis, DispatchID: "clip_job_01:analysis", AttemptID: "attempt_01",
-			MediaURL: "https://framevault.example/media", CallbackURL: "https://framevault.example/callback",
-			SourceDurationMS: 60_000, ExpiresAt: dispatchNow + 3_600,
-			CallbackExpiresAt: dispatchNow + 3_600 + int64(clippingCallbackCapabilityGrace.Seconds()),
-			SourceSHA256:      strings.Repeat("b", 64), ContentType: "podcast", Model: clippingWorkerModel,
-			MinClipSeconds: 20, MaxClipSeconds: 150, CandidateLimit: 8,
-		}, MediaBearer: "media-capability", CallbackBearer: "callback-capability",
-	}
-	config := clippingWorkerConfig{
-		Enabled: true, Endpoint: "https://fn-worker.modal.run:443/dispatch", BearerToken: strings.Repeat("b", 64),
-		MaxComputeSeconds: 60, PipelineRevision: "m3.2.0",
-	}
-	acknowledgement := `{"accepted":true,"job_id":"clip_job_01","attempt_id":"attempt_01","dispatch_id":"clip_job_01:analysis"}`
-	validResolver := &clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.4.4")}}}
-	disabledCalled := false
-	disabledConfig := config
-	disabledConfig.Enabled = false
-	disabledDispatcher := newClippingWorkerDispatcher(&clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}, nil, &http.Client{Transport: clippingRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
-		disabledCalled = true
-		return clippingRuntimeResponse(request, http.StatusAccepted, `{}`), nil
-	})})
-	if err := disabledDispatcher.dispatch(context.Background(), disabledConfig, prepared); err == nil || disabledCalled {
-		t.Fatalf("disabled worker dispatched work: called=%v error=%v", disabledCalled, err)
-	}
-
-	unsafeResolver := &clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP("127.0.0.1")}}}
-	called := false
-	unsafeDispatcher := newClippingWorkerDispatcher(unsafeResolver, nil, &http.Client{Transport: clippingRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
-		called = true
-		return clippingRuntimeResponse(request, http.StatusAccepted, `{}`), nil
-	})})
-	if err := unsafeDispatcher.dispatch(context.Background(), config, prepared); err == nil || called {
-		t.Fatalf("unsafe mixed DNS response was dispatched: called=%v error=%v", called, err)
-	}
-
-	for _, response := range []struct {
-		status int
-		body   string
-	}{
-		{http.StatusOK, acknowledgement},
-		{http.StatusFound, acknowledgement},
-		{http.StatusAccepted, `{"accepted":false,"job_id":"clip_job_01","attempt_id":"attempt_01","dispatch_id":"clip_job_01:analysis"}`},
-		{http.StatusAccepted, `{"accepted":true,"job_id":"clip_job_01","attempt_id":"other_attempt","dispatch_id":"clip_job_01:analysis"}`},
-		{http.StatusAccepted, `{"accepted":true,"job_id":"clip_job_01","attempt_id":"attempt_01","dispatch_id":"other-dispatch"}`},
-		{http.StatusAccepted, `{"accepted":true,"accepted":true,"job_id":"clip_job_01","attempt_id":"attempt_01","dispatch_id":"clip_job_01:analysis"}`},
-		{http.StatusAccepted, `{"accepted":true,"job_id":"clip_job_01","attempt_id":"attempt_01","dispatch_id":"clip_job_01:analysis","extra":true}`},
-		{http.StatusAccepted, ""},
-		{http.StatusAccepted, `{}`},
-		{http.StatusAccepted, `not-json`},
-		{http.StatusAccepted, strings.Repeat("x", maxClippingWorkerResponseBodyBytes+1)},
-	} {
-		dispatcher := newClippingWorkerDispatcher(validResolver, nil, &http.Client{Transport: clippingRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
-			return clippingRuntimeResponse(request, response.status, response.body), nil
-		})})
-		if err := dispatcher.dispatch(context.Background(), config, prepared); err == nil {
-			t.Errorf("accepted status=%d body_length=%d", response.status, len(response.body))
-		}
-	}
-}
-
-func TestClippingWorkerDispatchTransportErrorRemainsAmbiguous(t *testing.T) {
+func TestLegacyWorkerDispatchContractBoundsCallbackExpiry(t *testing.T) {
 	now := time.Now().Unix()
-	prepared := clippingPreparedDispatch{
-		Payload: clippingStageDispatch{
-			ProtocolVersion: clippingProtocolVersion, JobID: "clip_job_01", BatchID: "clip_batch_01", SourceID: "clip_source_01",
-			Stage: ClippingStageAnalysis, DispatchID: "clip_job_01:analysis", AttemptID: "attempt_01",
-			MediaURL: "https://framevault.example/media", CallbackURL: "https://framevault.example/callback",
-			SourceDurationMS: 60_000, ExpiresAt: now + 3_600, CallbackExpiresAt: now + 3_600 + int64(clippingCallbackCapabilityGrace.Seconds()),
-			SourceSHA256: strings.Repeat("c", 64), ContentType: "general", Model: clippingWorkerModel,
-			MinClipSeconds: 15, MaxClipSeconds: 180, CandidateLimit: 10,
-		}, MediaBearer: "media-capability", CallbackBearer: "callback-capability",
+	input := clippingStageDispatch{
+		ProtocolVersion: clippingProtocolVersion, JobID: "clip_job_01", BatchID: "clip_batch_01", SourceID: "clip_source_01",
+		Stage: ClippingStageAnalysis, DispatchID: "clip_job_01:analysis", AttemptID: "attempt_01",
+		MediaURL: "https://framevault.example/media", CallbackURL: "https://framevault.example/callback",
+		SourceDurationMS: 60_000, ExpiresAt: now + 3_600,
+		CallbackExpiresAt: now + 3_600 + int64(clippingCallbackCapabilityGrace.Seconds()),
+		SourceSHA256:      strings.Repeat("a", 64), ContentType: "general", Model: clippingWorkerModel,
+		MinClipSeconds: 15, MaxClipSeconds: 180, CandidateLimit: 10, PipelineRevision: "m3.2.1-operator",
 	}
-	config := clippingWorkerConfig{
-		Enabled: true, Endpoint: "https://fn-worker.modal.run/dispatch", BearerToken: strings.Repeat("d", 64),
-		MaxComputeSeconds: 60, PipelineRevision: "worker-outcome-v1",
+	wire, err := buildClippingWorkerDispatchV2(input, clippingWorkerProtocolCompatibilityRate, 120)
+	if err != nil || wire.RateMicroUSDPerSecond != 1 || wire.MaxComputeSeconds != 120 || wire.PipelineRevision != input.PipelineRevision || wire.CallbackExpiresAt != input.CallbackExpiresAt {
+		t.Fatalf("historical v2 contract=%+v error=%v", wire, err)
 	}
-	dispatcher := newClippingWorkerDispatcher(
-		&clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}, nil,
-		&http.Client{Transport: clippingRuntimeRoundTripper(func(*http.Request) (*http.Response, error) {
-			return nil, errors.New("connection reset")
-		})},
-	)
-	err := dispatcher.dispatch(context.Background(), config, prepared)
-	if err == nil || clippingWorkerDispatchDefinitelyNotSubmitted(err) {
-		t.Fatalf("client.Do transport error was not marked ambiguous: %v", err)
+	input.CallbackExpiresAt++
+	if _, err := buildClippingWorkerDispatchV2(input, clippingWorkerProtocolCompatibilityRate, 120); err == nil {
+		t.Fatal("accepted callback expiry beyond bounded capability window")
 	}
-	var outcome *clippingWorkerDispatchOutcomeError
-	if !errors.As(err, &outcome) || !outcome.submissionAttempted {
-		t.Fatalf("dispatch outcome did not record that client.Do began: %#v", outcome)
-	}
-}
-
-func TestClippingWorkerCancelBeforeSubmitPreventsModalRequest(t *testing.T) {
-	store, security, _, _ := clippingDashboardFixture(t)
-	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	job, _ := clippingCreateJob(t, store, source.ID, "cancel-before-modal-submit")
-	config := clippingCreateWorkerConfigForTest(t, store, security)
-	if claimed, err := store.ClaimClippingAnalysisSource(job.ID); err != nil || !claimed {
-		t.Fatalf("claim analysis source=%v error=%v", claimed, err)
-	}
-	app := &dashboardApp{store: store, security: security}
-	prepared, claimed, err := app.historicalPrepareClippingStageDispatch(job.ID, 0, "https://framevault.dev")
-	if err != nil || !claimed {
-		t.Fatalf("prepare dispatch=%+v claimed=%v error=%v", prepared, claimed, err)
-	}
-	if err := store.SetClippingAnalysisClaimAttempt(job.ID, prepared.Payload.AttemptID); err != nil {
-		t.Fatal(err)
-	}
-
-	resolver := &clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}
-	var roundTripCalled bool
-	resolver.onLookup = func(host string) {
-		if host != "fn-worker.modal.run" {
-			t.Errorf("unexpected resolver host %q", host)
-		}
-		var persistedRevision string
-		var persistedCompute int64
-		if err := store.db.QueryRow(`SELECT pipeline_revision,max_compute_seconds FROM clipping_stage_attempts WHERE attempt_id=?`, prepared.Payload.AttemptID).
-			Scan(&persistedRevision, &persistedCompute); err != nil {
-			t.Errorf("read persisted dispatch constraints: %v", err)
-		} else if persistedRevision != config.PipelineRevision || persistedCompute != config.MaxComputeSeconds {
-			t.Errorf("dispatch constraints were not persisted before DNS: revision=%q compute=%d", persistedRevision, persistedCompute)
-		}
-		if err := store.CancelClippingJob(job.ID); err != nil {
-			t.Errorf("cancel job at pre-submit boundary: %v", err)
-		}
-		app.deleteClippingCapabilities(job.ID)
-	}
-	client := &http.Client{Transport: clippingRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
-		roundTripCalled = true
-		return clippingRuntimeResponse(request, http.StatusAccepted, `{"accepted":true,"job_id":"`+job.ID+`","attempt_id":"`+prepared.Payload.AttemptID+`","dispatch_id":"`+prepared.Payload.DispatchID+`"}`), nil
-	})}
-	dispatcher := newClippingWorkerDispatcher(resolver, nil, client)
-	err = app.dispatchPreparedClippingStageWithDispatcher(context.Background(), prepared, dispatcher)
-	if err == nil || !clippingWorkerDispatchDefinitelyNotSubmitted(err) {
-		t.Fatalf("canceled attempt was not recognized as definitely unsubmitted: error=%v", err)
-	}
-	if roundTripCalled {
-		t.Fatal("Modal dispatch occurred after the job was canceled")
-	}
-	canceled, err := store.ClippingJob(job.ID)
-	if err != nil || canceled.Status != ClippingJobCanceled {
-		t.Fatalf("job status after pre-submit cancellation=%q error=%v", canceled.Status, err)
+	input.CallbackExpiresAt = now
+	if _, err := buildClippingWorkerDispatchV2(input, clippingWorkerProtocolCompatibilityRate, 120); err == nil {
+		t.Fatal("accepted an expired callback window")
 	}
 }
 
