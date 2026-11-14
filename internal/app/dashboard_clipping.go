@@ -680,29 +680,48 @@ func (a *dashboardApp) cleanupExpiredClippingCapabilities(now int64, limit int) 
 	if limit <= 0 || limit > maxClippingCapabilityCleanupBatch {
 		limit = maxClippingCapabilityCleanupBatch
 	}
-	legacy, err := a.store.LegacyClippingCallbackExpirySettings(limit)
-	if err != nil {
-		return 0, err
-	}
-	for _, setting := range legacy {
-		jobID, attemptID, validKey := clippingCallbackExpirySettingIDs(setting.Key)
-		if !validKey {
-			return 0, errors.New("legacy clipping callback expiry key could not be validated")
-		}
-		expiry := int64(0)
-		if a.security != nil {
-			if plaintext, decryptErr := a.security.DecryptSetting(setting.Key, setting.Ciphertext); decryptErr == nil {
-				expiry, _ = strconv.ParseInt(strings.TrimSpace(plaintext), 10, 64)
-			}
-		}
-		if expiry <= 0 {
-			expiry, err = a.store.conservativeClippingCallbackExpiry(jobID, attemptID)
-			if err != nil || expiry <= 0 {
-				return 0, errors.New("legacy clipping callback expiry could not be safely recovered")
-			}
-		}
-		if err := a.store.SetClippingCallbackCapabilityExpiryIndex(jobID, attemptID, expiry); err != nil {
+	// Page past records whose expiry cannot be established. They remain
+	// unresolved in the inventory, but do not block cleanup of other sources.
+	after, indexed := "", 0
+	for indexed < limit {
+		legacy, err := a.store.LegacyClippingCallbackExpirySettings(after, limit)
+		if err != nil {
 			return 0, err
+		}
+		if len(legacy) == 0 {
+			break
+		}
+		for _, setting := range legacy {
+			after = setting.Key
+			jobID, attemptID, validKey := clippingCallbackExpirySettingIDs(setting.Key)
+			if !validKey {
+				continue
+			}
+			expiry := int64(0)
+			if a.security != nil {
+				if plaintext, decryptErr := a.security.DecryptSetting(setting.Key, setting.Ciphertext); decryptErr == nil {
+					expiry, _ = strconv.ParseInt(strings.TrimSpace(plaintext), 10, 64)
+				}
+			}
+			if expiry <= 0 {
+				expiry, err = a.store.conservativeClippingCallbackExpiry(jobID, attemptID)
+				if errors.Is(err, ErrClippingInvalidState) || errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				if err != nil {
+					return 0, err
+				}
+			}
+			if err := a.store.SetClippingCallbackCapabilityExpiryIndex(jobID, attemptID, expiry); err != nil {
+				return 0, err
+			}
+			indexed++
+			if indexed == limit {
+				break
+			}
+		}
+		if len(legacy) < limit {
+			break
 		}
 	}
 	return a.store.CleanupExpiredClippingCapabilities(now, limit)

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -13,7 +14,7 @@ import (
 
 func TestLegacyUnknownCallbackExpiryNeverReleasesClaimsOrCapabilities(t *testing.T) {
 	for _, status := range []string{"running", "uncertain", "canceled", "failed"} {
-		for _, expiry := range []string{"zero_lease", "negative_lease", "overflow_lease", "invalid_index"} {
+		for _, expiry := range []string{"zero_lease", "negative_lease", "overflow_lease", "text_lease", "invalid_index", "text_index"} {
 			t.Run(status+"/"+expiry, func(t *testing.T) {
 				f := newLegacyInflightFixture(t)
 				now := time.Now().Unix()
@@ -33,23 +34,35 @@ func TestLegacyUnknownCallbackExpiryNeverReleasesClaimsOrCapabilities(t *testing
 					lease = -1
 				case "overflow_lease":
 					lease = math.MaxInt64
-				case "invalid_index":
+				case "invalid_index", "text_index":
 					lease = now - 100_000
 				}
 				if _, err := f.store.db.Exec(`UPDATE clipping_stage_attempts SET status=?,lease_expires_at=? WHERE attempt_id=?`, attemptStatus, lease, f.attemptID); err != nil {
 					t.Fatal(err)
 				}
-				if expiry == "invalid_index" {
+				if expiry == "text_lease" {
+					if _, err := f.store.db.Exec(`UPDATE clipping_stage_attempts SET lease_expires_at='invalid' WHERE attempt_id=?`, f.attemptID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if expiry == "invalid_index" || expiry == "text_index" {
 					if _, err := f.store.db.Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
 						t.Fatal(err)
 					}
-					if _, err := f.store.db.Exec(`UPDATE clipping_capability_expiry_index SET expires_at=0 WHERE attempt_id=?`, f.attemptID); err != nil {
+					indexValue := any(int64(0))
+					if expiry == "text_index" {
+						indexValue = "invalid"
+					}
+					if _, err := f.store.db.Exec(`UPDATE clipping_capability_expiry_index SET expires_at=? WHERE attempt_id=?`, indexValue, f.attemptID); err != nil {
 						t.Fatal(err)
 					}
 					if _, err := f.store.db.Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
 						t.Fatal(err)
 					}
 				} else if _, err := f.store.db.Exec(`DELETE FROM clipping_capability_expiry_index WHERE attempt_id=?`, f.attemptID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.store.db.Exec(`UPDATE clipping_sources SET retain_until=1,media_lease_until=0 WHERE id=?`, f.sourceID); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := f.store.CleanupExpiredClippingCapabilities(now, 100); err != nil {
@@ -73,8 +86,117 @@ func TestLegacyUnknownCallbackExpiryNeverReleasesClaimsOrCapabilities(t *testing
 				if err != nil || inventory.UnknownCallbackExpiry != 1 || claimCount != 1 || capabilityCount != 1 || reference != "" {
 					t.Fatalf("unknown expiry resolved: inventory=%+v claims=%d caps=%d ref=%q error=%v", inventory, claimCount, capabilityCount, reference, err)
 				}
+				if expired, err := f.store.ExpiredClippingSources(now, 100); err != nil || len(expired) != 0 {
+					t.Fatalf("unknown expiry did not protect media: sources=%+v error=%v", expired, err)
+				}
 			})
 		}
+	}
+}
+
+func TestExpiredIndexedTerminalAttemptsKeepProofThroughCleanupAndRecovery(t *testing.T) {
+	for _, status := range []string{"running", "failed", "canceled"} {
+		t.Run(status, func(t *testing.T) {
+			f := newLegacyInflightFixture(t)
+			now := time.Now()
+			for _, update := range []struct {
+				query string
+				args  []any
+			}{
+				{`UPDATE clipping_jobs SET status=? WHERE id=?`, []any{status, f.jobID}},
+				{`UPDATE clipping_stages SET status=?,lease_expires_at=1 WHERE job_id=?`, []any{status, f.jobID}},
+				{`UPDATE clipping_stage_attempts SET status=?,lease_expires_at=0 WHERE attempt_id=?`, []any{status, f.attemptID}},
+				{`UPDATE clipping_capability_expiry_index SET expires_at=? WHERE attempt_id=?`, []any{now.Unix() - 1, f.attemptID}},
+				{`UPDATE clipping_sources SET retain_until=1,media_lease_until=0 WHERE id=?`, []any{f.sourceID}},
+			} {
+				if _, err := f.store.db.Exec(update.query, update.args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := f.store.CleanupExpiredClippingCapabilities(now.Unix(), 100); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.RecoverExpiredClippingStages(now.Unix()); err != nil {
+				t.Fatal(err)
+			}
+			var claims, indexes int
+			if err := f.store.db.QueryRow(`SELECT COUNT(*) FROM clipping_analysis_claims WHERE job_id=?`, f.jobID).Scan(&claims); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.db.QueryRow(`SELECT COUNT(*) FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, f.jobID, f.attemptID).Scan(&indexes); err != nil {
+				t.Fatal(err)
+			}
+			inventory, err := f.store.LegacyClippingDrainInventory(now.Unix())
+			if err != nil || claims != 0 || indexes != 1 || inventory.UnknownCallbackExpiry != 0 || inventory.UnexpiredCallbackWindows != 0 {
+				t.Fatalf("cleanup lost expiry evidence: claims=%d indexes=%d inventory=%+v error=%v", claims, indexes, inventory, err)
+			}
+			cleaned, err := NewClippingAcquisition(f.store, nil).CleanupExpiredSources(context.Background(), now)
+			if err != nil || cleaned != 1 {
+				t.Fatalf("expired indexed source cleanup=%d error=%v", cleaned, err)
+			}
+		})
+	}
+}
+
+func TestMalformedLegacyExpiryDoesNotBlockBackfillOrRetention(t *testing.T) {
+	f := newLegacyInflightFixture(t)
+	now := time.Now()
+	security, err := NewSecurity(f.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`DELETE FROM clipping_capability_expiry_index WHERE attempt_id=?`, f.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`UPDATE clipping_stage_attempts SET lease_expires_at=0 WHERE attempt_id=?`, f.attemptID); err != nil {
+		t.Fatal(err)
+	}
+	unknownKey := clippingCapabilitySettingKey(f.jobID, f.attemptID, clippingCapabilityCallback+"_expiry")
+	if err := f.store.SetSetting(unknownKey, "corrupt-ciphertext"); err != nil {
+		t.Fatal(err)
+	}
+	// Force the valid row onto a later one-item page than the unknown row.
+	var name, jobID, attemptID string
+	for i := 0; i < 1000; i++ {
+		candidate := fmt.Sprintf("page-%d", i)
+		job, attempt := legacyDrainFixtureIDs(candidate)
+		if job > f.jobID {
+			name, jobID, attemptID = candidate, job, attempt
+			break
+		}
+	}
+	if name == "" {
+		t.Fatal("could not create ordered fixture")
+	}
+	legacyDrainAttemptFixture(t, f.store, name, "modal_legacy", "failed", "failed", now.Unix()-100_000, nil)
+	key := clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityCallback+"_expiry")
+	ciphertext, err := security.EncryptSetting(key, fmt.Sprint(now.Unix()-1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SetSetting(key, ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	app := &dashboardApp{store: f.store, security: security, clippingAcquisition: NewClippingAcquisition(f.store, security)}
+	if cleaned, err := app.cleanupExpiredClippingCapabilities(now.Unix(), 1); err != nil || cleaned != 1 {
+		t.Fatalf("backfill beyond unknown record cleaned=%d error=%v", cleaned, err)
+	}
+	if _, err := f.store.Setting(unknownKey); err != nil {
+		t.Fatalf("unknown capability was removed: %v", err)
+	}
+	other := makeReadyClippingSource(t, f.store, 60_000)
+	if _, err := f.store.db.Exec(`UPDATE clipping_sources SET retain_until=1 WHERE id=?`, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Processor{app: app}).cleanupClippingSources(context.Background()); err != nil {
+		t.Fatalf("unrelated retention was blocked by unknown expiry: %v", err)
+	}
+	if _, err := os.Stat(other.StoragePath); !os.IsNotExist(err) {
+		t.Fatalf("unrelated source was not cleaned: %v", err)
+	}
+	inventory, err := f.store.LegacyClippingDrainInventory(now.Unix())
+	if err != nil || inventory.UnknownCallbackExpiry != 1 {
+		t.Fatalf("unknown expiry disappeared from inventory: %+v error=%v", inventory, err)
 	}
 }
 

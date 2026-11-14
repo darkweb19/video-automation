@@ -177,8 +177,8 @@ func TestClippingCapabilityCleanupRetainsIssuedExpiryUntilRecovery(t *testing.T)
 		t.Fatalf("expired callback attempt state=%+v error=%v", stages, err)
 	}
 	var remaining int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&remaining); err != nil || remaining != 0 {
-		t.Fatalf("recovered attempt retained callback expiry index: count=%d error=%v", remaining, err)
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, job.ID, stage.AttemptID).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("recovery lost issued callback expiry while fallback remains open: count=%d error=%v", remaining, err)
 	}
 	if _, err := store.historicalRetryClippingStage(job.ID, ClippingStageAnalysis); err != nil {
 		t.Fatalf("explicit retry after callback expiry: %v", err)

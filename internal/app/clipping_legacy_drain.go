@@ -1,9 +1,6 @@
 package app
 
-import (
-	"database/sql"
-	"math"
-)
+import "database/sql"
 
 // ClippingLegacyDrainInventory is a point-in-time inventory of persisted
 // legacy work. A zero inventory is not a release or deployment approval: the
@@ -46,7 +43,7 @@ func (s *Store) LegacyClippingDrainInventory(now int64) (ClippingLegacyDrainInve
 		return ClippingLegacyDrainInventory{}, err
 	}
 
-	rows, err := tx.Query(`SELECT attempt.lease_expires_at,expiry.expires_at
+	rows, err := tx.Query(`SELECT attempt.lease_expires_at,expiry.job_id,expiry.expires_at
 		FROM clipping_stage_attempts AS attempt
 		JOIN clipping_jobs AS job ON job.id=attempt.job_id AND job.provider='modal_legacy'
 		LEFT JOIN clipping_capability_expiry_index AS expiry
@@ -55,20 +52,13 @@ func (s *Store) LegacyClippingDrainInventory(now int64) (ClippingLegacyDrainInve
 		return ClippingLegacyDrainInventory{}, err
 	}
 	for rows.Next() {
-		var lease int64
-		var issued sql.NullInt64
-		if err := rows.Scan(&lease, &issued); err != nil {
+		var lease, issued any
+		var indexedJob sql.NullString
+		if err := rows.Scan(&lease, &indexedJob, &issued); err != nil {
 			rows.Close()
 			return ClippingLegacyDrainInventory{}, err
 		}
-		var expiry int64
-		if issued.Valid {
-			expiry = issued.Int64
-		} else if lease > 0 && lease <= math.MaxInt64-int64(clippingCallbackCapabilityGrace.Seconds()) {
-			// Older attempts may lack an index. Source retention and job status
-			// can change after issuance, so neither may shorten this bound.
-			expiry = lease + int64(clippingCallbackCapabilityGrace.Seconds())
-		}
+		expiry := clippingCallbackExpiryFromEvidence(lease, issued, indexedJob.Valid)
 		if expiry <= 0 {
 			inventory.UnknownCallbackExpiry++
 		} else if expiry > now {

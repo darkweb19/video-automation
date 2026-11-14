@@ -436,7 +436,7 @@ func (s *Store) SetClippingCallbackCapabilityExpiryIndex(jobID, attemptID string
 
 // LegacyClippingCallbackExpirySettings returns a bounded page of old encrypted
 // callback-expiry settings that predate the durable index.
-func (s *Store) LegacyClippingCallbackExpirySettings(limit int) ([]clippingLegacyCallbackExpirySetting, error) {
+func (s *Store) LegacyClippingCallbackExpirySettings(after string, limit int) ([]clippingLegacyCallbackExpirySetting, error) {
 	if s == nil || s.db == nil {
 		return nil, ErrClippingInvalidState
 	}
@@ -447,12 +447,12 @@ func (s *Store) LegacyClippingCallbackExpirySettings(limit int) ([]clippingLegac
 	const suffix = "_callback_expiry"
 	keyLength := len(prefix) + len("clipjob_") + 32 + 1 + len("clipatt_") + 32 + len(suffix)
 	rows, err := s.db.Query(`SELECT setting.key,setting.value FROM settings AS setting
-		WHERE substr(setting.key,1,?)=? AND length(setting.key)=? AND substr(setting.key,length(setting.key)-?+1)=?
+		WHERE substr(setting.key,1,?)=? AND length(setting.key)=? AND substr(setting.key,length(setting.key)-?+1)=? AND setting.key>?
 		AND NOT EXISTS (
 			SELECT 1 FROM clipping_capability_expiry_index AS expiry
 			WHERE setting.key=? || expiry.job_id || '_' || expiry.attempt_id || ?
 		)
-		ORDER BY setting.updated_at,setting.key LIMIT ?`, len(prefix), prefix, keyLength, len(suffix), suffix, prefix, suffix, limit)
+		ORDER BY setting.key LIMIT ?`, len(prefix), prefix, keyLength, len(suffix), suffix, after, prefix, suffix, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -468,10 +468,9 @@ func (s *Store) LegacyClippingCallbackExpirySettings(limit int) ([]clippingLegac
 	return settings, rows.Err()
 }
 
-// DeleteClippingCapabilitiesForAttempt removes the five encrypted settings and
-// their nonsecret expiry index in one transaction. It is used for failed
-// pre-dispatch persistence and after expiry validation has established that
-// the callback window is closed.
+// DeleteClippingCapabilitiesForAttempt removes bearer settings. Keep the
+// nonsecret issued-expiry evidence until the fallback bound has also elapsed;
+// recovery and the drain inventory can otherwise lose proof of the deadline.
 func (s *Store) DeleteClippingCapabilitiesForAttempt(jobID, attemptID string) error {
 	if s == nil || s.db == nil || !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") ||
 		!safeID(attemptID) || !strings.HasPrefix(attemptID, "clipatt_") {
@@ -488,9 +487,6 @@ func (s *Store) DeleteClippingCapabilitiesForAttempt(jobID, attemptID string) er
 		clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityLease),
 		clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityMedia+"_expiry"),
 		clippingCapabilitySettingKey(jobID, attemptID, clippingCapabilityCallback+"_expiry")); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, jobID, attemptID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -563,24 +559,37 @@ func (s *Store) CleanupExpiredClippingCapabilities(now int64, limit int) (int, e
 			cleaned++
 		}
 	}
-	// Expiry indexes are needed only for the current, unsettled attempt. Keep
-	// those rows after deleting the bearer settings; remove indexes for terminal
-	// or superseded attempts in the same transaction.
+	// Keep the issued deadline while it is needed by unsettled recovery or
+	// while the pre-index fallback would be unknown or still open. Orphan rows
+	// remain visible in the drain inventory for operator investigation.
+	_, maxLease, preIndexDeadline := clippingElapsedCallbackArgs(now)
 	if _, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index AS expiry WHERE typeof(expiry.expires_at)='integer' AND expiry.expires_at>0 AND expiry.expires_at<=?
+		AND EXISTS (SELECT 1 FROM clipping_stage_attempts AS attempt WHERE attempt.job_id=expiry.job_id AND attempt.attempt_id=expiry.attempt_id
+			AND typeof(attempt.lease_expires_at)='integer' AND attempt.lease_expires_at>0 AND attempt.lease_expires_at<=? AND attempt.lease_expires_at<=?)
 		AND NOT EXISTS (
 			SELECT 1 FROM clipping_stage_attempts AS attempt
 			JOIN clipping_stages AS stage ON stage.job_id=attempt.job_id AND stage.name=attempt.stage_name
 			JOIN clipping_jobs AS job ON job.id=attempt.job_id
 			WHERE attempt.job_id=expiry.job_id AND attempt.attempt_id=expiry.attempt_id
-			AND stage.attempt_id=attempt.attempt_id AND stage.status IN ('running','uncertain')
-			AND job.status NOT IN ('completed','failed','canceled')
-			AND attempt.status IN ('running','expired') AND attempt.callback_received_at=0 AND attempt.settled_at=0)`, now); err != nil {
+			AND stage.attempt_id=attempt.attempt_id AND stage.status IN ('running','uncertain','canceled','failed')
+			AND attempt.status IN ('running','expired','canceled','failed') AND attempt.callback_received_at=0 AND attempt.settled_at=0
+			AND attempt.reconciliation_reference NOT IN ('known_no_submission','callback_window_expired'))`, now, maxLease, preIndexDeadline); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return cleaned, nil
+}
+
+func deleteClippingExpiryIfFallbackElapsedTx(tx *sql.Tx, jobID, attemptID string, now int64) error {
+	_, maxLease, preIndexDeadline := clippingElapsedCallbackArgs(now)
+	_, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index AS expiry WHERE expiry.job_id=? AND expiry.attempt_id=?
+		AND typeof(expiry.expires_at)='integer' AND expiry.expires_at>0 AND expiry.expires_at<=?
+		AND EXISTS (SELECT 1 FROM clipping_stage_attempts AS attempt WHERE attempt.job_id=expiry.job_id AND attempt.attempt_id=expiry.attempt_id
+			AND typeof(attempt.lease_expires_at)='integer' AND attempt.lease_expires_at>0 AND attempt.lease_expires_at<=? AND attempt.lease_expires_at<=?)`,
+		jobID, attemptID, now, maxLease, preIndexDeadline)
+	return err
 }
 
 func newClippingStorageID(prefix string) (string, error) {
@@ -775,23 +784,13 @@ func (s *Store) conservativeClippingCallbackExpiry(jobID, attemptID string) (int
 		return 0, err
 	}
 	defer tx.Rollback()
-	var stageName string
-	if err := tx.QueryRow(`SELECT stage_name FROM clipping_stage_attempts WHERE job_id=? AND attempt_id=?`, jobID, attemptID).Scan(&stageName); err != nil {
+	var lease any
+	if err := tx.QueryRow(`SELECT attempt.lease_expires_at FROM clipping_stage_attempts AS attempt
+		JOIN clipping_jobs AS job ON job.id=attempt.job_id JOIN clipping_sources AS source ON source.id=job.source_id
+		WHERE attempt.job_id=? AND attempt.attempt_id=?`, jobID, attemptID).Scan(&lease); err != nil {
 		return 0, err
 	}
-	attempt, err := readClippingAttempt(tx, jobID, stageName, attemptID)
-	if err != nil {
-		return 0, err
-	}
-	var sourceID string
-	if err := tx.QueryRow(`SELECT source_id FROM clipping_jobs WHERE id=?`, jobID).Scan(&sourceID); err != nil {
-		return 0, err
-	}
-	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, sourceID))
-	if err != nil {
-		return 0, err
-	}
-	expiresAt := clippingConservativeCallbackExpiry(attempt, source)
+	expiresAt := clippingCallbackExpiryFromEvidence(lease, nil, false)
 	if expiresAt <= 0 {
 		return 0, ErrClippingInvalidState
 	}
@@ -822,47 +821,49 @@ func clippingIssuedCallbackExpiryTx(tx *sql.Tx, attempt clippingAttemptRecord, s
 	return expiresAt, nil
 }
 
+// Invalid types, nonpositive values, and overflow are unknown, never elapsed.
+// An issued index is authoritative even if the old lease is malformed.
+func clippingCallbackExpiryFromEvidence(lease, issued any, hasIndex bool) int64 {
+	if hasIndex {
+		expiry, ok := issued.(int64)
+		if ok && expiry > 0 {
+			return expiry
+		}
+		return 0
+	}
+	leaseValue, ok := lease.(int64)
+	grace := int64(clippingCallbackCapabilityGrace.Seconds())
+	if !ok || leaseValue <= 0 || leaseValue > math.MaxInt64-grace {
+		return 0
+	}
+	return leaseValue + grace
+}
+
 func clippingSourceHasActiveCallbackWindowTx(tx *sql.Tx, source ClippingSource, now int64) (bool, error) {
-	rows, err := tx.Query(`SELECT attempt.job_id,attempt.stage_name,attempt.attempt_id
+	rows, err := tx.Query(`SELECT attempt.lease_expires_at,expiry.job_id,expiry.expires_at
 		FROM clipping_stage_attempts AS attempt
 		JOIN clipping_jobs AS job ON job.id=attempt.job_id
+		LEFT JOIN clipping_capability_expiry_index AS expiry ON expiry.job_id=attempt.job_id AND expiry.attempt_id=attempt.attempt_id
 		WHERE job.source_id=? AND job.provider='modal_legacy' ORDER BY attempt.started_at,attempt.attempt_id`, source.ID)
 	if err != nil {
 		return false, err
 	}
-	type attemptKey struct {
-		jobID, stageName, attemptID string
-	}
-	keys := make([]attemptKey, 0)
+	defer rows.Close()
 	for rows.Next() {
-		var key attemptKey
-		if err := rows.Scan(&key.jobID, &key.stageName, &key.attemptID); err != nil {
-			rows.Close()
+		var lease, issued any
+		var indexedJob sql.NullString
+		if err := rows.Scan(&lease, &indexedJob, &issued); err != nil {
 			return false, err
 		}
-		keys = append(keys, key)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return false, err
-	}
-	if err := rows.Close(); err != nil {
-		return false, err
-	}
-	for _, key := range keys {
-		attempt, err := readClippingAttempt(tx, key.jobID, key.stageName, key.attemptID)
-		if err != nil {
-			return false, err
+		expiry := clippingCallbackExpiryFromEvidence(lease, issued, indexedJob.Valid)
+		if expiry <= 0 {
+			return false, ErrClippingInvalidState
 		}
-		expiry, err := clippingIssuedCallbackExpiryTx(tx, attempt, source)
-		if err != nil {
-			return false, err
-		}
-		if expiry <= 0 || expiry > now {
+		if expiry > now {
 			return true, nil
 		}
 	}
-	return false, nil
+	return false, rows.Err()
 }
 
 func (s *Store) TombstoneClippingSource(id string) error {
@@ -1480,7 +1481,7 @@ func (s *Store) RecoverExpiredClippingStages(now int64) error {
 			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback+"_expiry")); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, item.jobID, item.attemptID); err != nil {
+		if err := deleteClippingExpiryIfFallbackElapsedTx(tx, item.jobID, item.attemptID, now); err != nil {
 			return err
 		}
 	}
@@ -1528,7 +1529,7 @@ func (s *Store) RecoverExpiredClippingStages(now int64) error {
 			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback+"_expiry")); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, item.jobID, item.attemptID); err != nil {
+		if err := deleteClippingExpiryIfFallbackElapsedTx(tx, item.jobID, item.attemptID, now); err != nil {
 			return err
 		}
 	}
@@ -1587,7 +1588,7 @@ func (s *Store) RecoverExpiredClippingStages(now int64) error {
 			clippingCapabilitySettingKey(item.jobID, item.attemptID, clippingCapabilityCallback+"_expiry")); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM clipping_capability_expiry_index WHERE job_id=? AND attempt_id=?`, item.jobID, item.attemptID); err != nil {
+		if err := deleteClippingExpiryIfFallbackElapsedTx(tx, item.jobID, item.attemptID, now); err != nil {
 			return err
 		}
 	}
