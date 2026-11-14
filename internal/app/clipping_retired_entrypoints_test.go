@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +48,21 @@ func TestLegacyStoreEntryPointsCannotCreateOrRetryWork(t *testing.T) {
 	stored, err := store.ClippingJob(job.ID)
 	if err != nil || stored.Status != ClippingJobQueued {
 		t.Fatalf("retired entry points changed job=%+v error=%v", stored, err)
+	}
+}
+
+func TestHistoricalImportErrorsDirectUsersToGemini(t *testing.T) {
+	store, _, handler, cookie := clippingDashboardFixture(t)
+	source := makeReadyClippingSource(t, store, 60_000)
+	for _, code := range []string{"invalid_media", "unsafe_dns_answer", "youtube_bot_challenge", "source_import_timed_out", "extractor_exit_failure", "source_import_canceled", "legacy_source_import_unsupported", "legacy_source_import_retired", "track_transfer_aborted", "unknown_old_failure"} {
+		if _, err := store.db.Exec(`UPDATE clipping_sources SET status='failed',failure=? WHERE id=?`, code, source.ID); err != nil {
+			t.Fatal(err)
+		}
+		response := clippingDashboardRequest(handler, http.MethodGet, "/api/clipping/sources/"+source.ID, "", cookie, "")
+		body := strings.ToLower(response.Body.String())
+		if response.Code != http.StatusOK || !strings.Contains(body, "gemini analysis") || strings.Contains(body, "retry") || strings.Contains(body, "try again") {
+			t.Errorf("old failure %q gave unusable guidance: %d %s", code, response.Code, response.Body.String())
+		}
 	}
 }
 

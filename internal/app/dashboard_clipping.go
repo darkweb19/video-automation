@@ -114,25 +114,25 @@ func clippingSourceSummary(source ClippingSource) clippingSourceView {
 func clippingSourceErrorMessage(code string) string {
 	switch strings.TrimSpace(code) {
 	case "invalid_media":
-		return "This YouTube source is not a supported video with a valid duration and dimensions."
+		return "The old import did not contain a supported video. Submit a public YouTube link for Gemini analysis."
 	case "unsafe_dns_answer":
-		return "The YouTube link resolved to an unsafe destination. Check the link and try again."
+		return "The old import resolved to an unsafe destination. Submit a public YouTube link for Gemini analysis."
 	case "youtube_bot_challenge":
-		return "YouTube requested verification of automated access from this server, so this video could not be imported. Try again later; repeated immediate retries are unlikely to help."
+		return "YouTube requested automated-access verification during the old import. Submit a public YouTube link for Gemini analysis."
 	case "source_import_timed_out", "extractor_exit_failure":
-		return "YouTube could not download this public video. Retry once, then choose another public video."
+		return "The old import did not complete. Submit a public YouTube link for Gemini analysis."
 	case "source_import_canceled":
-		return "The YouTube import was interrupted. Try importing it again."
+		return "The old import was interrupted. Submit a public YouTube link for Gemini analysis."
 	case "legacy_source_import_unsupported":
-		return "This source came from a removed import workflow. Import a public YouTube video to continue."
+		return "This source came from a retired import workflow. Submit a public YouTube link for Gemini analysis."
 	case "legacy_source_import_retired":
 		return "This import was stopped because legacy clipping was retired. Submit the public YouTube link for Gemini analysis."
 	case "track_transfer_aborted":
-		return "A YouTube media stream stopped before the source was complete. Retry the import."
+		return "A media stream ended before the old import completed. Submit a public YouTube link for Gemini analysis."
 	case "":
 		return ""
 	default:
-		return "The YouTube import failed. Check the public link and retry."
+		return "The old import failed. Submit a public YouTube link for Gemini analysis."
 	}
 }
 
