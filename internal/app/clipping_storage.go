@@ -25,6 +25,7 @@ var (
 	ErrClippingIdempotencyConflict = errors.New("clipping idempotency key was reused with different input")
 	ErrClippingInvalidState        = errors.New("invalid clipping state transition")
 	ErrClippingLegacyRetired       = fmt.Errorf("%w: legacy clipping has been retired", ErrClippingInvalidState)
+	errClippingRetentionDeferred   = errors.New("clipping source retention deferred")
 	ErrClippingStaleAttempt        = errors.New("clipping stage attempt is stale")
 	ErrClippingJobTerminal         = errors.New("clipping job is terminal")
 	ErrClippingInvalidArtifact     = errors.New("invalid clipping artifact")
@@ -1284,20 +1285,20 @@ func (s *Store) tombstoneClippingSource(id string, now int64, automatic bool) er
 		return tx.Commit()
 	}
 	if automatic && (retainUntil <= 0 || retainUntil > now) {
-		return errors.New("clipping source retention period has not expired")
+		return fmt.Errorf("%w: retention period has not expired", errClippingRetentionDeferred)
 	}
 	if automatic && importLease > now {
-		return errors.New("clipping source is protected by an active import lease")
+		return fmt.Errorf("%w: active import lease", errClippingRetentionDeferred)
 	}
 	if mediaLease > now {
-		return errors.New("clipping source is protected by an active media lease")
+		return fmt.Errorf("%w: active media lease", errClippingRetentionDeferred)
 	}
 	var active int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM clipping_jobs WHERE source_id=? AND status IN ('queued','running')`, id).Scan(&active); err != nil {
 		return err
 	}
 	if active != 0 {
-		return errors.New("clipping source is referenced by an active job")
+		return fmt.Errorf("%w: referenced by an active job", errClippingRetentionDeferred)
 	}
 	source, err := scanClippingSource(tx.QueryRow(`SELECT `+clippingSourceColumns()+` FROM clipping_sources WHERE id=?`, id))
 	if err != nil {
@@ -1309,7 +1310,7 @@ func (s *Store) tombstoneClippingSource(id string, now int64, automatic bool) er
 			return err
 		}
 		if callbackActive {
-			return errors.New("clipping source is protected until every worker callback window expires")
+			return fmt.Errorf("%w: worker callback window remains open", errClippingRetentionDeferred)
 		}
 	}
 	// Source-derived artifacts can contain transcripts and analysis content;

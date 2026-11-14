@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -165,5 +166,70 @@ func TestUnknownLegacyExpiryDoesNotBlockUnrelatedRetention(t *testing.T) {
 	}
 	if _, err := store.ExpiredClippingSources(now, 100); err == nil {
 		t.Fatal("real database failure was treated as an unknown expiry")
+	}
+}
+
+func TestRetentionRechecksCallbackExpiryWithoutAbortingBatch(t *testing.T) {
+	for _, change := range []string{"unknown", "open", "lease", "retention"} {
+		t.Run(change, func(t *testing.T) {
+			f := newLegacyInflightFixture(t)
+			now := time.Now()
+			if _, err := f.store.db.Exec(`UPDATE clipping_jobs SET status='failed' WHERE id=?`, f.jobID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.db.Exec(`UPDATE clipping_stages SET status='failed' WHERE job_id=?`, f.jobID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.db.Exec(`UPDATE clipping_sources SET retain_until=1,media_lease_until=0 WHERE id=?`, f.sourceID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.db.Exec(`UPDATE clipping_capability_expiry_index SET expires_at=? WHERE attempt_id=?`, now.Unix()-1, f.attemptID); err != nil {
+				t.Fatal(err)
+			}
+			protected, err := f.store.ClippingSource(f.sourceID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := makeReadyClippingSource(t, f.store, 60_000)
+			if _, err := f.store.db.Exec(`UPDATE clipping_sources SET retain_until=1 WHERE id=?`, other.ID); err != nil {
+				t.Fatal(err)
+			}
+			// Simulate a change after the retention candidate snapshot was read.
+			switch change {
+			case "unknown":
+				if _, err := f.store.db.Exec(`DELETE FROM clipping_capability_expiry_index WHERE attempt_id=?`, f.attemptID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.store.db.Exec(`UPDATE clipping_stage_attempts SET lease_expires_at=0 WHERE attempt_id=?`, f.attemptID); err != nil {
+					t.Fatal(err)
+				}
+			case "open":
+				if _, err := f.store.db.Exec(`UPDATE clipping_capability_expiry_index SET expires_at=? WHERE attempt_id=?`, now.Unix()+300, f.attemptID); err != nil {
+					t.Fatal(err)
+				}
+			case "lease":
+				if _, err := f.store.db.Exec(`UPDATE clipping_sources SET import_lease_until=? WHERE id=?`, now.Unix()+300, f.sourceID); err != nil {
+					t.Fatal(err)
+				}
+			case "retention":
+				if _, err := f.store.db.Exec(`UPDATE clipping_sources SET retain_until=? WHERE id=?`, now.Unix()+300, f.sourceID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cleaned, err := NewClippingAcquisition(f.store, nil).cleanupExpiredSources(context.Background(), now, []ClippingSource{protected, other})
+			if err != nil || cleaned != 1 {
+				t.Fatalf("cleanup count=%d error=%v", cleaned, err)
+			}
+			if _, err := os.Stat(protected.StoragePath); err != nil {
+				t.Fatalf("protected source media was removed: %v", err)
+			}
+			if _, err := os.Stat(other.StoragePath); !os.IsNotExist(err) {
+				t.Fatalf("unrelated expired media remains: %v", err)
+			}
+			var claims int
+			if err := f.store.db.QueryRow(`SELECT COUNT(*) FROM clipping_analysis_claims WHERE job_id=?`, f.jobID).Scan(&claims); err != nil || claims != 1 {
+				t.Fatalf("protected claims=%d error=%v", claims, err)
+			}
+		})
 	}
 }

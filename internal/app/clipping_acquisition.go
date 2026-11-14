@@ -293,6 +293,13 @@ func (a *ClippingAcquisition) CleanupExpiredSources(ctx context.Context, now tim
 	if err != nil {
 		return 0, err
 	}
+	return a.cleanupExpiredSources(ctx, now, sources)
+}
+
+// Recheck every source before deleting files. A callback expiry, lease, or job
+// may change after the candidate snapshot; defer that source without blocking
+// the remainder of the batch. Database and filesystem errors still surface.
+func (a *ClippingAcquisition) cleanupExpiredSources(ctx context.Context, now time.Time, sources []ClippingSource) (int, error) {
 	cleaned := 0
 	for _, source := range sources {
 		if err := ctx.Err(); err != nil {
@@ -305,7 +312,8 @@ func (a *ClippingAcquisition) CleanupExpiredSources(ctx context.Context, now tim
 		if source.Status != ClippingSourceDeleted {
 			if err := a.store.ExpireClippingSource(source.ID, now.Unix()); err != nil {
 				a.store.clippingMu.Unlock()
-				if errors.Is(err, sql.ErrNoRows) {
+				if errors.Is(err, sql.ErrNoRows) || errors.Is(err, ErrClippingSourceNotFound) ||
+					errors.Is(err, ErrClippingInvalidState) || errors.Is(err, errClippingRetentionDeferred) {
 					continue
 				}
 				return cleaned, err
