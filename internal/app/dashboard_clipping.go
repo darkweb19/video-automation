@@ -484,7 +484,7 @@ func clippingErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrClippingIdempotencyConflict), errors.Is(err, ErrClippingInvalidState), errors.Is(err, ErrClippingStaleAttempt), errors.Is(err, ErrClippingJobTerminal):
 		return http.StatusConflict
-	case errors.Is(err, ErrYouTubeImportUnavailable), errors.Is(err, ErrClippingRightsNotAttested):
+	case errors.Is(err, ErrClippingRightsNotAttested):
 		return http.StatusUnprocessableEntity
 	default:
 		return http.StatusBadRequest

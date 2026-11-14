@@ -31,7 +31,7 @@ func TestRetirePendingImportsPreservesFilesReservationsAndLeases(t *testing.T) {
 	if _, err := os.Stat(source.StoragePath); err != nil {
 		t.Fatalf("retirement removed source media: %v", err)
 	}
-	if _, err := NewClippingAcquisition(store, security).CleanupFailedSources(context.Background()); err != nil {
+	if _, err := NewClippingAcquisition(store, security).CleanupExpiredSources(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(source.StoragePath); err != nil {

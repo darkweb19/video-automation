@@ -38,10 +38,6 @@ type Store struct {
 	// Gemini analysis cancellation is shared by authenticated requests and
 	// processor workers built around this Store.
 	clippingGeminiCancellations *clippingGeminiCancellationRegistry
-	// clippingImportWorkspaces is shared by dashboard acquisitions and the
-	// processor because they share Store. Values are the remaining reserved
-	// scratch bytes for active split-track imports.
-	clippingImportWorkspaces map[string]int64
 }
 
 type GenerationRecord struct {
@@ -298,7 +294,6 @@ func OpenStore(dataDir string) (*Store, error) {
 		db: db, dataDir: dataDir, videoDir: videoDir, projectDir: projectDir, clippingDir: clippingDir, events: newEventHub(),
 		clippingOperations:          &clippingOperationRegistry{operations: map[string]clippingActiveOperation{}},
 		clippingGeminiCancellations: newClippingGeminiCancellationRegistry(),
-		clippingImportWorkspaces:    map[string]int64{},
 	}
 	if err := store.migrate(); err != nil {
 		db.Close()

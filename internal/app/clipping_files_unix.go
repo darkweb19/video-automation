@@ -39,15 +39,3 @@ func syncClippingDirectory(path string) error {
 	defer directory.Close()
 	return directory.Sync()
 }
-
-func clippingAvailableDiskBytes(path string) (int64, error) {
-	var stats syscall.Statfs_t
-	if err := syscall.Statfs(path, &stats); err != nil {
-		return 0, err
-	}
-	blockSize := int64(stats.Bsize)
-	if blockSize <= 0 || stats.Bavail > uint64((int64(1<<63-1))/blockSize) {
-		return 0, errors.New("invalid filesystem capacity")
-	}
-	return int64(stats.Bavail) * blockSize, nil
-}

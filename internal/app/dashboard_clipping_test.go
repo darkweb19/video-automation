@@ -16,7 +16,7 @@ func clippingDashboardFixture(t *testing.T, allowLowDisk ...bool) (*Store, *Secu
 	return clippingDashboardFixtureWithAvailableBytes(t, availableBytes)
 }
 
-func clippingDashboardFixtureWithAvailableBytes(t *testing.T, availableBytes int64) (*Store, *Security, http.Handler, *http.Cookie) {
+func clippingDashboardFixtureWithAvailableBytes(t *testing.T, _ int64) (*Store, *Security, http.Handler, *http.Cookie) {
 	t.Helper()
 	store := newTestStore(t)
 	provisionTestUser(t, store)
@@ -25,9 +25,7 @@ func clippingDashboardFixtureWithAvailableBytes(t *testing.T, availableBytes int
 		t.Fatal(err)
 	}
 	acquisition := NewClippingAcquisition(store, security)
-	if availableBytes > 0 {
-		acquisition.diskAvailable = func(string) (int64, error) { return availableBytes, nil }
-	}
+
 	handler := newDashboardHandler(&dashboardApp{store: store, security: security, clippingAcquisition: acquisition})
 	login := httptest.NewRecorder()
 	if err := security.NewSession(login, httptest.NewRequest(http.MethodGet, "/", nil), "sujanshrestha"); err != nil {

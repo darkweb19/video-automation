@@ -1,9 +1,12 @@
 package app
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 )
+
+var ErrClippingRightsNotAttested = errors.New("explicit rights and processing attestation is required")
 
 const clippingSourceURLSetting = "clipping_source_url"
 
