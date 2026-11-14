@@ -1433,7 +1433,8 @@
       ui.analysisHeading.focus?.({ preventScroll: true });
     } catch (error) {
       if (!current(lifecycle)) return;
-      const definiteRejection = !unresolved && [400, 401, 403, 404, 413, 415, 422].includes(Number(error && error.status));
+      // A rejection of a replay cannot establish whether its original POST succeeded.
+      const definiteRejection = !unresolved && [400, 401, 403, 404, 409, 413, 415, 422].includes(Number(error && error.status));
       if (!definiteRejection) state.unknownRequests.set(identity, { body, key: idempotencyKey });
       const message = definiteRejection
         ? error && error.message || "The analysis request could not be saved."

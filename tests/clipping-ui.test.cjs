@@ -370,15 +370,56 @@ test("a known terminal video starts a fresh request with its entered URL and a n
   assert.notEqual(posts[0].options.headers["Idempotency-Key"], posts[1].options.headers["Idempotency-Key"]);
 });
 
-test("a server error retains the lock even when a replay is rejected", async () => {
-  const { state, ui } = mockAPI();
-  let calls = 0;
-  state.post = async () => { const error = new Error("unavailable"); error.status = ++calls === 1 ? 500 : 400; throw error; };
-  await ui.api.start(); fillLink(ui); submit(ui); await settle(); submit(ui); await settle();
-  assert.equal(el(ui, "link-submit").textContent, "Resend same request");
-  assert.match(el(ui, "workflow-status").textContent, /original settings/);
-  const posts = ui.requests.filter((call) => call.endpoint === "/api/clipping/gemini/jobs");
-  assert.equal(posts[0].options.headers["Idempotency-Key"], posts[1].options.headers["Idempotency-Key"]);
+test("a server error retains the lock even when a replay gets a 400 or 409", async () => {
+  for (const replayStatus of [400, 409]) {
+    const { state, ui } = mockAPI();
+    let calls = 0;
+    state.post = async () => { const error = new Error("unavailable"); error.status = ++calls === 1 ? 500 : replayStatus; throw error; };
+    await ui.api.start(); fillLink(ui); submit(ui); await settle(); submit(ui); await settle();
+    assert.equal(el(ui, "link-submit").textContent, "Resend same request");
+    assert.match(el(ui, "workflow-status").textContent, /original settings/);
+    const posts = ui.requests.filter((call) => call.endpoint === "/api/clipping/gemini/jobs");
+    assert.equal(posts[0].options.body, posts[1].options.body);
+    assert.equal(posts[0].options.headers["Idempotency-Key"], posts[1].options.headers["Idempotency-Key"]);
+  }
+});
+
+test("a first 409 is a known rejection for both link and saved-source submissions", async () => {
+  for (const kind of ["link", "source"]) {
+    const { state, ui } = mockAPI({ sources: kind === "source" ? [reference()] : [] });
+    let calls = 0;
+    state.post = async () => {
+      if (++calls === 1) {
+        const error = new Error("clipping source is not available for analysis");
+        error.status = 409;
+        throw error;
+      }
+      state.sources = [reference()]; state.jobs = [job()];
+      return { job: state.jobs[0] };
+    };
+    await ui.api.start();
+    if (kind === "link") { fillLink(ui); submit(ui); }
+    else buttonIn(el(ui, "sources"), "Analyze with Gemini").click();
+    await settle();
+    const posts = ui.requests.filter((call) => call.endpoint === "/api/clipping/gemini/jobs");
+    assert.equal(posts.length, 1, "no automatic resubmission");
+    const surface = kind === "link" ? el(ui, "link-error") : el(ui, "sources");
+    assert.match(treeText(surface), /clipping source is not available for analysis/);
+    if (kind === "link") {
+      assert.equal(el(ui, "link-submit").textContent, "Analyze video");
+      assert.equal(el(ui, "link-submit").disabled, false);
+      submit(ui);
+    } else {
+      const analyze = buttonIn(el(ui, "sources"), "Analyze with Gemini");
+      assert.equal(analyze.disabled, false);
+      analyze.click();
+    }
+    await settle();
+    const after = ui.requests.filter((call) => call.endpoint === "/api/clipping/gemini/jobs");
+    assert.equal(after.length, 2);
+    assert.notEqual(after[0].options.headers["Idempotency-Key"], after[1].options.headers["Idempotency-Key"]);
+    assert.equal(after[0].options.body, after[1].options.body);
+  }
 });
 
 test("an unresolved request blocks fresh submissions through another link or a saved source", async () => {
