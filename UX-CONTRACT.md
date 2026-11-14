@@ -28,6 +28,7 @@ Business and API documents define data policy. This file describes what the brow
 - New URL references show a generic YouTube label only. They do not expose source URLs, filenames, file sizes, local paths, or presumed media duration. No import, download, extraction, or fabricated progress state appears in the flow.
 - Job status is authoritative. Gemini jobs do not display a percentage unless a future API supplies meaningful determinate progress. No client timer or automatic retry is used.
 - Interpret `retry_safety` as returned: `not_submitted_retryable`, `rate_limited_wait` (show `retry_at` without a timer), `response_received_terminal`, `outcome_unknown_no_replay`, `terminal`, or `none`. An unknown provider outcome is never replayed by the browser.
+- After a known terminal outcome, **Analyze again** explicitly creates a new job with the chosen options and a new idempotency key; it does not retry a stage. Explain that a new analysis may incur provider charges. Active and unknown outcomes remain blocked, including canceled jobs whose provider outcome is unknown.
 - Legacy saved source/job endpoints and artifact envelopes remain readable. Legacy artifacts keep their established renderer; only the exact `framevault.clipping.analysis.v3` artifact uses the typed Gemini renderer.
 
 ## Shared interaction rules

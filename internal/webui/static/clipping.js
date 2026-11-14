@@ -229,6 +229,7 @@
     if (!isGeminiJob(job)) return "";
     const safety = String(job.retry_safety || "none");
     if (safety === "not_submitted_retryable") {
+      if (terminalJobStatus(job.status)) return "This attempt was not submitted and has ended.";
       return "This attempt was not submitted. The service may retry it automatically when safe.";
     }
     if (safety === "rate_limited_wait") {
@@ -252,7 +253,9 @@
       source_inaccessible: "The provider could not access this public YouTube video. It may be unavailable or unsupported.",
       invalid_response: "The provider response did not match the saved analysis contract.",
       outcome_unknown: "The provider outcome is unknown. Do not resubmit this analysis; refresh to check its status.",
-      request_not_submitted: "This attempt was not submitted. The service may retry it automatically when safe.",
+      request_not_submitted: terminalJobStatus(job && job.status)
+        ? "This attempt was not submitted and has ended."
+        : "This attempt was not submitted. The service may retry it automatically when safe.",
       rate_limited: "Gemini rate-limited this attempt. Review the retry status below.",
       provider_rejected_request: "Gemini rejected this request. Review the public link and provider status before starting another analysis.",
       response_blocked: "Gemini did not return an analysis for this video.",
@@ -441,6 +444,10 @@
     return ["queued", "running", "uncertain", "outcome_unknown", "submitting", "rate_limited_wait"].includes(String(status || "").toLowerCase());
   }
 
+  function terminalJobStatus(status) {
+    return ["completed", "failed", "canceled", "cancelled"].includes(String(status || "").toLowerCase());
+  }
+
   function analysisAttemptID(job) {
     const stages = Array.isArray(job && job.stages) ? job.stages : [];
     const stage = stages.find((item) => item && item.name === "analysis");
@@ -596,7 +603,7 @@
       const status = String(job && job.status || "").toLowerCase();
       const safety = String(job && job.retry_safety || "none");
       return activeJobStatus(status) || safety === "rate_limited_wait" || safety === "outcome_unknown_no_replay"
-        || (safety === "not_submitted_retryable" && !["failed", "canceled", "cancelled"].includes(status));
+        || (safety === "not_submitted_retryable" && !terminalJobStatus(status));
     });
     if (active) return { job: active, canStart: false };
     const latest = latestJobForSource(sourceID, "gemini");
@@ -606,7 +613,8 @@
     if (activeJobStatus(status) || safety === "rate_limited_wait" || safety === "outcome_unknown_no_replay") {
       return { job: latest, canStart: false };
     }
-    return { job: latest, canStart: status === "completed" };
+    const knownOutcome = ["none", "terminal", "response_received_terminal", "not_submitted_retryable"].includes(safety);
+    return { job: latest, canStart: terminalJobStatus(status) && knownOutcome };
   }
 
   function analysisLockedForSource(sourceID) {
@@ -614,7 +622,8 @@
   }
 
   function sourceJobActionLabel(job, canStart) {
-    if (!job || canStart) return "Analyze with Gemini";
+    if (canStart) return job ? "Analyze again" : "Analyze with Gemini";
+    if (!job) return "Analyze with Gemini";
     const safety = String(job.retry_safety || "none");
     if (safety === "outcome_unknown_no_replay") return "Outcome unknown";
     if (safety === "rate_limited_wait") return "Retry scheduled automatically";
@@ -672,6 +681,7 @@
         else if (job && !analysisState.canStart) analyze.title = retrySafetyCopy(job)
           || "A previous analysis is still active or has ended without a reusable result.";
         actions.append(analyze);
+        if (job && analysisState.canStart) main.append(element("p", "clipping-source-meta", "A new analysis may incur provider charges."));
       }
       const removeLabel = isReference ? "Delete reference" : "Delete video";
       const remove = button(deleting ? "Deleting…" : removeLabel, "button secondary clipping-action clipping-delete-action",

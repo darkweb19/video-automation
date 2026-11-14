@@ -380,6 +380,41 @@ test("eligible saved sources use source_id; unresolved saves can only resend the
   assert.equal(posts[0].options.headers["Idempotency-Key"], posts[1].options.headers["Idempotency-Key"]);
 });
 
+test("known terminal outcomes allow a new source analysis while active and unknown outcomes stay blocked", async () => {
+  const terminal = [
+    job({ id: "failed", source_id: "failed", status: "failed", retry_safety: "terminal", error_code: "request_not_submitted" }),
+    job({ id: "not-submitted", source_id: "not-submitted", status: "failed", retry_safety: "not_submitted_retryable", error_code: "request_not_submitted" }),
+    job({ id: "canceled", source_id: "canceled", status: "canceled", retry_safety: "terminal" }),
+    job({ id: "completed", source_id: "completed", status: "completed", retry_safety: "response_received_terminal" })
+  ];
+  const blocked = [
+    job({ id: "active", source_id: "active", status: "queued", retry_safety: "not_submitted_retryable" }),
+    job({ id: "unknown", source_id: "unknown", status: "failed", retry_safety: "outcome_unknown_no_replay" }),
+    job({ id: "cancel-unknown", source_id: "cancel-unknown", status: "canceled", retry_safety: "outcome_unknown_no_replay" })
+  ];
+  const { state, ui } = mockAPI({ sources: [...terminal, ...blocked].map((item) => reference(item.source_id)), jobs: [...terminal, ...blocked] });
+  state.post = async () => {
+    state.jobs = [...state.jobs, job({ id: "new-job", source_id: "not-submitted", created_at: 1 })];
+    return { job: state.jobs.at(-1) };
+  };
+  await ui.api.start();
+  const rows = el(ui, "sources").children;
+  for (const row of rows.slice(0, terminal.length)) {
+    assert.equal(buttonIn(row, "Analyze again").disabled, false);
+    assert.match(treeText(row), /may incur provider charges/);
+  }
+  assert.equal(buttonIn(rows[4], "Analysis retrying automatically").disabled, true);
+  assert.equal(buttonIn(rows[5], "Outcome unknown").disabled, true);
+  assert.equal(buttonIn(rows[6], "Outcome unknown").disabled, true);
+  assert.match(treeText(el(ui, "jobs")), /This attempt was not submitted and has ended\./);
+  buttonIn(rows[1], "Analyze again").click(); await settle();
+  const posts = ui.requests.filter((call) => call.endpoint === "/api/clipping/gemini/jobs");
+  assert.equal(posts.length, 1);
+  assert.deepEqual(JSON.parse(posts[0].options.body), { source_id: "not-submitted", options: OPTIONS });
+  assert.ok(posts[0].options.headers["Idempotency-Key"]);
+  assert.ok(!ui.requests.some((call) => /\/retry(?:\/|$)/.test(call.endpoint)));
+});
+
 const v3 = {
   version: "framevault.clipping.analysis.v3", source_duration_ms: 61234, source_duration_provenance: "model_reported",
   summary: "A complete summary", language_codes: ["en", "ja"], limitations: ["Audio was unclear"], fewer_candidates_reason: "Only two strong moments",
