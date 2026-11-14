@@ -37,10 +37,17 @@
 
   function youtubeVideoID(value) {
     const raw = String(value || "").trim();
+    if (!raw || raw.length > 8192 || /[\x00-\x1f\x7f#\\]/.test(raw) || /%(?![0-9a-f]{2})/i.test(raw)) return "";
     if (/^[A-Za-z0-9_-]{11}$/.test(raw)) return raw;
+    const withoutScheme = raw.replace(/^https?:\/\//i, "");
+    const authority = withoutScheme.split(/[/?]/, 1)[0];
+    const rawPath = withoutScheme.slice(authority.length).split("?", 1)[0];
+    if (authority.includes("%") || authority.includes("@") || /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i.test(rawPath)) return "";
+    const port = authority.match(/:([^:]*)$/);
+    if (port && port[1] && port[1] !== "443") return "";
     let url;
     try {
-      url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw) ? raw : "https://" + raw);
+      url = new URL(raw.includes("://") ? raw : "https://" + raw);
     } catch (_error) {
       return "";
     }
@@ -49,25 +56,26 @@
       "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
       "youtube-nocookie.com", "www.youtube-nocookie.com", "youtu.be", "www.youtu.be"
     ]);
-    if (!hosts.has(host) || !["https:", "http:"].includes(url.protocol)
+    if (!hosts.has(host) || url.protocol !== "https:"
       || url.username || url.password
-      || (url.port && url.port !== "443" && !(url.protocol === "http:" && url.port === "80"))) return "";
-    const parts = url.pathname.split("/").filter(Boolean);
+      || (url.port && url.port !== "443") || url.search.includes(";")) return "";
+    for (const key of url.searchParams.keys()) {
+      if (["list", "playlist", "playlist_id", "video_ids", "start_radio", "index"].includes(key.toLowerCase())) return "";
+    }
+    let path;
+    try { path = decodeURIComponent(url.pathname); } catch (_error) { return ""; }
     let id = "";
     if (host === "youtu.be" || host === "www.youtu.be") {
-      if (parts.length === 1) id = parts[0];
-    } else if (parts.length === 1 && parts[0] === "watch") {
+      id = path.replace(/^\/+|\/+$/g, "");
+      if (id.includes("/")) return "";
+    } else if (path === "/watch" || path === "/watch/") {
       const values = url.searchParams.getAll("v");
       if (values.length === 1) id = values[0];
-    } else if (parts.length === 2 && ["shorts", "embed", "live", "v"].includes(parts[0])) {
-      id = parts[1];
+    } else {
+      const match = path.match(/^\/(?:shorts|embed|live|v)\/([^/]+)\/?$/);
+      if (match) id = match[1];
     }
     return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : "";
-  }
-
-  function canonicalYouTubeURL(value) {
-    const id = youtubeVideoID(value);
-    return id ? "https://www.youtube.com/watch?v=" + id : "";
   }
 
   function safeID(value) {
@@ -94,7 +102,7 @@
     return (gib >= 10 ? Math.round(gib) : Math.round(gib * 10) / 10) + " GiB";
   }
 
-  const pure = { youtubeVideoID, canonicalYouTubeURL, safeID, formatDuration, formatBytes };
+  const pure = { youtubeVideoID, safeID, formatDuration, formatBytes };
   if (typeof module !== "undefined" && module.exports) module.exports = pure;
   if (!root || !root.document) return;
 
@@ -1336,14 +1344,14 @@
     if (sourceID && (!source || String(source.status).toLowerCase() !== "ready" || !["youtube_url", "youtube_original_file"].includes(String(source.kind || ""))
       || source.rights_attested !== true || state.pendingSourceIDs.has(sourceID) || state.deletedSourceIDs.has(sourceID)
       || !sourceAnalysisState(sourceID).canStart)) return;
-    const youtubeURL = sourceID ? "" : canonicalYouTubeURL(String(ui.link.value || "").trim());
-    if (!sourceID && !youtubeVideoID(youtubeURL)) {
+    const youtubeURL = sourceID ? "" : String(request && request.youtubeURL || "").trim();
+    const videoID = youtubeVideoID(youtubeURL);
+    if (!sourceID && !videoID) {
       ui.importError.textContent = "Paste a valid link to one public YouTube video.";
       ui.link.setAttribute("aria-invalid", "true");
       ui.link.focus();
       return;
     }
-    const videoID = youtubeVideoID(youtubeURL);
     const identity = sourceID ? "source:" + sourceID : "youtube:" + videoID;
     const unresolved = state.unknownRequests.get(identity);
     if (state.unknownRequests.size && !unresolved) {
@@ -1360,7 +1368,9 @@
     clearFieldError(ui.link);
     clearFieldError(ui.permission);
     const mappedSource = !sourceID && state.urlSourceIDs.get(videoID);
-    if (mappedSource && !unresolved && !sourceAnalysisState(mappedSource).canStart) {
+    if (mappedSource && !unresolved && (!state.sourcesLoaded
+      || !state.sources.some((item) => safeID(item && item.id) === mappedSource)
+      || !sourceAnalysisState(mappedSource).canStart)) {
       ui.importError.textContent = "This video already has an active or unresolved analysis. Review its saved status below.";
       return;
     }
@@ -1671,7 +1681,9 @@
     const unresolved = state.unknownRequests.get("youtube:" + videoID);
     const mappedSource = state.urlSourceIDs.get(videoID);
     const otherUnknown = state.unknownRequests.size > 0 && !unresolved;
-    const blocked = Boolean(otherUnknown || (mappedSource && !unresolved && !sourceAnalysisState(mappedSource).canStart));
+    const blocked = Boolean(otherUnknown || (mappedSource && !unresolved && (!state.sourcesLoaded
+      || !state.sources.some((item) => safeID(item && item.id) === mappedSource)
+      || !sourceAnalysisState(mappedSource).canStart)));
     ui.importButton.textContent = state.geminiRequestPending ? "Saving request…" : unresolved ? "Resend same request" : "Analyze video";
     ui.importButton.disabled = !hasLink || !validLink || (!ui.permission.checked && !unresolved)
       || !geminiReady() || state.geminiRequestPending || blocked;

@@ -255,10 +255,17 @@ function deferred() {
 }
 
 test("public YouTube parsing accepts one video and rejects ambiguous or unsafe links", () => {
-  for (const url of ["https://www.youtube.com/watch?v=abcdefghijk", "youtu.be/abcdefghijk", "youtube.com/shorts/abcdefghijk", "abcdefghijk"]) {
+  for (const url of ["https://www.youtube.com/watch?v=abcdefghijk", "youtu.be/abcdefghijk", "youtube.com/shorts/abcdefghijk", "abcdefghijk",
+    "https://youtube.com:443/watch?v=abcdefghijk&t=12", "youtube.com:443/watch?v=abcdefghijk", "https://youtu.be/abcde%66ghijk?si=share"]) {
     assert.equal(pure.youtubeVideoID(url), "abcdefghijk");
   }
-  for (const url of ["https://youtube.com/playlist?list=PL123", "https://youtube.com/watch?v=abcdefghijk&v=mnopqrstuvw", "https://attacker.example/watch?v=abcdefghijk", "https://user:pass@youtube.com/watch?v=abcdefghijk"]) {
+  for (const url of ["http://youtube.com/watch?v=abcdefghijk", "https://youtube.com/watch?v=abcdefghijk#fragment",
+    "https://youtube.com/watch?v=abcdefghijk&list=PL123", "https://youtube.com/watch?v=abcdefghijk&%6cist=PL123",
+    "https://youtube.com/watch?v=abcdefghijk&index=1", "https://youtube.com/playlist?list=PL123",
+    "https://youtube.com/watch?v=abcdefghijk&v=mnopqrstuvw", "https://youtube.com/watch?v=abcdefghijk;t=12",
+    "https://youtube.com:444/watch?v=abcdefghijk", "https://youtube.com:0443/watch?v=abcdefghijk", "https://youtube.com./watch?v=abcdefghijk",
+    "https://attacker.example/watch?v=abcdefghijk", "https://user:pass@youtube.com/watch?v=abcdefghijk",
+    "https://@youtube.com/watch?v=abcdefghijk", "https://youtube.com/watch?v=abcdefghijk&bad=%xx"]) {
     assert.equal(pure.youtubeVideoID(url), "");
   }
   assert.equal(pure.safeID("../source"), "");
@@ -276,7 +283,7 @@ test("link submission sends rights and exact Gemini options, never imports media
   submit(ui);
   const calls = ui.requests.filter((call) => call.endpoint === "/api/clipping/gemini/jobs");
   assert.equal(calls.length, 1);
-  assert.deepEqual(JSON.parse(calls[0].options.body), { youtube_url: "https://www.youtube.com/watch?v=abcdefghijk", rights_attested: true, options: OPTIONS });
+  assert.deepEqual(JSON.parse(calls[0].options.body), { youtube_url: "https://youtu.be/abcdefghijk", rights_attested: true, options: OPTIONS });
   assert.ok(calls[0].options.headers["Idempotency-Key"]);
   assert.equal(el(ui, "link").disabled, true);
   assert.match(el(ui, "workflow-status").textContent, /Saving/);
@@ -314,6 +321,8 @@ test("uncertain HTTP submission locks the video to the original body and key, in
   assert.match(el(ui, "link-error").textContent, /could not be confirmed/);
   assert.equal(el(ui, "link-submit").textContent, "Resend same request");
   el(ui, "min-clip-seconds").value = "45";
+  el(ui, "link").value = "https://www.youtube.com/watch?v=abcdefghijk&t=30";
+  el(ui, "link").emit("input");
   el(ui, "link-permission-check").checked = false;
   state.sources = [reference()]; state.jobs = [job()];
   submit(ui); await settle();
@@ -322,6 +331,43 @@ test("uncertain HTTP submission locks the video to the original body and key, in
   assert.equal(posts[0].options.body, posts[1].options.body);
   assert.equal(posts[0].options.headers["Idempotency-Key"], posts[1].options.headers["Idempotency-Key"]);
   assert.equal(el(ui, "link").value, "");
+});
+
+test("unsupported URL forms cannot be repaired into an accepted analysis", async () => {
+  const { ui } = mockAPI();
+  await ui.api.start();
+  for (const url of ["http://youtube.com/watch?v=abcdefghijk", "https://youtube.com/watch?v=abcdefghijk#t=5",
+    "https://youtube.com/watch?v=abcdefghijk&list=PL123", "https://youtube.com:444/watch?v=abcdefghijk", "https://youtube.com:0443/watch?v=abcdefghijk",
+    "https://@youtube.com/watch?v=abcdefghijk", "https://youtube.com/watch?v=abcdefghijk;foo=bar"]) {
+    fillLink(ui, url);
+    assert.equal(el(ui, "link-submit").disabled, true, url);
+    submit(ui); await settle();
+    assert.equal(el(ui, "link").getAttribute("aria-invalid"), "true", url);
+  }
+  assert.ok(!ui.requests.some((call) => call.endpoint === "/api/clipping/gemini/jobs"));
+});
+
+test("a known terminal video starts a fresh request with its entered URL and a new key", async () => {
+  const { state, ui } = mockAPI();
+  state.post = async () => {
+    if (!state.sources.length) {
+      state.sources = [reference()]; state.jobs = [job()];
+    } else {
+      state.sources = [reference(), reference("source2")];
+      state.jobs = [state.jobs[0], job({ id: "job2", source_id: "source2" })];
+    }
+    return { job: state.jobs.at(-1) };
+  };
+  await ui.api.start(); fillLink(ui); submit(ui); await settle();
+  state.jobs = [job({ status: "failed", retry_safety: "terminal", error_code: "credentials_unavailable" })];
+  await ui.api.refresh();
+  fillLink(ui, "  https://youtube.com:443/watch?v=abcdefghijk&t=30  ");
+  assert.equal(el(ui, "link-submit").disabled, false);
+  submit(ui); await settle();
+  const posts = ui.requests.filter((call) => call.endpoint === "/api/clipping/gemini/jobs");
+  assert.equal(posts.length, 2);
+  assert.deepEqual(JSON.parse(posts[1].options.body), { youtube_url: "https://youtube.com:443/watch?v=abcdefghijk&t=30", rights_attested: true, options: OPTIONS });
+  assert.notEqual(posts[0].options.headers["Idempotency-Key"], posts[1].options.headers["Idempotency-Key"]);
 });
 
 test("a server error retains the lock even when a replay is rejected", async () => {

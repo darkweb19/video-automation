@@ -24,7 +24,7 @@ Business and API documents define data policy. This file describes what the brow
 ## Provider state and recovery
 
 - Configuration is read only from the authenticated same-origin `/api/clipping/config` response. `configured` and `enabled` gate the new form; `verification: unverified` is shown as unverified. The browser does not probe ADC or claim live provider access.
-- The URL request atomically saves a rights-attested reference and job through `POST /api/clipping/gemini/jobs`. The request body carries the URL or source ID and the exact options; `Idempotency-Key` protects an explicit same-body resubmission.
+- The URL request atomically saves a rights-attested reference and job through `POST /api/clipping/gemini/jobs`. The request body carries the original trimmed URL or source ID and the exact options; the server remains authoritative for URL validation. `Idempotency-Key` protects an explicit same-body resubmission.
 - New URL references show a generic YouTube label only. They do not expose source URLs, filenames, file sizes, local paths, or presumed media duration. No import, download, extraction, or fabricated progress state appears in the flow.
 - Job status is authoritative. Gemini jobs do not display a percentage unless a future API supplies meaningful determinate progress. No client timer or automatic retry is used.
 - Interpret `retry_safety` as returned: `not_submitted_retryable`, `rate_limited_wait` (show `retry_at` without a timer), `response_received_terminal`, `outcome_unknown_no_replay`, `terminal`, or `none`. An unknown provider outcome is never replayed by the browser.
