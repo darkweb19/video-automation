@@ -31,6 +31,10 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Optional first-run bootstrap only. Prefer the authenticated Settings UI.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # Opt-in Gemini routing; credentials are configured separately.
+      CLIPPING_GEMINI_ENABLED: ${CLIPPING_GEMINI_ENABLED:-false}
+      CLIPPING_GEMINI_PROJECT_ID: ${CLIPPING_GEMINI_PROJECT_ID:-}
+      CLIPPING_GEMINI_LOCATION: ${CLIPPING_GEMINI_LOCATION:-global}
     volumes:
       - video_automation_data:/data
     depends_on:
