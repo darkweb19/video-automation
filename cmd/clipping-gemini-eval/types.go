@@ -22,8 +22,11 @@ const (
 )
 
 const (
-	maxGeminiTargetDurationMS int64 = 40 * 60 * 1000
-	durationMatchToleranceMS  int64 = 1000
+	maxGeminiTargetDurationMS  int64 = 40 * 60 * 1000
+	minExportableOpportunityMS int64 = 15 * 1000
+	maxExportableOpportunityMS int64 = 180 * 1000
+	shortDurationBucketMS      int64 = 15 * 60 * 1000
+	durationMatchToleranceMS   int64 = 1000
 )
 
 // Dataset contains saved analyses and human annotations. It has no URL,
@@ -168,6 +171,7 @@ type CorpusSummary struct {
 	OpportunityKindCounts       map[string]int `json:"opportunity_kind_counts"`
 	OpportunityLanguageCounts   map[string]int `json:"opportunity_language_counts"`
 	OperatorRightsAttestedCount int            `json:"operator_rights_attested_count"`
+	ReadyRightsSourceCount      int            `json:"ready_rights_source_count"`
 	HumanDurationCount          int            `json:"human_duration_count"`
 	CompleteSourceReviewCount   int            `json:"complete_source_review_count"`
 	EligibleSourceCount         int            `json:"eligible_source_count"`
@@ -177,12 +181,14 @@ type CorpusSummary struct {
 type RunSummary struct {
 	RunID                       string                `json:"run_id"`
 	SourceID                    string                `json:"source_id"`
+	SourceEligibilityStatus     string                `json:"source_eligibility_status"`
 	AnalysisPayloadSHA256       string                `json:"analysis_payload_sha256"`
 	AnalysisStatus              string                `json:"analysis_status"`
 	ModelReportedDurationMS     int64                 `json:"model_reported_duration_ms,omitempty"`
 	OperatorHumanDurationMS     *int64                `json:"operator_human_duration_ms,omitempty"`
 	DurationComparisonStatus    string                `json:"duration_comparison_status"`
 	DurationTargetStatus        string                `json:"duration_target_status"`
+	ModelDurationTargetStatus   string                `json:"model_duration_target_status"`
 	DeclaredContentType         string                `json:"declared_content_type"`
 	RequestedContentType        string                `json:"requested_content_type"`
 	ContentTypeComparisonStatus string                `json:"content_type_comparison_status"`
@@ -221,8 +227,8 @@ type TopKSummary struct {
 	ReturnedOutputs int      `json:"returned_outputs"`
 	UsableOutputs   int      `json:"usable_outputs"`
 	MatchedUsable   int      `json:"matched_usable"`
-	Precision       *float64 `json:"precision,omitempty"`
-	Recall          *float64 `json:"recall,omitempty"`
+	Precision       *float64 `json:"precision"`
+	Recall          *float64 `json:"recall"`
 	PrecisionStatus string   `json:"precision_status"`
 	RecallStatus    string   `json:"recall_status"`
 }
@@ -240,6 +246,7 @@ type StratumSummary struct {
 	Key                         string   `json:"key"`
 	SourceIDs                   []string `json:"source_ids"`
 	SourceCount                 int      `json:"source_count"`
+	EligibleSourceCount         int      `json:"eligible_source_count"`
 	OperatorRightsAttestedCount int      `json:"operator_rights_attested_count"`
 	ReviewCompleteCount         int      `json:"review_complete_count"`
 	PartialReviewCount          int      `json:"partial_review_count"`

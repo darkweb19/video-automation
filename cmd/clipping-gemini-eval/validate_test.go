@@ -2,9 +2,10 @@ package main
 
 import "testing"
 
-func TestReviewedCandidateRequiresCompleteRubricAndKnownBoundaries(t *testing.T) {
+func TestReviewedCandidateRequiresCompleteRubricAndContextualBoundaryFits(t *testing.T) {
 	valid := CandidateReview{
 		Rank: 1, Status: "reviewed", Usability: "usable",
+		MatchedOpportunityID: "opportunity-1", SameMomentConfirmed: true,
 		StartBoundaryFit: "within", EndBoundaryFit: "outside",
 		Dimensions: ReviewDimensions{
 			Completeness: intPointer(4), Context: intPointer(5), Hook: intPointer(3), Emotion: intPointer(4),
@@ -24,7 +25,20 @@ func TestReviewedCandidateRequiresCompleteRubricAndKnownBoundaries(t *testing.T)
 	unknownBoundary := valid
 	unknownBoundary.EndBoundaryFit = "unknown"
 	if err := validateCandidateReview(unknownBoundary); err == nil {
-		t.Fatal("reviewed candidate with unknown end boundary was accepted")
+		t.Fatal("matched candidate with unknown end boundary was accepted")
+	}
+
+	unmatched := valid
+	unmatched.MatchedOpportunityID = ""
+	unmatched.SameMomentConfirmed = false
+	unmatched.StartBoundaryFit = "unknown"
+	unmatched.EndBoundaryFit = "unknown"
+	if err := validateCandidateReview(unmatched); err != nil {
+		t.Fatalf("unmatched candidate with unknown boundaries rejected: %v", err)
+	}
+	unmatched.StartBoundaryFit = "within"
+	if err := validateCandidateReview(unmatched); err == nil {
+		t.Fatal("unmatched candidate with an invented boundary fit was accepted")
 	}
 }
 
@@ -77,6 +91,42 @@ func TestPartialSourceReviewCannotLabelOutsideItsReviewedRange(t *testing.T) {
 	}
 	if err := validateSourceReview(review, source); err == nil {
 		t.Fatal("partial review accepted an opportunity outside its reviewed interval")
+	}
+}
+
+func TestExportableOpportunityMustFitGlobalClipDurationBounds(t *testing.T) {
+	source := CorpusSource{ID: "source-1", Status: "ready", RightsStatus: "confirmed", ContentType: "general"}
+	base := Opportunity{
+		ID: "opportunity-1", StartMS: 10_000, EndMS: 25_000, Kinds: []string{"speech"}, LanguageCodes: []string{"en"},
+		Exportable: true, Humor: "unknown", Emotion: "unknown", Context: "unknown",
+	}
+	cases := []struct {
+		name      string
+		duration  int64
+		wantValid bool
+	}{
+		{name: "minimum inclusive", duration: minExportableOpportunityMS, wantValid: true},
+		{name: "below minimum", duration: minExportableOpportunityMS - 1},
+		{name: "maximum inclusive", duration: maxExportableOpportunityMS, wantValid: true},
+		{name: "above maximum", duration: maxExportableOpportunityMS + 1},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			opportunity := base
+			opportunity.EndMS = opportunity.StartMS + test.duration
+			err := validateOpportunity(opportunity, source)
+			if test.wantValid && err != nil {
+				t.Fatalf("valid exportable interval rejected: %v", err)
+			}
+			if !test.wantValid && err == nil {
+				t.Fatal("exportable opportunity outside global clip bounds was accepted")
+			}
+		})
+	}
+	base.Exportable = false
+	base.EndMS = base.StartMS + maxExportableOpportunityMS + 1
+	if err := validateOpportunity(base, source); err != nil {
+		t.Fatalf("non-exportable observation outside clip bounds was rejected: %v", err)
 	}
 }
 

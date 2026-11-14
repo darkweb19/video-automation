@@ -32,7 +32,7 @@ func evaluateDataset(data Dataset) EvaluationReport {
 		Corpus: CorpusSummary{
 			SourceStatusCounts:        emptyCounts("synthetic", "pending", "ready", "excluded"),
 			RightsStatusCounts:        emptyCounts("unknown", "confirmed", "denied"),
-			CoverageStatusCounts:      emptyCounts("not_reviewed", "partial", "complete"),
+			CoverageStatusCounts:      emptyCounts("ineligible", "not_reviewed", "partial", "complete"),
 			OpportunityKindCounts:     emptyCounts("speech", "non_speech_audio", "visual_only"),
 			OpportunityLanguageCounts: make(map[string]int),
 		},
@@ -49,35 +49,44 @@ func evaluateDataset(data Dataset) EvaluationReport {
 	for _, source := range data.Corpus {
 		report.Corpus.SourceStatusCounts[source.Status]++
 		report.Corpus.RightsStatusCounts[source.RightsStatus]++
+		evidenceEligible := candidateReviewSourceEligibility(source) == "eligible_for_candidate_review"
 		if source.RightsStatus == "confirmed" {
 			report.Corpus.OperatorRightsAttestedCount++
+			if source.Status == "ready" {
+				report.Corpus.ReadyRightsSourceCount++
+			}
 		}
-		if source.HumanDurationMS != nil {
+		if evidenceEligible && source.HumanDurationMS != nil {
 			report.Corpus.HumanDurationCount++
 		}
 		review, hasReview := sourceReviews[source.ID]
-		coverageStatus := "not_reviewed"
+		coverageStatus := "ineligible"
+		if evidenceEligible {
+			coverageStatus = "not_reviewed"
+		}
 		if hasReview {
-			coverageStatus = review.CoverageStatus
-			for _, opportunity := range review.Opportunities {
-				report.Corpus.OpportunityCount++
-				if opportunity.Exportable {
-					report.Corpus.ExportableOpportunityCount++
-				}
-				for _, kind := range opportunity.Kinds {
-					report.Corpus.OpportunityKindCounts[kind]++
-				}
-				if len(opportunity.LanguageCodes) == 0 {
-					report.Corpus.OpportunityLanguageCounts["unknown"]++
-				} else {
-					for _, language := range opportunity.LanguageCodes {
-						report.Corpus.OpportunityLanguageCounts[strings.ToLower(language)]++
+			if evidenceEligible {
+				coverageStatus = review.CoverageStatus
+				for _, opportunity := range review.Opportunities {
+					report.Corpus.OpportunityCount++
+					if opportunity.Exportable {
+						report.Corpus.ExportableOpportunityCount++
+					}
+					for _, kind := range opportunity.Kinds {
+						report.Corpus.OpportunityKindCounts[kind]++
+					}
+					if len(opportunity.LanguageCodes) == 0 {
+						report.Corpus.OpportunityLanguageCounts["unknown"]++
+					} else {
+						for _, language := range opportunity.LanguageCodes {
+							report.Corpus.OpportunityLanguageCounts[reportLanguageTag(language)]++
+						}
 					}
 				}
 			}
 		}
 		report.Corpus.CoverageStatusCounts[coverageStatus]++
-		if hasReview && sourceReviewComplete(review, source) {
+		if hasReview && evidenceEligible && sourceReviewComplete(review, source) {
 			report.Corpus.CompleteSourceReviewCount++
 			if source.Status == "ready" && source.RightsStatus == "confirmed" && source.HumanDurationMS != nil {
 				report.Corpus.EligibleSourceCount++
@@ -86,37 +95,39 @@ func evaluateDataset(data Dataset) EvaluationReport {
 	}
 	report.Corpus.SourceCount = len(data.Corpus)
 	report.Corpus.EvidenceStatus = corpusEvidenceStatus(report.Corpus.EligibleSourceCount)
+	report.ExternalReadiness.SourceRights = corpusRightsReadinessGate(report).ReasonCode
 
-	completeHumanReviews := 0
-	partialHumanReviews := 0
+	eligibleQualityRuns := 0
+	completeEligibleQualityRuns := 0
 	completeCostRecords := 0
-	rankSummaries := make(map[int]*RankSummary)
+	rankSummaries := make(map[int]*rankEvidence)
 	for _, run := range data.Runs {
 		analysis, _ := app.DecodeClippingGeminiAnalysis(run.Analysis, run.Options)
 		source := sources[run.SourceID]
 		sourceReview, hasSourceReview := sourceReviews[run.SourceID]
 		runReview, hasRunReview := runReviews[run.ID]
-		addRunRankEvidence(rankSummaries, analysis, sourceReview, hasSourceReview, runReview, hasRunReview)
+		if humanQualityEvidenceEligible(source, sourceReview, hasSourceReview, analysis, runReview, hasRunReview) {
+			addRunRankEvidence(rankSummaries, analysis, sourceReview, hasSourceReview, runReview, hasRunReview)
+		}
 		summary := summarizeRun(run, analysis, source, sourceReview, hasSourceReview, runReview, hasRunReview)
 		report.Runs = append(report.Runs, summary)
-		if run.ActualCostUSD != nil {
-			completeCostRecords++
-		}
-		if summary.HumanReviewStatus == "complete" {
-			completeHumanReviews++
-		} else if summary.HumanReviewStatus == "partial" {
-			partialHumanReviews++
+		if summary.SourceEligibilityStatus == "eligible_for_candidate_review" {
+			eligibleQualityRuns++
+			if summary.HumanReviewStatus == "complete" && summary.Rubric.RatedCandidateCount > 0 {
+				completeEligibleQualityRuns++
+			}
+			if run.ActualCostUSD != nil {
+				completeCostRecords++
+			}
 		}
 	}
 	for _, rank := range finalizeRankEvidence(rankSummaries) {
 		report.RankSummary = append(report.RankSummary, rank)
 	}
-	if completeHumanReviews == len(data.Runs) && len(data.Runs) > 0 && hasAnyRubricRatings(report.Runs) {
+	if eligibleQualityRuns > 0 && completeEligibleQualityRuns == eligibleQualityRuns {
 		report.ExternalReadiness.HumanQuality = "human_review_metrics_are_descriptive_only"
-	} else if completeHumanReviews > 0 || partialHumanReviews > 0 {
-		report.ExternalReadiness.HumanQuality = "partial_review_metrics_are_descriptive_only"
 	}
-	if completeCostRecords == len(data.Runs) && len(data.Runs) > 0 {
+	if eligibleQualityRuns > 0 && completeCostRecords == eligibleQualityRuns {
 		report.ExternalReadiness.ActualCost = "operator_recorded_not_independently_verified"
 	} else if completeCostRecords > 0 {
 		report.ExternalReadiness.ActualCost = "partial_operator_records_other_runs_unknown"
@@ -132,7 +143,7 @@ func summarizeReadinessGates(data Dataset, report EvaluationReport) []ReadinessG
 		return []ReadinessGate{
 			{Name: "provider_availability", Status: "unverified", ReasonCode: "live_inference_not_run"},
 			{Name: "live_authentication", Status: "unverified", ReasonCode: "live_authentication_not_run"},
-			{Name: "corpus_rights", Status: "blocked", ReasonCode: "no_operator_rights_attestations"},
+			corpusRightsReadinessGate(report),
 			{Name: "human_quality", Status: "not_run", ReasonCode: "no_saved_runs"},
 			{Name: "provider_usage", Status: "not_run", ReasonCode: "no_saved_runs"},
 			{Name: "actual_cost", Status: "not_run", ReasonCode: "no_saved_runs"},
@@ -147,45 +158,83 @@ func summarizeReadinessGates(data Dataset, report EvaluationReport) []ReadinessG
 		{Name: "long_video_support", Status: "unverified", ReasonCode: "preview_40_minute_gate_not_run"},
 		{Name: "deployment_backup", Status: "not_run", ReasonCode: "offline_tool_does_not_verify_operations"},
 	}
-	if report.Corpus.OperatorRightsAttestedCount == 0 {
-		gate = append(gate, ReadinessGate{Name: "corpus_rights", Status: "blocked", ReasonCode: "no_operator_rights_attestations"})
-	} else {
-		gate = append(gate, ReadinessGate{Name: "corpus_rights", Status: "unverified", ReasonCode: "operator_attestation_not_independently_verified"})
-	}
+	gate = append(gate, corpusRightsReadinessGate(report))
 
-	completeHumanReviews := 0
+	eligibleQualityRuns := 0
+	completeEligibleQualityRuns := 0
+	eligibleProviderRuns := 0
 	completeUsageRecords := 0
 	completeCostRecords := 0
 	for _, run := range report.Runs {
-		if run.HumanReviewStatus == "complete" {
-			completeHumanReviews++
-		}
-		if run.UsageStatus == "reported" {
-			completeUsageRecords++
-		}
-		if run.CostStatus == "operator_recorded_not_independently_verified" {
-			completeCostRecords++
+		if run.SourceEligibilityStatus == "eligible_for_candidate_review" {
+			eligibleQualityRuns++
+			eligibleProviderRuns++
+			if run.HumanReviewStatus == "complete" && run.Rubric.RatedCandidateCount > 0 {
+				completeEligibleQualityRuns++
+			}
+			if run.UsageStatus == "reported" && run.PromptTokens != nil && run.OutputTokens != nil && run.TotalTokens != nil {
+				completeUsageRecords++
+			}
+			if run.CostStatus == "operator_recorded_not_independently_verified" {
+				completeCostRecords++
+			}
 		}
 	}
-	if completeHumanReviews == runs && hasAnyRubricRatings(report.Runs) {
+	if eligibleQualityRuns > 0 && completeEligibleQualityRuns == eligibleQualityRuns {
 		gate = append(gate, ReadinessGate{Name: "human_quality", Status: "descriptive_only", ReasonCode: "human_labels_are_not_a_release_pass"})
 	} else {
-		gate = append(gate, ReadinessGate{Name: "human_quality", Status: "insufficient_evidence", ReasonCode: "complete_adjudicated_reviews_missing"})
+		reason := "complete_adjudicated_reviews_missing"
+		if eligibleQualityRuns == 0 {
+			reason = "no_eligible_sources_with_human_review"
+		} else if completeEligibleQualityRuns > 0 {
+			reason = "eligible_source_review_panels_incomplete"
+		}
+		gate = append(gate, ReadinessGate{Name: "human_quality", Status: "insufficient_evidence", ReasonCode: reason})
 	}
-	if completeUsageRecords == runs {
+	if eligibleProviderRuns > 0 && completeUsageRecords == eligibleProviderRuns {
 		gate = append(gate, ReadinessGate{Name: "provider_usage", Status: "unverified", ReasonCode: "provider_reported_counts_not_independently_verified"})
 	} else {
-		gate = append(gate, ReadinessGate{Name: "provider_usage", Status: "insufficient_evidence", ReasonCode: "provider_usage_missing_or_partial"})
+		reason := "provider_usage_missing_or_partial"
+		if eligibleProviderRuns == 0 {
+			reason = "no_eligible_runs_with_provider_usage"
+		}
+		gate = append(gate, ReadinessGate{Name: "provider_usage", Status: "insufficient_evidence", ReasonCode: reason})
 	}
-	if completeCostRecords == runs {
+	if eligibleProviderRuns > 0 && completeCostRecords == eligibleProviderRuns {
 		gate = append(gate, ReadinessGate{Name: "actual_cost", Status: "unverified", ReasonCode: "operator_cost_records_not_invoice_verified"})
 	} else {
-		gate = append(gate, ReadinessGate{Name: "actual_cost", Status: "insufficient_evidence", ReasonCode: "actual_cost_missing_or_partial"})
+		reason := "actual_cost_missing_or_partial"
+		if eligibleProviderRuns == 0 {
+			reason = "no_eligible_runs_with_cost_records"
+		}
+		gate = append(gate, ReadinessGate{Name: "actual_cost", Status: "insufficient_evidence", ReasonCode: reason})
 	}
 	return gate
 }
 
-func addRunRankEvidence(summaries map[int]*RankSummary, analysis app.ClippingGeminiAnalysis, sourceReview SourceReview, hasSourceReview bool, runReview RunReview, hasRunReview bool) {
+func corpusRightsReadinessGate(report EvaluationReport) ReadinessGate {
+	if report.Corpus.ReadyRightsSourceCount == 0 {
+		reason := "no_operator_rights_attestations"
+		if report.Corpus.OperatorRightsAttestedCount > 0 {
+			reason = "no_ready_rights_sources"
+		}
+		return ReadinessGate{Name: "corpus_rights", Status: "blocked", ReasonCode: reason}
+	}
+	return ReadinessGate{Name: "corpus_rights", Status: "unverified", ReasonCode: "operator_attestation_not_independently_verified"}
+}
+
+func humanQualityEvidenceEligible(source CorpusSource, sourceReview SourceReview, hasSourceReview bool, analysis app.ClippingGeminiAnalysis, runReview RunReview, hasRunReview bool) bool {
+	return candidateReviewSourceEligibility(source) == "eligible_for_candidate_review" &&
+		hasSourceReview && sourceReviewComplete(sourceReview, source) &&
+		len(analysis.Candidates) > 0 && runCandidateReviewsComplete(analysis, runReview, hasRunReview)
+}
+
+type rankEvidence struct {
+	summary              RankSummary
+	completePanelOutputs int
+}
+
+func addRunRankEvidence(summaries map[int]*rankEvidence, analysis app.ClippingGeminiAnalysis, sourceReview SourceReview, hasSourceReview bool, runReview RunReview, hasRunReview bool) {
 	opportunities := make(map[string]Opportunity)
 	if hasSourceReview {
 		for _, opportunity := range sourceReview.Opportunities {
@@ -198,13 +247,19 @@ func addRunRankEvidence(summaries map[int]*RankSummary, analysis app.ClippingGem
 			reviews[candidateReview.Rank] = candidateReview
 		}
 	}
+	completePanel := runCandidateReviewsComplete(analysis, runReview, hasRunReview)
 	for _, candidate := range analysis.Candidates {
-		summary := summaries[candidate.Rank]
-		if summary == nil {
-			summary = &RankSummary{Rank: candidate.Rank, EvidenceStatus: "insufficient_evidence"}
-			summaries[candidate.Rank] = summary
+		evidence := summaries[candidate.Rank]
+		if evidence == nil {
+			evidence = &rankEvidence{summary: RankSummary{Rank: candidate.Rank, EvidenceStatus: "insufficient_evidence"}}
+			summaries[candidate.Rank] = evidence
 		}
+		summary := &evidence.summary
 		summary.ReturnedOutputs++
+		if !completePanel {
+			continue
+		}
+		evidence.completePanelOutputs++
 		candidateReview, exists := reviews[candidate.Rank]
 		if !exists || candidateReview.Status != "reviewed" {
 			continue
@@ -219,7 +274,7 @@ func addRunRankEvidence(summaries map[int]*RankSummary, analysis app.ClippingGem
 	}
 }
 
-func finalizeRankEvidence(summaries map[int]*RankSummary) []RankSummary {
+func finalizeRankEvidence(summaries map[int]*rankEvidence) []RankSummary {
 	ranks := make([]int, 0, len(summaries))
 	for rank := range summaries {
 		ranks = append(ranks, rank)
@@ -227,11 +282,14 @@ func finalizeRankEvidence(summaries map[int]*RankSummary) []RankSummary {
 	sort.Ints(ranks)
 	result := make([]RankSummary, 0, len(ranks))
 	for _, rank := range ranks {
-		summary := *summaries[rank]
-		if summary.ReturnedOutputs > 0 && summary.ReviewedOutputs == summary.ReturnedOutputs {
+		evidence := summaries[rank]
+		summary := evidence.summary
+		if summary.ReturnedOutputs > 0 && summary.ReviewedOutputs == summary.ReturnedOutputs && evidence.completePanelOutputs == summary.ReturnedOutputs {
 			rate := float64(summary.UsableOutputs) / float64(summary.ReturnedOutputs)
 			summary.UsabilityRate = &rate
 			summary.EvidenceStatus = "descriptive_only"
+		} else if summary.ReviewedOutputs > 0 {
+			summary.EvidenceStatus = "partial"
 		}
 		result = append(result, summary)
 	}
@@ -244,18 +302,20 @@ func finalizeRankEvidence(summaries map[int]*RankSummary) []RankSummary {
 func summarizeRun(run SavedRun, analysis app.ClippingGeminiAnalysis, source CorpusSource, sourceReview SourceReview, hasSourceReview bool, runReview RunReview, hasRunReview bool) RunSummary {
 	digest := sha256.Sum256(run.Analysis)
 	summary := RunSummary{
-		RunID:                       run.ID,
-		SourceID:                    run.SourceID,
+		RunID:                       opaqueReportID("run", run.ID),
+		SourceID:                    opaqueReportID("source", run.SourceID),
+		SourceEligibilityStatus:     candidateReviewSourceEligibility(source),
 		AnalysisPayloadSHA256:       hex.EncodeToString(digest[:]),
 		AnalysisStatus:              "valid",
 		ModelReportedDurationMS:     analysis.SourceDurationMS,
 		OperatorHumanDurationMS:     cloneInt64(source.HumanDurationMS),
 		DurationComparisonStatus:    compareDurations(source.HumanDurationMS, analysis.SourceDurationMS),
 		DurationTargetStatus:        geminiDurationTargetStatus(source.HumanDurationMS),
+		ModelDurationTargetStatus:   modelGeminiDurationTargetStatus(analysis.SourceDurationMS),
 		DeclaredContentType:         source.ContentType,
 		RequestedContentType:        run.Options.ContentType,
 		ContentTypeComparisonStatus: compareContentTypes(source.ContentType, run.Options.ContentType),
-		ModelReportedLanguageCodes:  append([]string{}, analysis.LanguageCodes...),
+		ModelReportedLanguageCodes:  reportLanguageCodes(analysis.LanguageCodes),
 		LanguageComparisonStatus:    compareLanguages(source.LanguageCodes, analysis.LanguageCodes),
 		CandidateCount:              len(analysis.Candidates),
 		CandidateReviews:            summarizeCandidateReviewCounts(analysis, runReview, hasRunReview),
@@ -279,60 +339,62 @@ func summarizeRun(run SavedRun, analysis app.ClippingGeminiAnalysis, source Corp
 		// sort, score, repair, or choose candidates.
 		summary.RanksAsReturned = append(summary.RanksAsReturned, candidate.Rank)
 	}
-	if run.Usage != nil {
+	summary.TopK.ReturnedOutputs = min(len(analysis.Candidates), topK)
+	if summary.SourceEligibilityStatus == "eligible_for_candidate_review" && run.Usage != nil {
 		summary.UsageStatus = run.Usage.Status
 		summary.PromptTokens = cloneInt64(run.Usage.PromptTokens)
 		summary.OutputTokens = cloneInt64(run.Usage.OutputTokens)
 		summary.TotalTokens = cloneInt64(run.Usage.TotalTokens)
 	}
-	if run.ActualCostUSD != nil {
+	if summary.SourceEligibilityStatus == "eligible_for_candidate_review" && run.ActualCostUSD != nil {
 		summary.CostStatus = "operator_recorded_not_independently_verified"
 		actual := *run.ActualCostUSD
 		summary.ActualCostUSD = &actual
 	}
 
-	if hasSourceReview {
+	if hasSourceReview && summary.SourceEligibilityStatus == "eligible_for_candidate_review" {
 		summary.ReviewedOpportunityCount = len(sourceReview.Opportunities)
 		for _, opportunity := range sourceReview.Opportunities {
 			if opportunity.Exportable {
 				summary.UsableOpportunityCount++
 			}
 		}
-		if sourceReview.CoverageStatus != "not_reviewed" {
-			summary.HumanReviewStatus = "partial"
-		}
-		if sourceReviewComplete(sourceReview, source) {
+	}
+
+	if summary.SourceEligibilityStatus == "eligible_for_candidate_review" {
+		if humanQualityEvidenceEligible(source, sourceReview, hasSourceReview, analysis, runReview, hasRunReview) {
+			summarizeRunReview(&summary, run.Options, analysis, sourceReview, hasSourceReview, runReview, hasRunReview)
+			summary.Rubric.Status = "complete"
 			summary.HumanReviewStatus = "complete"
-			summary.LateEventStatus = "source_coverage_complete_candidate_review_missing"
+			summary.LateEventStatus = "review_complete"
 			lateThreshold := (*source.HumanDurationMS * 4) / 5
 			for _, opportunity := range sourceReview.Opportunities {
 				if opportunity.Exportable && opportunity.StartMS >= lateThreshold {
 					summary.LateOpportunityCount++
 				}
 			}
+			summary.LateMatchedOpportunityCount = countLateMatchedUsable(sourceReview, runReview, *source.HumanDurationMS)
+		} else if hasHumanReviewActivity(sourceReview, hasSourceReview, runReview, hasRunReview) {
+			summary.HumanReviewStatus = "partial"
+			summary.LateEventStatus = "insufficient_evidence"
 		}
-	}
-
-	summarizeRunReview(&summary, analysis, sourceReview, hasSourceReview, runReview, hasRunReview)
-	if hasRunReview && len(runReview.CandidateReviews) > 0 {
-		summary.Rubric.Status = "partial"
-		if runCandidateReviewsComplete(analysis, runReview, true) {
-			summary.Rubric.Status = "complete"
-		}
-	}
-	candidateReviewComplete := runCandidateReviewsComplete(analysis, runReview, hasRunReview)
-	sourceReviewIsComplete := hasSourceReview && sourceReviewComplete(sourceReview, source)
-	if summary.HumanReviewStatus == "complete" && !candidateReviewComplete {
-		summary.HumanReviewStatus = "partial"
-	}
-	if candidateReviewComplete && sourceReviewIsComplete {
-		summary.HumanReviewStatus = "complete"
-		summary.LateEventStatus = "review_complete"
-		summary.LateMatchedOpportunityCount = countLateMatchedUsable(sourceReview, runReview, *source.HumanDurationMS)
-	} else if !sourceReviewIsComplete && hasRunReview && len(runReview.CandidateReviews) > 0 && summary.HumanReviewStatus == "not_reviewed" {
-		summary.HumanReviewStatus = "partial"
+	} else {
+		summary.HumanReviewStatus = "ineligible_source"
+		summary.LateEventStatus = "ineligible_source"
+		summary.TopK.PrecisionStatus = "ineligible_source"
+		summary.TopK.RecallStatus = "ineligible_source"
+		summary.Rubric.Status = "ineligible_source"
+		summary.UsageStatus = "ineligible_source"
+		summary.CostStatus = "ineligible_source"
 	}
 	return summary
+}
+
+func hasHumanReviewActivity(sourceReview SourceReview, hasSourceReview bool, runReview RunReview, hasRunReview bool) bool {
+	if hasSourceReview && sourceReview.CoverageStatus != "not_reviewed" {
+		return true
+	}
+	return hasRunReview && (len(runReview.CandidateReviews) > 0 || runReview.AdjudicationStatus != "not_started")
 }
 
 func summarizeCandidateReviewCounts(analysis app.ClippingGeminiAnalysis, review RunReview, hasReview bool) CandidateReviewCounts {
@@ -369,7 +431,7 @@ func emptyCounts(keys ...string) map[string]int {
 	return counts
 }
 
-func summarizeRunReview(summary *RunSummary, analysis app.ClippingGeminiAnalysis, sourceReview SourceReview, hasSourceReview bool, review RunReview, hasRunReview bool) {
+func summarizeRunReview(summary *RunSummary, options app.ClippingGeminiOptions, analysis app.ClippingGeminiAnalysis, sourceReview SourceReview, hasSourceReview bool, review RunReview, hasRunReview bool) {
 	opportunityByID := make(map[string]Opportunity)
 	if hasSourceReview {
 		for _, opportunity := range sourceReview.Opportunities {
@@ -416,12 +478,19 @@ func summarizeRunReview(summary *RunSummary, analysis app.ClippingGeminiAnalysis
 	}
 	if hasSourceReview && sourceReviewComplete(sourceReview, CorpusSource{HumanDurationMS: sourceReview.ReviewedEndMS}) && runCandidateReviewsComplete(analysis, review, hasRunReview) {
 		usableOpportunities := 0
+		optionsCompatible := true
 		for _, opportunity := range sourceReview.Opportunities {
 			if opportunity.Exportable {
 				usableOpportunities++
+				duration := opportunity.EndMS - opportunity.StartMS
+				if duration < options.MinClipMS || duration > options.MaxClipMS {
+					optionsCompatible = false
+				}
 			}
 		}
-		if usableOpportunities > 0 {
+		if usableOpportunities > 0 && !optionsCompatible {
+			summary.TopK.RecallStatus = "not_comparable"
+		} else if usableOpportunities > 0 {
 			value := float64(len(matchedUsableIDs)) / float64(usableOpportunities)
 			summary.TopK.Recall = &value
 			summary.TopK.RecallStatus = "descriptive_only"
@@ -447,10 +516,31 @@ func geminiDurationTargetStatus(operatorDuration *int64) string {
 	if operatorDuration == nil {
 		return "operator_duration_unknown"
 	}
-	if *operatorDuration > maxGeminiTargetDurationMS {
+	return durationTargetStatus(*operatorDuration)
+}
+
+func modelGeminiDurationTargetStatus(modelDuration int64) string {
+	return durationTargetStatus(modelDuration)
+}
+
+func durationTargetStatus(duration int64) string {
+	if duration > maxGeminiTargetDurationMS {
 		return "above_40_min_target"
 	}
 	return "within_40_min_target_unverified"
+}
+
+func candidateReviewSourceEligibility(source CorpusSource) string {
+	if source.Status == "synthetic" {
+		return "synthetic_source"
+	}
+	if source.Status != "ready" {
+		return "source_not_ready"
+	}
+	if source.RightsStatus != "confirmed" {
+		return "rights_not_confirmed"
+	}
+	return "eligible_for_candidate_review"
 }
 
 func compareContentTypes(declared, requested string) string {
@@ -479,14 +569,65 @@ func sameLanguageSet(left, right []string) bool {
 	}
 	values := make(map[string]struct{}, len(left))
 	for _, value := range left {
-		values[strings.ToLower(value)] = struct{}{}
-	}
-	for _, value := range right {
-		if _, exists := values[strings.ToLower(value)]; !exists {
+		key := strings.ToLower(value)
+		if _, exists := values[key]; exists {
 			return false
 		}
+		values[key] = struct{}{}
 	}
-	return true
+	for _, value := range right {
+		key := strings.ToLower(value)
+		if _, exists := values[key]; !exists {
+			return false
+		}
+		delete(values, key)
+	}
+	return len(values) == 0
+}
+
+func reportLanguageTag(code string) string {
+	full := strings.ToLower(code)
+	primary, supported := reportableLanguagePrimary(full)
+	if !supported {
+		primary = "other"
+	}
+	if full == primary {
+		return primary
+	}
+	return primary + "~tag_" + opaqueDigest("language-tag", full)
+}
+
+func reportableLanguagePrimary(code string) (string, bool) {
+	primary := strings.ToLower(strings.SplitN(code, "-", 2)[0])
+	switch primary {
+	case "en", "hi", "ne":
+		return primary, len(primary) >= 2 && len(primary) <= 3
+	default:
+		return "", false
+	}
+}
+
+func reportLanguageCodes(codes []string) []string {
+	result := make([]string, 0, len(codes))
+	seen := make(map[string]struct{}, len(codes))
+	for _, code := range codes {
+		reported := reportLanguageTag(code)
+		if _, exists := seen[reported]; exists {
+			continue
+		}
+		seen[reported] = struct{}{}
+		result = append(result, reported)
+	}
+	return result
+}
+
+func opaqueReportID(kind, value string) string {
+	return kind + "_" + opaqueDigest("report-id:"+kind, value)
+}
+
+func opaqueDigest(domain, value string) string {
+	digest := sha256.Sum256([]byte("framevault.clipping.gemini.evaluation.v1\x00" + domain + "\x00" + value))
+	return hex.EncodeToString(digest[:])
 }
 
 func summarizeDimensions(summary *RunSummary, dimensions ReviewDimensions) {
@@ -569,16 +710,23 @@ func countLateMatchedUsable(sourceReview SourceReview, runReview RunReview, dura
 func summarizeStrata(sources []CorpusSource, reviews map[string]SourceReview) []StratumSummary {
 	groups := make(map[string]*StratumSummary)
 	for _, source := range sources {
+		review := reviews[source.ID]
 		contentKey := "content_type\x00" + source.ContentType
-		addSourceToStratum(groups, contentKey, "content_type", source.ContentType, source, reviews[source.ID])
-		languages := source.LanguageCodes
+		addSourceToStratum(groups, contentKey, "content_type", source.ContentType, source, review)
+		languageLabels := reportLanguageCodes(source.LanguageCodes)
+		languages := languageLabels
 		if len(languages) == 0 {
 			languages = []string{"unknown"}
 		}
 		for _, language := range languages {
 			key := "language\x00" + language
-			addSourceToStratum(groups, key, "language", language, source, reviews[source.ID])
+			addSourceToStratum(groups, key, "language", language, source, review)
+			crossKey := "language_by_content_type\x00" + source.ContentType + "\x00" + language
+			crossLabel := source.ContentType + "/" + language
+			addSourceToStratum(groups, crossKey, "language_by_content_type", crossLabel, source, review)
 		}
+		durationKey := durationStratumKey(source.HumanDurationMS)
+		addSourceToStratum(groups, "duration\x00"+durationKey, "duration", durationKey, source, review)
 	}
 	strata := make([]StratumSummary, 0, len(groups))
 	for _, stratum := range groups {
@@ -601,11 +749,15 @@ func addSourceToStratum(groups map[string]*StratumSummary, groupID, kind, key st
 		stratum = &StratumSummary{Kind: kind, Key: key, SourceIDs: make([]string, 0)}
 		groups[groupID] = stratum
 	}
-	stratum.SourceIDs = append(stratum.SourceIDs, source.ID)
+	stratum.SourceIDs = append(stratum.SourceIDs, opaqueReportID("source", source.ID))
+	eligible := candidateReviewSourceEligibility(source) == "eligible_for_candidate_review"
+	if eligible {
+		stratum.EligibleSourceCount++
+	}
 	if source.RightsStatus == "confirmed" {
 		stratum.OperatorRightsAttestedCount++
 	}
-	if review.SourceID == source.ID {
+	if eligible && review.SourceID == source.ID {
 		stratum.OpportunityCount += len(review.Opportunities)
 		if sourceReviewComplete(review, source) {
 			stratum.ReviewCompleteCount++
@@ -613,6 +765,19 @@ func addSourceToStratum(groups map[string]*StratumSummary, groupID, kind, key st
 			stratum.PartialReviewCount++
 		}
 	}
+}
+
+func durationStratumKey(durationMS *int64) string {
+	if durationMS == nil {
+		return "unknown"
+	}
+	if *durationMS < shortDurationBucketMS {
+		return "under_15m"
+	}
+	if *durationMS <= maxGeminiTargetDurationMS {
+		return "15m_to_40m"
+	}
+	return "over_40m"
 }
 
 func sourceReviewComplete(review SourceReview, source CorpusSource) bool {

@@ -1,0 +1,112 @@
+name: Gemini offline evaluation
+
+on:
+  push:
+    branches:
+      - work
+      - 'feat/gemini-**'
+      - 'codex/gemini-**'
+    paths:
+      - "cmd/clipping-gemini-eval/**"
+      - "docs/clipping/EVALUATION.md"
+      - "docs/clipping/GEMINI-OPERATIONS.md"
+      - "docs/clipping/gemini-evaluation/**"
+      - "internal/app/clipping_gemini_contract*.go"
+      - "internal/app/script_generation.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/gemini-evaluation.yml"
+  pull_request:
+    paths:
+      - "cmd/clipping-gemini-eval/**"
+      - "docs/clipping/EVALUATION.md"
+      - "docs/clipping/GEMINI-OPERATIONS.md"
+      - "docs/clipping/gemini-evaluation/**"
+      - "internal/app/clipping_gemini_contract*.go"
+      - "internal/app/script_generation.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/gemini-evaluation.yml"
+
+jobs:
+  offline-evaluation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test the offline evaluation contract and reducers
+        run: go test ./cmd/clipping-gemini-eval -count=1
+      - name: Vet the offline evaluation package
+        run: go vet ./cmd/clipping-gemini-eval
+      - name: Build the offline evaluator
+        run: go build -trimpath -o /tmp/clipping-gemini-eval ./cmd/clipping-gemini-eval
+      - name: Validate synthetic examples and fail closed on readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for fixture in \
+            docs/clipping/gemini-evaluation/synthetic-example.v1.json \
+            docs/clipping/gemini-evaluation/synthetic-labeled-example.v1.json; do
+            /tmp/clipping-gemini-eval --input "$fixture" > /tmp/gemini-evaluation-report.json
+            python3 - "$fixture" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path("/tmp/gemini-evaluation-report.json").read_text())
+          fixture = json.loads(Path(sys.argv[1]).read_text())
+          assert report["version"] == "framevault.clipping.gemini.evaluation-report.v1"
+          assert report["corpus"]["source_status_counts"]["synthetic"] == 1
+          assert report["corpus"]["rights_status_counts"]["unknown"] == 1
+          assert report["corpus"]["coverage_status_counts"]["ineligible"] == 1
+          assert report["corpus"]["coverage_status_counts"]["complete"] == 0
+          assert report["corpus"]["human_duration_count"] == 0
+          assert report["corpus"]["eligible_source_count"] == 0
+          gates = {gate["name"]: gate["status"] for gate in report["readiness_gates"]}
+          assert set(gates) == {
+              "provider_availability", "live_authentication", "corpus_rights", "human_quality",
+              "provider_usage", "actual_cost", "long_video_support", "deployment_backup",
+          }
+          assert gates["provider_availability"] == "unverified"
+          assert gates["live_authentication"] == "unverified"
+          assert gates["corpus_rights"] == "blocked"
+          assert gates["human_quality"] == "insufficient_evidence"
+          assert gates["actual_cost"] == "insufficient_evidence"
+          assert gates["provider_usage"] == "insufficient_evidence"
+          assert gates["long_video_support"] == "unverified"
+          assert gates["deployment_backup"] == "not_run"
+          assert report["corpus"]["opportunity_count"] == 0
+          run = report["runs"][0]
+          assert run["source_eligibility_status"] == "synthetic_source"
+          assert run["human_review_status"] == "ineligible_source"
+          assert report["external_readiness"]["human_quality"] == "insufficient_evidence"
+          assert run["top_k"]["precision"] is None
+          assert run["top_k"]["recall"] is None
+          assert run["top_k"]["precision_status"] == "ineligible_source"
+          assert run["rubric"]["rated_candidate_count"] == 0
+          assert report["rank_summary"] == []
+          if fixture.get("source_reviews"):
+              assert run["candidate_reviews"]["reviewed"] == 1
+              assert run["top_k"]["recall_status"] == "ineligible_source"
+          else:
+              assert run["candidate_reviews"]["reviewed"] == 0
+          serialized = json.dumps(report)
+          for private_text in (
+              "SYNTHETIC_PRIVATE_HOOK", "Synthetic rationale for contract validation.",
+              "Synthetic rationale for rubric example.", "Synthetic boundary rationale.",
+              "Synthetic context.", "Synthetic evidence detail.", "Synthetic evaluation example.",
+              "synthetic-labeled-source-1", "synthetic-labeled-run-1",
+              "synthetic-reviewer-1", "synthetic-opportunity-1",
+          ):
+              assert private_text not in serialized
+          assert "https://" not in serialized
+          PY
+          done

@@ -19,7 +19,7 @@ func TestEvaluateDatasetUsesHumanMatchesAndPreservesModelRanks(t *testing.T) {
 		t.Fatalf("corpus summary = %#v", report.Corpus)
 	}
 	if report.Corpus.SourceStatusCounts["ready"] != 1 || report.Corpus.RightsStatusCounts["confirmed"] != 1 ||
-		report.Corpus.CoverageStatusCounts["complete"] != 1 || report.Corpus.CoverageStatusCounts["not_reviewed"] != 0 {
+		report.Corpus.ReadyRightsSourceCount != 1 || report.Corpus.CoverageStatusCounts["complete"] != 1 || report.Corpus.CoverageStatusCounts["ineligible"] != 0 {
 		t.Fatalf("corpus lifecycle and coverage counts = %#v", report.Corpus)
 	}
 	if report.Corpus.OpportunityCount != 2 || report.Corpus.ExportableOpportunityCount != 2 ||
@@ -37,8 +37,12 @@ func TestEvaluateDatasetUsesHumanMatchesAndPreservesModelRanks(t *testing.T) {
 		t.Fatalf("candidate review coverage = %#v", run.CandidateReviews)
 	}
 	if run.DurationComparisonStatus != "within_1s" || run.DurationTargetStatus != "within_40_min_target_unverified" ||
+		run.ModelDurationTargetStatus != "within_40_min_target_unverified" ||
 		run.ContentTypeComparisonStatus != "matches_declared_content_type" || run.LanguageComparisonStatus != "matches_operator_metadata" {
 		t.Fatalf("source metadata comparisons = %#v", run)
+	}
+	if run.SourceEligibilityStatus != "eligible_for_candidate_review" {
+		t.Fatalf("source eligibility = %q", run.SourceEligibilityStatus)
 	}
 	if len(run.RanksAsReturned) != 2 || run.RanksAsReturned[0] != 1 || run.RanksAsReturned[1] != 2 {
 		t.Fatalf("ranks as returned = %v", run.RanksAsReturned)
@@ -76,7 +80,8 @@ func TestEvaluateDatasetUsesHumanMatchesAndPreservesModelRanks(t *testing.T) {
 	if gate := readinessGateForTest(t, report, "actual_cost"); gate.Status != "insufficient_evidence" || gate.ReasonCode != "actual_cost_missing_or_partial" {
 		t.Fatalf("cost gate = %#v", gate)
 	}
-	if len(report.Strata) != 2 || report.Strata[0].Kind != "content_type" || report.Strata[1].Kind != "language" {
+	if len(report.Strata) != 4 || report.Strata[0].Kind != "content_type" || report.Strata[1].Kind != "duration" ||
+		report.Strata[2].Kind != "language" || report.Strata[3].Kind != "language_by_content_type" {
 		t.Fatalf("strata = %#v", report.Strata)
 	}
 	if len(report.RankSummary) != 2 || report.RankSummary[0].Rank != 1 || report.RankSummary[1].Rank != 2 {
@@ -87,8 +92,15 @@ func TestEvaluateDatasetUsesHumanMatchesAndPreservesModelRanks(t *testing.T) {
 		t.Fatalf("rank evidence = %#v", report.RankSummary)
 	}
 	for _, stratum := range report.Strata {
-		if stratum.SourceCount != 1 || stratum.ReviewCompleteCount != 1 || stratum.OperatorRightsAttestedCount != 1 || stratum.EvidenceStatus != "descriptive_only" {
+		if stratum.SourceCount != 1 || stratum.EligibleSourceCount != 1 || stratum.ReviewCompleteCount != 1 ||
+			stratum.OperatorRightsAttestedCount != 1 || stratum.EvidenceStatus != "descriptive_only" {
 			t.Fatalf("stratum = %#v", stratum)
+		}
+		if stratum.Kind == "duration" && stratum.Key != "under_15m" {
+			t.Fatalf("duration bucket = %#v", stratum)
+		}
+		if stratum.Kind == "language_by_content_type" && stratum.Key != "comedy/en" {
+			t.Fatalf("language/content bucket = %#v", stratum)
 		}
 	}
 
@@ -114,6 +126,8 @@ func TestEvaluateDatasetWithholdsRecallWhenSourceCoverageIsPartial(t *testing.T)
 	dataset.SourceReviews[0].Opportunities = dataset.SourceReviews[0].Opportunities[:1]
 	dataset.RunReviews[0].CandidateReviews[1].MatchedOpportunityID = ""
 	dataset.RunReviews[0].CandidateReviews[1].SameMomentConfirmed = false
+	dataset.RunReviews[0].CandidateReviews[1].StartBoundaryFit = "unknown"
+	dataset.RunReviews[0].CandidateReviews[1].EndBoundaryFit = "unknown"
 	if err := validateDataset(dataset); err != nil {
 		t.Fatalf("validate partial dataset: %v", err)
 	}
@@ -125,10 +139,10 @@ func TestEvaluateDatasetWithholdsRecallWhenSourceCoverageIsPartial(t *testing.T)
 	if run.HumanReviewStatus != "partial" || run.TopK.Recall != nil || run.TopK.RecallStatus != "insufficient_evidence" {
 		t.Fatalf("partial source coverage was treated as complete: %#v", run)
 	}
-	if run.TopK.Precision == nil || run.TopK.PrecisionStatus != "descriptive_only" {
-		t.Fatalf("fully reviewed candidate outputs lost their descriptive precision: %#v", run.TopK)
+	if run.TopK.Precision != nil || run.TopK.PrecisionStatus != "insufficient_evidence" {
+		t.Fatalf("source-partial panel contributed to quality precision: %#v", run.TopK)
 	}
-	if run.LateEventStatus != "unknown" || run.LateOpportunityCount != 0 || run.LateMatchedOpportunityCount != 0 {
+	if run.LateEventStatus != "insufficient_evidence" || run.LateOpportunityCount != 0 || run.LateMatchedOpportunityCount != 0 {
 		t.Fatalf("late-source events were inferred from partial coverage: %#v", run)
 	}
 }
@@ -168,8 +182,8 @@ func TestEvaluateDatasetWithholdsMetricsForUncertainCandidateLabels(t *testing.T
 		run.TopK.PrecisionStatus != "insufficient_evidence" || run.TopK.RecallStatus != "insufficient_evidence" {
 		t.Fatalf("uncertain candidate label contributed to top-k metrics: %#v", run)
 	}
-	if run.Rubric.Status != "partial" || run.Rubric.RatedCandidateCount != 1 {
-		t.Fatalf("uncertain candidate label contributed to rubric completion: %#v", run.Rubric)
+	if run.Rubric.Status != "insufficient_evidence" || run.Rubric.RatedCandidateCount != 0 || len(run.Rubric.DimensionMeans) != 0 {
+		t.Fatalf("uncertain candidate label contributed to rubric metrics: %#v", run.Rubric)
 	}
 	if run.CandidateReviews.Returned != 2 || run.CandidateReviews.Reviewed != 1 || run.CandidateReviews.Uncertain != 1 || run.CandidateReviews.Missing != 0 {
 		t.Fatalf("uncertain candidate review count = %#v", run.CandidateReviews)
@@ -189,6 +203,345 @@ func TestEvaluateDatasetCountsMissingCandidateReviewsExplicitly(t *testing.T) {
 	run := evaluateDataset(dataset).Runs[0]
 	if run.CandidateReviews.Returned != 2 || run.CandidateReviews.Reviewed != 1 || run.CandidateReviews.Missing != 1 || run.CandidateReviews.Uncertain != 0 {
 		t.Fatalf("missing candidate review was hidden: %#v", run.CandidateReviews)
+	}
+}
+
+func TestSyntheticHumanLabelsDoNotContributeToQualityEvidence(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.Corpus[0].Status = "synthetic"
+	dataset.Corpus[0].RightsStatus = "unknown"
+	dataset.Runs[0].Usage = &UsageRecord{Status: "reported", PromptTokens: int64Pointer(10), OutputTokens: int64Pointer(5), TotalTokens: int64Pointer(15)}
+	syntheticCost := 0.01
+	dataset.Runs[0].ActualCostUSD = &syntheticCost
+	dataset.Runs[0].ActualCostEvidenceID = "synthetic-cost-record"
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate labeled synthetic dataset: %v", err)
+	}
+	report := evaluateDataset(dataset)
+	run := report.Runs[0]
+	if run.SourceEligibilityStatus != "synthetic_source" || run.HumanReviewStatus != "ineligible_source" {
+		t.Fatalf("synthetic source eligibility/review status = %#v", run)
+	}
+	if run.CandidateReviews.Reviewed != 2 {
+		t.Fatalf("synthetic annotation coverage was hidden: %#v", run.CandidateReviews)
+	}
+	if run.UsageStatus != "ineligible_source" || run.PromptTokens != nil || run.CostStatus != "ineligible_source" || run.ActualCostUSD != nil {
+		t.Fatalf("synthetic provider metadata contributed to readiness: %#v", run)
+	}
+	if run.TopK.Precision != nil || run.TopK.Recall != nil || run.TopK.PrecisionStatus != "ineligible_source" || run.TopK.RecallStatus != "ineligible_source" {
+		t.Fatalf("synthetic labels produced quality metrics: %#v", run.TopK)
+	}
+	if run.Rubric.RatedCandidateCount != 0 || run.Rubric.Status != "ineligible_source" || len(report.RankSummary) != 0 {
+		t.Fatalf("synthetic labels contributed to aggregate quality evidence: rubric=%#v ranks=%#v", run.Rubric, report.RankSummary)
+	}
+	if report.Corpus.EligibleSourceCount != 0 || report.Corpus.OpportunityCount != 0 || report.ExternalReadiness.HumanQuality != "insufficient_evidence" {
+		t.Fatalf("synthetic labels changed quality readiness: corpus=%#v external=%#v", report.Corpus, report.ExternalReadiness)
+	}
+	if report.Corpus.CoverageStatusCounts["ineligible"] != 1 || report.Corpus.CoverageStatusCounts["complete"] != 0 || report.ExternalReadiness.ActualCost != "unknown" {
+		t.Fatalf("synthetic labels or costs entered eligible aggregates: corpus=%#v external=%#v", report.Corpus, report.ExternalReadiness)
+	}
+	if gate := readinessGateForTest(t, report, "human_quality"); gate.Status != "insufficient_evidence" {
+		t.Fatalf("synthetic labels passed the human-quality gate: %#v", gate)
+	}
+	for _, gateName := range []string{"provider_usage", "actual_cost"} {
+		if gate := readinessGateForTest(t, report, gateName); gate.Status != "insufficient_evidence" {
+			t.Fatalf("synthetic data affected %s readiness: %#v", gateName, gate)
+		}
+	}
+	for _, stratum := range report.Strata {
+		if stratum.Kind == "language" && stratum.ReviewCompleteCount != 0 {
+			t.Fatalf("synthetic review counted as complete stratum evidence: %#v", stratum)
+		}
+	}
+}
+
+func TestHumanQualityGateRequiresEveryEligibleRunToHaveCompleteReviews(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	secondRun := dataset.Runs[0]
+	secondRun.ID = "run-test-2"
+	dataset.Runs = append(dataset.Runs, secondRun)
+	secondReview := dataset.RunReviews[0]
+	secondReview.RunID = "run-test-2"
+	secondReview.AdjudicationStatus = "pending"
+	dataset.RunReviews = append(dataset.RunReviews, secondReview)
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate mixed complete/incomplete eligible runs: %v", err)
+	}
+	report := evaluateDataset(dataset)
+	if report.ExternalReadiness.HumanQuality != "insufficient_evidence" {
+		t.Fatalf("human quality status = %q", report.ExternalReadiness.HumanQuality)
+	}
+	if gate := readinessGateForTest(t, report, "human_quality"); gate.Status != "insufficient_evidence" || gate.ReasonCode != "eligible_source_review_panels_incomplete" {
+		t.Fatalf("incomplete eligible corpus passed human-quality gate: %#v", gate)
+	}
+}
+
+func TestReadinessRightsGateUsesCorpusWhenThereAreNoRuns(t *testing.T) {
+	dataset := Dataset{
+		Version: evaluationInputVersion,
+		Corpus:  []CorpusSource{{ID: "source-rights-only", Status: "ready", RightsStatus: "confirmed", ContentType: "general", LanguageCodes: []string{}}},
+		Runs:    []SavedRun{},
+	}
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate corpus without runs: %v", err)
+	}
+	gate := readinessGateForTest(t, evaluateDataset(dataset), "corpus_rights")
+	if gate.Status != "unverified" || gate.ReasonCode != "operator_attestation_not_independently_verified" {
+		t.Fatalf("rights gate ignored recorded attestation: %#v", gate)
+	}
+}
+
+func TestUnmatchedReviewedCandidateCountsBoundaryFitsAsUnknown(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	review := &dataset.RunReviews[0].CandidateReviews[0]
+	review.Usability = "not_usable"
+	review.MatchedOpportunityID = ""
+	review.SameMomentConfirmed = false
+	review.StartBoundaryFit = "unknown"
+	review.EndBoundaryFit = "unknown"
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate unmatched candidate review: %v", err)
+	}
+	run := evaluateDataset(dataset).Runs[0]
+	if run.Rubric.BoundaryFitCounts["start_unknown"] != 1 || run.Rubric.BoundaryFitCounts["end_unknown"] != 1 {
+		t.Fatalf("unknown boundary judgments were not reported: %#v", run.Rubric.BoundaryFitCounts)
+	}
+}
+
+func TestModelDurationTargetIsCheckedSeparatelyFromOperatorDuration(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.SourceReviews = nil
+	dataset.RunReviews = nil
+	humanDuration := int64(60_000)
+	dataset.Corpus[0].HumanDurationMS = &humanDuration
+	var analysis app.ClippingGeminiAnalysis
+	if err := json.Unmarshal(dataset.Runs[0].Analysis, &analysis); err != nil {
+		t.Fatalf("decode fixture analysis: %v", err)
+	}
+	analysis.SourceDurationMS = 41 * 60 * 1000
+	dataset.Runs[0].Analysis, _ = json.Marshal(analysis)
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate model-duration fixture: %v", err)
+	}
+	run := evaluateDataset(dataset).Runs[0]
+	if run.DurationTargetStatus != "within_40_min_target_unverified" || run.ModelDurationTargetStatus != "above_40_min_target" {
+		t.Fatalf("operator/model target flags = %q / %q", run.DurationTargetStatus, run.ModelDurationTargetStatus)
+	}
+}
+
+func TestModelDurationTargetIsFlaggedWhenHumanDurationIsUnknown(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.SourceReviews = nil
+	dataset.RunReviews = nil
+	dataset.Corpus[0].HumanDurationMS = nil
+	var analysis app.ClippingGeminiAnalysis
+	if err := json.Unmarshal(dataset.Runs[0].Analysis, &analysis); err != nil {
+		t.Fatalf("decode fixture analysis: %v", err)
+	}
+	analysis.SourceDurationMS = 41 * 60 * 1000
+	dataset.Runs[0].Analysis, _ = json.Marshal(analysis)
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate model-duration fixture: %v", err)
+	}
+	run := evaluateDataset(dataset).Runs[0]
+	if run.DurationTargetStatus != "operator_duration_unknown" || run.ModelDurationTargetStatus != "above_40_min_target" {
+		t.Fatalf("unknown operator/model target flags = %q / %q", run.DurationTargetStatus, run.ModelDurationTargetStatus)
+	}
+}
+
+func TestRecallIsNotComparableWhenRunOptionsExcludeExportableOpportunities(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.Runs[0].Options.MinClipMS = 17_000
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate narrower-options fixture: %v", err)
+	}
+	run := evaluateDataset(dataset).Runs[0]
+	if run.TopK.Precision == nil || run.TopK.Recall != nil || run.TopK.RecallStatus != "not_comparable" {
+		t.Fatalf("option-incompatible opportunities were used for recall: %#v", run.TopK)
+	}
+}
+
+func TestReportedPartialUsageDoesNotPassUsageReadiness(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.Runs[0].Usage = &UsageRecord{Status: "reported", PromptTokens: int64Pointer(120)}
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate partial usage fixture: %v", err)
+	}
+	report := evaluateDataset(dataset)
+	if gate := readinessGateForTest(t, report, "provider_usage"); gate.Status != "insufficient_evidence" || gate.ReasonCode != "provider_usage_missing_or_partial" {
+		t.Fatalf("partial reported usage passed readiness: %#v", gate)
+	}
+	if report.Runs[0].PromptTokens == nil || report.Runs[0].OutputTokens != nil || report.Runs[0].TotalTokens != nil {
+		t.Fatalf("partial usage detail was lost or fabricated: %#v", report.Runs[0])
+	}
+}
+
+func TestIneligibleRightsAttestationDoesNotUnblockCorpusRightsGate(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.Corpus[0].Status = "pending"
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate pending attestation fixture: %v", err)
+	}
+	report := evaluateDataset(dataset)
+	gate := readinessGateForTest(t, report, "corpus_rights")
+	if report.Corpus.OperatorRightsAttestedCount != 1 || report.Corpus.ReadyRightsSourceCount != 0 || gate.Status != "blocked" || gate.ReasonCode != "no_ready_rights_sources" {
+		t.Fatalf("ineligible attestation affected rights readiness: corpus=%#v gate=%#v", report.Corpus, gate)
+	}
+	if report.Corpus.CoverageStatusCounts["ineligible"] != 1 || report.Corpus.CoverageStatusCounts["complete"] != 0 || report.Corpus.OpportunityCount != 0 {
+		t.Fatalf("ineligible review entered human coverage totals: %#v", report.Corpus)
+	}
+}
+
+func TestReportHashesUntrustedIDsAndLanguageTagExtensions(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	markers := []string{
+		"AIzaSyFakeSourceKey123456789012345678901234",
+		"sk-test-FAKEKEY1",
+		"AIzaSyFakeReviewerKey12345678901234567890",
+		"AIzaSyFakeOpportunityKey123456789012345678",
+		"AIzaSyFakeCostKey123456789012345678901",
+	}
+	sourceID, runID, reviewerID, opportunityID, costID := markers[0], markers[1], markers[2], markers[3], markers[4]
+	dataset.Corpus[0].ID = sourceID
+	dataset.Corpus[0].LanguageCodes = []string{"sk-test-FAKEKEY1"}
+	dataset.Runs[0].ID = runID
+	dataset.Runs[0].SourceID = sourceID
+	dataset.Runs[0].ActualCostEvidenceID = costID
+	actualCost := 0.01
+	dataset.Runs[0].ActualCostUSD = &actualCost
+	var analysis app.ClippingGeminiAnalysis
+	if err := json.Unmarshal(dataset.Runs[0].Analysis, &analysis); err != nil {
+		t.Fatalf("decode fixture analysis: %v", err)
+	}
+	analysis.LanguageCodes = []string{"sk-test-FAKEKEY1"}
+	dataset.Runs[0].Analysis, _ = json.Marshal(analysis)
+	dataset.SourceReviews[0].SourceID = sourceID
+	dataset.SourceReviews[0].ReviewerIDs = []string{reviewerID, "reviewer-2"}
+	dataset.SourceReviews[0].Opportunities[0].ID = opportunityID
+	dataset.SourceReviews[0].Opportunities[0].LanguageCodes = []string{"sk-test-FAKEKEY1"}
+	dataset.RunReviews[0].RunID = runID
+	dataset.RunReviews[0].ReviewerIDs = []string{reviewerID, "reviewer-2"}
+	dataset.RunReviews[0].CandidateReviews[0].MatchedOpportunityID = opportunityID
+	if err := validateDataset(dataset); err != nil {
+		t.Fatalf("validate key-shaped marker fixture: %v", err)
+	}
+	report := evaluateDataset(dataset)
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	for _, marker := range markers {
+		if strings.Contains(string(encoded), marker) {
+			t.Fatalf("report echoed untrusted identifier/language marker %q", marker)
+		}
+	}
+	if report.Runs[0].RunID != opaqueReportID("run", runID) || report.Runs[0].SourceID != opaqueReportID("source", sourceID) {
+		t.Fatalf("report IDs were not stable opaque digests: %#v", report.Runs[0])
+	}
+	if len(report.Runs[0].ModelReportedLanguageCodes) != 1 || !strings.HasPrefix(report.Runs[0].ModelReportedLanguageCodes[0], "other~tag_") {
+		t.Fatalf("untrusted language tag was not redacted: %v", report.Runs[0].ModelReportedLanguageCodes)
+	}
+}
+
+func TestLanguageComparisonDoesNotCollapseDuplicateCaseVariants(t *testing.T) {
+	if sameLanguageSet([]string{"en", "hi"}, []string{"en", "EN"}) {
+		t.Fatal("duplicate model language code was treated as a set match")
+	}
+	if compareLanguages([]string{"en", "hi"}, []string{"en", "EN"}) == "matches_operator_metadata" {
+		t.Fatal("duplicate case-variant language codes passed the report comparison")
+	}
+	if !sameLanguageSet([]string{"en", "hi"}, []string{"hi", "EN"}) {
+		t.Fatal("case-insensitive language set comparison failed")
+	}
+}
+
+func TestLanguageStrataNormalizeCaseVariants(t *testing.T) {
+	sources := []CorpusSource{
+		{ID: "source-1", Status: "ready", RightsStatus: "confirmed", ContentType: "general", LanguageCodes: []string{"en"}},
+		{ID: "source-2", Status: "ready", RightsStatus: "confirmed", ContentType: "general", LanguageCodes: []string{"EN"}},
+	}
+	strata := summarizeStrata(sources, map[string]SourceReview{})
+	var language *StratumSummary
+	for i := range strata {
+		if strata[i].Kind == "language" {
+			if language != nil {
+				t.Fatalf("case variants produced separate strata: %#v", strata)
+			}
+			language = &strata[i]
+		}
+	}
+	if language == nil || language.Key != "en" || language.SourceCount != 2 || language.EligibleSourceCount != 2 {
+		t.Fatalf("normalized language stratum = %#v", language)
+	}
+}
+
+func TestDurationStrataUseFixedBucketsAndUnknownDenominator(t *testing.T) {
+	cases := []struct {
+		name     string
+		duration *int64
+		want     string
+	}{
+		{name: "unknown", duration: nil, want: "unknown"},
+		{name: "under fifteen minutes", duration: int64Pointer(shortDurationBucketMS - 1), want: "under_15m"},
+		{name: "fifteen minutes", duration: int64Pointer(shortDurationBucketMS), want: "15m_to_40m"},
+		{name: "forty minutes", duration: int64Pointer(maxGeminiTargetDurationMS), want: "15m_to_40m"},
+		{name: "over forty minutes", duration: int64Pointer(maxGeminiTargetDurationMS + 1), want: "over_40m"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := durationStratumKey(test.duration); got != test.want {
+				t.Fatalf("durationStratumKey() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRankUsabilityRequiresCompleteAdjudicatedPanels(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*Dataset)
+	}{
+		{
+			name: "one reviewer pending",
+			setup: func(dataset *Dataset) {
+				dataset.RunReviews[0].ReviewerIDs = []string{"reviewer-1"}
+				dataset.RunReviews[0].AdjudicationStatus = "pending"
+			},
+		},
+		{
+			name: "missing rank",
+			setup: func(dataset *Dataset) {
+				dataset.RunReviews[0].AdjudicationStatus = "pending"
+				dataset.RunReviews[0].CandidateReviews = dataset.RunReviews[0].CandidateReviews[:1]
+			},
+		},
+		{
+			name: "uncertain rank",
+			setup: func(dataset *Dataset) {
+				dataset.RunReviews[0].AdjudicationStatus = "pending"
+				dataset.RunReviews[0].CandidateReviews[1] = CandidateReview{
+					Rank: 2, Status: "uncertain", Usability: "uncertain",
+					StartBoundaryFit: "unknown", EndBoundaryFit: "unknown",
+				}
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			dataset := completeEvaluationDatasetForTest(t)
+			test.setup(&dataset)
+			if err := validateDataset(dataset); err != nil {
+				t.Fatalf("validate partial panel: %v", err)
+			}
+			report := evaluateDataset(dataset)
+			if len(report.RankSummary) != 0 {
+				t.Fatalf("incomplete panel entered per-rank metrics: %#v", report.RankSummary)
+			}
+			run := report.Runs[0]
+			if run.TopK.Precision != nil || run.TopK.UsableOutputs != 0 || run.Rubric.RatedCandidateCount != 0 || len(run.Rubric.DimensionMeans) != 0 {
+				t.Fatalf("incomplete panel entered run-level quality metrics: %#v", run)
+			}
+		})
 	}
 }
 

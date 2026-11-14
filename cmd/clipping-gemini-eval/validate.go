@@ -193,6 +193,12 @@ func validateOpportunity(opportunity Opportunity, source CorpusSource) error {
 	if source.HumanDurationMS != nil && opportunity.EndMS > *source.HumanDurationMS {
 		return errInvalidDataset
 	}
+	if opportunity.Exportable {
+		duration := opportunity.EndMS - opportunity.StartMS
+		if duration < minExportableOpportunityMS || duration > maxExportableOpportunityMS {
+			return errInvalidDataset
+		}
+	}
 	return nil
 }
 
@@ -263,8 +269,16 @@ func validateCandidateReview(review CandidateReview) error {
 	if review.Status == "reviewed" && review.Usability != "usable" && review.Usability != "not_usable" {
 		return errInvalidDataset
 	}
-	if review.Status == "reviewed" && (!allDimensionsPresent(review.Dimensions) || review.StartBoundaryFit == "unknown" || review.EndBoundaryFit == "unknown") {
+	if review.Status == "reviewed" && !allDimensionsPresent(review.Dimensions) {
 		return errInvalidDataset
+	}
+	if review.Status == "reviewed" {
+		if review.MatchedOpportunityID == "" && (review.StartBoundaryFit != "unknown" || review.EndBoundaryFit != "unknown") {
+			return errInvalidDataset
+		}
+		if review.MatchedOpportunityID != "" && (review.StartBoundaryFit == "unknown" || review.EndBoundaryFit == "unknown") {
+			return errInvalidDataset
+		}
 	}
 	if review.Status == "uncertain" && review.Usability != "uncertain" && review.Usability != "not_rated" {
 		return errInvalidDataset

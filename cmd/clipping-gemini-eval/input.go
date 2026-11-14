@@ -52,6 +52,9 @@ func validateEvaluationShape(payload []byte, target reflect.Type, depth int) err
 	if target == reflect.TypeOf(json.RawMessage{}) {
 		return nil // The saved analysis has its own stricter application decoder.
 	}
+	if bytes.Equal(bytes.TrimSpace(payload), []byte("null")) {
+		return errors.New("unexpected null value")
+	}
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}
@@ -87,6 +90,12 @@ func validateEvaluationShape(payload []byte, target reflect.Type, depth int) err
 					return errors.New("required field is missing")
 				}
 				continue
+			}
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				if field.Type.Kind() == reflect.Pointer && optional {
+					continue
+				}
+				return errors.New("unexpected null value")
 			}
 			if err := validateEvaluationShape(raw, field.Type, depth+1); err != nil {
 				return err

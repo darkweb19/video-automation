@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -77,6 +78,29 @@ func TestDecodeDatasetHonorsByteAndNestingLimits(t *testing.T) {
 	tooDeep := []byte(strings.Repeat("[", 66) + "0" + strings.Repeat("]", 66))
 	if err := validateUniqueJSON(tooDeep); err == nil {
 		t.Fatal("validateUniqueJSON accepted excessive nesting")
+	}
+}
+
+func TestDecodeDatasetRejectsNullNonPointerReviewScalars(t *testing.T) {
+	cases := map[string][2]string{
+		"unknown opportunity exportability": {`"exportable":true`, `"exportable":null`},
+		"unknown opportunity start time":    {`"start_ms":12000`, `"start_ms":null`},
+	}
+	for name, replacement := range cases {
+		t.Run(name, func(t *testing.T) {
+			dataset := completeEvaluationDatasetForTest(t)
+			payload, err := json.Marshal(dataset)
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			input := strings.Replace(string(payload), replacement[0], replacement[1], 1)
+			if input == string(payload) {
+				t.Fatalf("fixture did not contain %s", replacement[0])
+			}
+			if _, err := decodeDataset(strings.NewReader(input)); !errors.Is(err, errInvalidDataset) {
+				t.Fatalf("decodeDataset() error = %v, want %v", err, errInvalidDataset)
+			}
+		})
 	}
 }
 
