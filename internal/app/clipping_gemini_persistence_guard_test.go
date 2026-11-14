@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestClippingReferenceCannotEnterLegacyFileOrJobPaths(t *testing.T) {
@@ -24,8 +25,8 @@ func TestClippingReferenceCannotEnterLegacyFileOrJobPaths(t *testing.T) {
 	if job, _, err := store.CreateClippingJob(ClippingJobCreate{SourceID: source.ID}, "reference-legacy-job"); !errors.Is(err, ErrClippingInvalidState) || job.ID != "" {
 		t.Fatalf("legacy job accepted reference: %+v error=%v", job, err)
 	}
-	pending, err := store.PendingClippingImports(0)
-	if err != nil || len(pending) != 0 {
-		t.Fatalf("reference entered legacy import queue: %+v error=%v", pending, err)
+	retired, err := store.retirePendingClippingImports(time.Now().Unix(), 100)
+	if err != nil || len(retired) != 0 {
+		t.Fatalf("reference entered legacy retirement queue: %+v error=%v", retired, err)
 	}
 }

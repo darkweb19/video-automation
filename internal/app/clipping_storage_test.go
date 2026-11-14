@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -231,39 +232,7 @@ func TestClippingSourceRightsPathBoundsAndStorageReservation(t *testing.T) {
 	}
 }
 
-func TestClippingUploadProgressAndActualDurationBounds(t *testing.T) {
-	store := newTestStore(t)
-	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
-		Kind: ClippingSourceUpload, DeclaredSizeBytes: 50, RightsAttested: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceUploading, 25, 25); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceUploading, 24, 24); err == nil {
-		t.Fatal("upload offset moved backwards")
-	}
-	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceUploading, 51, 51); err == nil {
-		t.Fatal("upload exceeded declared size")
-	}
-	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceUploading, 50, 50); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.historicalMarkClippingSourceReady(source.ID, 50, MaxClippingSourceDurationMS+1, strings.Repeat("b", 64)); err == nil {
-		t.Fatal("source longer than four hours was accepted")
-	}
-	if err := store.historicalMarkClippingSourceReady(source.ID, 50, MaxClippingSourceDurationMS, strings.Repeat("b", 64)); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := store.ClippingSource(source.ID)
-	if err != nil || loaded.Status != ClippingSourceReady || loaded.DurationMS != MaxClippingSourceDurationMS || loaded.ReservedSizeBytes != 50 {
-		t.Fatalf("ready source=%+v error=%v", loaded, err)
-	}
-}
-
-func TestClippingImportLeaseRenewalGuardsAutomaticExpiry(t *testing.T) {
+func TestHistoricalImportLeaseGuardsAutomaticExpiry(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().Unix()
 	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
@@ -273,134 +242,47 @@ func TestClippingImportLeaseRenewalGuardsAutomaticExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := store.historicalBeginClippingImport(source.ID, 0, time.Minute)
-	if err != nil || claimed.ImportAttempts != 1 {
-		t.Fatalf("begin import=%+v error=%v", claimed, err)
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET import_attempts=1,import_lease_until=?,next_import_at=? WHERE id=?`, now+60, now+60, source.ID); err != nil {
+		t.Fatal(err)
 	}
-	if err := store.RenewClippingImportLease(source.ID, 1, time.Hour); err != nil {
-		t.Fatalf("renew active import lease: %v", err)
-	}
-	renewed, err := store.ClippingSource(source.ID)
-	if err != nil || renewed.ImportLeaseUntil <= claimed.ImportLeaseUntil || renewed.NextImportAt != renewed.ImportLeaseUntil {
-		t.Fatalf("renewed import lease=%+v error=%v", renewed, err)
-	}
-	if err := store.RenewClippingImportLease(source.ID, 2, time.Hour); !errors.Is(err, ErrClippingInvalidState) {
-		t.Fatalf("wrong import attempt renewed lease: %v", err)
-	}
-	if err := store.ExpireClippingSource(source.ID, time.Now().Unix()); err == nil {
-		t.Fatal("automatic cleanup ignored the active import lease")
+	if err := store.ExpireClippingSource(source.ID, now); err == nil {
+		t.Fatal("automatic cleanup ignored the active historical import lease")
 	}
 	if _, err := store.db.Exec(`UPDATE clipping_sources SET import_lease_until=0,next_import_at=0 WHERE id=?`, source.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RenewClippingImportLease(source.ID, 1, time.Hour); !errors.Is(err, ErrClippingInvalidState) {
-		t.Fatalf("expired import lease was revived: %v", err)
-	}
-	if err := store.ExpireClippingSource(source.ID, time.Now().Unix()); err != nil {
+	if err := store.ExpireClippingSource(source.ID, now); err != nil {
 		t.Fatalf("automatic cleanup after import lease expiry: %v", err)
 	}
 }
 
-func TestFailedClippingSourceReleasesReservationOnlyAfterRemoval(t *testing.T) {
+func TestHistoricalFailedSourceReleasesReservationAfterRetentionCleanup(t *testing.T) {
 	store := newTestStore(t)
-	sources := make([]ClippingSource, 0, 5)
-	for index := 0; index < 5; index++ {
-		source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
-			Kind: ClippingSourceUpload, OriginalName: "failed-upload.mp4",
-			DeclaredSizeBytes: MaxClippingSourceBytes, RightsAttested: true,
-		})
-		if err != nil {
-			t.Fatalf("create source %d: %v", index+1, err)
-		}
-		sources = append(sources, source)
-	}
-	partial := []byte("partial upload bytes")
-	if err := os.WriteFile(sources[0].StoragePath, partial, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpdateClippingSourceProgress(sources[0].ID, ClippingSourceUploading, int64(len(partial)), int64(len(partial))); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 1, RightsAttested: true}); err == nil {
-		t.Fatal("five active reservations should exhaust the 100 GiB limit")
-	}
-	if failed, err := store.FailedClippingSources(10); err != nil || len(failed) != 0 {
-		t.Fatalf("failed-source cleanup list before failure=%+v error=%v", failed, err)
-	}
-	if err := store.ReleaseFailedClippingSourceReservation(sources[0].ID); !errors.Is(err, ErrClippingInvalidState) {
-		t.Fatalf("non-failed source release error=%v", err)
-	}
-
-	for _, source := range sources {
-		if err := store.FailClippingSource(source.ID, "permanent_import_failure"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	failed, err := store.FailedClippingSources(2)
-	if err != nil || len(failed) != 2 {
-		t.Fatalf("bounded failed-source cleanup list=%+v error=%v", failed, err)
-	}
-	for _, item := range failed {
-		if item.Status != ClippingSourceFailed || item.ReservedSizeBytes != MaxClippingSourceBytes {
-			t.Fatalf("failed-source cleanup query returned ineligible source: %+v", item)
-		}
-	}
-
-	for _, source := range sources {
-		if err := store.ReleaseFailedClippingSourceReservation(source.ID); err == nil {
-			t.Fatal("reservation released while generated media directory still existed")
-		}
-		before, err := store.ClippingSource(source.ID)
-		if err != nil || before.ReservedSizeBytes != MaxClippingSourceBytes {
-			t.Fatalf("failed source lost reservation before removal: source=%+v error=%v", before, err)
-		}
-		store.clippingMu.Lock()
-		removeErr := os.RemoveAll(clippingSourceDir(store.clippingDir, source.ID))
-		releaseErr := error(nil)
-		if removeErr == nil {
-			releaseErr = store.ReleaseFailedClippingSourceReservation(source.ID)
-		}
-		store.clippingMu.Unlock()
-		if removeErr != nil || releaseErr != nil {
-			t.Fatalf("remove/release source %q: remove=%v release=%v", source.ID, removeErr, releaseErr)
-		}
-		after, err := store.ClippingSource(source.ID)
-		if err != nil || after.Status != ClippingSourceFailed || after.ReservedSizeBytes != 0 || after.DeclaredSizeBytes != MaxClippingSourceBytes || after.OriginalName != source.OriginalName || after.Failure != "permanent_import_failure" {
-			t.Fatalf("released failed source lost audit fields or retained bytes: source=%+v error=%v", after, err)
-		}
-		if source.ID == sources[0].ID && (after.SizeBytes != int64(len(partial)) || after.UploadOffset != int64(len(partial))) {
-			t.Fatalf("reservation release discarded upload progress audit: source=%+v", after)
-		}
-		if err := store.ReleaseFailedClippingSourceReservation(source.ID); err != nil {
-			t.Fatalf("repeated failed-source release: %v", err)
-		}
-	}
-
-	if failed, err := store.FailedClippingSources(10); err != nil || len(failed) != 0 {
-		t.Fatalf("failed-source cleanup list after release=%+v error=%v", failed, err)
-	}
-	newSource, err := store.historicalCreateClippingSource(ClippingSourceCreate{
-		Kind: ClippingSourceUpload, DeclaredSizeBytes: MaxClippingSourceBytes, RightsAttested: true,
+	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{
+		Kind: ClippingSourceUpload, OriginalName: "failed-upload.mp4", DeclaredSizeBytes: 100, RightsAttested: true, RetainUntil: 1,
 	})
 	if err != nil {
-		t.Fatalf("released failed sources did not restore aggregate capacity: %v", err)
-	}
-	for index := 1; index < 5; index++ {
-		if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{
-			Kind: ClippingSourceUpload, DeclaredSizeBytes: MaxClippingSourceBytes, RightsAttested: true,
-		}); err != nil {
-			t.Fatalf("restored capacity rejected source %d: %v", index+1, err)
-		}
-	}
-	if _, err := store.historicalCreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceUpload, DeclaredSizeBytes: 1, RightsAttested: true}); err == nil {
-		t.Fatal("restored capacity exceeded 100 GiB")
-	}
-	var reserved int64
-	if err := store.db.QueryRow(`SELECT SUM(reserved_size_bytes) FROM clipping_sources`).Scan(&reserved); err != nil {
 		t.Fatal(err)
 	}
-	if reserved != MaxClippingStorageBytes || newSource.ReservedSizeBytes != MaxClippingSourceBytes {
-		t.Fatalf("post-release reservations=%d, want 100 GiB", reserved)
+	partial := []byte("partial upload bytes")
+	if err := os.WriteFile(source.StoragePath, partial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET status='failed',failure='permanent_import_failure',size_bytes=?,upload_offset=? WHERE id=?`, len(partial), len(partial), source.ID); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err := NewClippingAcquisition(store, nil).CleanupExpiredSources(context.Background(), time.Now())
+	if err != nil || cleaned != 1 {
+		t.Fatalf("retention cleanup count=%d error=%v", cleaned, err)
+	}
+	after, err := store.ClippingSource(source.ID)
+	if err != nil || after.Status != ClippingSourceDeleted || !after.CleanupComplete || after.ReservedSizeBytes != 0 ||
+		after.DeclaredSizeBytes != 100 || after.OriginalName != source.OriginalName || after.Failure != "permanent_import_failure" ||
+		after.SizeBytes != int64(len(partial)) || after.UploadOffset != int64(len(partial)) {
+		t.Fatalf("cleanup lost audit fields or retained reservation: source=%+v error=%v", after, err)
+	}
+	if _, err := os.Stat(source.StoragePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed source media remains: %v", err)
 	}
 }
 

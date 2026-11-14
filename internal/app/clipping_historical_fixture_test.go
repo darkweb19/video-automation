@@ -4,10 +4,7 @@ package app
 // transitions. They never ship in the application and allow callback, media,
 // retention, and recovery tests to exercise already-issued work.
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -447,58 +444,4 @@ func (s *Store) historicalRetryClippingImport(id string, expectedAttempts int, n
 		return ErrClippingInvalidState
 	}
 	return nil
-}
-
-func (s *Store) historicalMarkClippingSourceReady(id string, sizeBytes, durationMS int64, sha256Hex string) error {
-	if !safeClippingSourceID(id) || sizeBytes < 1 || sizeBytes > MaxClippingSourceBytes || durationMS < 1 || durationMS > MaxClippingSourceDurationMS {
-		return errors.New("source size or duration is outside clipping limits")
-	}
-	if len(sha256Hex) != sha256.Size*2 {
-		return errors.New("source SHA-256 must contain 64 hexadecimal characters")
-	}
-	if _, err := hex.DecodeString(sha256Hex); err != nil {
-		return errors.New("source SHA-256 must be hexadecimal")
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var kind ClippingSourceKind
-	var status ClippingSourceStatus
-	var rightsAttested int
-	var declared, offset int64
-	var expectedSize int64
-	var expectedSHA, expectationJSON string
-	if err := tx.QueryRow(`SELECT kind,status,declared_size_bytes,upload_offset,rights_attested,import_expectation_json,import_expected_size_bytes,import_expected_sha256 FROM clipping_sources WHERE id=?`, id).Scan(&kind, &status, &declared, &offset, &rightsAttested, &expectationJSON, &expectedSize, &expectedSHA); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrClippingSourceNotFound
-		}
-		return err
-	}
-	if (status != ClippingSourceUploading && status != ClippingSourceImporting) || rightsAttested == 0 {
-		return ErrClippingInvalidState
-	}
-	if sizeBytes > declared {
-		return errors.New("actual source size exceeds its durable reservation")
-	}
-	if kind == ClippingSourceUpload && (sizeBytes != declared || offset != sizeBytes) {
-		return errors.New("upload is incomplete")
-	}
-	if kind != ClippingSourceUpload && status == ClippingSourceImporting && offset != 0 {
-		return ErrClippingInvalidState
-	}
-	if kind == ClippingSourceYouTube {
-		var expectation youtubeImportExpectation
-		if expectationJSON == "" || json.Unmarshal([]byte(expectationJSON), &expectation) != nil || !validYouTubeImportExpectation(expectation) ||
-			expectation.SeparateTracks && !expectation.WorkspaceComplete || expectedSize != sizeBytes || !strings.EqualFold(expectedSHA, sha256Hex) {
-			return ErrClippingInvalidState
-		}
-	}
-	now := time.Now().Unix()
-	_, err = tx.Exec(`UPDATE clipping_sources SET status='ready',reserved_size_bytes=?,size_bytes=?,upload_offset=?,duration_ms=?,sha256=?,failure='',next_import_at=0,import_lease_until=0,updated_at=? WHERE id=?`, sizeBytes, sizeBytes, sizeBytes, durationMS, strings.ToLower(sha256Hex), now, id)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
 }

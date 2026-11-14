@@ -23,24 +23,12 @@ func clippingRevisionTestSource(t *testing.T, store *Store, name, content string
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetClippingSourceImportExpectation(source.ID, youtubeImportExpectation{
-		Version: clippingYouTubeExpectationVersion, SeparateTracks: true,
-	}); err != nil {
-		t.Fatalf("set YouTube import expectation: %v", err)
-	}
-	if err := store.CompleteClippingSourceTrackWorkspace(source.ID); err != nil {
-		t.Fatalf("complete YouTube source workspace: %v", err)
-	}
-	if err := store.SetClippingSourceImportFinalExpectation(source.ID, int64(len(data)), digestHex); err != nil {
-		t.Fatalf("set YouTube source digest expectation: %v", err)
-	}
 	if err := os.WriteFile(source.StoragePath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpdateClippingSourceProgress(source.ID, ClippingSourceImporting, 0, int64(len(data))); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.historicalMarkClippingSourceReady(source.ID, int64(len(data)), durationMS, digestHex); err != nil {
+	// This test reads a ready file imported before retirement.
+	if _, err := store.db.Exec(`UPDATE clipping_sources SET status='ready',reserved_size_bytes=?,size_bytes=?,upload_offset=?,duration_ms=?,sha256=?,next_import_at=0 WHERE id=?`,
+		len(data), len(data), len(data), durationMS, digestHex, source.ID); err != nil {
 		t.Fatal(err)
 	}
 	ready, err := store.ClippingSource(source.ID)
