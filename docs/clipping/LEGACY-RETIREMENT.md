@@ -56,6 +56,14 @@ than the original capability. Unknown or inconsistent records block the drain
 check rather than being treated as expired. A database error also prevents a
 usable inventory.
 
+Expired bearer settings may be removed once the issued deadline has passed.
+The nonsecret expiry index remains while recovery needs it or while the
+pre-index lease-plus-grace fallback is unknown or still open. This preserves
+proof of an issued deadline for terminal as well as running jobs. Cleanup pages
+past malformed records while leaving them unresolved in the inventory; one
+unknown source does not block unrelated eligible retention. Database and
+filesystem failures still surface. Explicit source deletion cancels its jobs.
+
 All counts must be zero for this persisted-state check to pass after legacy
 submission has stopped. Zero does not prove that an in-memory import, remote
 worker, recent deployment or other external activity has stopped; confirm those
@@ -64,7 +72,9 @@ deletes data, releases claims or changes retention.
 
 ## Compatibility that remains
 
-The service continues to read legacy sources, results and v2 candidate pools.
+This staged branch has removed the native clipping downloader and its probing
+processes. The service continues to read legacy sources, results and v2
+candidate pools.
 The Go legacy artifact builder and authenticated v2 callback settlement remain
 only to finish already-issued Modal work; they are never used to choose or
 rerank Gemini candidates. The Wan and SkyReels generation workers, generation
