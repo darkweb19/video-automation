@@ -210,7 +210,7 @@ func validateRunReview(review RunReview, analysis app.ClippingGeminiAnalysis, so
 	if len(review.CandidateReviews) > 0 && (len(review.ReviewerIDs) == 0 || review.AdjudicationStatus == "not_started") {
 		return errInvalidDataset
 	}
-	if review.AdjudicationStatus == "complete" && len(analysis.Candidates) > 0 &&
+	if review.AdjudicationStatus == "complete" &&
 		(len(review.ReviewerIDs) < minimumReviewers || len(review.CandidateReviews) != len(analysis.Candidates)) {
 		return errInvalidDataset
 	}

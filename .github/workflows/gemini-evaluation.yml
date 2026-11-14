@@ -84,6 +84,11 @@ jobs:
           assert gates["long_video_support"] == "unverified"
           assert gates["deployment_backup"] == "not_run"
           assert report["corpus"]["opportunity_count"] == 0
+          for stratum in report["strata"]:
+              assert stratum["source_count"] == 1
+              assert stratum["eligible_source_count"] == 0
+              assert stratum["review_complete_count"] == 0
+              assert stratum["opportunity_count"] == 0
           run = report["runs"][0]
           assert run["source_eligibility_status"] == "synthetic_source"
           assert run["human_review_status"] == "ineligible_source"

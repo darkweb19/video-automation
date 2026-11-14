@@ -249,8 +249,8 @@ func TestSyntheticHumanLabelsDoNotContributeToQualityEvidence(t *testing.T) {
 		}
 	}
 	for _, stratum := range report.Strata {
-		if stratum.Kind == "language" && stratum.ReviewCompleteCount != 0 {
-			t.Fatalf("synthetic review counted as complete stratum evidence: %#v", stratum)
+		if stratum.SourceCount != 1 || stratum.EligibleSourceCount != 0 || stratum.ReviewCompleteCount != 0 || stratum.OpportunityCount != 0 {
+			t.Fatalf("synthetic source entered eligible stratum coverage: %#v", stratum)
 		}
 	}
 }
@@ -361,6 +361,51 @@ func TestRecallIsNotComparableWhenRunOptionsExcludeExportableOpportunities(t *te
 	}
 }
 
+func TestCompleteEmptyCandidatePanelReportsZeroRecall(t *testing.T) {
+	dataset := completeEvaluationDatasetForTest(t)
+	dataset.SourceReviews[0].Opportunities = dataset.SourceReviews[0].Opportunities[:1]
+	dataset.RunReviews[0].CandidateReviews = []CandidateReview{}
+	var analysis app.ClippingGeminiAnalysis
+	if err := json.Unmarshal(dataset.Runs[0].Analysis, &analysis); err != nil {
+		t.Fatalf("decode fixture analysis: %v", err)
+	}
+	analysis.Candidates = []app.ClippingGeminiCandidate{}
+	analysis.FewerCandidatesReason = "No candidate met the requested editorial criteria."
+	dataset.Runs[0].Analysis, _ = json.Marshal(analysis)
+	payload, err := json.Marshal(dataset)
+	if err != nil {
+		t.Fatalf("marshal complete empty panel: %v", err)
+	}
+	decoded, err := decodeDataset(strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("decode complete empty panel: %v", err)
+	}
+	report := evaluateDataset(decoded)
+	run := report.Runs[0]
+	if run.HumanReviewStatus != "complete" || run.CandidateReviews.Returned != 0 || run.Rubric.Status != "complete" {
+		t.Fatalf("complete empty panel was not preserved: %#v", run)
+	}
+	if run.TopK.ReturnedOutputs != 0 || run.TopK.Precision != nil || run.TopK.PrecisionStatus != "not_applicable" {
+		t.Fatalf("precision was reported for an empty output set: %#v", run.TopK)
+	}
+	if run.TopK.Recall == nil || *run.TopK.Recall != 0 || run.TopK.RecallStatus != "descriptive_only" {
+		t.Fatalf("zero-output recall was withheld or changed: %#v", run.TopK)
+	}
+	if gate := readinessGateForTest(t, report, "human_quality"); gate.Status != "insufficient_evidence" {
+		t.Fatalf("empty candidate set passed the human-quality readiness gate: %#v", gate)
+	}
+
+	missingPanel := dataset
+	missingPanel.RunReviews = nil
+	if err := validateDataset(missingPanel); err != nil {
+		t.Fatalf("validate empty candidate run without a panel: %v", err)
+	}
+	missingRun := evaluateDataset(missingPanel).Runs[0]
+	if missingRun.TopK.Recall != nil || missingRun.TopK.RecallStatus != "insufficient_evidence" || missingRun.HumanReviewStatus != "partial" {
+		t.Fatalf("missing empty candidate panel was treated as a completed review: %#v", missingRun)
+	}
+}
+
 func TestReportedPartialUsageDoesNotPassUsageReadiness(t *testing.T) {
 	dataset := completeEvaluationDatasetForTest(t)
 	dataset.Runs[0].Usage = &UsageRecord{Status: "reported", PromptTokens: int64Pointer(120)}
@@ -443,12 +488,15 @@ func TestReportHashesUntrustedIDsAndLanguageTagExtensions(t *testing.T) {
 	}
 }
 
-func TestLanguageComparisonDoesNotCollapseDuplicateCaseVariants(t *testing.T) {
-	if sameLanguageSet([]string{"en", "hi"}, []string{"en", "EN"}) {
-		t.Fatal("duplicate model language code was treated as a set match")
+func TestLanguageComparisonUsesCaseFoldedUniqueSets(t *testing.T) {
+	if !sameLanguageSet([]string{"en"}, []string{"en", "EN"}) {
+		t.Fatal("duplicate case variant did not collapse into one language code")
+	}
+	if compareLanguages([]string{"en"}, []string{"en", "EN"}) != "matches_operator_metadata" {
+		t.Fatal("case-folded unique language sets did not match")
 	}
 	if compareLanguages([]string{"en", "hi"}, []string{"en", "EN"}) == "matches_operator_metadata" {
-		t.Fatal("duplicate case-variant language codes passed the report comparison")
+		t.Fatal("duplicate case variant masked a missing language code")
 	}
 	if !sameLanguageSet([]string{"en", "hi"}, []string{"hi", "EN"}) {
 		t.Fatal("case-insensitive language set comparison failed")

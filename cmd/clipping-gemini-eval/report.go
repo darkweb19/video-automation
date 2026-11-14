@@ -226,7 +226,7 @@ func corpusRightsReadinessGate(report EvaluationReport) ReadinessGate {
 func humanQualityEvidenceEligible(source CorpusSource, sourceReview SourceReview, hasSourceReview bool, analysis app.ClippingGeminiAnalysis, runReview RunReview, hasRunReview bool) bool {
 	return candidateReviewSourceEligibility(source) == "eligible_for_candidate_review" &&
 		hasSourceReview && sourceReviewComplete(sourceReview, source) &&
-		len(analysis.Candidates) > 0 && runCandidateReviewsComplete(analysis, runReview, hasRunReview)
+		runCandidateReviewsComplete(analysis, runReview, hasRunReview)
 }
 
 type rankEvidence struct {
@@ -471,7 +471,9 @@ func summarizeRunReview(summary *RunSummary, options app.ClippingGeminiOptions, 
 	summary.TopK.ReturnedOutputs = min(len(analysis.Candidates), topK)
 	summary.TopK.UsableOutputs = usableOutputs
 	summary.TopK.MatchedUsable = matchedUsableCount
-	if hasRunReview && runCandidateReviewsComplete(analysis, review, true) && summary.TopK.ReturnedOutputs > 0 && review.AdjudicationStatus == "complete" {
+	if summary.TopK.ReturnedOutputs == 0 {
+		summary.TopK.PrecisionStatus = "not_applicable"
+	} else if hasRunReview && runCandidateReviewsComplete(analysis, review, true) && review.AdjudicationStatus == "complete" {
 		value := float64(usableOutputs) / float64(summary.TopK.ReturnedOutputs)
 		summary.TopK.Precision = &value
 		summary.TopK.PrecisionStatus = "descriptive_only"
@@ -564,25 +566,23 @@ func compareLanguages(operatorLanguages, modelLanguages []string) string {
 }
 
 func sameLanguageSet(left, right []string) bool {
-	if len(left) != len(right) {
+	leftSet := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		leftSet[strings.ToLower(value)] = struct{}{}
+	}
+	rightSet := make(map[string]struct{}, len(right))
+	for _, value := range right {
+		rightSet[strings.ToLower(value)] = struct{}{}
+	}
+	if len(leftSet) != len(rightSet) {
 		return false
 	}
-	values := make(map[string]struct{}, len(left))
-	for _, value := range left {
-		key := strings.ToLower(value)
-		if _, exists := values[key]; exists {
+	for value := range leftSet {
+		if _, exists := rightSet[value]; !exists {
 			return false
 		}
-		values[key] = struct{}{}
 	}
-	for _, value := range right {
-		key := strings.ToLower(value)
-		if _, exists := values[key]; !exists {
-			return false
-		}
-		delete(values, key)
-	}
-	return len(values) == 0
+	return true
 }
 
 func reportLanguageTag(code string) string {
@@ -671,9 +671,6 @@ func finishDimensionMeans(summary *RunSummary) {
 }
 
 func runCandidateReviewsComplete(analysis app.ClippingGeminiAnalysis, review RunReview, hasReview bool) bool {
-	if len(analysis.Candidates) == 0 {
-		return true
-	}
 	if !hasReview || review.AdjudicationStatus != "complete" || len(review.ReviewerIDs) < minimumReviewers || len(review.CandidateReviews) != len(analysis.Candidates) {
 		return false
 	}
