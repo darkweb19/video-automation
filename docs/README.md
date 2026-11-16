@@ -4,6 +4,9 @@ Start with the repository [README](../README.md) for setup and everyday workflow
 
 ## Clipping
 
+- [Gemini operations and release gates](clipping/GEMINI-OPERATIONS.md) — ADC/service accounts, single-owner deployment, backup, canary and rollback requirements.
+- [Gemini offline evaluation](clipping/EVALUATION.md#g5-gemini-offline-evaluation) — saved-analysis/human-label contract, privacy-safe reports and explicit evidence limits.
+
 - [Direct Gemini dashboard/API](clipping/GEMINI-DASHBOARD.md) — URL submission, model-ranked proposals, uncertainty and compatible HTTP contracts.
 
 - [Gemini migration](clipping/GEMINI-MIGRATION.md) — current phased migration, architectural decisions and acceptance gates; production routing remains legacy during the foundation phase.

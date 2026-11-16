@@ -1,6 +1,6 @@
 # Gemini clipping operations and release gates
 
-This is a future operator runbook for the Gemini clipping path. G5 adds offline evaluation code and release documentation; it does not deploy Gemini, create Google Cloud resources, verify an ADC identity, run an inference request, or complete a backup/restore test. The dashboard still uses the legacy clipping path until the later migration phases are integrated and their gates pass.
+This runbook supports the implemented Gemini dashboard and execution path. G5 adds offline evaluation code and release documentation; it does not deploy Gemini, create Google Cloud resources, verify an ADC identity, run an inference request, or complete a backup/restore test. Code integration and offline verification are complete through G5; live provider, quality, cost, backup and rollout gates remain unverified.
 
 ## Supported deployment shape
 
@@ -8,12 +8,13 @@ Keep FrameVault as one owning Go service on one Google Compute Engine VM, in one
 
 Attach a dedicated Google Cloud service account to the VM and let Application Default Credentials use the VM metadata identity. Give it an IAM role containing `aiplatform.endpoints.predict`; Google's predefined `roles/aiplatform.user` is the practical standard starting point. Restrict who can attach or impersonate that identity. The VM's access scope must allow the Vertex AI API, while IAM remains the permission boundary. Do not create, download, mount, or paste service-account JSON keys, and do not put credentials in app settings or logs.
 
-Before any future inference, an operator with Google Cloud authority must enable the Vertex AI API, associate a billing account, select a supported project/location, review applicable quotas, and configure an explicit spending limit outside the application. These requirements are not satisfied by offline tests. Check Google's current primary documentation before setup because IAM permissions, model availability, API behavior, quota, and prices can change:
+Before any future inference, an operator with Google Cloud authority must enable the Vertex AI API, associate a billing account, select a supported project/location, review applicable quotas, and configure an explicit spending limit outside the application. Cloud Billing budget notifications are alerts, not hard spending caps; bound the approved source/attempt count and stop manually when evidence or cost is uncertain. These requirements are not satisfied by offline tests. Check Google's current primary documentation before setup because IAM permissions, model availability, API behavior, quota, and prices can change:
 
 - [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
 - [Attach a service account to a Compute Engine VM](https://cloud.google.com/compute/docs/access/create-enable-service-accounts-for-instances)
 - [Vertex AI access control](https://cloud.google.com/vertex-ai/docs/general/access-control)
 - [Vertex AI quotas](https://cloud.google.com/vertex-ai/docs/quotas)
+- [Cloud Billing budgets and alerts](https://cloud.google.com/billing/docs/how-to/budgets)
 - [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation)
 
 An external host is acceptable only after its OIDC/workload identity token issuer and claims have been verified to work with Google Workload Identity Federation. Do not assume that a hosting provider supplies compatible workload tokens. Railway support for this exact federation path is unverified; do not substitute a service-account key.

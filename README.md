@@ -18,7 +18,7 @@ Scores are editorial estimates and timestamps are proposed boundaries. Live prov
 
 ## Gemini migration status
 
-Phases G1–G4 are complete with offline tests and independent review: provider contracts, compatible references, durable execution and the dashboard/API flow are integrated. G5 evaluation and G6 legacy-runtime retirement are staged separately. Historical media/results and issued legacy callbacks remain supported. Live qualification and production rollout have separate gates. See the [migration plan](docs/clipping/GEMINI-MIGRATION.md) and [dashboard/API guide](docs/clipping/GEMINI-DASHBOARD.md).
+Phases G1–G5 are complete with offline tests and independent review: provider contracts, compatible references, durable execution, dashboard/API flow and offline evaluation are integrated. G6 legacy-runtime retirement is staged separately. Historical media/results and issued legacy callbacks remain supported. Live qualification and production rollout have separate gates. See the [migration plan](docs/clipping/GEMINI-MIGRATION.md) and [dashboard/API guide](docs/clipping/GEMINI-DASHBOARD.md).
 
 ## Quick start
 
@@ -73,7 +73,7 @@ CLIPPING_GEMINI_LOCATION=global \
 docker compose up -d --build
 ```
 
-The application uses ADC/service accounts, with no Google API-key input. Supported locations are `global`, `us` and `eu`. **Configured** reports local settings only; it does not verify credentials or video access. Analysis may incur Google Cloud charges. See the [provider](docs/clipping/GEMINI-PROVIDER.md) and [execution](docs/clipping/GEMINI-EXECUTION.md) guides before enablement.
+The application uses ADC/service accounts, with no Google API-key input. Supported locations are `global`, `us` and `eu`. **Configured** reports local settings only; it does not verify credentials or video access. Analysis may incur Google Cloud charges. See the [operations runbook](docs/clipping/GEMINI-OPERATIONS.md), [provider](docs/clipping/GEMINI-PROVIDER.md) and [execution](docs/clipping/GEMINI-EXECUTION.md) guides before enablement.
 
 An unresolved submission can be resent with the exact original body and key. Unknown provider outcomes are quarantined rather than automatically repeated. After a known terminal result, an explicit new analysis creates a separate job. Cancel/delete stop local publication but cannot guarantee Google stopped or did not charge. Existing saved YouTube sources can be analyzed remotely; legacy media and results remain readable.
 
@@ -132,5 +132,13 @@ node --check internal/webui/static/app.js
 python3 workers/modal/callback_delivery_test.py
 git diff --check
 ```
+
+Evaluate saved analyses and human annotations without credentials, network calls or media access:
+
+```bash
+go run ./cmd/clipping-gemini-eval --input docs/clipping/gemini-evaluation/synthetic-example.v1.json
+```
+
+The example is synthetic and proves no live quality or readiness. The evaluator withholds incomplete quality metrics, preserves model rank, hashes report identifiers and distinguishes operator evidence from verified facts. See the [Gemini evaluation protocol](docs/clipping/EVALUATION.md#g5-gemini-offline-evaluation).
 
 For deeper implementation notes and decisions, see [docs/README.md](docs/README.md), [architecture decisions](docs/architecture/), and the [clipping tracker](docs/clipping/TRACKER.md).
