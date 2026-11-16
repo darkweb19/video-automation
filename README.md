@@ -20,6 +20,8 @@ Scores are editorial estimates and timestamps are proposed boundaries. Live prov
 
 All six implementation phases are integrated and independently reviewed: provider contracts, compatible references, durable execution, dashboard/API flow, offline evaluation and legacy-runtime retirement. New analysis uses Gemini exclusively; old import/submission/retry routes and outbound Modal clipping dispatch are retired. Historical media/results and issued legacy callbacks remain supported. Live qualification, a real legacy drain and production rollout have separate gates. See the [migration plan](docs/clipping/GEMINI-MIGRATION.md), [dashboard/API guide](docs/clipping/GEMINI-DASHBOARD.md) and [legacy drain procedure](docs/clipping/LEGACY-RETIREMENT.md).
 
+The final [backend/UI CI](https://github.com/darkweb19/video-automation/actions/runs/43901151940), [offline evaluator CI](https://github.com/darkweb19/video-automation/actions/runs/43901151625), and [container build/runtime/health CI](https://github.com/darkweb19/video-automation/actions/runs/43901151871) passed. These checks establish code/image readiness; they do not establish live Google access, editorial quality, actual cost, a production drain or deployment.
+
 ## Quick start
 
 Install Docker with Compose, then start the app:

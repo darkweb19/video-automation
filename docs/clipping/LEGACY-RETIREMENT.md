@@ -80,3 +80,9 @@ only to finish already-issued Modal work; they are never used to choose or
 rerank Gemini candidates. The Wan and SkyReels generation workers, generation
 callbacks, FFmpeg assembly, Vault and YouTube upload are unrelated to clipping
 worker retirement and remain supported. See [ADR-005](../architecture/005-gemini-clipping.md).
+
+## Recorded code and image verification
+
+The final feature-branch code checkpoint `ccc2c69d2c7c65ed5adf13b0579f7e27f1b54dcc` passed [backend/UI CI](https://github.com/darkweb19/video-automation/actions/runs/43901151940), [evaluator CI](https://github.com/darkweb19/video-automation/actions/runs/43901151625), and [container CI](https://github.com/darkweb19/video-automation/actions/runs/43901151871). The image built successfully, encoded/probed a local FFmpeg fixture, excluded downloader runtimes, and passed network-isolated startup/health and application-user data-permission checks. Local image builds were blocked by the execution environment's package-host policy; the hosted run supplies the actual image evidence.
+
+These are test-state and feature-branch checks. No production drain, provider authentication, live YouTube quality/cost canary, backup restore or deployment was performed. The release gates above remain required for operational rollout.
