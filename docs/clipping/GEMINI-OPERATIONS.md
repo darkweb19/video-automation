@@ -1,6 +1,6 @@
 # Gemini clipping operations and release gates
 
-This runbook supports the implemented Gemini dashboard and execution path. G5 adds offline evaluation code and release documentation; it does not deploy Gemini, create Google Cloud resources, verify an ADC identity, run an inference request, or complete a backup/restore test. Code integration and offline verification are complete through G5; live provider, quality, cost, backup and rollout gates remain unverified.
+This runbook supports the implemented Gemini dashboard and execution path. G5 adds offline evaluation code and release documentation; it does not deploy Gemini, create Google Cloud resources, verify an ADC identity, run an inference request, or complete a backup/restore test. Code integration and offline verification are complete through G6; live provider, quality, cost, backup and rollout gates remain unverified.
 
 ## Supported deployment shape
 
@@ -47,7 +47,7 @@ Take and verify a recoverable `/data` backup before rollout. Roll out the new re
 
 If the canary fails, stop new submissions, let issued attempts settle or remain durably marked uncertain, and stop the new process. Restore the last known-good application revision against the same intact `/data` state only after confirming schema compatibility. Do not delete new job/result rows or restore an older database snapshot just to make the prior binary start. If schema compatibility is uncertain, keep submissions disabled and inspect a copy of the data before making another change. Re-enable work only after health and persisted state are confirmed.
 
-The same drain rule applies to a future legacy-path retirement: do not remove a path while active work or provider callbacks can still settle through it. See the phase tracker for the actual retirement gate; an offline report is not evidence that production is drained.
+The legacy sender/downloader is retired in this branch, while its issued callback/media settlement remains. Before an authorized rollout, use the authenticated `GET /api/clipping/legacy-drain` snapshot plus the [legacy retirement procedure](LEGACY-RETIREMENT.md) to verify actual in-memory/remote work and callback windows. An offline report is not evidence that production is drained.
 
 ## Video duration and Preview limits
 

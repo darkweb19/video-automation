@@ -43,7 +43,7 @@ Use the authenticated, same-origin API with `Content-Type: application/json` and
 
 Replace the illustrative video ID with the intended public video. Submit the original URL for server validation; do not repair unsupported HTTP, playlist or fragment URLs into accepted inputs. Existing sources use `{ "source_id": "<saved-source-id>", "options": { ... } }` instead. Caller-selected projects, models, prompts, endpoints and credentials are unsupported. Duplicate identical submissions return the original job; a key reused for different intent returns conflict.
 
-The response contains `job` and `duplicate`; creation returns 201 and a replay returns 200. Jobs expose `provider`, exact immutable `options`, safe lifecycle/error codes, available usage and cache-origin provenance. `retry_safety` describes automatic policy, not a manual retry permission. The legacy retry endpoint rejects Gemini jobs.
+The response contains `job` and `duplicate`; creation returns 201 and a replay returns 200. Jobs expose `provider`, exact immutable `options`, safe lifecycle/error codes, available usage and cache-origin provenance. `retry_safety` describes automatic policy, not a manual retry permission. The legacy retry endpoint rejects Gemini jobs; legacy import/job submission and worker-configuration mutations are retired. The read-only legacy drain endpoint is for operator checks, not a cleanup or retry command.
 
 `GET /api/clipping/config` includes a safe `gemini` descriptor with `configured`, `enabled`, `verification: "unverified"`, and limits. It performs no ADC discovery or provider probe.
 

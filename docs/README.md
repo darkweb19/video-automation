@@ -4,6 +4,8 @@ Start with the repository [README](../README.md) for setup and everyday workflow
 
 ## Clipping
 
+- [Legacy drain and retirement](clipping/LEGACY-RETIREMENT.md) — retired sender/runtime, retained callback/history compatibility and gates for an authorized rollout.
+
 - [Gemini operations and release gates](clipping/GEMINI-OPERATIONS.md) — ADC/service accounts, single-owner deployment, backup, canary and rollback requirements.
 - [Gemini offline evaluation](clipping/EVALUATION.md#g5-gemini-offline-evaluation) — saved-analysis/human-label contract, privacy-safe reports and explicit evidence limits.
 

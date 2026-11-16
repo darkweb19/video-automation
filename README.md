@@ -18,7 +18,7 @@ Scores are editorial estimates and timestamps are proposed boundaries. Live prov
 
 ## Gemini migration status
 
-Phases G1–G5 are complete with offline tests and independent review: provider contracts, compatible references, durable execution, dashboard/API flow and offline evaluation are integrated. G6 legacy-runtime retirement is staged separately. Historical media/results and issued legacy callbacks remain supported. Live qualification and production rollout have separate gates. See the [migration plan](docs/clipping/GEMINI-MIGRATION.md) and [dashboard/API guide](docs/clipping/GEMINI-DASHBOARD.md).
+All six implementation phases are integrated and independently reviewed: provider contracts, compatible references, durable execution, dashboard/API flow, offline evaluation and legacy-runtime retirement. New analysis uses Gemini exclusively; old import/submission/retry routes and outbound Modal clipping dispatch are retired. Historical media/results and issued legacy callbacks remain supported. Live qualification, a real legacy drain and production rollout have separate gates. See the [migration plan](docs/clipping/GEMINI-MIGRATION.md), [dashboard/API guide](docs/clipping/GEMINI-DASHBOARD.md) and [legacy drain procedure](docs/clipping/LEGACY-RETIREMENT.md).
 
 ## Quick start
 
@@ -114,7 +114,7 @@ Enter it under **Forgot password?** on the sign-in screen. It expires after 15 m
 
 ## Development
 
-The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go 1.24 or newer and FFmpeg for generation and project assembly. Gemini analysis uses ADC and does not require a local video downloader. Legacy importer code remains during staged retirement; its guides describe compatibility behavior, not the new analysis path.
+The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go 1.24 or newer and FFmpeg for generation and project assembly. Gemini analysis uses ADC and does not require a local video downloader. The clipping downloader, Deno/Python importer runtime, and Modal analysis worker are removed. Modal video-generation workers and FFmpeg assembly remain supported.
 
 Run locally with a writable data directory:
 
