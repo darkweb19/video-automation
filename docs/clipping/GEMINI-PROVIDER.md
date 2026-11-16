@@ -1,6 +1,6 @@
 # Gemini provider foundation
 
-G1 introduced an isolated provider foundation. G3 connects it to the opt-in Go executor; public dashboard/API submission follows in G4. It sends one canonical public YouTube watch URL directly as a video part. It never acquires the source file. The official Go SDK is pinned to `google.golang.org/genai v1.77.0`; the module requires Go 1.24 or newer.
+G1 introduced an isolated provider foundation. G3 connects it to the opt-in Go executor; G4 adds public dashboard/API submission. It sends one canonical public YouTube watch URL directly as a video part. It never acquires the source file. The official Go SDK is pinned to `google.golang.org/genai v1.77.0`; the module requires Go 1.24 or newer.
 
 ## Request and authentication
 

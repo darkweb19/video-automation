@@ -1,6 +1,6 @@
 # ADR-005: Direct YouTube analysis with managed Gemini
 
-Status: accepted for the phased migration; G1–G3 are implemented and verified offline; G4 dashboard/API integration is in progress. This decision supersedes ADR-004's download-first/Modal architecture for future Gemini analysis; the current dashboard still starts legacy analysis. Legacy records and unrelated generation behavior remain supported during migration. No deployment or live provider validation is implied.
+Status: accepted for the phased migration; G1–G4 are implemented and verified offline; evaluation and staged legacy retirement are in progress. This decision supersedes ADR-004's download-first/Modal architecture for future Gemini analysis; the current dashboard starts direct Gemini analysis when configured. Legacy records and unrelated generation behavior remain supported during migration. No deployment or live provider validation is implied.
 
 ## Context
 
