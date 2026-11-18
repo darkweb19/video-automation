@@ -96,6 +96,9 @@ func (s *Store) SetClippingAttemptPipelineRevision(jobID, stageName, attemptID, 
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireLegacyClippingJobTx(tx, jobID); err != nil {
+		return ErrClippingInvalidState
+	}
 	attempt, err := readClippingAttempt(tx, jobID, stageName, attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrClippingStaleAttempt
@@ -135,6 +138,9 @@ func (s *Store) SetClippingAttemptComputeLimit(jobID, stageName, attemptID, leas
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireLegacyClippingJobTx(tx, jobID); err != nil {
+		return ErrClippingInvalidState
+	}
 	attempt, err := readClippingAttempt(tx, jobID, stageName, attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrClippingStaleAttempt
@@ -170,7 +176,7 @@ func (s *Store) PendingClippingJobs(limit int) ([]ClippingJob, error) {
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	rows, err := s.db.Query(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE status='queued' AND analysis_deleted=0 ORDER BY created_at,id LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE provider='modal_legacy' AND status='queued' AND analysis_deleted=0 ORDER BY created_at,id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -219,13 +225,25 @@ func (s *Store) DeleteClippingAnalysis(jobID string) error {
 	}
 	// The cache contains the source transcript and analysis core. Removing it
 	// prevents a later Analyze action from silently recreating deleted results.
-	if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, job.SourceID); err != nil {
-		return err
+	if job.Provider == ClippingProviderGemini {
+		if _, err := tx.Exec(`DELETE FROM clipping_gemini_cache WHERE source_id=? AND fingerprint=(SELECT fingerprint FROM clipping_gemini_requests WHERE job_id=?)`, job.SourceID, job.ID); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.Exec(`DELETE FROM clipping_analysis_cache WHERE source_id=?`, job.SourceID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(`UPDATE clipping_jobs SET analysis_deleted=1,updated_at=? WHERE id=?`, time.Now().Unix(), jobID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if job.Provider == ClippingProviderGemini {
+		s.clippingGeminiCancellationRegistry().cancelJob(jobID)
+	}
+	return nil
 }
 
 func loadClippingAnalysisCacheTx(tx *sql.Tx, source ClippingSource, revision string) (clippingAnalysisCore, bool, error) {
@@ -332,6 +350,9 @@ func (s *Store) ClaimClippingAnalysisSource(jobID string) (bool, error) {
 	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, jobID))
 	if err != nil {
 		return false, err
+	}
+	if job.Provider != ClippingProviderModalLegacy {
+		return false, ErrClippingInvalidState
 	}
 	if job.AnalysisDeleted || job.Status != ClippingJobQueued {
 		return false, nil
@@ -466,7 +487,7 @@ func (s *Store) SetClippingAnalysisClaimAttempt(jobID, attemptID string) error {
 	if err != nil {
 		return err
 	}
-	result, err := s.db.Exec(`UPDATE clipping_analysis_claims SET attempt_id=? WHERE source_id=? AND source_sha256=? AND pipeline_key=? AND job_id=? AND attempt_id=''`, attemptID, source.ID, source.SHA256, pipelineKey, jobID)
+	result, err := s.db.Exec(`UPDATE clipping_analysis_claims SET attempt_id=? WHERE source_id=? AND source_sha256=? AND pipeline_key=? AND job_id=? AND attempt_id='' AND EXISTS(SELECT 1 FROM clipping_jobs WHERE id=clipping_analysis_claims.job_id AND provider='modal_legacy')`, attemptID, source.ID, source.SHA256, pipelineKey, jobID)
 	if err != nil {
 		return err
 	}
@@ -484,7 +505,7 @@ func (s *Store) ReleaseClippingAnalysisSourceClaim(jobID string) error {
 	if !safeID(jobID) || !strings.HasPrefix(jobID, "clipjob_") {
 		return ErrClippingJobNotFound
 	}
-	_, err := s.db.Exec(`DELETE FROM clipping_analysis_claims WHERE job_id=? AND attempt_id=''`, jobID)
+	_, err := s.db.Exec(`DELETE FROM clipping_analysis_claims WHERE job_id=? AND attempt_id='' AND EXISTS(SELECT 1 FROM clipping_jobs WHERE id=clipping_analysis_claims.job_id AND provider='modal_legacy')`, jobID)
 	return err
 }
 
@@ -500,6 +521,9 @@ func (s *Store) ReleaseClippingAnalysisSourceClaimBeforeSubmit(jobID, attemptID 
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireLegacyClippingJobTx(tx, jobID); err != nil {
+		return ErrClippingInvalidState
+	}
 	attempt, err := readClippingAttempt(tx, jobID, ClippingStageAnalysis, attemptID)
 	if err != nil {
 		return err
@@ -539,6 +563,9 @@ func (s *Store) TryCompleteClippingJobFromAnalysisCache(jobID string) (bool, err
 	}
 	if err != nil {
 		return false, err
+	}
+	if job.Provider != ClippingProviderModalLegacy {
+		return false, ErrClippingInvalidState
 	}
 	if job.AnalysisDeleted || job.Status != ClippingJobQueued {
 		return false, nil
@@ -686,6 +713,9 @@ func (s *Store) CompleteClippingAnalysisStage(jobID, name, attemptID, leaseToken
 		return ClippingStage{}, false, false, err
 	}
 	defer tx.Rollback()
+	if err := requireLegacyClippingJobTx(tx, jobID); err != nil {
+		return ClippingStage{}, false, false, ErrClippingInvalidState
+	}
 	attempt, err := readClippingAttempt(tx, jobID, name, attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClippingStage{}, false, false, ErrClippingStaleAttempt
@@ -830,6 +860,9 @@ func (s *Store) FailClippingAnalysisCallback(jobID, name, attemptID, leaseToken,
 		return ClippingStage{}, false, err
 	}
 	defer tx.Rollback()
+	if err := requireLegacyClippingJobTx(tx, jobID); err != nil {
+		return ClippingStage{}, false, ErrClippingInvalidState
+	}
 	attempt, err := readClippingAttempt(tx, jobID, name, attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClippingStage{}, false, ErrClippingStaleAttempt

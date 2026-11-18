@@ -2,12 +2,9 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -24,10 +21,8 @@ func newClippingAcquisitionFixture(t *testing.T) (string, *Store, *Security, *Cl
 		store.Close()
 		t.Fatal(err)
 	}
-	acquisition := NewClippingAcquisition(store, security)
-	acquisition.diskAvailable = func(string) (int64, error) { return 1 << 40, nil }
 	t.Cleanup(func() { _ = store.Close() })
-	return dataDir, store, security, acquisition
+	return dataDir, store, security, NewClippingAcquisition(store, security)
 }
 
 func TestClippingYouTubeOnlyImportURLPolicy(t *testing.T) {
@@ -67,158 +62,11 @@ func TestClippingYouTubeOnlyImportURLPolicy(t *testing.T) {
 		}
 	}
 
-	_, store, _, acquisition := newClippingAcquisitionFixture(t)
-	if _, err := acquisition.CreatePublicImport(context.Background(), false, "https://youtu.be/abcdefghijk", 0); err == nil {
-		t.Fatal("missing rights attestation was accepted")
-	}
-	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk&si=tracking", 0)
-	if err != nil || source.Kind != ClippingSourceYouTube || !source.RightsAttested || source.OriginalName != "youtube-abcdefghijk.mp4" || source.MediaType != "video/mp4" {
-		t.Fatalf("attested YouTube source=%+v error=%v", source, err)
-	}
-	if canonical, err := acquisition.security.DecryptSetting(clippingSourceURLSetting, source.SourceURL); err != nil || canonical != "https://www.youtube.com/watch?v=abcdefghijk" {
-		t.Fatalf("canonical encrypted YouTube URL=%q error=%v", canonical, err)
-	}
-	if _, err := acquisition.CreatePublicImport(context.Background(), true, "https://drive.google.com/file/d/id/view", 0); err == nil {
-		t.Fatal("non-YouTube public import was accepted by the server-side API")
-	}
-	if sources, err := store.ClippingSources(); err != nil || len(sources) != 1 {
-		t.Fatalf("only the valid YouTube link should create a source: sources=%d error=%v", len(sources), err)
-	}
-}
-
-func TestClippingCodecRequiresAllowedInstalledDecoder(t *testing.T) {
-	decoders := map[string]struct{}{"h264": {}, "aac": {}, "fictional_codec": {}}
-	if !supportedClippingCodec("video", "h264", decoders) || !supportedClippingCodec("audio", "aac", decoders) {
-		t.Fatal("installed common codec decoder was rejected")
-	}
-	if supportedClippingCodec("video", "fictional_codec", decoders) || supportedClippingCodec("video", "h264", map[string]struct{}{}) {
-		t.Fatal("unsupported or uninstalled decoder was accepted")
-	}
-}
-
-func TestClippingPermanentYouTubeImportFailuresReleaseSourceReservations(t *testing.T) {
-	_, store, _, acquisition := newClippingAcquisitionFixture(t)
-	acquisition.youtubePythonExecutable = requirePython(t)
-	acquisition.youtubeExecutable = writeFakeYouTubeExecutable(t, t.TempDir(), "yt-dlp", "exit 0\n")
-	acquisition.youtubeRuntime = "deno:" + filepath.Join(t.TempDir(), "missing-deno")
-	for index := 0; index < 6; index++ {
-		source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
-		if err != nil {
-			t.Fatalf("create import %d: %v", index, err)
-		}
-		if _, err := acquisition.ProcessNextImport(context.Background()); err != nil {
-			t.Fatalf("process unavailable-runtime failure %d: %v", index, err)
-		}
-		failed, err := store.ClippingSource(source.ID)
-		if err != nil || failed.Status != ClippingSourceFailed || failed.ReservedSizeBytes != 0 || failed.Failure != "youtube_import_unavailable" {
-			t.Fatalf("failed import retained reservation: source=%+v error=%v", failed, err)
-		}
-	}
-	var reserved int64
-	if err := store.db.QueryRow(`SELECT COALESCE(SUM(reserved_size_bytes),0) FROM clipping_sources`).Scan(&reserved); err != nil || reserved != 0 {
-		t.Fatalf("failed source reservations total=%d error=%v", reserved, err)
-	}
-}
-
-func TestClippingAttemptFiveCrashIsFailedAndCleanedAfterRestart(t *testing.T) {
-	dataDir, store, _, acquisition := newClippingAcquisitionFixture(t)
-	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for attempt := 0; attempt < MaxClippingImportAttempts; attempt++ {
-		store.clippingMu.Lock()
-		claimed, err := store.BeginClippingImport(source.ID, attempt, time.Minute)
-		if err == nil && claimed.ImportAttempts != attempt+1 {
-			err = fmt.Errorf("claimed attempt %d, want %d", claimed.ImportAttempts, attempt+1)
-		}
-		if err == nil {
-			_, err = store.db.Exec(`UPDATE clipping_sources SET import_lease_until=0,next_import_at=1 WHERE id=?`, source.ID)
-		}
-		store.clippingMu.Unlock()
-		if err != nil {
-			t.Fatalf("claim simulated attempt %d: %v", attempt+1, err)
-		}
-	}
-	partPath, err := store.ClippingSourceTempPath(source.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(partPath, []byte("crash-leftover"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened, err := OpenStore(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reopened.Close() })
-	reopenedSecurity, err := NewSecurity(reopened)
-	if err != nil {
-		t.Fatal(err)
-	}
-	restarted := NewClippingAcquisition(reopened, reopenedSecurity)
-	restarted.diskAvailable = func(string) (int64, error) { return 1 << 40, nil }
-	if didWork, err := restarted.ProcessNextImport(context.Background()); err != nil || didWork {
-		t.Fatalf("attempt-limit reconciliation didWork=%v error=%v", didWork, err)
-	}
-	failed, err := reopened.ClippingSource(source.ID)
-	if err != nil || failed.Status != ClippingSourceFailed || failed.ImportAttempts != MaxClippingImportAttempts || failed.ReservedSizeBytes != 0 {
-		t.Fatalf("restarted attempt-limit source=%+v error=%v", failed, err)
-	}
-	if _, err := os.Stat(filepath.Dir(partPath)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stale retry file remains after restart reconciliation: %v", err)
-	}
-	if sources, err := reopened.FailedClippingSources(10); err != nil || len(sources) != 0 {
-		t.Fatalf("failed cleanup queue still contains source: sources=%+v error=%v", sources, err)
-	}
-}
-
-func TestClippingImportLeaseKeepaliveRenewsActiveAttempt(t *testing.T) {
-	_, store, _, acquisition := newClippingAcquisitionFixture(t)
-	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.clippingMu.Lock()
-	claimed, err := store.BeginClippingImport(source.ID, 0, time.Minute)
-	if err == nil {
-		shortExpiry := time.Now().Add(time.Second).Unix()
-		_, err = store.db.Exec(`UPDATE clipping_sources SET import_lease_until=?,next_import_at=? WHERE id=?`, shortExpiry, shortExpiry, source.ID)
-	}
-	store.clippingMu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	acquisition.leaseRenewEvery = 10 * time.Millisecond
-	leaseCtx, stop, leaseFailure := acquisition.startImportLeaseKeepalive(context.Background(), claimed)
-	defer stop()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		current, err := store.ClippingSource(source.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if current.ImportLeaseUntil > time.Now().Add(time.Minute).Unix() {
-			if err := leaseFailure(); err != nil {
-				t.Fatal(err)
-			}
-			if err := leaseCtx.Err(); err != nil {
-				t.Fatalf("lease renewal canceled active import: %v", err)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("active import lease was not renewed")
 }
 
 func TestClippingCleanupResumesDeletedTombstone(t *testing.T) {
-	dataDir, store, security, acquisition := newClippingAcquisitionFixture(t)
-	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
+	dataDir, store, security, _ := newClippingAcquisitionFixture(t)
+	source, err := store.historicalCreateClippingSource(ClippingSourceCreate{Kind: ClippingSourceYouTube, SourceURL: "encrypted-history", DeclaredSizeBytes: 100, RightsAttested: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +89,6 @@ func TestClippingCleanupResumesDeletedTombstone(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted := NewClippingAcquisition(reopened, security)
-	restarted.diskAvailable = func(string) (int64, error) { return 1 << 40, nil }
 	cleaned, err := restarted.CleanupExpiredSources(context.Background(), time.Now())
 	if err != nil || cleaned != 1 {
 		t.Fatalf("restart cleanup count=%d error=%v", cleaned, err)
@@ -252,66 +99,5 @@ func TestClippingCleanupResumesDeletedTombstone(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(source.StoragePath)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("source directory remains after restart cleanup: %v", err)
-	}
-}
-
-func TestClippingUnsupportedLegacyImportIsFailedWithoutDeletingSourceFiles(t *testing.T) {
-	_, store, security, acquisition := newClippingAcquisitionFixture(t)
-	source, err := store.CreateClippingSource(ClippingSourceCreate{
-		Kind: ClippingSourceGoogleDrive, OriginalName: "legacy.mp4", MediaType: "video/mp4",
-		DeclaredSizeBytes: 1024, RightsAttested: true, SourceURL: "encrypted-legacy-reference",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(source.StoragePath+".part", []byte("legacy source bytes"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	acquisition.security = security
-	if worked, err := acquisition.ProcessNextImport(context.Background()); err != nil || !worked {
-		t.Fatalf("unsupported legacy import worked=%v error=%v", worked, err)
-	}
-	failed, err := store.ClippingSource(source.ID)
-	if err != nil || failed.Status != ClippingSourceFailed || failed.Failure != "legacy_source_import_unsupported" {
-		t.Fatalf("unsupported source was not parked safely: source=%+v error=%v", failed, err)
-	}
-	if _, err := os.Stat(source.StoragePath + ".part"); err != nil {
-		t.Fatalf("legacy source file was deleted: %v", err)
-	}
-	if pending, err := store.FailedClippingSources(10); err != nil || len(pending) != 0 {
-		t.Fatalf("preserved legacy source entered automatic delete queue: rows=%v error=%v", pending, err)
-	}
-}
-
-func TestClippingImportExpectationRemainsSanitized(t *testing.T) {
-	dataDir, store, _, acquisition := newClippingAcquisitionFixture(t)
-	source, err := acquisition.CreatePublicImport(context.Background(), true, "https://www.youtube.com/watch?v=abcdefghijk", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.clippingMu.Lock()
-	claimed, err := store.BeginClippingImport(source.ID, 0, clippingImportLeaseDuration)
-	if err == nil {
-		err = store.SetClippingSourceImportExpectation(claimed.ID, youtubeImportExpectation{Version: clippingYouTubeExpectationVersion, SeparateTracks: true})
-	}
-	store.clippingMu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := store.ClippingSource(source.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var expectation map[string]any
-	if err := json.Unmarshal([]byte(loaded.ImportExpectation), &expectation); err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{"url", "format_id", "headers", "signed_url", "title"} {
-		if _, ok := expectation[forbidden]; ok {
-			t.Fatalf("import expectation contains disallowed key %q: %s", forbidden, loaded.ImportExpectation)
-		}
-	}
-	if strings.Contains(dataDir, loaded.ImportExpectation) {
-		t.Fatal("import expectation unexpectedly contains source path")
 	}
 }

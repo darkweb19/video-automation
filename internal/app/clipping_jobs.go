@@ -43,7 +43,7 @@ type clippingStageDispatch struct {
 // work. A future dispatcher can send this only after the attempt capabilities
 // have been encrypted by persistClippingDispatchCapabilities.
 func buildClippingStageDispatch(job ClippingJob, stage ClippingStage, source ClippingSource, origin string, now time.Time) (clippingStageDispatch, error) {
-	if !safeID(job.ID) || !safeID(job.BatchID) || !safeID(source.ID) || !safeID(stage.AttemptID) || job.SourceID != source.ID || job.Status != ClippingJobRunning ||
+	if job.Provider != ClippingProviderModalLegacy || !safeID(job.ID) || !safeID(job.BatchID) || !safeID(source.ID) || !safeID(stage.AttemptID) || job.SourceID != source.ID || job.Status != ClippingJobRunning ||
 		stage.JobID != job.ID || stage.Name != ClippingStageAnalysis || stage.Status != ClippingStageRunning ||
 		stage.IdempotencyKey != job.ID+":"+stage.Name || stage.LeaseExpiresAt <= now.Unix() ||
 		source.Status != ClippingSourceReady || !source.RightsAttested || source.DurationMS < 1 || source.DurationMS > MaxClippingSourceDurationMS {
@@ -81,39 +81,8 @@ func buildClippingStageDispatch(job ClippingJob, stage ClippingStage, source Cli
 // before returning a worker envelope. It does not send the
 // dispatch or select a provider; M2 leaves this queue waiting until a worker
 // configuration exists.
-func (a *dashboardApp) prepareClippingStageDispatch(jobID string, _ int64, workerOrigin string) (clippingPreparedDispatch, bool, error) {
-	if a == nil || a.store == nil || a.security == nil {
-		return clippingPreparedDispatch{}, false, errors.New("clipping worker dispatch security is unavailable")
-	}
-	stage, claimed, err := a.store.ClaimClippingStage(jobID, ClippingStageAnalysis, 0, clippingWorkerLeaseDuration)
-	if err != nil || !claimed {
-		return clippingPreparedDispatch{}, claimed, err
-	}
-	job, err := a.store.ClippingJob(jobID)
-	if err != nil {
-		_, _ = a.store.FailClippingStageBeforeSubmit(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker job snapshot could not be loaded")
-		return clippingPreparedDispatch{}, false, errors.New("clipping worker job snapshot could not be loaded")
-	}
-	source, err := a.store.ClippingSource(job.SourceID)
-	if err != nil {
-		_, _ = a.store.FailClippingStageBeforeSubmit(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker source snapshot could not be loaded")
-		a.store.PublishClippingJob(jobID)
-		return clippingPreparedDispatch{}, false, errors.New("clipping worker source snapshot could not be loaded")
-	}
-	payload, err := buildClippingStageDispatch(job, stage, source, workerOrigin, time.Now())
-	if err != nil {
-		_, _ = a.store.FailClippingStageBeforeSubmit(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker dispatch envelope could not be built")
-		a.store.PublishClippingJob(jobID)
-		return clippingPreparedDispatch{}, false, err
-	}
-	mediaBearer, callbackBearer, err := a.persistClippingDispatchCapabilitiesUntil(stage, payload.CallbackExpiresAt)
-	if err != nil {
-		_, _ = a.store.FailClippingStageBeforeSubmit(jobID, stage.Name, stage.AttemptID, stage.LeaseToken, "Worker capability persistence failed")
-		a.store.PublishClippingJob(jobID)
-		return clippingPreparedDispatch{}, false, errors.New("clipping worker capabilities could not be persisted")
-	}
-	a.store.PublishClippingJob(jobID)
-	return clippingPreparedDispatch{Payload: payload, MediaBearer: mediaBearer, CallbackBearer: callbackBearer}, true, nil
+func (a *dashboardApp) prepareClippingStageDispatch(_ string, _ int64, _ string) (clippingPreparedDispatch, bool, error) {
+	return clippingPreparedDispatch{}, false, ErrClippingLegacyRetired
 }
 
 func clippingWorkerEndpoint(origin, path string) (string, error) {

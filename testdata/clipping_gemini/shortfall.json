@@ -1,0 +1,26 @@
+{
+  "version": "framevault.clipping.analysis.v3",
+  "source_duration_ms": 30000,
+  "source_duration_provenance": "model_reported",
+  "summary": "एक वक्ता एक विचार समझाता है।",
+  "language_codes": ["hi"],
+  "limitations": [],
+  "candidates": [
+    {
+      "rank": 1,
+      "start_ms": 0,
+      "end_ms": 20000,
+      "title_variants": ["एक नया विचार"],
+      "hook": "इस विचार को समझें",
+      "rationale": "विचार का स्पष्ट परिचय।",
+      "boundary_rationale": "परिचय और उसका निष्कर्ष।",
+      "context": "वीडियो में एक ही विचार है।",
+      "editorial_score": 67,
+      "scores": {"hook": 60, "emotional_impact": 50, "retention_potential": 70, "shareability": 60, "standalone_context": 80},
+      "evidence": [
+        {"kind": "speech", "start_ms": 1000, "end_ms": 8000, "detail": "वक्ता विचार प्रस्तुत करता है।"}
+      ]
+    }
+  ],
+  "fewer_candidates_reason": "The model found only one sufficiently self-contained moment."
+}

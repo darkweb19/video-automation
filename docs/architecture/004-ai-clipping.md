@@ -1,5 +1,7 @@
 # ADR-004: Integrated AI clipping with Go and a Modal worker
 
+**Gemini migration:** [ADR-005](005-gemini-clipping.md) supersedes the download-first/Modal architecture for future Gemini analysis; the current dashboard starts direct Gemini analysis when configured. The historical decisions below remain compatibility context; see the [migration tracker](../clipping/TRACKER.md) for actual phase status.
+
 **Status:** Accepted for the M2 foundation on 2026-10-08. Remaining M1 feasibility explicitly waived; paid providers, measured budget/quality, languages and render-placement decisions remain open.
 
 **Date:** 2026-10-08

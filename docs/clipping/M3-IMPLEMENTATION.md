@@ -1,5 +1,11 @@
 # M3: full-source analysis and clip candidates
 
+> Historical implementation record. The staged Gemini retirement removes the
+> clipping worker sources and dependencies from this branch. Do not follow the
+> old worker deployment instructions below. Existing issued attempts must drain
+> through their original deployed worker and compatible Go receiver; see
+> [legacy retirement](LEGACY-RETIREMENT.md).
+
 The current Clipping workflow imports one public YouTube video and lets a signed-in user request analysis from an opt-in Modal worker. Transcript, context, and heuristic candidates are persisted and shown read-only. The UI has no file upload, Drive/Dropbox, batch, budget, retention, candidate-editing, export/publishing, or invoice-reconciliation flow. Source retention is an automatic server policy, not a browser setting.
 
 The worker is callable only after an operator separately deploys it and configures the three least-privilege Modal secrets and authenticated application Settings. No worker was deployed, no model weights were fetched, and no live inference or paid call was made during this implementation. The UI's readiness value means `configured, not live checked`; it does not prove that the endpoint, credentials, Modal account, model download, or billing are operational.
@@ -63,7 +69,7 @@ Go processor failures and valid current-attempt Modal failures transition the af
 
 ## Dependency and evaluation limits
 
-Worker-only direct runtime pins are isolated in [`requirements-clipping.txt`](../../workers/modal/requirements-clipping.txt); the existing Go production pins and images are unchanged. These direct pins do not yet lock transitive wheel hashes, the Modal Debian base image, or apt FFmpeg. Treat a reproducible worker build as a deployment blocker until those are pinned and reviewed; runtime fingerprints audit an executed build but do not pin it in advance. The pinned projects report these upstream licenses: Modal, Hugging Face Hub, and Tokenizers are Apache-2.0; FastAPI, faster-whisper, and CTranslate2 are MIT; PyAV and NumPy are BSD-3-Clause. Review transitive notices and the exact model snapshot's own license before a production deployment. The Modal SDK was installed only into a temporary local validation environment; no worker image, model weights, or deployment was downloaded or executed here.
+Worker-only direct runtime pins were isolated in `requirements-clipping.txt`, which remains in repository history. These direct pins did not lock transitive wheel hashes, the Modal Debian base image, or apt FFmpeg. Treat a reproducible worker build as a deployment blocker until those are pinned and reviewed; runtime fingerprints audit an executed build but do not pin it in advance. The pinned projects report these upstream licenses: Modal, Hugging Face Hub, and Tokenizers are Apache-2.0; FastAPI, faster-whisper, and CTranslate2 are MIT; PyAV and NumPy are BSD-3-Clause. Review transitive notices and the exact model snapshot's own license before a production deployment. The Modal SDK was installed only into a temporary local validation environment; no worker image, model weights, or deployment was downloaded or executed here.
 
 Local deterministic tests cover protocol and storage bounds, original-script/full-timeline timestamps including late non-speech events, real FFmpeg analysis of generated fixtures (including rejected stream-start skew), model revision pinning and CPU prewarm with a mocked Hugging Face client, deadlines, finalist sequence inspection, source hash checks, replay/idempotency, stale callbacks, cache restart/reselection, revision invalidation, and automatic source retention. The browser regression suite covers the current YouTube-import and read-only-results workflow. These checks do not substitute for labeled real-media review or the waived M1 corpus and benchmark.
 

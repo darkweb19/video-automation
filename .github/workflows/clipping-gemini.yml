@@ -1,0 +1,78 @@
+name: Gemini clipping provider and persistence
+
+on:
+  push:
+    branches:
+      - work
+      - feat/gemini-*
+    paths:
+      - "internal/app/*clipping*.go"
+      - "internal/app/dashboard*.go"
+      - "internal/app/storage*.go"
+      - "internal/app/security*.go"
+      - "docs/clipping/contracts/**"
+      - "testdata/clipping_gemini/**"
+      - "internal/webui/static/app.js"
+      - "internal/webui/static/clipping.js"
+      - "internal/webui/static/clipping.css"
+      - "internal/webui/static/index.html"
+      - "tests/clipping-ui.test.cjs"
+      - "tests/dashboard-ui.test.cjs"
+      - "testdata/clipping_legacy/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/clipping-gemini.yml"
+  pull_request:
+    paths:
+      - "internal/app/*clipping*.go"
+      - "internal/app/dashboard*.go"
+      - "internal/app/storage*.go"
+      - "internal/app/security*.go"
+      - "docs/clipping/contracts/**"
+      - "testdata/clipping_gemini/**"
+      - "internal/webui/static/app.js"
+      - "internal/webui/static/clipping.js"
+      - "internal/webui/static/clipping.css"
+      - "internal/webui/static/index.html"
+      - "tests/clipping-ui.test.cjs"
+      - "tests/dashboard-ui.test.cjs"
+      - "testdata/clipping_legacy/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/clipping-gemini.yml"
+
+jobs:
+  gemini-foundations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check dashboard JavaScript syntax
+        run: |
+          node --check internal/webui/static/app.js
+          node --check internal/webui/static/clipping.js
+      - name: Test clipping and dashboard interactions
+        run: node --test tests/clipping-ui.test.cjs tests/dashboard-ui.test.cjs
+      - name: Install FFmpeg for offline media fixtures
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Test clipping provider and persistence compatibility
+        run: go test ./internal/app -run '^Test.*(Clipping|Gemini)' -count=1
+      - name: Run clipping provider and persistence race tests
+        run: go test -race ./internal/app -run '^Test.*(Clipping|Gemini)' -count=1
+      - name: Fuzz Gemini analysis decoding
+        run: go test ./internal/app -run '^$' -fuzz '^FuzzDecodeClippingGeminiAnalysis$' -fuzztime=10s -parallel=2
+      - name: Vet the application package
+        run: go vet ./internal/app
+      - name: Build the service
+        run: go build -o /tmp/video-automation ./cmd/video-automation

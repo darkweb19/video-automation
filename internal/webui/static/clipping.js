@@ -1,6 +1,7 @@
 (function (root) {
   "use strict";
 
+  const GEMINI_SCHEMA_VERSION = "framevault.clipping.analysis.v3";
   const CONTENT_TYPES = ["general", "podcast", "comedy", "gaming", "movie"];
   const IMPORT_ERROR_COPY = {
     youtube_import_unavailable: "The YouTube importer is unavailable right now. Try again later or ask the operator to check the importer setup.",
@@ -21,7 +22,10 @@
     failed: "Analysis failed",
     canceled: "Canceled",
     cancelled: "Canceled",
-    uncertain: "Waiting for the previous attempt to resolve"
+    uncertain: "Outcome unknown",
+    outcome_unknown: "Outcome unknown",
+    rate_limited_wait: "Waiting after provider rate limit",
+    submitting: "Submitting analysis request"
   };
   const CONTENT_TYPE_LABELS = {
     general: "General",
@@ -33,10 +37,17 @@
 
   function youtubeVideoID(value) {
     const raw = String(value || "").trim();
+    if (!raw || raw.length > 8192 || /[\x00-\x1f\x7f#\\]/.test(raw) || /%(?![0-9a-f]{2})/i.test(raw)) return "";
     if (/^[A-Za-z0-9_-]{11}$/.test(raw)) return raw;
+    const withoutScheme = raw.replace(/^https?:\/\//i, "");
+    const authority = withoutScheme.split(/[/?]/, 1)[0];
+    const rawPath = withoutScheme.slice(authority.length).split("?", 1)[0];
+    if (authority.includes("%") || authority.includes("@") || /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i.test(rawPath)) return "";
+    const port = authority.match(/:([^:]*)$/);
+    if (port && port[1] && port[1] !== "443") return "";
     let url;
     try {
-      url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw) ? raw : "https://" + raw);
+      url = new URL(raw.includes("://") ? raw : "https://" + raw);
     } catch (_error) {
       return "";
     }
@@ -45,18 +56,24 @@
       "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
       "youtube-nocookie.com", "www.youtube-nocookie.com", "youtu.be", "www.youtu.be"
     ]);
-    if (!hosts.has(host) || !["https:", "http:"].includes(url.protocol)
+    if (!hosts.has(host) || url.protocol !== "https:"
       || url.username || url.password
-      || (url.port && url.port !== "443" && !(url.protocol === "http:" && url.port === "80"))) return "";
-    const parts = url.pathname.split("/").filter(Boolean);
+      || (url.port && url.port !== "443") || url.search.includes(";")) return "";
+    for (const key of url.searchParams.keys()) {
+      if (["list", "playlist", "playlist_id", "video_ids", "start_radio", "index"].includes(key.toLowerCase())) return "";
+    }
+    let path;
+    try { path = decodeURIComponent(url.pathname); } catch (_error) { return ""; }
     let id = "";
     if (host === "youtu.be" || host === "www.youtu.be") {
-      if (parts.length === 1) id = parts[0];
-    } else if (parts.length === 1 && parts[0] === "watch") {
+      id = path.replace(/^\/+|\/+$/g, "");
+      if (id.includes("/")) return "";
+    } else if (path === "/watch" || path === "/watch/") {
       const values = url.searchParams.getAll("v");
       if (values.length === 1) id = values[0];
-    } else if (parts.length === 2 && ["shorts", "embed", "live", "v"].includes(parts[0])) {
-      id = parts[1];
+    } else {
+      const match = path.match(/^\/(?:shorts|embed|live|v)\/([^/]+)\/?$/);
+      if (match) id = match[1];
     }
     return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : "";
   }
@@ -97,30 +114,29 @@
     importForm: $("clipping-link-form"),
     link: $("clipping-link"),
     permission: $("clipping-link-permission-check"),
+    contentType: $("clipping-content-type"),
+    minClipSeconds: $("clipping-min-clip-seconds"),
+    maxClipSeconds: $("clipping-max-clip-seconds"),
+    candidateLimit: $("clipping-candidate-limit"),
     importButton: $("clipping-link-submit"),
     importError: $("clipping-link-error"),
+    optionsError: $("clipping-options-error"),
     importStatus: $("clipping-workflow-status"),
     importLimits: $("clipping-import-limits"),
+    geminiReadiness: $("clipping-gemini-readiness"),
     sourceError: $("clipping-sources-error"),
     sourceCount: $("clipping-source-count"),
     sources: $("clipping-sources"),
     jobsError: $("clipping-jobs-error"),
     jobCount: $("clipping-job-count"),
     jobs: $("clipping-jobs"),
-    workerSummary: $("clipping-worker-summary"),
-    settings: $("clipping-settings-disclosure"),
-    workerForm: $("clipping-worker-form"),
-    workerEndpoint: $("clipping-worker-endpoint"),
-    workerRevision: $("clipping-worker-pipeline-revision"),
-    workerToken: $("clipping-worker-token"),
-    workerMaxCompute: $("clipping-worker-max-compute"),
-    workerEnabled: $("clipping-worker-enabled"),
-    workerStatus: $("clipping-worker-status"),
-    workerError: $("clipping-worker-error"),
-    workerSaveNote: $("clipping-worker-save-note"),
-    workerSave: $("clipping-worker-save"),
-    workerOpen: $("clipping-open-worker-settings"),
-    analysisHeading: $("clipping-analysis-heading")
+    analysisHeading: $("clipping-analysis-heading"),
+    confirmDialog: $("clipping-confirm-dialog"),
+    confirmTitle: $("clipping-confirm-title"),
+    confirmDescription: $("clipping-confirm-description"),
+    confirmError: $("clipping-confirm-error"),
+    confirmCancel: $("clipping-confirm-cancel"),
+    confirmDelete: $("clipping-confirm-delete")
   };
 
   const state = {
@@ -128,17 +144,15 @@
     lifecycle: 0,
     requestImpl: null,
     toastImpl: null,
-    confirmImpl: null,
-    requestSequence: { config: 0, worker: 0, sources: 0, jobs: 0 },
+    requestSequence: { config: 0, sources: 0, jobs: 0 },
     config: null,
-    worker: null,
     sources: [],
     sourceConsoleStatuses: new Map(),
     jobs: [],
-    contentTypes: new Map(),
     pendingSourceIDs: new Set(),
     pendingDeleteSourceIDs: new Set(),
     pendingDeleteJobIDs: new Set(),
+    pendingCancelJobIDs: new Set(),
     pendingJobBaselines: new Map(),
     deletedSourceIDs: new Set(),
     deletedJobIDs: new Set(),
@@ -150,7 +164,14 @@
     resultDetails: new Map(),
     resultErrors: new Map(),
     loadingResults: new Set(),
-    pendingKeys: new Map()
+    resultSequences: new Map(),
+    unknownRequests: new Map(),
+    urlSourceIDs: new Map(),
+    uncertainSources: new Set(),
+    sourcesLoaded: false,
+    jobsLoaded: false,
+    pendingConfirmation: null,
+    geminiRequestPending: false
   };
 
   function current(lifecycle) {
@@ -176,7 +197,86 @@
     return CONTENT_TYPES.includes(type) ? type : "general";
   }
 
+  function geminiConfig() {
+    return state.config && state.config.gemini && typeof state.config.gemini === "object"
+      ? state.config.gemini : null;
+  }
+
+  function geminiLimits() {
+    const config = geminiConfig();
+    const limits = config && config.limits && typeof config.limits === "object" ? config.limits : null;
+    if (!limits) return null;
+    const minClipMS = Number(limits.min_clip_ms);
+    const maxClipMS = Number(limits.max_clip_ms);
+    const maxCandidates = Number(limits.max_candidates);
+    if (!Number.isSafeInteger(minClipMS) || !Number.isSafeInteger(maxClipMS)
+      || minClipMS < 0 || maxClipMS < minClipMS
+      || !Number.isInteger(maxCandidates) || maxCandidates < 1 || maxCandidates > 10) return null;
+    return { minClipMS, maxClipMS, maxCandidates, maxSourceDurationMS: Number(limits.max_source_duration_ms) };
+  }
+
+  function geminiReady() {
+    const config = geminiConfig();
+    return Boolean(config && config.configured === true && config.enabled === true && geminiLimits());
+  }
+
+  function isGeminiJob(job) {
+    return String(job && job.provider || "").toLowerCase() === "gemini";
+  }
+
+  function formatRetryAt(value) {
+    let milliseconds = NaN;
+    if (typeof value === "number" && Number.isFinite(value)) milliseconds = value < 1e12 ? value * 1000 : value;
+    else if (typeof value === "string" && value.trim()) milliseconds = Date.parse(value);
+    if (!Number.isFinite(milliseconds)) return "";
+    try { return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(milliseconds)); }
+    catch (_error) { return ""; }
+  }
+
+  function retrySafetyCopy(job) {
+    if (!isGeminiJob(job)) return "";
+    const safety = String(job.retry_safety || "none");
+    if (safety === "not_submitted_retryable") {
+      if (terminalJobStatus(job.status)) return "This attempt was not submitted and has ended.";
+      return "This attempt was not submitted. The service may retry it automatically when safe.";
+    }
+    if (safety === "rate_limited_wait") {
+      const retryAt = formatRetryAt(job.retry_at);
+      return "Gemini rate-limited this attempt. The service will wait" + (retryAt ? " until " + retryAt : "") + " before its bounded retry.";
+    }
+    if (safety === "response_received_terminal") {
+      return "Gemini responded. This attempt will not be submitted again.";
+    }
+    if (safety === "outcome_unknown_no_replay") {
+      return "The provider outcome is unknown. Do not resubmit this analysis. Refresh to check its status.";
+    }
+    if (safety === "terminal") return "This analysis is terminal. No provider retry is available.";
+    return "";
+  }
+
+  function geminiErrorCopy(job) {
+    const messages = {
+      config_drift: "Analysis configuration changed before this request could be sent. Refresh and check provider readiness.",
+      credentials_unavailable: "The Google provider identity is unavailable. Ask the operator to check provider setup.",
+      source_inaccessible: "The provider could not access this public YouTube video. It may be unavailable or unsupported.",
+      invalid_response: "The provider response did not match the saved analysis contract.",
+      outcome_unknown: "The provider outcome is unknown. Do not resubmit this analysis; refresh to check its status.",
+      request_not_submitted: terminalJobStatus(job && job.status)
+        ? "This attempt was not submitted and has ended."
+        : "This attempt was not submitted. The service may retry it automatically when safe.",
+      rate_limited: "Gemini rate-limited this attempt. Review the retry status below.",
+      provider_rejected_request: "Gemini rejected this request. Review the public link and provider status before starting another analysis.",
+      response_blocked: "Gemini did not return an analysis for this video.",
+      response_incomplete: "Gemini returned an incomplete analysis that could not be saved.",
+      reported_source_too_long: "The video duration reported by Gemini is above the configured limit.",
+      response_unusable: "Gemini returned an analysis that could not be used. Review its saved status before starting another request."
+    };
+    const code = String(job && (job.error_code || job.error) || "");
+    return messages[code] || "Analysis could not be completed. Refresh to check the saved status.";
+  }
+
   function sourceName(source) {
+    if (source && source.kind === "youtube_url") return "YouTube video";
     const name = source && (source.title || source.original_name || source.name);
     return typeof name === "string" && name.trim() ? name.trim() : "YouTube video";
   }
@@ -189,6 +289,7 @@
   function sourceStatus(source) {
     const status = String(source && source.status || "").toLowerCase();
     if (status === "importing") return "Preparing video";
+    if (status === "ready" && source && source.kind === "youtube_url") return "Reference saved · unverified";
     if (status === "ready") return "Ready to analyze";
     if (status === "failed") return "Import failed";
     return status ? status.charAt(0).toUpperCase() + status.slice(1) : "Status unavailable";
@@ -196,10 +297,25 @@
 
   function jobStatus(job) {
     const status = String(job && job.status || "").toLowerCase();
-    if (status === "queued" && (!state.worker || !state.worker.configured || !state.worker.enabled)) {
-      return "Waiting for Modal worker setup";
+    if (isGeminiJob(job)) {
+      const safety = String(job.retry_safety || "none");
+      if (safety === "outcome_unknown_no_replay") return "Outcome unknown";
+      if (safety === "rate_limited_wait") return "Waiting after provider rate limit";
+      if (safety === "not_submitted_retryable") return "Automatic retry pending";
     }
     return JOB_STATUS_COPY[status] || "Status unavailable";
+  }
+
+  function geminiOptionsCopy(options) {
+    if (!options || typeof options !== "object") return "Gemini analysis";
+    const type = CONTENT_TYPE_LABELS[contentType(options.content_type)] || "General";
+    const min = Number(options.min_clip_ms);
+    const max = Number(options.max_clip_ms);
+    const limit = Number(options.candidate_limit);
+    const bounds = Number.isSafeInteger(min) && Number.isSafeInteger(max)
+      ? " · " + min.toLocaleString() + "–" + max.toLocaleString() + " ms" : "";
+    const candidates = Number.isSafeInteger(limit) ? " · up to " + limit + " suggestions" : "";
+    return "Gemini · " + type + bounds + candidates;
   }
 
   function sourceProgress(source) {
@@ -227,8 +343,95 @@
     return message;
   }
 
-  function confirmAction(message) {
-    return typeof state.confirmImpl === "function" && state.confirmImpl(message) === true;
+  function closeConfirmation(confirmed) {
+    const pending = state.pendingConfirmation;
+    if (!pending) return;
+    state.pendingConfirmation = null;
+    ui.confirmCancel.disabled = false;
+    ui.confirmDelete.disabled = false;
+    ui.confirmDialog.removeAttribute("aria-busy");
+    if (ui.confirmDialog.open) ui.confirmDialog.close(confirmed ? "confirm" : "cancel");
+    pending.resolve(Boolean(confirmed));
+  }
+
+  function confirmAction(title, description, action, confirmLabel) {
+    if (!ui.confirmDialog || typeof ui.confirmDialog.showModal !== "function" || state.pendingConfirmation) {
+      if (ui.confirmError) {
+        ui.confirmError.hidden = false;
+        ui.confirmError.textContent = "Confirmation is unavailable. No item was deleted.";
+      }
+      return Promise.resolve(false);
+    }
+    ui.confirmTitle.textContent = title;
+    ui.confirmDescription.textContent = description;
+    ui.confirmError.textContent = "";
+    ui.confirmError.hidden = true;
+    ui.confirmCancel.disabled = false;
+    ui.confirmDelete.disabled = false;
+    ui.confirmDialog.removeAttribute("aria-busy");
+    ui.confirmDelete.textContent = confirmLabel || "Delete";
+    ui.confirmCancel.textContent = confirmLabel === "Cancel analysis" ? "Keep analysis" : "Cancel";
+    return new Promise((resolve) => {
+      state.pendingConfirmation = { resolve, action, running: false, confirmLabel: confirmLabel || "Delete" };
+      try {
+        ui.confirmDialog.showModal();
+        ui.confirmCancel.focus?.({ preventScroll: true });
+      } catch (_error) {
+        state.pendingConfirmation = null;
+        ui.confirmError.hidden = false;
+        ui.confirmError.textContent = "Confirmation could not be opened. No item was deleted.";
+        resolve(false);
+      }
+    });
+  }
+
+  async function runConfirmation() {
+    const pending = state.pendingConfirmation;
+    if (!pending || pending.running || typeof pending.action !== "function") return;
+    pending.running = true;
+    ui.confirmError.textContent = "";
+    ui.confirmError.hidden = true;
+    ui.confirmCancel.disabled = true;
+    ui.confirmDelete.disabled = true;
+    ui.confirmDelete.textContent = pending.confirmLabel === "Delete" ? "Deleting…" : "Canceling…";
+    ui.confirmDialog.setAttribute("aria-busy", "true");
+    try {
+      const result = await pending.action();
+      if (state.pendingConfirmation !== pending) return;
+      if (!result || result.ok !== true) {
+        ui.confirmError.textContent = result && result.message || "The action could not be completed. Close this dialog and check the saved item before trying again.";
+        ui.confirmError.hidden = false;
+        ui.confirmDelete.disabled = true;
+        ui.confirmDelete.textContent = pending.confirmLabel;
+        ui.confirmCancel.disabled = false;
+        ui.confirmDialog.removeAttribute("aria-busy");
+        pending.running = false;
+        ui.confirmCancel.focus?.({ preventScroll: true });
+        return;
+      }
+      closeConfirmation(true);
+    } catch (_error) {
+      if (state.pendingConfirmation !== pending) return;
+      ui.confirmError.textContent = "The outcome could not be confirmed. Close this dialog and refresh saved items before trying again.";
+      ui.confirmError.hidden = false;
+      ui.confirmDelete.disabled = true;
+      ui.confirmDelete.textContent = pending.confirmLabel;
+      ui.confirmCancel.disabled = false;
+      ui.confirmDialog.removeAttribute("aria-busy");
+      pending.running = false;
+      ui.confirmCancel.focus?.({ preventScroll: true });
+    }
+  }
+
+  function cancelConfirmation(event) {
+    const pending = state.pendingConfirmation;
+    if (!pending) return;
+    if (pending.running) {
+      event?.preventDefault?.();
+      return;
+    }
+    state.pendingConfirmation = null;
+    pending.resolve(false);
   }
 
   function invalidateListLoads() {
@@ -239,14 +442,18 @@
   function clearPendingKeysForSource(sourceID) {
     const id = safeID(sourceID);
     if (!id) return;
-    const prefix = id + ":";
-    for (const key of state.pendingKeys.keys()) {
-      if (key.startsWith(prefix)) state.pendingKeys.delete(key);
+    state.unknownRequests.delete("source:" + id);
+    for (const [videoID, mappedID] of state.urlSourceIDs.entries()) {
+      if (mappedID === id) state.urlSourceIDs.delete(videoID);
     }
   }
 
   function activeJobStatus(status) {
-    return ["queued", "running", "uncertain"].includes(String(status || "").toLowerCase());
+    return ["queued", "running", "uncertain", "outcome_unknown", "submitting", "rate_limited_wait"].includes(String(status || "").toLowerCase());
+  }
+
+  function terminalJobStatus(status) {
+    return ["completed", "failed", "canceled", "cancelled"].includes(String(status || "").toLowerCase());
   }
 
   function analysisAttemptID(job) {
@@ -293,15 +500,20 @@
     const id = safeID(jobID);
     if (!id) return;
     const existing = state.jobs.find((job) => safeID(job && job.id) === id);
-    clearPendingKeysForSource(sourceID || existing && existing.source_id);
+    if (existing && existing.retry_safety === "outcome_unknown_no_replay") {
+      const source = safeID(sourceID || existing.source_id);
+      if (source) state.uncertainSources.add(source);
+    }
     state.deletedJobIDs.add(id);
     state.pendingDeleteJobIDs.delete(id);
+    state.pendingCancelJobIDs.delete(id);
     state.jobActionErrors.delete(id);
     state.jobTracking.delete(id);
     state.expandedResults.delete(id);
     state.resultDetails.delete(id);
     state.resultErrors.delete(id);
     state.loadingResults.delete(id);
+    state.resultSequences.set(id, (state.resultSequences.get(id) || 0) + 1);
     state.jobs = state.jobs.filter((job) => safeID(job && job.id) !== id);
   }
 
@@ -313,11 +525,11 @@
     state.pendingSourceIDs.delete(id);
     state.pendingJobBaselines.delete(id);
     clearPendingKeysForSource(id);
-    state.contentTypes.delete(id);
     state.sourceActionErrors.delete(id);
     for (const job of state.jobs.filter((item) => safeID(item && item.source_id) === id)) {
       markJobDeleted(job.id, id);
     }
+    state.uncertainSources.delete(id);
     state.sources = state.sources.filter((source) => safeID(source && source.id) !== id);
   }
 
@@ -376,27 +588,55 @@
     parent.append(wrapper);
   }
 
-  function activeJobForSource(sourceID) {
-    return state.jobs.find((job) => String(job && job.source_id) === sourceID
-      && ["queued", "running", "uncertain"].includes(String(job.status || "").toLowerCase()));
+  function latestJobForSource(sourceID, provider) {
+    const matching = state.jobs.filter((job) => String(job && job.source_id) === sourceID
+      && (!provider || String(job && job.provider || "").toLowerCase() === provider));
+    return matching.reduce((latest, job) => {
+      if (!latest) return job;
+      const latestCreated = Number(latest.created_at);
+      const candidateCreated = Number(job.created_at);
+      return Number.isFinite(candidateCreated) && (!Number.isFinite(latestCreated) || candidateCreated > latestCreated)
+        ? job : latest;
+    }, null);
   }
 
-  function makeContentTypeSelect(sourceID, name) {
-    const label = element("label", "clipping-content-type");
-    label.append(element("span", "", "Analysis type"));
-    const select = element("select", "clipping-content-type-select");
-    select.setAttribute("aria-label", "Analysis type for " + name);
-    select.dataset.clippingFocusKey = "content-type";
-    for (const value of CONTENT_TYPES) {
-      const option = element("option", "", CONTENT_TYPE_LABELS[value]);
-      option.value = value;
-      select.append(option);
+  function sourceAnalysisState(sourceID) {
+    const unresolved = state.unknownRequests.get("source:" + sourceID);
+    if (unresolved) return { job: null, canStart: true, resend: true };
+    if (state.unknownRequests.size) return { job: null, canStart: false, otherUnknown: true };
+    if (state.uncertainSources.has(sourceID)) return { job: null, canStart: false, unknown: true };
+    if (!state.jobsLoaded) return { job: null, canStart: false, loading: true };
+    const active = state.jobs.find((job) => {
+      if (String(job && job.source_id) !== sourceID) return false;
+      const status = String(job && job.status || "").toLowerCase();
+      const safety = String(job && job.retry_safety || "none");
+      return activeJobStatus(status) || safety === "rate_limited_wait" || safety === "outcome_unknown_no_replay"
+        || (safety === "not_submitted_retryable" && !terminalJobStatus(status));
+    });
+    if (active) return { job: active, canStart: false };
+    const latest = latestJobForSource(sourceID, "gemini");
+    if (!latest) return { job: null, canStart: true };
+    const status = String(latest.status || "").toLowerCase();
+    const safety = String(latest.retry_safety || "none");
+    if (activeJobStatus(status) || safety === "rate_limited_wait" || safety === "outcome_unknown_no_replay") {
+      return { job: latest, canStart: false };
     }
-    if (!state.contentTypes.has(sourceID)) state.contentTypes.set(sourceID, "general");
-    select.value = contentType(state.contentTypes.get(sourceID));
-    select.addEventListener("change", () => state.contentTypes.set(sourceID, contentType(select.value)));
-    label.append(select);
-    return label;
+    const knownOutcome = ["none", "terminal", "response_received_terminal", "not_submitted_retryable"].includes(safety);
+    return { job: latest, canStart: terminalJobStatus(status) && knownOutcome };
+  }
+
+  function analysisLockedForSource(sourceID) {
+    return state.unknownRequests.has("source:" + sourceID);
+  }
+
+  function sourceJobActionLabel(job, canStart) {
+    if (canStart) return job ? "Analyze again" : "Analyze with Gemini";
+    if (!job) return "Analyze with Gemini";
+    const safety = String(job.retry_safety || "none");
+    if (safety === "outcome_unknown_no_replay") return "Outcome unknown";
+    if (safety === "rate_limited_wait") return "Retry scheduled automatically";
+    if (safety === "not_submitted_retryable") return "Analysis retrying automatically";
+    return jobStatus(job);
   }
 
   function renderSources() {
@@ -404,13 +644,14 @@
     const fragment = document.createDocumentFragment();
     ui.sourceCount.textContent = String(state.sources.length);
     if (!state.sources.length) {
-      fragment.append(element("p", "empty", "Imported videos will appear here. Paste a public YouTube link above to begin."));
+      fragment.append(element("p", "empty", "Saved references and legacy sources will appear here."));
     }
     for (const source of state.sources) {
       const id = safeID(source && source.id);
       if (!id) continue;
       const status = String(source.status || "").toLowerCase();
       const name = sourceName(source);
+      const isReference = source.kind === "youtube_url";
       const row = element("article", "clipping-source-row");
       row.dataset.sourceId = id;
       const main = element("div", "clipping-source-main");
@@ -420,30 +661,44 @@
       badge.dataset.state = status;
       heading.append(badge);
       main.append(heading);
-      const duration = formatDuration(source.duration_ms);
-      if (duration) main.append(element("p", "clipping-source-meta", "Duration " + duration));
-      if (status === "importing") renderProgress(main, "Importing video", sourceProgress(source));
+      const duration = !isReference && Number(source.duration_ms) > 0 ? formatDuration(source.duration_ms) : "";
+      if (duration) main.append(element("p", "clipping-source-meta", "Imported duration " + duration));
+      if (!isReference && status === "importing") renderProgress(main, "Preparing legacy source", sourceProgress(source));
       const error = state.sourceActionErrors.get(id) || String(source.error_message || "").trim() || importErrorCopy(source);
       if (error) main.append(element("p", "clipping-row-error", error));
       const actions = element("div", "clipping-source-actions");
       const deleting = state.pendingDeleteSourceIDs.has(id);
-      if (status === "ready") {
-        const activeJob = activeJobForSource(id);
-        actions.append(makeContentTypeSelect(id, name));
-        const analyze = button(activeJob ? jobStatus(activeJob) : "Analyze", "button primary clipping-action",
-          () => { if (!activeJob) void createJob(id); });
+      const supportedYouTubeSource = source.rights_attested === true && ["youtube_url", "youtube_original_file"].includes(String(source.kind || ""));
+      if (status === "ready" && supportedYouTubeSource) {
+        const analysisState = sourceAnalysisState(id);
+        const job = analysisState.job;
+      const actionLabel = analysisState.resend ? "Resend same request" : analysisState.otherUnknown ? "Resolve previous request"
+          : analysisState.unknown ? "Outcome unknown"
+          : analysisState.loading ? "Loading analysis status…"
+            : sourceJobActionLabel(job, analysisState.canStart);
+        const analyze = button(state.pendingSourceIDs.has(id) ? "Saving request…" : actionLabel, "button primary clipping-action",
+          () => { if (sourceAnalysisState(id).canStart && !state.pendingSourceIDs.has(id)) void createGeminiJob({ sourceID: id }); });
         analyze.dataset.clippingFocusKey = "analyze";
-        analyze.disabled = Boolean(activeJob || state.pendingSourceIDs.has(id) || deleting);
-        if (state.pendingSourceIDs.has(id)) analyze.textContent = "Queueing analysis…";
+        analyze.setAttribute("aria-label", actionLabel + " for " + name);
+        analyze.disabled = Boolean(!analysisState.canStart || state.geminiRequestPending || state.pendingSourceIDs.has(id) || deleting || !geminiReady());
+        if (!geminiReady()) analyze.title = "Gemini must be configured and enabled before requesting analysis.";
+        if (analysisState.resend) analyze.title = "Resend the original request with the same idempotency key.";
+        else if (analysisState.otherUnknown) analyze.title = "Resend the previous request before starting another analysis.";
+        else if (analysisState.unknown) analyze.title = "The provider outcome is unknown. This analysis cannot be submitted again.";
+        else if (analysisState.loading) analyze.title = "Saved analysis status is loading. Refresh before requesting another analysis.";
+        else if (job && !analysisState.canStart) analyze.title = retrySafetyCopy(job)
+          || "A previous analysis is still active or has ended without a reusable result.";
         actions.append(analyze);
+        if (job && analysisState.canStart) main.append(element("p", "clipping-source-meta", "A new analysis may incur provider charges."));
       }
-      const remove = button(deleting ? "Deleting…" : "Delete video", "button secondary clipping-action clipping-delete-action",
+      const removeLabel = isReference ? "Delete reference" : "Delete video";
+      const remove = button(deleting ? "Deleting…" : removeLabel, "button secondary clipping-action clipping-delete-action",
         () => { void deleteSource(id); });
       remove.dataset.clippingFocusKey = "delete-source";
-      remove.setAttribute("aria-label", (deleting ? "Deleting imported video " : "Delete imported video ") + name);
-      remove.setAttribute("aria-disabled", String(deleting || state.pendingSourceIDs.has(id)));
+      remove.setAttribute("aria-label", (deleting ? "Deleting saved source " : "Delete saved source ") + name);
+      remove.setAttribute("aria-disabled", String(deleting || state.pendingSourceIDs.has(id) || analysisLockedForSource(id)));
       if (deleting) remove.setAttribute("aria-busy", "true");
-      remove.disabled = state.pendingSourceIDs.has(id);
+      remove.disabled = deleting || state.pendingSourceIDs.has(id) || analysisLockedForSource(id);
       actions.append(remove);
       row.append(main, actions);
       fragment.append(row);
@@ -631,7 +886,93 @@
     if (section.children.length > 2) parent.append(section);
   }
 
-  function renderArtifact(parent, artifact) {
+  function renderGeminiArtifact(parent, artifact, analysis, job) {
+    const panel = element("section", "clipping-artifact clipping-gemini-artifact");
+    const header = element("div", "clipping-gemini-header");
+    header.append(element("h4", "", "Gemini analysis"));
+    header.append(element("span", "badge", GEMINI_SCHEMA_VERSION));
+    panel.append(header);
+
+    const sourceDuration = Number(analysis.source_duration_ms);
+    if (Number.isSafeInteger(sourceDuration) && sourceDuration > 0) {
+      panel.append(element("p", "clipping-artifact-note", "Video duration reported by Gemini: " + sourceTime(sourceDuration) + " (" + sourceDuration.toLocaleString() + " ms). It was not independently measured."));
+    }
+    if (typeof analysis.summary === "string" && analysis.summary) {
+      const summary = element("section", "clipping-artifact-section");
+      summary.append(element("h5", "", "Summary"), element("p", "clipping-gemini-summary", analysis.summary));
+      panel.append(summary);
+    }
+    if (Array.isArray(analysis.language_codes) && analysis.language_codes.length) {
+      panel.append(element("p", "clipping-artifact-note", "Languages reported by Gemini: " + analysis.language_codes.join(", ")));
+    }
+    panel.append(element("p", "clipping-gemini-source-note", "Clip times are proposed source boundaries. Evidence and scores are model estimates, not independently verified facts."));
+
+    const options = job && job.options && typeof job.options === "object" ? job.options : {};
+    const requested = Number(options.candidate_limit);
+    const candidates = Array.isArray(analysis.candidates) ? analysis.candidates : [];
+    if (Number.isSafeInteger(requested) && requested >= 0 && candidates.length < requested) {
+      const reason = typeof analysis.fewer_candidates_reason === "string" ? analysis.fewer_candidates_reason : "";
+      panel.append(element("p", "clipping-artifact-note", "Gemini returned " + candidates.length + " of " + requested + " requested suggestions." + (reason ? " " + reason : "")));
+    } else if (typeof analysis.fewer_candidates_reason === "string" && analysis.fewer_candidates_reason.trim()) {
+      panel.append(element("p", "clipping-artifact-note", "Fewer suggestions: " + analysis.fewer_candidates_reason));
+    }
+
+    if (candidates.length) {
+      const section = element("section", "clipping-artifact-section clipping-gemini-candidates");
+      section.append(element("h5", "", "Clip suggestions · original rank order"));
+      section.append(element("p", "clipping-artifact-note", "Editorial scores are estimates, not calibrated probabilities or guarantees."));
+      for (const candidate of candidates) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const item = element("article", "clipping-gemini-candidate");
+        const variants = Array.isArray(candidate.title_variants) ? candidate.title_variants.filter((title) => typeof title === "string" && title) : [];
+        const title = variants[0] || "Clip suggestion";
+        const rank = Number.isSafeInteger(candidate.rank) ? "#" + candidate.rank + " · " : "";
+        item.append(element("h5", "", rank + title));
+        const start = Number(candidate.start_ms);
+        const end = Number(candidate.end_ms);
+        if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && end > start) {
+          item.append(element("p", "clipping-gemini-boundary", "Proposed source time: " + sourceTime(start, end) + " · " + (end - start).toLocaleString() + " ms"));
+        }
+        if (typeof candidate.hook === "string" && candidate.hook) item.append(element("p", "", "Hook suggestion (not a verified quote): " + candidate.hook));
+        if (typeof candidate.rationale === "string" && candidate.rationale) item.append(element("p", "", "Why this moment: " + candidate.rationale));
+        if (typeof candidate.boundary_rationale === "string" && candidate.boundary_rationale) item.append(element("p", "", "Boundary rationale: " + candidate.boundary_rationale));
+        if (typeof candidate.context === "string" && candidate.context) item.append(element("p", "", "Context: " + candidate.context));
+        if (Number.isSafeInteger(candidate.editorial_score)) {
+          item.append(element("p", "", "Editorial score estimate: " + candidate.editorial_score + " / 100"));
+        }
+        renderMetadata(item, "Score estimates by dimension", candidate.scores);
+        if (variants.length > 1) {
+          const alternatives = element("ul", "clipping-artifact-list");
+          for (const variant of variants.slice(1)) alternatives.append(element("li", "", "Alternative title: " + variant));
+          item.append(alternatives);
+        }
+        if (Array.isArray(candidate.evidence) && candidate.evidence.length) {
+          item.append(element("p", "clipping-artifact-note", "Evidence described by Gemini; not independently verified."));
+          renderEvidence(item, candidate.evidence);
+        }
+        section.append(item);
+      }
+      panel.append(section);
+    } else {
+      panel.append(element("p", "clipping-artifact-note", "Gemini returned no clip suggestions."));
+    }
+
+    if (Array.isArray(analysis.limitations) && analysis.limitations.length) {
+      const section = element("section", "clipping-artifact-section");
+      section.append(element("h5", "", "Limitations"));
+      const list = element("ul", "clipping-gemini-limitations");
+      for (const limitation of analysis.limitations) {
+        if (typeof limitation === "string" && limitation.trim()) list.append(element("li", "", limitation));
+      }
+      if (list.children.length) {
+        section.append(list);
+        panel.append(section);
+      }
+    }
+    parent.append(panel);
+  }
+
+  function renderArtifact(parent, artifact, job) {
     const panel = element("section", "clipping-artifact");
     panel.append(element("h4", "", "Saved analysis"));
     let envelope;
@@ -644,6 +985,16 @@
     if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
       panel.append(element("p", "clipping-artifact-note", "No displayable analysis fields were saved."));
       parent.append(panel);
+      return;
+    }
+    const schemaVersion = String(artifact.schema_version || "");
+    if (schemaVersion === GEMINI_SCHEMA_VERSION) {
+      if (envelope.version !== GEMINI_SCHEMA_VERSION) {
+        panel.append(element("p", "clipping-row-error", "The saved Gemini analysis schema did not match its artifact version."));
+        parent.append(panel);
+        return;
+      }
+      renderGeminiArtifact(parent, artifact, envelope, job);
       return;
     }
     const data = envelope.payload && typeof envelope.payload === "object" && !Array.isArray(envelope.payload)
@@ -670,7 +1021,13 @@
   function renderResults(parent, jobID) {
     const result = state.resultDetails.get(jobID);
     const error = state.resultErrors.get(jobID);
-    if (error) parent.append(element("p", "clipping-row-error", error));
+    const job = state.jobs.find((item) => safeID(item && item.id) === jobID);
+    if (error) {
+      parent.append(element("p", "clipping-row-error", error));
+      const retry = button("Try loading again", "button secondary clipping-action", () => { void loadResults(jobID); });
+      retry.dataset.clippingFocusKey = "reload-results";
+      parent.append(retry);
+    }
     if (state.loadingResults.has(jobID)) {
       parent.append(element("p", "clipping-artifact-note", "Loading saved analysis…"));
       return;
@@ -680,7 +1037,7 @@
       parent.append(element("p", "clipping-artifact-note", "No saved analysis results are available for this job."));
     }
     for (const artifact of artifacts) {
-      if (artifact && typeof artifact === "object") renderArtifact(parent, artifact);
+      if (artifact && typeof artifact === "object") renderArtifact(parent, artifact, job);
     }
   }
 
@@ -691,15 +1048,26 @@
     row.dataset.jobId = id;
     const header = element("div", "clipping-job-heading");
     const source = state.sources.find((item) => String(item.id) === String(job.source_id));
-    header.append(element("strong", "clipping-job-title", source ? sourceName(source) : "YouTube analysis"));
+    header.append(element("strong", "clipping-job-title", isGeminiJob(job) ? "YouTube reference" : source ? sourceName(source) : "YouTube analysis"));
     header.append(element("span", "badge clipping-job-status", jobStatus(job)));
     row.append(header);
     const status = String(job.status || "").toLowerCase();
-    if (["queued", "running"].includes(status)) renderProgress(row, "Analysis progress", statusProgress(job));
-    const error = state.jobActionErrors.get(id) || String(job.error || "").trim();
+    if (!isGeminiJob(job) && ["queued", "running"].includes(status)) renderProgress(row, "Analysis progress", statusProgress(job));
+    if (isGeminiJob(job) && ["queued", "running", "submitting", "outcome_unknown"].includes(status)) {
+      row.append(element("p", "clipping-gemini-status", status === "running"
+        ? "Analysis is in progress. A percentage is not available."
+        : status === "outcome_unknown" ? "The provider outcome is unresolved. Refresh for an update." : "Analysis request saved. Waiting for provider status."));
+    }
+    const error = state.jobActionErrors.get(id) || (isGeminiJob(job)
+      ? job.error_code || job.error ? geminiErrorCopy(job) : ""
+      : String(job.error || "").trim());
     if (error) row.append(element("p", "clipping-row-error", error));
+    const safetyCopy = retrySafetyCopy(job);
+    if (safetyCopy) row.append(element("p", "clipping-gemini-status", safetyCopy));
     const footer = element("div", "clipping-job-actions");
-    footer.append(element("span", "clipping-job-meta", "Analysis type: " + (CONTENT_TYPE_LABELS[contentType(job.content_type)] || "General")));
+    footer.append(element("span", "clipping-job-meta", isGeminiJob(job)
+      ? geminiOptionsCopy(job.options)
+      : "Legacy analysis · " + (CONTENT_TYPE_LABELS[contentType(job.content_type)] || "General")));
     if (status === "completed" || state.resultDetails.has(id) || state.resultErrors.has(id)) {
       const expanded = state.expandedResults.has(id);
       const toggle = button(
@@ -708,10 +1076,18 @@
         () => { void toggleResults(id); }
       );
       toggle.dataset.clippingFocusKey = "results";
+      toggle.setAttribute("aria-expanded", String(expanded));
       if (state.loadingResults.has(id)) toggle.setAttribute("aria-busy", "true");
       footer.append(toggle);
     }
+    const canceling = state.pendingCancelJobIDs.has(id);
     const deleting = state.pendingDeleteJobIDs.has(id) || state.pendingDeleteSourceIDs.has(safeID(job.source_id));
+    if (["queued", "running", "submitting", "rate_limited_wait"].includes(status)) {
+      const cancel = button(canceling ? "Canceling…" : "Cancel analysis", "button secondary clipping-action", () => { void cancelJob(id); });
+      cancel.dataset.clippingFocusKey = "cancel-job";
+      cancel.disabled = canceling || deleting;
+      footer.append(cancel);
+    }
     const remove = button(deleting ? "Deleting…" : "Delete analysis", "button secondary clipping-action clipping-delete-action",
       () => { void deleteJob(id); });
     remove.dataset.clippingFocusKey = "delete-job";
@@ -719,7 +1095,7 @@
     remove.setAttribute("aria-label", (deleting ? "Deleting analysis for " : "Delete analysis for ") + sourceNameForJob);
     remove.setAttribute("aria-disabled", String(deleting));
     if (deleting) remove.setAttribute("aria-busy", "true");
-    remove.disabled = false;
+    remove.disabled = deleting || canceling;
     footer.append(remove);
     row.append(footer);
     if (state.expandedResults.has(id)) {
@@ -746,6 +1122,8 @@
   async function load(kind, endpoint, render, errorNode, recordName, notifyError) {
     const lifecycle = state.lifecycle;
     const sequence = ++state.requestSequence[kind];
+    if (kind === "sources") state.sourcesLoaded = false;
+    if (kind === "jobs") state.jobsLoaded = false;
     errorNode.textContent = "";
     try {
       const response = await api(endpoint);
@@ -764,6 +1142,7 @@
         }
         state.sources = records.filter((source) => !state.deletedSourceIDs.has(safeID(source && source.id))
           && String(source && source.status || "").toLowerCase() !== "deleted");
+        state.sourcesLoaded = true;
       }
       if (kind === "jobs") {
         const visible = [];
@@ -779,8 +1158,11 @@
           visible.push(job);
         }
         state.jobs = visible;
+        state.jobsLoaded = true;
       }
       render();
+      if (kind === "jobs") renderSources();
+      updateImportState();
     } catch (error) {
       if (!current(lifecycle) || sequence !== state.requestSequence[kind] || error.name === "AbortError") return;
       if (kind === "sources") console.warn("[clipper/youtube-import] source refresh failed", { error_type: error && error.name || "unknown" });
@@ -789,140 +1171,58 @@
     }
   }
 
+  function renderGeminiReadiness() {
+    const config = geminiConfig();
+    const limits = geminiLimits();
+    if (!config) {
+      ui.geminiReadiness.textContent = "Gemini provider settings could not be loaded. Refresh before requesting an analysis.";
+      ui.geminiReadiness.dataset.state = "unknown";
+      ui.importLimits.textContent = "Provider limits are unavailable until settings load.";
+    } else if (config.configured !== true) {
+      ui.geminiReadiness.textContent = "Gemini is not configured. Ask the operator to configure the Google provider.";
+      ui.geminiReadiness.dataset.state = "blocked";
+      ui.importLimits.textContent = "The configured clip and source limits will appear here when Gemini is set up.";
+    } else if (config.enabled !== true) {
+      ui.geminiReadiness.textContent = "Gemini is configured but disabled. An operator must enable it before you can request analysis.";
+      ui.geminiReadiness.dataset.state = "blocked";
+      ui.importLimits.textContent = "The configured clip and source limits will appear here when Gemini is enabled.";
+    } else if (!limits) {
+      ui.geminiReadiness.textContent = "Gemini is configured and enabled, but its limits could not be read. Refresh provider settings before requesting analysis.";
+      ui.geminiReadiness.dataset.state = "unknown";
+      ui.importLimits.textContent = "Provider limits are unavailable until settings load.";
+    } else {
+      const duration = formatDuration(limits.maxSourceDurationMS);
+      ui.geminiReadiness.textContent = "Gemini is configured and enabled. Connection and YouTube video access have not been tested; a public video may be unavailable.";
+      ui.geminiReadiness.dataset.state = config.verification === "unverified" ? "unverified" : "configured";
+      const minSeconds = Math.ceil(limits.minClipMS / 1000);
+      const maxSeconds = Math.floor(limits.maxClipMS / 1000);
+      const maxCandidates = limits.maxCandidates;
+      ui.minClipSeconds.min = String(minSeconds);
+      ui.minClipSeconds.max = String(maxSeconds);
+      ui.maxClipSeconds.min = String(minSeconds);
+      ui.maxClipSeconds.max = String(maxSeconds);
+      for (const option of Array.from(ui.candidateLimit.options || [])) {
+        option.disabled = Number(option.value) > maxCandidates;
+      }
+      if (Number(ui.candidateLimit.value) > maxCandidates) ui.candidateLimit.value = String(maxCandidates);
+      ui.importLimits.textContent = "Clip lengths: " + minSeconds + "–" + maxSeconds + " seconds. Up to " + maxCandidates + " suggestions." + (duration ? " Source duration ceiling: " + duration + " as reported by Gemini, not independently measured." : "");
+    }
+    updateImportState();
+  }
+
   async function loadConfig(notifyError) {
     const lifecycle = state.lifecycle;
     const sequence = ++state.requestSequence.config;
     try {
-      state.config = await api("/api/clipping/config");
+      const config = await api("/api/clipping/config");
       if (!current(lifecycle) || sequence !== state.requestSequence.config) return;
-      const duration = formatDuration(state.config && state.config.max_duration_ms);
-      const size = formatBytes(state.config && state.config.max_source_bytes);
-      ui.importLimits.textContent = "One public video at a time; up to " + (duration || "four hours") + " and " + size + ".";
+      state.config = config;
+      renderGeminiReadiness();
     } catch (error) {
       if (!current(lifecycle) || sequence !== state.requestSequence.config || error.name === "AbortError") return;
       state.config = null;
-      if (notifyError) toastError(error, "Clipping settings could not be loaded.");
-    }
-  }
-
-  function renderWorkerSummary() {
-    if (!ui.workerSummary) return;
-    if (!state.worker) {
-      ui.workerSummary.textContent = "Worker status is unavailable. Open Modal worker settings to check the saved configuration.";
-    } else if (!state.worker.configured) {
-      ui.workerSummary.textContent = "The Modal worker is not set up yet. Videos can be imported; analysis jobs will wait for setup.";
-    } else if (!state.worker.enabled) {
-      ui.workerSummary.textContent = "The Modal worker is configured but disabled. Analysis jobs will wait until it is enabled.";
-    } else {
-      ui.workerSummary.textContent = "The Modal worker is enabled. Starting analysis may incur Modal charges.";
-    }
-  }
-
-  function renderWorkerStatus() {
-    const worker = state.worker;
-    if (!worker) {
-      ui.workerStatus.textContent = "Worker settings could not be loaded.";
-      return;
-    }
-    if (!worker.configured) {
-      ui.workerStatus.textContent = "Not configured · disabled by default";
-      return;
-    }
-    const details = [worker.enabled ? "Enabled" : "Disabled", "configured, not live checked"];
-    if (typeof worker.endpoint_host === "string" && worker.endpoint_host) details.push(worker.endpoint_host);
-    if (typeof worker.pipeline_revision === "string" && worker.pipeline_revision) details.push("revision " + worker.pipeline_revision);
-    ui.workerStatus.textContent = details.join(" · ");
-  }
-
-  async function loadWorker(notifyError) {
-    const lifecycle = state.lifecycle;
-    const sequence = ++state.requestSequence.worker;
-    ui.workerError.textContent = "";
-    try {
-      const response = await api("/api/clipping/config/worker");
-      if (!current(lifecycle) || sequence !== state.requestSequence.worker) return;
-      state.worker = response && response.worker ? response.worker : response;
-      ui.workerEnabled.checked = Boolean(state.worker && state.worker.enabled);
-      ui.workerRevision.value = String(state.worker && state.worker.pipeline_revision || "");
-      const seconds = Number(state.worker && state.worker.max_compute_seconds);
-      if (Number.isInteger(seconds) && seconds > 0 && seconds <= 43200) {
-        ui.workerMaxCompute.value = String(Math.ceil(seconds / 60));
-      }
-      ui.workerToken.value = "";
-      renderWorkerStatus();
-      renderWorkerSummary();
-    } catch (error) {
-      if (!current(lifecycle) || sequence !== state.requestSequence.worker || error.name === "AbortError") return;
-      state.worker = null;
-      renderWorkerStatus();
-      renderWorkerSummary();
-      ui.workerError.textContent = error.message || "Worker settings could not be loaded.";
-      if (notifyError) toastError(error, ui.workerError.textContent);
-    }
-  }
-
-  async function saveWorker(event) {
-    event.preventDefault();
-    const lifecycle = state.lifecycle;
-    if (!current(lifecycle)) return;
-    ui.workerError.textContent = "";
-    const endpoint = String(ui.workerEndpoint.value || "").trim();
-    const revision = String(ui.workerRevision.value || "").trim();
-    const token = String(ui.workerToken.value || "");
-    let parsed;
-    try { parsed = new URL(endpoint); } catch (_error) { parsed = null; }
-    if (!parsed || parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password
-      || parsed.search || parsed.hash || !parsed.pathname.endsWith("/dispatch")) {
-      ui.workerError.textContent = "Enter the complete HTTPS Modal dispatch URL ending in /dispatch.";
-      ui.settings.open = true;
-      ui.workerEndpoint.focus();
-      return;
-    }
-    if (!/^[A-Za-z0-9._-]{1,64}$/.test(revision)) {
-      ui.workerError.textContent = "Enter the pipeline revision that matches the deployed Modal worker.";
-      ui.settings.open = true;
-      ui.workerRevision.focus();
-      return;
-    }
-    if (token && !/^[0-9a-f]{64}$/.test(token)) {
-      ui.workerError.textContent = "The worker bearer token must contain 64 lowercase hexadecimal characters.";
-      ui.settings.open = true;
-      ui.workerToken.focus();
-      return;
-    }
-    const maxComputeMinutes = Number(ui.workerMaxCompute.value);
-    if (!Number.isInteger(maxComputeMinutes) || maxComputeMinutes < 1 || maxComputeMinutes > 720) {
-      ui.workerError.textContent = "Choose a maximum analysis time from 1 to 720 minutes.";
-      ui.settings.open = true;
-      ui.workerMaxCompute.focus();
-      return;
-    }
-    if (!state.worker?.configured && !token) {
-      ui.workerError.textContent = "Enter the worker bearer token for initial setup.";
-      ui.settings.open = true;
-      ui.workerToken.focus();
-      return;
-    }
-    ui.workerSave.disabled = true;
-    try {
-      await api("/api/clipping/config/worker", {
-        method: "PUT",
-        body: JSON.stringify({
-          enabled: ui.workerEnabled.checked,
-          endpoint,
-          bearer_token: token,
-          pipeline_revision: revision,
-          max_compute_seconds: maxComputeMinutes * 60
-        })
-      });
-      if (!current(lifecycle)) return;
-      ui.workerToken.value = "";
-      ui.workerSaveNote.textContent = "Settings saved. The endpoint was not live checked.";
-      await loadWorker();
-    } catch (error) {
-      if (current(lifecycle)) ui.workerError.textContent = toastError(error, "Worker settings could not be saved.");
-    } finally {
-      if (current(lifecycle)) ui.workerSave.disabled = false;
+      renderGeminiReadiness();
+      if (notifyError) toastError(error, "Gemini provider settings could not be loaded.");
     }
   }
 
@@ -943,132 +1243,307 @@
     const id = safeID(jobID);
     if (!id || state.deletedJobIDs.has(id) || !state.active || state.loadingResults.has(id)) return;
     const lifecycle = state.lifecycle;
+    const sequence = (state.resultSequences.get(id) || 0) + 1;
+    state.resultSequences.set(id, sequence);
     state.loadingResults.add(id);
     state.resultErrors.delete(id);
     renderJobs();
     try {
       const response = await api("/api/clipping/jobs/" + encodeURIComponent(id) + "/results");
-      if (!current(lifecycle) || state.deletedJobIDs.has(id)) return;
+      if (!current(lifecycle) || state.deletedJobIDs.has(id) || state.resultSequences.get(id) !== sequence) return;
       const result = response && response.results ? response.results : response;
       if (result && result.job_id && safeID(result.job_id) !== id) throw new Error("Saved results did not match this analysis job.");
       state.resultDetails.set(id, result || {});
     } catch (error) {
-      if (current(lifecycle) && !state.deletedJobIDs.has(id) && error.name !== "AbortError") {
+      if (current(lifecycle) && !state.deletedJobIDs.has(id) && state.resultSequences.get(id) === sequence && error.name !== "AbortError") {
         const message = error.message || "Saved analysis could not be loaded.";
         state.resultErrors.set(id, message);
         toastError(error, message);
       }
     } finally {
-      state.loadingResults.delete(id);
-      if (current(lifecycle)) renderJobs();
+      if (current(lifecycle) && state.resultSequences.get(id) === sequence) {
+        state.loadingResults.delete(id);
+        renderJobs();
+      }
     }
   }
 
-  async function createJob(sourceID) {
-    const id = safeID(sourceID);
-    const source = state.sources.find((item) => safeID(item && item.id) === id);
-    if (!id || !source || String(source.status).toLowerCase() !== "ready" || state.pendingSourceIDs.has(id)) return;
-    const lifecycle = state.lifecycle;
-    const type = contentType(state.contentTypes.get(id));
-    const fingerprint = id + ":" + type;
-    let idempotencyKey = state.pendingKeys.get(fingerprint);
-    if (!idempotencyKey) {
-      idempotencyKey = root.crypto && typeof root.crypto.randomUUID === "function"
-        ? root.crypto.randomUUID()
-        : "clipping-" + Date.now() + "-" + Math.random().toString(16).slice(2);
-      state.pendingKeys.set(fingerprint, idempotencyKey);
+  function clearFieldError(field) {
+    field.removeAttribute("aria-invalid");
+  }
+
+  function validateGeminiOptions() {
+    ui.optionsError.textContent = "";
+    for (const field of [ui.contentType, ui.minClipSeconds, ui.maxClipSeconds, ui.candidateLimit]) clearFieldError(field);
+    const limits = geminiLimits();
+    if (!limits) {
+      ui.optionsError.textContent = "Gemini limits are unavailable. Refresh provider settings before submitting.";
+      ui.contentType.setAttribute("aria-invalid", "true");
+      ui.contentType.focus();
+      return null;
     }
-    state.pendingJobBaselines.set(id, new Set(state.jobs.map((job) => safeID(job && job.id)).filter(Boolean)));
-    state.pendingSourceIDs.add(id);
-    state.sourceActionErrors.delete(id);
+    const minClipSeconds = Number(ui.minClipSeconds.value);
+    const maxClipSeconds = Number(ui.maxClipSeconds.value);
+    const candidateLimit = Number(ui.candidateLimit.value);
+    const minAllowedSeconds = Math.ceil(limits.minClipMS / 1000);
+    const maxAllowedSeconds = Math.floor(limits.maxClipMS / 1000);
+    const maxCandidates = limits.maxCandidates;
+    if (!Number.isInteger(minClipSeconds) || minClipSeconds < minAllowedSeconds || minClipSeconds > maxAllowedSeconds) {
+      ui.optionsError.textContent = "Choose a shortest clip from " + minAllowedSeconds + " to " + maxAllowedSeconds + " seconds.";
+      ui.minClipSeconds.setAttribute("aria-invalid", "true");
+      ui.minClipSeconds.focus();
+      return null;
+    }
+    if (!Number.isInteger(maxClipSeconds) || maxClipSeconds < minAllowedSeconds || maxClipSeconds > maxAllowedSeconds) {
+      ui.optionsError.textContent = "Choose a longest clip from " + minAllowedSeconds + " to " + maxAllowedSeconds + " seconds.";
+      ui.maxClipSeconds.setAttribute("aria-invalid", "true");
+      ui.maxClipSeconds.focus();
+      return null;
+    }
+    if (minClipSeconds > maxClipSeconds) {
+      ui.optionsError.textContent = "The longest clip must be at least as long as the shortest clip.";
+      ui.maxClipSeconds.setAttribute("aria-invalid", "true");
+      ui.maxClipSeconds.focus();
+      return null;
+    }
+    if (!Number.isInteger(candidateLimit) || candidateLimit < 1 || candidateLimit > maxCandidates) {
+      ui.optionsError.textContent = "Choose between 1 and " + maxCandidates + " suggested clips.";
+      ui.candidateLimit.setAttribute("aria-invalid", "true");
+      ui.candidateLimit.focus();
+      return null;
+    }
+    const type = String(ui.contentType.value || "").toLowerCase();
+    if (!CONTENT_TYPES.includes(type)) {
+      ui.optionsError.textContent = "Choose a supported content type.";
+      ui.contentType.setAttribute("aria-invalid", "true");
+      ui.contentType.focus();
+      return null;
+    }
+    return {
+      content_type: type,
+      min_clip_ms: minClipSeconds * 1000,
+      max_clip_ms: maxClipSeconds * 1000,
+      candidate_limit: candidateLimit
+    };
+  }
+
+  function makeIdempotencyKey() {
+    if (root.crypto && typeof root.crypto.randomUUID === "function") return root.crypto.randomUUID();
+    if (root.crypto && typeof root.crypto.getRandomValues === "function") {
+      const bytes = new Uint8Array(16);
+      root.crypto.getRandomValues(bytes);
+      return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    }
+    return "gemini-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+  }
+
+  async function createGeminiJob(request) {
+    if (state.geminiRequestPending || !geminiReady()) return;
+    const sourceID = safeID(request && request.sourceID);
+    const source = sourceID ? state.sources.find((item) => safeID(item && item.id) === sourceID) : null;
+    if (sourceID && (!source || String(source.status).toLowerCase() !== "ready" || !["youtube_url", "youtube_original_file"].includes(String(source.kind || ""))
+      || source.rights_attested !== true || state.pendingSourceIDs.has(sourceID) || state.deletedSourceIDs.has(sourceID)
+      || !sourceAnalysisState(sourceID).canStart)) return;
+    const youtubeURL = sourceID ? "" : String(request && request.youtubeURL || "").trim();
+    const videoID = youtubeVideoID(youtubeURL);
+    if (!sourceID && !videoID) {
+      ui.importError.textContent = "Paste a valid link to one public YouTube video.";
+      ui.link.setAttribute("aria-invalid", "true");
+      ui.link.focus();
+      return;
+    }
+    const identity = sourceID ? "source:" + sourceID : "youtube:" + videoID;
+    const unresolved = state.unknownRequests.get(identity);
+    if (state.unknownRequests.size && !unresolved) {
+      ui.importError.textContent = "Resolve the previous request by resending it before starting another analysis.";
+      return;
+    }
+    if (!sourceID && !unresolved && !ui.permission.checked) {
+      ui.importError.textContent = "Confirm that you have permission to reuse and process this video.";
+      ui.permission.setAttribute("aria-invalid", "true");
+      ui.permission.focus();
+      return;
+    }
+    ui.importError.textContent = "";
+    clearFieldError(ui.link);
+    clearFieldError(ui.permission);
+    const mappedSource = !sourceID && state.urlSourceIDs.get(videoID);
+    if (mappedSource && !unresolved && (!state.sourcesLoaded
+      || !state.sources.some((item) => safeID(item && item.id) === mappedSource)
+      || !sourceAnalysisState(mappedSource).canStart)) {
+      ui.importError.textContent = "This video already has an active or unresolved analysis. Review its saved status below.";
+      return;
+    }
+    const options = unresolved ? null : validateGeminiOptions();
+    if (!unresolved && !options) return;
+    const body = unresolved ? unresolved.body : JSON.stringify(sourceID
+      ? { source_id: sourceID, options } : { youtube_url: youtubeURL, rights_attested: true, options });
+    const idempotencyKey = unresolved ? unresolved.key : makeIdempotencyKey();
+    const lifecycle = state.lifecycle;
+    invalidateListLoads();
+    state.geminiRequestPending = true;
+    if (sourceID) {
+      state.pendingSourceIDs.add(sourceID);
+      state.sourceActionErrors.delete(sourceID);
+      state.pendingJobBaselines.set(sourceID, new Set(state.jobs.map((job) => safeID(job && job.id)).filter(Boolean)));
+    } else {
+      ui.importButton.textContent = "Saving request…";
+      ui.link.disabled = true;
+      ui.permission.disabled = true;
+      ui.contentType.disabled = true;
+      ui.minClipSeconds.disabled = true;
+      ui.maxClipSeconds.disabled = true;
+      ui.candidateLimit.disabled = true;
+      ui.importForm.setAttribute("aria-busy", "true");
+      ui.importStatus.textContent = "Saving the analysis request…";
+    }
     renderSources();
+    updateImportState();
     try {
-      const response = await api("/api/clipping/jobs", {
+      const response = await api("/api/clipping/gemini/jobs", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({ source_id: id, content_type: type })
+        body
       });
       if (!current(lifecycle)) return;
-      if (response && response.job && typeof response.job === "object") {
-        const createdID = safeID(response.job.id);
-        if (createdID && !state.jobTracking.has(createdID)) observeJobStatus(Object.assign({}, response.job, { status: "queued" }));
-        observeJobStatus(response.job);
+      const job = response && response.job;
+      const jobID = safeID(job && job.id);
+      if (!jobID) throw new Error("The analysis request response did not include a saved job. Refresh to check its status.");
+      if (!state.jobTracking.has(jobID)) observeJobStatus(Object.assign({}, job, { status: job.status || "queued" }));
+      observeJobStatus(job);
+      state.unknownRequests.delete(identity);
+      if (videoID && safeID(job.source_id)) state.urlSourceIDs.set(videoID, safeID(job.source_id));
+      if (!state.jobs.some((item) => safeID(item && item.id) === jobID)) state.jobs.unshift(job);
+      renderJobs();
+      if (!sourceID) {
+        ui.link.value = "";
+        ui.permission.checked = false;
+        clearFieldError(ui.link);
+        clearFieldError(ui.permission);
       }
-      state.pendingKeys.delete(fingerprint);
-      ui.importStatus.textContent = "Analysis was queued for " + sourceName(source) + ".";
+      ui.importStatus.textContent = response.duplicate === true
+        ? "This analysis request was already saved. Its current status appears below."
+        : "Analysis request saved. Provider status will appear below.";
+      delete ui.importStatus.dataset.recovery;
+      showToast(response.duplicate === true ? "Analysis request was already saved." : "Analysis request saved.", false);
       await Promise.allSettled([
         load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs"),
         load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources")
       ]);
-      renderSources();
       ui.analysisHeading.focus?.({ preventScroll: true });
     } catch (error) {
-      if (current(lifecycle) && !state.deletedSourceIDs.has(id)) {
-        state.sourceActionErrors.set(id, toastError(error, "Analysis could not be queued."));
+      if (!current(lifecycle)) return;
+      // A rejection of a replay cannot establish whether its original POST succeeded.
+      const definiteRejection = !unresolved && [400, 401, 403, 404, 409, 413, 415, 422].includes(Number(error && error.status));
+      if (!definiteRejection) state.unknownRequests.set(identity, { body, key: idempotencyKey });
+      const message = definiteRejection
+        ? error && error.message || "The analysis request could not be saved."
+        : "The request outcome could not be confirmed. Resend the same request to check it safely; no automatic retry was made.";
+      if (sourceID && !state.deletedSourceIDs.has(sourceID)) {
+        state.sourceActionErrors.set(sourceID, message);
+        if (!error || error.status !== 401) showToast(message, true);
         renderSources();
+      } else if (!sourceID) {
+        ui.importError.textContent = message;
+        if (!error || error.status !== 401) showToast(message, true);
         ui.importStatus.textContent = "";
+        ui.link.focus?.({ preventScroll: true });
       }
     } finally {
-      state.pendingSourceIDs.delete(id);
-      state.pendingJobBaselines.delete(id);
-      if (current(lifecycle)) renderSources();
+      if (!current(lifecycle)) return;
+      state.geminiRequestPending = false;
+      if (sourceID) {
+        state.pendingSourceIDs.delete(sourceID);
+        state.pendingJobBaselines.delete(sourceID);
+      } else {
+        ui.link.disabled = false;
+        ui.permission.disabled = false;
+        ui.contentType.disabled = false;
+        ui.minClipSeconds.disabled = false;
+        ui.maxClipSeconds.disabled = false;
+        ui.candidateLimit.disabled = false;
+        ui.importForm.removeAttribute("aria-busy");
+        updateImportState();
+      }
+      renderSources();
+      updateImportState();
     }
   }
 
-  async function submitImport(event) {
+  async function submitGeminiRequest(event) {
     event.preventDefault();
-    const lifecycle = state.lifecycle;
-    if (!current(lifecycle)) return;
+    if (!current(state.lifecycle)) return;
     ui.importError.textContent = "";
-    const value = String(ui.link.value || "").trim();
-    if (!youtubeVideoID(value)) {
+    if (!youtubeVideoID(String(ui.link.value || "").trim())) {
       ui.importError.textContent = "Paste a valid link to one public YouTube video.";
+      ui.link.setAttribute("aria-invalid", "true");
       ui.link.focus();
       return;
     }
-    if (!ui.permission.checked) {
+    if (!ui.permission.checked && !state.unknownRequests.has("youtube:" + youtubeVideoID(ui.link.value))) {
       ui.importError.textContent = "Confirm that you have permission to reuse and process this video.";
+      ui.permission.setAttribute("aria-invalid", "true");
       ui.permission.focus();
       return;
     }
-    ui.importButton.disabled = true;
-    ui.importButton.textContent = "Importing…";
-    ui.link.disabled = true;
-    ui.permission.disabled = true;
-    ui.importForm.setAttribute("aria-busy", "true");
-    ui.importStatus.textContent = "The public YouTube link was accepted. Preparing the video…";
-    let restoreLinkFocus = false;
-    console.info("[clipper/youtube-import] submitting import request");
+    if (!geminiReady()) {
+      ui.importError.textContent = "Gemini must be configured and enabled before an analysis request can be saved.";
+      ui.geminiReadiness.focus?.({ preventScroll: true });
+      return;
+    }
+    await createGeminiJob({ youtubeURL: String(ui.link.value || "").trim() });
+  }
+
+  async function cancelJob(jobID) {
+    const id = safeID(jobID);
+    const job = state.jobs.find((item) => safeID(item && item.id) === id);
+    if (!id || !job || state.pendingCancelJobIDs.has(id) || state.pendingDeleteJobIDs.has(id)
+      || !["queued", "running", "submitting", "rate_limited_wait"].includes(String(job.status || "").toLowerCase())) return;
+    const description = isGeminiJob(job)
+      ? "Cancel this analysis? If Google has already started work, cancellation does not confirm that Google stopped processing it. The saved source remains."
+      : "Cancel this analysis? The saved source remains.";
+    const confirmed = await confirmAction("Cancel analysis?", description, () => performJobCancel(id), "Cancel analysis");
+    if (!confirmed) focusTarget(Array.from(ui.jobs.children).find((row) => row.dataset.jobId === id), "cancel-job")?.focus?.({ preventScroll: true });
+    else ui.analysisHeading.focus?.({ preventScroll: true });
+  }
+
+  async function performJobCancel(id) {
+    const lifecycle = state.lifecycle;
+    if (!state.jobs.some((job) => safeID(job && job.id) === id) || state.deletedJobIDs.has(id)) {
+      return { ok: false, message: "This analysis is no longer available. Refresh saved analyses." };
+    }
+    invalidateListLoads();
+    state.pendingCancelJobIDs.add(id);
+    state.jobActionErrors.delete(id);
+    renderJobs();
     try {
-      const response = await api("/api/clipping/sources/import", {
-        method: "POST",
-        body: JSON.stringify({ url: value, rights_attested: true })
-      });
-      if (!current(lifecycle)) return;
-      const source = response && response.source;
-      const id = safeID(source && source.id);
-      console.info("[clipper/youtube-import] import accepted", { source_id: id, status: String(source && source.status || "") });
-      if (id && !state.sources.some((item) => safeID(item && item.id) === id)) state.sources.unshift(source);
-      ui.link.value = "";
-      ui.permission.checked = false;
-      ui.importForm.reset?.();
-      ui.importStatus.textContent = "Import accepted. The video will appear below as it becomes ready.";
-      await load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources");
-      renderSources();
+      const response = await api("/api/clipping/jobs/" + encodeURIComponent(id) + "/cancel", { method: "POST" });
+      if (!current(lifecycle)) return { ok: false };
+      const job = response && response.job;
+      if (!job || safeID(job.id) !== id) throw new Error("Cancellation could not be confirmed. Refresh to check the saved status.");
+      state.jobs = state.jobs.map((item) => safeID(item && item.id) === id ? job : item);
+      observeJobStatus(job);
+      renderJobs();
+      showToast(isGeminiJob(job)
+        ? "Analysis canceled locally. The provider may still be processing work already submitted."
+        : "Analysis canceled.", false);
+      await Promise.allSettled([
+        load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs"),
+        load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources")
+      ]);
+      return { ok: true };
     } catch (error) {
-      if (!current(lifecycle)) return;
-      console.warn("[clipper/youtube-import] import request failed", { error_type: error && error.name || "unknown", http_status: Number.isInteger(error && error.status) ? error.status : null });
-      ui.importError.textContent = toastError(error, "The YouTube video could not be imported.");
-      ui.importStatus.textContent = "";
-      restoreLinkFocus = true;
+      if (!current(lifecycle)) return { ok: false };
+      const message = "Cancellation could not be confirmed. Refresh to check the saved status.";
+      state.jobActionErrors.set(id, message);
+      renderJobs();
+      if (!error || error.status !== 401) showToast(message, true);
+      return { ok: false, message };
     } finally {
       if (current(lifecycle)) {
-        ui.importButton.textContent = "Import YouTube video";
-        ui.link.disabled = false;
-        ui.permission.disabled = false;
-        ui.importForm.removeAttribute("aria-busy");
-        updateImportState();
-        if (restoreLinkFocus) ui.link.focus({ preventScroll: true });
+        state.pendingCancelJobIDs.delete(id);
+        renderJobs();
+        renderSources();
       }
     }
   }
@@ -1076,9 +1551,26 @@
   async function deleteSource(sourceID) {
     const id = safeID(sourceID);
     const source = state.sources.find((item) => safeID(item && item.id) === id);
-    if (!id || !source || state.deletedSourceIDs.has(id) || state.pendingDeleteSourceIDs.has(id)) return;
+    if (!id || !source || state.deletedSourceIDs.has(id) || state.pendingDeleteSourceIDs.has(id) || analysisLockedForSource(id)) return;
     const name = sourceName(source);
-    if (!confirmAction("Delete “" + name + "” and its analyses? This stops any analysis in progress and removes the imported video.")) return;
+    let description = source.kind === "youtube_url"
+      ? "Delete the saved YouTube reference and its analysis records? This removes the saved reference; it does not delete a local video file."
+      : "Delete “" + name + "” and its saved analyses? This removes the imported video and its analysis records.";
+    if (state.jobs.some((job) => safeID(job.source_id) === id && isGeminiJob(job) && activeJobStatus(job.status))) {
+      description += " Work already submitted to Google may continue processing.";
+    }
+    const confirmed = await confirmAction("Delete saved source?", description, () => performSourceDelete(id));
+    if (!confirmed) {
+      focusTarget(Array.from(ui.sources.children).find((row) => row.dataset.sourceId === id), "delete-source")?.focus?.({ preventScroll: true });
+      return;
+    }
+    focusFirstAction(ui.sources, "delete-source");
+    if (!state.sources.length) ui.link.focus?.({ preventScroll: true });
+  }
+
+  async function performSourceDelete(id) {
+    const source = state.sources.find((item) => safeID(item && item.id) === id);
+    if (!source || state.deletedSourceIDs.has(id)) return { ok: false, message: "This source is no longer available. Refresh saved sources." };
     const lifecycle = state.lifecycle;
     invalidateListLoads();
     state.pendingDeleteSourceIDs.add(id);
@@ -1092,23 +1584,26 @@
       invalidateListLoads();
       renderSources();
       renderJobs();
-      showToast(response && response.cleanup_pending === true
-        ? "Video and analyses removed. File cleanup is still finishing."
-        : "Video and its analyses deleted.", false);
+      showToast(response && response.cleanup_pending === true && source.kind !== "youtube_url"
+        ? "Saved source and analyses removed. File cleanup is still finishing."
+        : "Saved source and analyses deleted.", false);
       await Promise.allSettled([
         load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources"),
         load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs")
       ]);
-      focusFirstAction(ui.sources, "delete-source");
-      if (!state.sources.length) ui.link.focus?.({ preventScroll: true });
+      return { ok: true };
     } catch (error) {
       if (current(lifecycle) && !state.deletedSourceIDs.has(id)) {
-        state.sourceActionErrors.set(id, toastError(error, "The imported video could not be deleted."));
+        const message = error && error.message || "The saved source could not be deleted.";
+        state.sourceActionErrors.set(id, message);
         renderSources();
+        toastError(error, message);
+        return { ok: false, message };
       }
+      return { ok: false, message: "The session changed before deletion was confirmed. Refresh saved sources." };
     } finally {
-      state.pendingDeleteSourceIDs.delete(id);
       if (current(lifecycle)) {
+        state.pendingDeleteSourceIDs.delete(id);
         renderSources();
         renderJobs();
       }
@@ -1123,10 +1618,23 @@
     const source = state.sources.find((item) => safeID(item && item.id) === safeID(job.source_id));
     const name = source ? sourceName(source) : "this video";
     const wasActive = activeJobStatus(job.status);
-    const confirmation = wasActive
-      ? "Delete the analysis for “" + name + "”? This stops the analysis in progress and keeps the imported video."
-      : "Delete the saved analysis for “" + name + "”? Its results will be removed and the imported video will remain.";
-    if (!confirmAction(confirmation)) return;
+    const geminiActive = isGeminiJob(job) && wasActive;
+    const description = geminiActive
+      ? "Delete the analysis for “" + name + "” and its saved results? The source will remain. If Google work has already started, this does not confirm that Google stopped processing it."
+      : wasActive
+        ? "Delete the analysis for “" + name + "” and its saved results? This requests cancellation and keeps the saved source."
+        : "Delete the saved analysis for “" + name + "” and its results? The saved source will remain.";
+    const confirmed = await confirmAction("Delete analysis?", description, () => performJobDelete(id, job, wasActive));
+    if (!confirmed) {
+      focusTarget(Array.from(ui.jobs.children).find((row) => row.dataset.jobId === id), "delete-job")?.focus?.({ preventScroll: true });
+      return;
+    }
+    focusFirstAction(ui.jobs, "delete-job");
+    if (!state.jobs.length) ui.analysisHeading.focus?.({ preventScroll: true });
+  }
+
+  async function performJobDelete(id, job, wasActive) {
+    if (state.deletedJobIDs.has(id)) return { ok: false, message: "This analysis is no longer available. Refresh saved analyses." };
     const lifecycle = state.lifecycle;
     invalidateListLoads();
     state.pendingDeleteJobIDs.add(id);
@@ -1140,21 +1648,26 @@
       invalidateListLoads();
       renderJobs();
       renderSources();
-      showToast(wasActive ? "Analysis stopped and deleted." : "Analysis and saved results deleted.", false);
+      showToast(isGeminiJob(job) && wasActive
+        ? "Saved analysis deleted. The provider may still be processing work already submitted."
+        : wasActive ? "Analysis canceled and deleted." : "Analysis and saved results deleted.", false);
       await Promise.allSettled([
         load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs"),
         load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources")
       ]);
-      focusFirstAction(ui.jobs, "delete-job");
-      if (!state.jobs.length) ui.analysisHeading.focus?.({ preventScroll: true });
+      return { ok: true };
     } catch (error) {
       if (current(lifecycle) && !state.deletedJobIDs.has(id)) {
-        state.jobActionErrors.set(id, toastError(error, "The analysis could not be deleted."));
+        const message = error && error.message || "The analysis could not be deleted.";
+        state.jobActionErrors.set(id, message);
         renderJobs();
+        toastError(error, message);
+        return { ok: false, message };
       }
+      return { ok: false, message: "The session changed before deletion was confirmed. Refresh saved analyses." };
     } finally {
-      state.pendingDeleteJobIDs.delete(id);
       if (current(lifecycle)) {
+        state.pendingDeleteJobIDs.delete(id);
         renderJobs();
         renderSources();
       }
@@ -1162,33 +1675,60 @@
   }
 
   function updateImportState() {
-    const hasLink = String(ui.link.value || "").trim().length > 0;
-    ui.importButton.disabled = !hasLink || !ui.permission.checked;
-    if (hasLink && !youtubeVideoID(ui.link.value)) {
+    const value = String(ui.link.value || "").trim();
+    const hasLink = value.length > 0;
+    const videoID = youtubeVideoID(value);
+    const validLink = Boolean(videoID);
+    const unresolved = state.unknownRequests.get("youtube:" + videoID);
+    const mappedSource = state.urlSourceIDs.get(videoID);
+    const otherUnknown = state.unknownRequests.size > 0 && !unresolved;
+    const blocked = Boolean(otherUnknown || (mappedSource && !unresolved && (!state.sourcesLoaded
+      || !state.sources.some((item) => safeID(item && item.id) === mappedSource)
+      || !sourceAnalysisState(mappedSource).canStart)));
+    ui.importButton.textContent = state.geminiRequestPending ? "Saving request…" : unresolved ? "Resend same request" : "Analyze video";
+    ui.importButton.disabled = !hasLink || !validLink || (!ui.permission.checked && !unresolved)
+      || !geminiReady() || state.geminiRequestPending || blocked;
+    if (unresolved) {
+      const original = JSON.parse(unresolved.body).options;
+      ui.importStatus.textContent = "The previous request is unresolved. Resending uses its original settings: " + geminiOptionsCopy(original) + ".";
+      ui.importStatus.dataset.recovery = "true";
+    } else if (otherUnknown) {
+      ui.importStatus.textContent = "A previous request is unresolved. Return to it and resend the same request before starting another analysis.";
+      ui.importStatus.dataset.recovery = "true";
+    } else if (blocked) {
+      ui.importStatus.textContent = "This video already has an active or unresolved analysis. Review its saved status below.";
+      ui.importStatus.dataset.recovery = "true";
+    } else if (ui.importStatus.dataset.recovery === "true") {
+      ui.importStatus.textContent = "";
+      delete ui.importStatus.dataset.recovery;
+    }
+    if (hasLink && !validLink) {
       ui.importError.textContent = "Use one public YouTube video link.";
     }
   }
 
   function bind() {
     ui.refresh.addEventListener("click", () => { void refresh({ notify: true }); });
-    ui.importForm.addEventListener("submit", (event) => { void submitImport(event); });
+    ui.importForm.addEventListener("submit", (event) => { void submitGeminiRequest(event); });
     ui.link.addEventListener("input", () => {
       ui.importError.textContent = "";
+      clearFieldError(ui.link);
       updateImportState();
     });
-    ui.permission.addEventListener("change", updateImportState);
-    ui.workerForm.addEventListener("submit", (event) => { void saveWorker(event); });
-    ui.workerOpen.addEventListener("click", () => {
-      ui.settings.open = true;
-      ui.workerEndpoint.focus();
-    });
+    ui.permission.addEventListener("change", () => { clearFieldError(ui.permission); updateImportState(); });
+    for (const field of [ui.contentType, ui.minClipSeconds, ui.maxClipSeconds, ui.candidateLimit]) {
+      field.addEventListener("input", () => { ui.optionsError.textContent = ""; clearFieldError(field); });
+      field.addEventListener("change", () => { ui.optionsError.textContent = ""; clearFieldError(field); });
+    }
+    ui.confirmDelete.addEventListener("click", () => { void runConfirmation(); });
+    ui.confirmCancel.addEventListener("click", () => closeConfirmation(false));
+    ui.confirmDialog.addEventListener("cancel", cancelConfirmation);
     updateImportState();
   }
 
   function configure(options) {
     state.requestImpl = options && typeof options.request === "function" ? options.request : null;
     state.toastImpl = options && typeof options.toast === "function" ? options.toast : null;
-    state.confirmImpl = options && typeof options.confirm === "function" ? options.confirm : null;
   }
 
   function start() {
@@ -1202,30 +1742,32 @@
 
   async function refresh(options) {
     if (!state.active) return;
+    const lifecycle = state.lifecycle;
     const notifyError = Boolean(options && typeof options === "object" && options.notify);
     await Promise.allSettled([
       loadConfig(notifyError),
-      loadWorker(notifyError),
       load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources", notifyError),
       load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs", notifyError)
     ]);
-    renderSources();
-    renderJobs();
+    if (current(lifecycle)) {
+      renderSources();
+      renderJobs();
+    }
   }
 
   function stop(clear) {
+    if (state.pendingConfirmation) closeConfirmation(false);
     state.active = false;
     state.lifecycle++;
     if (clear !== false) {
       state.config = null;
-      state.worker = null;
       state.sources = [];
       state.sourceConsoleStatuses.clear();
       state.jobs = [];
-      state.contentTypes.clear();
       state.pendingSourceIDs.clear();
       state.pendingDeleteSourceIDs.clear();
       state.pendingDeleteJobIDs.clear();
+      state.pendingCancelJobIDs.clear();
       state.pendingJobBaselines.clear();
       state.deletedSourceIDs.clear();
       state.deletedJobIDs.clear();
@@ -1237,31 +1779,44 @@
       state.resultDetails.clear();
       state.resultErrors.clear();
       state.loadingResults.clear();
-      state.pendingKeys.clear();
+      state.resultSequences.clear();
+      state.unknownRequests.clear();
+      state.urlSourceIDs.clear();
+      state.uncertainSources.clear();
+      state.sourcesLoaded = false;
+      state.jobsLoaded = false;
+      state.geminiRequestPending = false;
       ui.importError.textContent = "";
+      ui.optionsError.textContent = "";
       ui.importStatus.textContent = "";
+      delete ui.importStatus.dataset.recovery;
       ui.sourceError.textContent = "";
       ui.jobsError.textContent = "";
-      ui.workerError.textContent = "";
-      ui.workerStatus.textContent = "Worker configuration has not been loaded.";
-      ui.workerSaveNote.textContent = "Saving settings does not test the worker connection.";
-      ui.workerEndpoint.value = "";
-      ui.workerRevision.value = "";
-      ui.workerToken.value = "";
-      ui.workerMaxCompute.value = "720";
-      ui.workerEnabled.checked = false;
-      ui.sources.replaceChildren(element("p", "empty", "Imported videos will appear here."));
-      ui.jobs.replaceChildren(element("p", "empty", "Analysis jobs will appear here."));
+      ui.sources.replaceChildren(element("p", "empty", "Saved references and legacy sources will appear here."));
+      ui.jobs.replaceChildren(element("p", "empty", "Saved analysis requests will appear here."));
       ui.sourceCount.textContent = "0";
       ui.jobCount.textContent = "0";
-      renderWorkerSummary();
-      ui.importButton.textContent = "Import YouTube video";
+      ui.importButton.textContent = "Analyze video";
       ui.link.value = "";
       ui.permission.checked = false;
       ui.link.disabled = false;
       ui.permission.disabled = false;
+      ui.contentType.disabled = false;
+      ui.minClipSeconds.disabled = false;
+      ui.maxClipSeconds.disabled = false;
+      ui.candidateLimit.disabled = false;
       ui.importForm.removeAttribute("aria-busy");
-      ui.importForm.reset?.();
+      ui.contentType.value = "general";
+      ui.minClipSeconds.value = "15";
+      ui.maxClipSeconds.value = "180";
+      ui.candidateLimit.value = "10";
+      ui.confirmDialog.removeAttribute("aria-busy");
+      ui.confirmError.textContent = "";
+      ui.confirmError.hidden = true;
+      ui.confirmCancel.disabled = false;
+      ui.confirmCancel.textContent = "Cancel";
+      ui.confirmDelete.disabled = false;
+      ui.confirmDelete.textContent = "Delete";
       updateImportState();
     }
   }
@@ -1270,31 +1825,22 @@
     if (!state.active || !event || typeof event.data !== "string") return;
     let payload;
     try { payload = JSON.parse(event.data); } catch (_error) { return; }
+    const lifecycle = state.lifecycle;
     if (kind === "clipping_source") {
-      const source = payload && payload.source && typeof payload.source === "object" ? payload.source : payload;
-      const id = safeID(source && source.id) || safeID(payload && payload.id);
-      if (id && String(source && source.status || "").toLowerCase() === "deleted") {
-        markSourceDeleted(id);
-        renderSources();
-        renderJobs();
-      }
-      if (id && state.deletedSourceIDs.has(id)) return;
-      void load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources");
+      // Events invalidate the list. Only authenticated GETs or acknowledged
+      // mutations can change records or establish a deletion tombstone.
+      void Promise.allSettled([
+        load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources"),
+        load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs")
+      ]);
       return;
     }
     if (kind === "clipping_job") {
       const job = payload && payload.job && typeof payload.job === "object" ? payload.job : payload;
       const id = safeID(job && job.id) || safeID(payload && payload.id);
-      if (id && job && job.analysis_deleted === true) {
-        markJobDeleted(id, job && job.source_id);
-        renderJobs();
-        renderSources();
-      } else if (id && (state.deletedJobIDs.has(id) || state.deletedSourceIDs.has(safeID(job && job.source_id)))) {
-        return;
-      } else if (id) {
-        observeJobStatus(job);
-      }
       if (id) {
+        state.resultSequences.set(id, (state.resultSequences.get(id) || 0) + 1);
+        state.loadingResults.delete(id);
         state.resultDetails.delete(id);
         state.resultErrors.delete(id);
       }
@@ -1302,7 +1848,8 @@
         load("jobs", "/api/clipping/jobs", renderJobs, ui.jobsError, "jobs"),
         load("sources", "/api/clipping/sources", renderSources, ui.sourceError, "sources")
       ]).then(() => {
-        if (id && !state.deletedJobIDs.has(id) && state.expandedResults.has(id)) void loadResults(id);
+        if (current(lifecycle) && id && !state.deletedJobIDs.has(id) && state.expandedResults.has(id)
+          && state.jobs.some((item) => safeID(item && item.id) === id)) void loadResults(id);
       });
     }
   }

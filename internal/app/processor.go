@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -40,10 +39,9 @@ func NewProcessor(store *Store, security *Security, logger *slog.Logger) *Proces
 }
 
 func (p *Processor) Run(ctx context.Context) {
-	go p.runClippingImportWorker(ctx)
 	go p.runClippingRetentionCleanup(ctx)
 	go p.runClippingStageRecovery(ctx)
-	go p.runClippingAnalysisWorker(ctx)
+	go p.runClippingGeminiWorkers(ctx)
 	p.process(ctx)
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
@@ -54,175 +52,6 @@ func (p *Processor) Run(ctx context.Context) {
 		case <-ticker.C:
 			p.process(ctx)
 		}
-	}
-}
-
-// runClippingAnalysisWorker dispatches one configured full-source analysis at
-// a time. Uncertain network outcomes keep their source claim until the
-// callback capability expires; this loop never retries them automatically.
-func (p *Processor) runClippingAnalysisWorker(ctx context.Context) {
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		worked, err := p.processNextClippingAnalysis(ctx)
-		if err != nil && ctx.Err() == nil {
-			p.logger.Warn("clipping analysis queue could not be processed")
-		}
-		if err != nil || !worked {
-			if !waitProcessor(ctx, 5*time.Second) {
-				return
-			}
-		}
-	}
-}
-
-func (p *Processor) processNextClippingAnalysis(ctx context.Context) (bool, error) {
-	jobs, err := p.app.store.PendingClippingJobs(20)
-	if err != nil {
-		return false, err
-	}
-	if len(jobs) == 0 {
-		return false, nil
-	}
-	config, configured, configErr := loadClippingWorkerConfig(p.app.store, p.app.security)
-	for _, job := range jobs {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		cached, err := p.app.store.TryCompleteClippingJobFromAnalysisCache(job.ID)
-		if err != nil {
-			p.logger.Warn("clipping source cache could not be applied", "job_id", job.ID)
-			p.failQueuedClippingAnalysis(job.ID, "Analysis results could not be loaded. Try analyzing the source again.")
-			continue
-		}
-		if cached {
-			p.app.store.PublishClippingJob(job.ID)
-			return true, nil
-		}
-		if configErr != nil {
-			p.logger.Warn("clipping worker configuration could not be loaded", "job_id", job.ID)
-			p.failQueuedClippingAnalysis(job.ID, "Analysis configuration could not be loaded. Check worker settings and try again.")
-			continue
-		}
-		if !configured || !config.Enabled {
-			continue
-		}
-		claimedSource, err := p.app.store.ClaimClippingAnalysisSource(job.ID)
-		if err != nil {
-			p.logger.Warn("clipping source analysis could not be claimed", "job_id", job.ID)
-			p.failQueuedClippingAnalysis(job.ID, "Analysis could not be started because the source was unavailable.")
-			continue
-		}
-		if !claimedSource {
-			continue
-		}
-		prepared, claimed, err := p.app.prepareClippingStageDispatch(job.ID, 0, p.app.callbackBaseURL)
-		if err != nil || !claimed {
-			_ = p.app.store.ReleaseClippingAnalysisSourceClaim(job.ID)
-			if err != nil {
-				p.logger.Warn("clipping analysis dispatch could not be prepared", "job_id", job.ID)
-				p.failQueuedClippingAnalysis(job.ID, "Analysis could not be prepared. Try analyzing the source again.")
-				p.app.store.PublishClippingJob(job.ID)
-			}
-			continue
-		}
-		if err := p.app.store.SetClippingAnalysisClaimAttempt(job.ID, prepared.Payload.AttemptID); err != nil {
-			leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
-			if leaseErr == nil {
-				if _, failErr := p.app.store.FailClippingStageBeforeSubmit(job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken, "Analysis source claim could not be saved"); failErr == nil {
-					if releaseErr := p.app.store.ReleaseClippingAnalysisSourceClaimBeforeSubmit(job.ID, prepared.Payload.AttemptID); releaseErr != nil {
-						_ = p.app.store.ReleaseClippingAnalysisSourceClaim(job.ID)
-					}
-				} else {
-					_ = p.app.store.CancelClippingJob(job.ID)
-				}
-			} else {
-				_ = p.app.store.CancelClippingJob(job.ID)
-			}
-			p.app.store.PublishClippingJob(job.ID)
-			continue
-		}
-		if ctx.Err() != nil {
-			// No network call has started, so retry safety is known.
-			leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
-			if leaseErr == nil {
-				_, failErr := p.app.store.FailClippingStageBeforeSubmit(job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken, "Analysis dispatch canceled before submission")
-				if failErr == nil || errors.Is(failErr, ErrClippingJobTerminal) {
-					_ = p.app.store.ReleaseClippingAnalysisSourceClaimBeforeSubmit(job.ID, prepared.Payload.AttemptID)
-				}
-			}
-			return false, ctx.Err()
-		}
-		dispatchStarted := time.Now()
-		if err := p.app.dispatchPreparedClippingStage(ctx, prepared); err != nil {
-			category, httpStatus := clippingWorkerDispatchFailureDetails(err)
-			p.logger.Warn(
-				"clipping analysis dispatch acknowledgement unavailable",
-				"job_id", job.ID,
-				"attempt_id", prepared.Payload.AttemptID,
-				"submission_attempted", clippingWorkerDispatchSubmissionAttempted(err),
-				"category", category,
-				"http_status", httpStatus,
-				"elapsed_ms", time.Since(dispatchStarted).Milliseconds(),
-			)
-			if clippingWorkerDispatchDefinitelyNotSubmitted(err) {
-				leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
-				if leaseErr == nil {
-					_, failErr := p.app.store.FailClippingStageBeforeSubmit(
-						job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken,
-						"Analysis dispatch ended before worker submission",
-					)
-					if failErr == nil || errors.Is(failErr, ErrClippingJobTerminal) {
-						if releaseErr := p.app.store.ReleaseClippingAnalysisSourceClaimBeforeSubmit(job.ID, prepared.Payload.AttemptID); releaseErr != nil {
-							p.logger.Warn("known-zero analysis source claim could not be released", "job_id", job.ID)
-						}
-						p.app.store.PublishClippingJob(job.ID)
-					} else {
-						p.logger.Warn("known-zero analysis dispatch could not be recorded", "job_id", job.ID)
-					}
-				} else {
-					p.logger.Warn("known-zero analysis lease could not be loaded", "job_id", job.ID)
-					_ = p.app.store.CancelClippingJob(job.ID)
-					p.app.store.PublishClippingJob(job.ID)
-				}
-			} else {
-				// A 202 can be accepted by Modal even if its acknowledgement
-				// arrives after our HTTP timeout or cannot be parsed. Never mark
-				// that attempt failed: doing so clears its media lease and makes
-				// the accepted GPU worker receive 410 during its first probe.
-				// Keep it running (but explicitly noted as uncertain) until the
-				// signed callback or existing expiry/recovery flow settles it.
-				leaseToken, leaseErr := p.app.clippingCapability(job.ID, prepared.Payload.AttemptID, clippingCapabilityLease)
-				if leaseErr == nil {
-					if _, noteErr := p.app.store.NoteClippingStageSubmissionUncertain(
-						job.ID, ClippingStageAnalysis, prepared.Payload.AttemptID, leaseToken,
-					); noteErr != nil && !errors.Is(noteErr, ErrClippingStaleAttempt) {
-						p.logger.Warn("ambiguous clipping dispatch could not be recorded", "job_id", job.ID)
-					}
-				} else {
-					// Preserve the state for reconciliation, rather than canceling a
-					// worker that may have already accepted the dispatch.
-					p.logger.Warn("ambiguous clipping dispatch lease could not be loaded", "job_id", job.ID)
-				}
-				p.app.store.PublishClippingJob(job.ID)
-			}
-		} else {
-			p.app.store.PublishClippingJob(job.ID)
-		}
-		return true, nil
-	}
-	return false, nil
-}
-
-func (p *Processor) failQueuedClippingAnalysis(jobID, reason string) {
-	failed, err := p.app.store.FailQueuedClippingJob(jobID, reason)
-	if err != nil {
-		p.logger.Warn("queued clipping analysis failure could not be recorded", "job_id", jobID)
-		return
-	}
-	if failed {
-		p.app.store.PublishClippingJob(jobID)
 	}
 }
 
@@ -255,6 +84,30 @@ func (p *Processor) runClippingStageRecovery(ctx context.Context) {
 
 func (p *Processor) recoverClippingStages() error {
 	now := time.Now().Unix()
+	if err := p.reconcileRetiredClipping(now); err != nil {
+		return err
+	}
+	recoveredGemini, err := p.app.store.RecoverClippingGeminiAttempts(now, false)
+	if err != nil {
+		return err
+	}
+	for _, id := range recoveredGemini {
+		p.app.store.PublishClippingJob(id)
+	}
+	expiredGemini, err := p.app.store.ExpireQueuedClippingGeminiJobs(now)
+	if err != nil {
+		return err
+	}
+	for _, jobID := range expiredGemini {
+		p.app.store.PublishClippingJob(jobID)
+	}
+	quarantined, err := p.app.store.QuarantineQueuedClippingGeminiJobs(now)
+	if err != nil {
+		return err
+	}
+	for _, jobID := range quarantined {
+		p.app.store.PublishClippingJob(jobID)
+	}
 	expired, err := p.app.store.ExpiredClippingStages(now, 100)
 	if err != nil {
 		return err
@@ -275,35 +128,6 @@ func (p *Processor) recoverClippingStages() error {
 		p.app.store.PublishClippingJob(job.ID)
 	}
 	return nil
-}
-
-// runClippingImportWorker drains the durable import queue outside the cheap
-// five-second project/generation scan. A single bounded worker is intentional:
-// imports can run for hours and contend for persistent disk/network capacity.
-func (p *Processor) runClippingImportWorker(ctx context.Context) {
-	p.logger.Info("clipping import worker started", "queue_idle_poll_seconds", 30)
-	for {
-		if err := ctx.Err(); err != nil {
-			return
-		}
-		worked, err := p.app.clippingAcquisition.ProcessNextImport(ctx)
-		if err != nil && ctx.Err() == nil {
-			// Import errors may include remote URLs or filesystem details. The
-			// source row contains a sanitized user-facing failure message.
-			p.logger.Warn("clipping source import worker iteration failed", "reason_code", clippingDiagnosticCode(ClippingDiagnosticStageDispatch, err))
-		}
-		if err != nil && ctx.Err() == nil {
-			if !waitProcessor(ctx, 5*time.Second) {
-				return
-			}
-		} else if !worked {
-			// ProcessNextImport also recovers exhausted import rows;
-			// call it before sleeping even when no ordinary import is queued.
-			if !waitProcessor(ctx, 30*time.Second) {
-				return
-			}
-		}
-	}
 }
 
 func (p *Processor) runClippingRetentionCleanup(ctx context.Context) {

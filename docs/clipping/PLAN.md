@@ -1,5 +1,7 @@
 # AI clipping implementation plan
 
+**Current work (2026-11-10):** the user authorized phased Gemini migration. [GEMINI-MIGRATION.md](GEMINI-MIGRATION.md) owns its current scope, phase gates and architecture; the download-first/Modal requirements below are historical for this migration. Each phase requires at least 15 meaningful commits, Terra/LUNA Max agents, independent review, and updated README/AGENTS.
+
 Planning baseline: 2026-10-08. Repository: https://github.com/darkweb19/video-automation.
 
 On 2026-10-09 (America/Toronto), the user authorized M3/C3.1+C3.2 implementation, local verification and independent review, ten meaningful commits, and publication only to `feat/clipper-ai`. This does not authorize a live paid inference run or deployment. The implemented Modal worker is opt-in after operator configuration. Because M1's corpus and benchmark work was waived, implementation evidence must not be described as meeting measured quality, language, or cost targets; M3's evaluation-dependent exit criteria remain unmeasured.

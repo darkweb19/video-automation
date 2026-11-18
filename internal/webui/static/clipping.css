@@ -11,17 +11,23 @@
 .clipping-section-head { margin-bottom: 14px; }
 .clipping-section-head h3 { margin: 0 0 4px; font-size: 17px; }
 .clipping-section-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
-.clipping-link-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 0 16px; }
-.clipping-link-form .field { min-width: 0; margin: 0 0 12px; }
+.clipping-link-form { display: grid; gap: 14px; }
+.clipping-link-form .field { min-width: 0; margin: 0; }
 .clipping-link-form .field small { margin-top: 5px; font-size: 11px; }
-.clipping-consent { display: flex; min-height: 42px; align-items: center; gap: 9px; margin: 0 0 12px; color: var(--graphite); font-size: 12px; line-height: 1.5; }
+.clipping-consent { display: flex; min-height: 42px; align-items: center; gap: 9px; margin: 0; color: var(--graphite); font-size: 12px; line-height: 1.5; }
 .clipping-consent input { width: 18px; min-height: 18px; flex: 0 0 18px; margin: 0; padding: 0; }
-.clipping-link-form .clipping-consent, .clipping-link-form > .form-error { grid-column: 1 / -1; }
-.clipping-link-form > .button { grid-column: 2; grid-row: 1; align-self: end; margin-bottom: 12px; }
+.clipping-analysis-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: start; gap: 12px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.clipping-analysis-options .field { min-width: 0; margin: 0; }
+.clipping-analysis-options .field label { margin-bottom: 5px; font-size: 11px; }
+.clipping-analysis-options .field input, .clipping-analysis-options .field select { min-height: 40px; padding: 8px 10px; font-size: 12px; }
+.clipping-options-help { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.clipping-link-form > .form-error { margin: 0; }
+.clipping-submit { min-width: 154px; justify-self: start; }
 .clipping-link-form[aria-busy="true"] > .button { cursor: progress; }
-.clipping-live-status { min-height: 1.4em; margin: 0; color: var(--graphite); font-size: 12px; }
-.clipping-worker-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.clipping-live-status { min-height: 1.4em; margin: 10px 0 0; color: var(--graphite); font-size: 12px; }
+.clipping-provider-summary-row { margin-bottom: 18px; }
 .clipping-notice { flex: 1 1 auto; margin: 0; padding: 11px 14px; border: 1px solid var(--rule); border-radius: var(--radius-control); background: var(--cloud); color: var(--graphite); font-size: 12px; line-height: 1.5; }
+.clipping-notice[data-state="blocked"], .clipping-notice[data-state="unknown"] { border-style: dashed; }
 .clipping-work-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 18px; }
 .clipping-panel { min-width: 0; padding: 20px; }
 .clipping-list-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 8px; }
@@ -36,9 +42,7 @@
 .clipping-source-status[data-state="ready"] { border-color: var(--rule); background: var(--white); color: var(--ink); }
 .clipping-source-status[data-state="failed"] { border-color: var(--ink); background: var(--ink); color: var(--white); }
 .clipping-source-meta, .clipping-job-meta { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
-.clipping-source-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
-.clipping-content-type { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
-.clipping-content-type select { min-height: 36px; padding: 7px 8px; font-size: 11px; }
+.clipping-source-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .clipping-action { min-height: 36px; padding: 8px 12px; font-size: 11px; white-space: nowrap; }
 .clipping-row-error { margin: 8px 0 0; color: var(--graphite); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .clipping-progress { display: flex; align-items: center; gap: 9px; margin-top: 10px; color: var(--muted); font-size: 10px; }
@@ -51,21 +55,18 @@
 .clipping-delete-action { flex: 0 0 auto; }
 .clipping-delete-action[aria-disabled="true"] { opacity: .48; cursor: progress; }
 .clipping-job-results { display: grid; gap: 12px; min-width: 0; padding-top: 4px; }
-.clipping-settings { margin-top: 18px; padding: 0 18px; border: 1px solid var(--rule); border-radius: var(--radius-panel); background: var(--white); }
-.clipping-settings > summary { min-height: 52px; padding: 16px 0; color: var(--graphite); cursor: pointer; font-size: 13px; font-weight: 600; list-style-position: inside; }
-.clipping-settings[open] > summary { border-bottom: 1px solid var(--rule); }
-.clipping-settings-body { padding: 14px 0 18px; }
-.clipping-worker-status { margin: 0 0 10px; color: var(--graphite); font-size: 12px; font-weight: 600; }
-.clipping-help { margin: 0 0 14px; color: var(--muted); font-size: 11px; line-height: 1.55; }
-.clipping-worker-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 12px; padding-top: 14px; border-top: 1px solid var(--rule); }
-.clipping-worker-form .field { min-width: 0; margin: 0; }
-.clipping-worker-form .field:last-of-type { grid-column: 1 / -1; }
-.clipping-worker-form .field label { margin-bottom: 5px; font-size: 11px; }
-.clipping-worker-form .field input { min-height: 38px; padding: 8px 10px; font-size: 12px; }
-.clipping-worker-form .field small { margin-top: 5px; font-size: 10px; line-height: 1.4; }
-.clipping-worker-enable { align-self: center; margin: 0; }
-.clipping-worker-form > .form-error, .clipping-worker-form > .clipping-help { grid-column: 1 / -1; margin: 0; }
-.clipping-worker-form > .button { justify-self: start; }
+.clipping-gemini-status { margin: 6px 0 0; color: var(--graphite); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.clipping-gemini-artifact { gap: 12px; }
+.clipping-gemini-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.clipping-gemini-header h4 { min-width: 0; }
+.clipping-gemini-summary { margin: 0; color: var(--graphite); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.clipping-gemini-source-note { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.clipping-gemini-candidates { display: grid; gap: 10px; min-width: 0; }
+.clipping-gemini-candidate { display: grid; gap: 7px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--rule); }
+.clipping-gemini-candidate h5 { margin: 0; color: var(--ink); font-size: 13px; overflow-wrap: anywhere; }
+.clipping-gemini-candidate p { margin: 0; color: var(--graphite); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.clipping-gemini-candidate .clipping-gemini-boundary { color: var(--muted); font-variant-numeric: tabular-nums; }
+.clipping-gemini-limitations { display: grid; gap: 4px; margin: 0; padding-left: 18px; color: var(--graphite); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .clipping-artifact { display: grid; gap: 8px; min-width: 0; padding: 12px; border: 1px solid var(--rule); border-radius: var(--radius-control); background: var(--cloud); }
 .clipping-artifact h4, .clipping-artifact-section h5, .clipping-candidate h6 { margin: 0; color: var(--ink); font-size: 12px; }
 .clipping-artifact-section { display: grid; gap: 7px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--rule); }
@@ -83,23 +84,28 @@
 .clipping-candidate { display: grid; gap: 5px; padding-top: 8px; border-top: 1px solid var(--rule); }
 .clipping-candidate > strong { font-size: 11px; overflow-wrap: anywhere; }
 .clipping-view :focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+.clipping-confirm-dialog { width: min(34rem, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); margin: auto; padding: 0; overflow: auto; border: 1px solid var(--rule); border-radius: var(--radius-panel); background: var(--white); color: var(--ink); box-shadow: 0 18px 50px rgb(0 0 0 / 18%); }
+.clipping-confirm-dialog::backdrop { background: rgb(0 0 0 / 42%); }
+.clipping-confirm-content { display: grid; gap: 12px; padding: clamp(18px, 4vw, 24px); }
+.clipping-confirm-content h3 { margin: 0; font-size: 18px; }
+.clipping-confirm-content > p:not(.form-error) { margin: 0; color: var(--graphite); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.clipping-confirm-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding-top: 4px; }
+.clipping-confirm-actions .button { min-width: 92px; }
+.clipping-confirm-actions .button.danger { border-color: var(--danger); background: var(--danger); color: var(--white); }
+.clipping-confirm-actions .button.danger:hover:not(:disabled) { background: var(--graphite); }
 @media (max-width: 760px) {
   .clipping-work-grid { grid-template-columns: minmax(0, 1fr); }
   .clipping-source-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
   .clipping-source-actions { justify-content: flex-start; }
-  .clipping-worker-summary-row { align-items: flex-start; }
 }
 @media (max-width: 520px) {
   .clipping-page-head { display: grid; }
   .clipping-page-head > .button { justify-self: start; }
-  .clipping-worker-summary-row { display: grid; }
-  .clipping-link-form { grid-template-columns: minmax(0, 1fr); }
-  .clipping-link-form > .button { grid-column: 1; grid-row: auto; justify-self: start; }
-  .clipping-worker-form { grid-template-columns: minmax(0, 1fr); }
-  .clipping-worker-form .field:last-of-type, .clipping-worker-form > .form-error,
-  .clipping-worker-form > .clipping-help { grid-column: auto; }
+  .clipping-analysis-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .clipping-source-heading, .clipping-job-heading { align-items: flex-start; }
   .clipping-source-status, .clipping-job-status { max-width: 48%; }
+  .clipping-confirm-actions { justify-content: stretch; }
+  .clipping-confirm-actions .button { flex: 1 1 100px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .clipping-progress-bar { transition: none; }

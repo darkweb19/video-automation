@@ -23,6 +23,7 @@ type ClippingSourceKind string
 const (
 	ClippingSourceUpload      ClippingSourceKind = "upload"
 	ClippingSourceYouTube     ClippingSourceKind = "youtube_original_file"
+	ClippingSourceYouTubeURL  ClippingSourceKind = "youtube_url"
 	ClippingSourceGoogleDrive ClippingSourceKind = "google_drive_public"
 	ClippingSourceDropbox     ClippingSourceKind = "dropbox_public"
 )
@@ -60,6 +61,13 @@ type ClippingSourceDiagnostic struct {
 }
 
 type ClippingJobStatus string
+
+type ClippingAnalysisProvider string
+
+const (
+	ClippingProviderModalLegacy ClippingAnalysisProvider = "modal_legacy"
+	ClippingProviderGemini      ClippingAnalysisProvider = "gemini"
+)
 
 const (
 	ClippingJobQueued       ClippingJobStatus = "queued"
@@ -136,21 +144,22 @@ type ClippingJobCreate struct {
 }
 
 type ClippingJob struct {
-	ID                  string            `json:"id"`
-	BatchID             string            `json:"-"`
-	SourceID            string            `json:"source_id"`
-	ContentType         string            `json:"content_type"`
-	MinClipSeconds      int               `json:"min_clip_seconds"`
-	MaxClipSeconds      int               `json:"max_clip_seconds"`
-	CandidateLimit      int               `json:"candidate_limit"`
-	Status              ClippingJobStatus `json:"status"`
-	BudgetLimitMicroUSD int64             `json:"-"`
-	ReservedMicroUSD    int64             `json:"-"`
-	SpentMicroUSD       int64             `json:"-"`
-	AnalysisDeleted     bool              `json:"analysis_deleted,omitempty"`
-	Error               string            `json:"error,omitempty"`
-	CreatedAt           int64             `json:"created_at"`
-	UpdatedAt           int64             `json:"updated_at"`
+	ID                  string                   `json:"id"`
+	BatchID             string                   `json:"-"`
+	SourceID            string                   `json:"source_id"`
+	Provider            ClippingAnalysisProvider `json:"provider"`
+	ContentType         string                   `json:"content_type"`
+	MinClipSeconds      int                      `json:"min_clip_seconds,omitempty"`
+	MaxClipSeconds      int                      `json:"max_clip_seconds,omitempty"`
+	CandidateLimit      int                      `json:"candidate_limit"`
+	Status              ClippingJobStatus        `json:"status"`
+	BudgetLimitMicroUSD int64                    `json:"-"`
+	ReservedMicroUSD    int64                    `json:"-"`
+	SpentMicroUSD       int64                    `json:"-"`
+	AnalysisDeleted     bool                     `json:"analysis_deleted,omitempty"`
+	Error               string                   `json:"error,omitempty"`
+	CreatedAt           int64                    `json:"created_at"`
+	UpdatedAt           int64                    `json:"updated_at"`
 }
 
 type ClippingStage struct {
@@ -192,7 +201,7 @@ type ClippingTimeRange struct {
 
 func validClippingSourceKind(kind ClippingSourceKind) bool {
 	switch kind {
-	case ClippingSourceUpload, ClippingSourceYouTube, ClippingSourceGoogleDrive, ClippingSourceDropbox:
+	case ClippingSourceUpload, ClippingSourceYouTube, ClippingSourceYouTubeURL, ClippingSourceGoogleDrive, ClippingSourceDropbox:
 		return true
 	default:
 		return false

@@ -49,7 +49,7 @@ func TestClippingAmbiguousDispatchPreservesMediaAndCompletedCallback(t *testing.
         t.Fatalf("accepted worker media probe=%d bytes=%d, want 206/1", media.Code, media.Body.Len())
     }
 
-    duplicate, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute)
+    duplicate, claimed, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute)
     if err != nil || claimed || duplicate.AttemptID != stage.AttemptID {
         t.Fatalf("uncertain dispatch allowed a duplicate attempt: %+v claimed=%v err=%v", duplicate, claimed, err)
     }
@@ -115,10 +115,10 @@ func TestClippingAmbiguousDispatchExpiryRemainsRecoverableWithoutRedispatch(t *t
     if err != nil || len(stages) != 1 || stages[0].Status != ClippingStageUncertain {
         t.Fatalf("expired lease did not become uncertain: %+v, %v", stages, err)
     }
-    if _, retryErr := store.RetryClippingStage(job.ID, ClippingStageAnalysis); retryErr == nil {
+    if _, retryErr := store.historicalRetryClippingStage(job.ID, ClippingStageAnalysis); retryErr == nil {
         t.Fatal("unsettled callback window was retried")
     }
-    if _, claimed, err := store.ClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute); err != nil || claimed {
+    if _, claimed, err := store.historicalClaimClippingStage(job.ID, ClippingStageAnalysis, 0, time.Minute); err != nil || claimed {
         t.Fatalf("unsettled attempt automatically redispatched: claimed=%v err=%v", claimed, err)
     }
 }

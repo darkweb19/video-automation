@@ -301,7 +301,7 @@ func TestClippingM2SchemaAdditivelyMigratesAndExpiresUnsupportedV1Attempt(t *tes
 	if settledAt == 0 || callbackAt != 0 || reserved != 0 {
 		t.Fatalf("expired legacy attempt was not safely released: settled=%d callback=%d reserved=%d", settledAt, callbackAt, reserved)
 	}
-	if _, err := store.RetryClippingStage(jobID, stageName); err != nil {
+	if _, err := store.historicalRetryClippingStage(jobID, stageName); err != nil {
 		t.Fatalf("explicit retry after callback capability expiry: %v", err)
 	}
 	retried, err := store.ClippingJob(jobID)

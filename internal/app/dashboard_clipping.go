@@ -39,9 +39,9 @@ type clippingSourceView struct {
 	Status         ClippingSourceStatus       `json:"status"`
 	RightsAttested bool                       `json:"rights_attested"`
 	OriginalName   string                     `json:"original_name"`
-	MediaType      string                     `json:"media_type"`
-	SizeBytes      int64                      `json:"size_bytes"`
-	DurationMS     int64                      `json:"duration_ms"`
+	MediaType      *string                    `json:"media_type,omitempty"`
+	SizeBytes      *int64                     `json:"size_bytes,omitempty"`
+	DurationMS     *int64                     `json:"duration_ms,omitempty"`
 	SHA256         string                     `json:"sha256,omitempty"`
 	Progress       int                        `json:"progress"`
 	Error          string                     `json:"error,omitempty"`
@@ -65,12 +65,15 @@ type clippingStageView struct {
 }
 
 type clippingJobView struct {
-	ID              string              `json:"id"`
-	SourceID        string              `json:"source_id"`
-	ContentType     string              `json:"content_type"`
-	MinClipSeconds  int                 `json:"min_clip_seconds"`
-	MaxClipSeconds  int                 `json:"max_clip_seconds"`
-	CandidateLimit  int                 `json:"candidate_limit"`
+	ID             string                   `json:"id"`
+	SourceID       string                   `json:"source_id"`
+	Provider       ClippingAnalysisProvider `json:"provider"`
+	ContentType    string                   `json:"content_type"`
+	MinClipSeconds *int                     `json:"min_clip_seconds,omitempty"`
+	MaxClipSeconds *int                     `json:"max_clip_seconds,omitempty"`
+	CandidateLimit int                      `json:"candidate_limit"`
+	Options        *ClippingGeminiOptions   `json:"options,omitempty"`
+	*ClippingGeminiLifecycleView
 	Status          ClippingJobStatus   `json:"status"`
 	AnalysisDeleted bool                `json:"analysis_deleted,omitempty"`
 	Progress        int                 `json:"progress"`
@@ -91,13 +94,18 @@ func clippingSourceSummary(source ClippingSource) clippingSourceView {
 		progress = 100
 	}
 	mediaURL := ""
-	if source.Status == ClippingSourceReady {
+	var mediaType *string
+	var sizeBytes, durationMS *int64
+	if source.Kind != ClippingSourceYouTubeURL {
+		mediaType, sizeBytes, durationMS = &source.MediaType, &source.SizeBytes, &source.DurationMS
+	}
+	if source.Status == ClippingSourceReady && source.Kind != ClippingSourceYouTubeURL {
 		mediaURL = "/api/clipping/sources/" + source.ID + "/media"
 	}
 	return clippingSourceView{
 		ID: source.ID, Kind: source.Kind, Status: source.Status, RightsAttested: source.RightsAttested, OriginalName: source.OriginalName,
-		MediaType: source.MediaType, SizeBytes: source.SizeBytes,
-		DurationMS: source.DurationMS, SHA256: source.SHA256,
+		MediaType: mediaType, SizeBytes: sizeBytes,
+		DurationMS: durationMS, SHA256: source.SHA256,
 		Progress: progress, Error: source.Failure, ErrorMessage: clippingSourceErrorMessage(source.Failure), Diagnostics: source.Diagnostics, MediaURL: mediaURL,
 		CreatedAt: source.CreatedAt, UpdatedAt: source.UpdatedAt,
 	}
@@ -106,23 +114,25 @@ func clippingSourceSummary(source ClippingSource) clippingSourceView {
 func clippingSourceErrorMessage(code string) string {
 	switch strings.TrimSpace(code) {
 	case "invalid_media":
-		return "This YouTube source is not a supported video with a valid duration and dimensions."
+		return "The old import did not contain a supported video. Submit a public YouTube link for Gemini analysis."
 	case "unsafe_dns_answer":
-		return "The YouTube link resolved to an unsafe destination. Check the link and try again."
+		return "The old import resolved to an unsafe destination. Submit a public YouTube link for Gemini analysis."
 	case "youtube_bot_challenge":
-		return "YouTube requested verification of automated access from this server, so this video could not be imported. Try again later; repeated immediate retries are unlikely to help."
+		return "YouTube requested automated-access verification during the old import. Submit a public YouTube link for Gemini analysis."
 	case "source_import_timed_out", "extractor_exit_failure":
-		return "YouTube could not download this public video. Retry once, then choose another public video."
+		return "The old import did not complete. Submit a public YouTube link for Gemini analysis."
 	case "source_import_canceled":
-		return "The YouTube import was interrupted. Try importing it again."
+		return "The old import was interrupted. Submit a public YouTube link for Gemini analysis."
 	case "legacy_source_import_unsupported":
-		return "This source came from a removed import workflow. Import a public YouTube video to continue."
+		return "This source came from a retired import workflow. Submit a public YouTube link for Gemini analysis."
+	case "legacy_source_import_retired":
+		return "This import was stopped because legacy clipping was retired. Submit the public YouTube link for Gemini analysis."
 	case "track_transfer_aborted":
-		return "A YouTube media stream stopped before the source was complete. Retry the import."
+		return "A media stream ended before the old import completed. Submit a public YouTube link for Gemini analysis."
 	case "":
 		return ""
 	default:
-		return "The YouTube import failed. Check the public link and retry."
+		return "The old import failed. Submit a public YouTube link for Gemini analysis."
 	}
 }
 
@@ -145,36 +155,75 @@ func clippingJobProgress(stages []ClippingStage, status ClippingJobStatus) int {
 func clippingJobSummary(job ClippingJob, stages []ClippingStage, artifacts []ClippingArtifact) clippingJobView {
 	stageViews := make([]clippingStageView, 0, len(stages))
 	for _, stage := range stages {
+		stageError := stage.Error
+		if job.Provider == ClippingProviderGemini {
+			stageError = safeClippingGeminiFailureCode(stageError)
+			if stage.Status == ClippingStageCanceled {
+				stageError = ""
+			}
+		}
 		stageViews = append(stageViews, clippingStageView{
 			JobID: stage.JobID, Name: stage.Name, Status: stage.Status, AttemptID: stage.AttemptID, Attempt: stage.Attempt,
-			LeaseExpiresAt: stage.LeaseExpiresAt, Error: stage.Error, CreatedAt: stage.CreatedAt,
+			LeaseExpiresAt: stage.LeaseExpiresAt, Error: stageError, CreatedAt: stage.CreatedAt,
 			UpdatedAt: stage.UpdatedAt,
 		})
 	}
+	var minSeconds, maxSeconds *int
+	jobError := job.Error
+	if job.Provider == ClippingProviderModalLegacy {
+		minSeconds, maxSeconds = &job.MinClipSeconds, &job.MaxClipSeconds
+	} else if job.Provider == ClippingProviderGemini {
+		jobError = safeClippingGeminiFailureCode(jobError)
+		if job.Status == ClippingJobCanceled {
+			jobError = ""
+		}
+	}
 	return clippingJobView{
-		ID: job.ID, SourceID: job.SourceID, ContentType: job.ContentType,
-		MinClipSeconds: job.MinClipSeconds, MaxClipSeconds: job.MaxClipSeconds, CandidateLimit: job.CandidateLimit, Status: job.Status,
+		ID: job.ID, SourceID: job.SourceID, Provider: job.Provider, ContentType: job.ContentType,
+		MinClipSeconds: minSeconds, MaxClipSeconds: maxSeconds, CandidateLimit: job.CandidateLimit, Status: job.Status,
 		Progress: clippingJobProgress(stages, job.Status),
-		Error:    job.Error, AnalysisDeleted: job.AnalysisDeleted, Stages: stageViews, Artifacts: artifacts, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
+		Error:    jobError, AnalysisDeleted: job.AnalysisDeleted, Stages: stageViews, Artifacts: artifacts, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
 	}
 }
 
-func (a *dashboardApp) clippingJobResponse(job ClippingJob, includeArtifacts bool) (clippingJobView, error) {
-	stages, err := a.store.ClippingStages(job.ID)
+// clippingJobProjection is the shared summary used for HTTP and live events.
+// Keep provider-specific enrichment here so every consumer sees the same
+// immutable options and safe lifecycle fields.
+func (s *Store) clippingJobProjection(job ClippingJob) (clippingJobView, error) {
+	stages, err := s.ClippingStages(job.ID)
 	if err != nil {
 		return clippingJobView{}, err
 	}
-	var artifacts []ClippingArtifact
+	view := clippingJobSummary(job, stages, nil)
+	if err := s.enrichClippingGeminiJob(&view, job); err != nil {
+		return clippingJobView{}, err
+	}
+	return view, nil
+}
+
+func (a *dashboardApp) clippingJobResponse(job ClippingJob, includeArtifacts bool) (clippingJobView, error) {
+	view, err := a.store.clippingJobProjection(job)
+	if err != nil {
+		return clippingJobView{}, err
+	}
 	if includeArtifacts {
-		artifacts, err = a.store.ClippingArtifacts(job.ID)
+		artifacts, err := a.store.ClippingArtifacts(job.ID)
 		if err != nil {
 			return clippingJobView{}, err
 		}
-		for index := range artifacts {
-			artifacts[index] = sanitizeClippingArtifactForPublic(artifacts[index])
+		if job.Provider == ClippingProviderGemini {
+			artifacts, err = clippingGeminiPublicArtifacts(job.ID, *view.Options, artifacts)
+			if err != nil {
+				return clippingJobView{}, err
+			}
+		} else {
+			for index := range artifacts {
+				artifacts[index] = sanitizeClippingArtifactForPublic(artifacts[index])
+			}
 		}
+		view.Artifacts = artifacts
 	}
-	return clippingJobSummary(job, stages, artifacts), nil
+	return view, nil
 }
 
 func sanitizeClippingArtifactForPublic(artifact ClippingArtifact) ClippingArtifact {
@@ -201,7 +250,8 @@ func (a *dashboardApp) clippingConfig(w http.ResponseWriter, _ *http.Request) {
 		"worker_state":         "unavailable",
 		"max_source_bytes":     MaxClippingSourceBytes,
 		"max_duration_ms":      MaxClippingSourceDurationMS,
-		"allowed_import_kinds": []ClippingSourceKind{ClippingSourceYouTube},
+		"allowed_import_kinds": []ClippingSourceKind{},
+		"gemini":               clippingGeminiDescriptor(os.Getenv),
 	})
 }
 
@@ -261,34 +311,6 @@ func (a *dashboardApp) deleteClippingSource(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *dashboardApp) createClippingImport(w http.ResponseWriter, r *http.Request) {
-	if !mutationAllowed(w, r) {
-		return
-	}
-	if !isJSON(r.Header.Get("Content-Type")) {
-		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
-	}
-	var input struct {
-		URL            string `json:"url"`
-		RightsAttested bool   `json:"rights_attested"`
-	}
-	if decodeJSONBody(w, r, &input) != nil {
-		return
-	}
-	if !input.RightsAttested {
-		writeError(w, http.StatusUnprocessableEntity, "confirm that you have permission to reuse and process this source")
-		return
-	}
-	source, err := a.clippingAcquisition.CreatePublicImport(r.Context(), input.RightsAttested, input.URL, a.retentionDeadline(time.Now()))
-	if err != nil {
-		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "this source cannot be imported from its public link"))
-		return
-	}
-	a.store.PublishClippingSource(source.ID)
-	writeJSON(w, http.StatusAccepted, map[string]any{"source": clippingSourceSummary(source)})
-}
-
 func (a *dashboardApp) clippingSourceMedia(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !safeID(id) {
@@ -296,7 +318,7 @@ func (a *dashboardApp) clippingSourceMedia(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	source, err := a.store.ClippingSource(id)
-	if err != nil || source.Status != ClippingSourceReady {
+	if err != nil || source.Status != ClippingSourceReady || source.Kind == ClippingSourceYouTubeURL {
 		writeError(w, http.StatusNotFound, "clipping source media not found")
 		return
 	}
@@ -343,55 +365,6 @@ func (a *dashboardApp) clippingJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job": view})
 }
 
-func (a *dashboardApp) createClippingJob(w http.ResponseWriter, r *http.Request) {
-	if !mutationAllowed(w, r) {
-		return
-	}
-	if !isJSON(r.Header.Get("Content-Type")) {
-		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
-	}
-	var input struct {
-		SourceID       string `json:"source_id"`
-		ContentType    string `json:"content_type"`
-		MinClipSeconds int    `json:"min_clip_seconds"`
-		MaxClipSeconds int    `json:"max_clip_seconds"`
-		CandidateLimit int    `json:"candidate_limit"`
-	}
-	if decodeJSONBody(w, r, &input) != nil {
-		return
-	}
-	key, ok := clippingIdempotencyKey(w, r)
-	if !ok {
-		return
-	}
-	selection, selectionErr := normalizeClippingSelection(ClippingJobCreate{
-		SourceID:    input.SourceID,
-		ContentType: input.ContentType, MinClipSeconds: input.MinClipSeconds,
-		MaxClipSeconds: input.MaxClipSeconds, CandidateLimit: input.CandidateLimit,
-	})
-	if selectionErr != nil {
-		writeError(w, http.StatusBadRequest, selectionErr.Error())
-		return
-	}
-	job, duplicate, err := a.store.CreateClippingJob(selection, key)
-	if err != nil {
-		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "could not queue clipping job"))
-		return
-	}
-	view, err := a.clippingJobResponse(job, false)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "clipping job was saved but could not be reloaded")
-		return
-	}
-	a.store.PublishClippingJob(job.ID)
-	status := http.StatusCreated
-	if duplicate {
-		status = http.StatusOK
-	}
-	writeJSON(w, status, map[string]any{"job": view, "duplicate": duplicate})
-}
-
 func (a *dashboardApp) clippingJobResults(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !safeID(id) {
@@ -403,15 +376,12 @@ func (a *dashboardApp) clippingJobResults(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "clipping job not found")
 		return
 	}
-	artifacts, err := a.store.ClippingArtifacts(job.ID)
+	view, err := a.clippingJobResponse(job, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load clipping job results")
 		return
 	}
-	for index := range artifacts {
-		artifacts[index] = sanitizeClippingArtifactForPublic(artifacts[index])
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"job_id": job.ID, "source_id": job.SourceID, "artifacts": artifacts})
+	writeJSON(w, http.StatusOK, map[string]any{"job_id": job.ID, "source_id": job.SourceID, "artifacts": view.Artifacts})
 }
 
 func (a *dashboardApp) deleteClippingAnalysis(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +427,12 @@ func (a *dashboardApp) cancelClippingJob(w http.ResponseWriter, r *http.Request)
 	}
 	a.deleteClippingCapabilities(job.ID)
 	a.store.PublishClippingJob(job.ID)
-	writeJSON(w, http.StatusOK, map[string]any{"job": clippingJobSummary(job, nil, nil)})
+	view, err := a.clippingJobResponse(job, false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "job was canceled but could not be reloaded")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": view})
 }
 
 func (a *dashboardApp) retryClippingJob(w http.ResponseWriter, r *http.Request) {
@@ -482,24 +457,16 @@ func (a *dashboardApp) retryClippingJob(w http.ResponseWriter, r *http.Request) 
 	if input.StageName == "" {
 		input.StageName = ClippingStageAnalysis
 	}
-	stage, err := a.store.RetryClippingStage(id, input.StageName)
-	if err != nil {
-		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "clipping stage cannot be retried"))
-		return
-	}
 	job, err := a.store.ClippingJob(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stage was queued but job could not be reloaded")
+		writeError(w, clippingErrorStatus(err), safeClippingClientError(err, "clipping job not found"))
 		return
 	}
-	_ = stage
-	view, err := a.clippingJobResponse(job, false)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stage was queued but job could not be reloaded")
+	if job.Provider == ClippingProviderGemini {
+		writeError(w, http.StatusConflict, "Gemini analysis retries are managed automatically")
 		return
 	}
-	a.store.PublishClippingJob(id)
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": view})
+	writeError(w, http.StatusGone, "Legacy clipping analysis and retries have been retired")
 }
 
 func clippingIdempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -517,7 +484,7 @@ func clippingErrorStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrClippingIdempotencyConflict), errors.Is(err, ErrClippingInvalidState), errors.Is(err, ErrClippingStaleAttempt), errors.Is(err, ErrClippingJobTerminal):
 		return http.StatusConflict
-	case errors.Is(err, ErrYouTubeImportUnavailable), errors.Is(err, ErrClippingRightsNotAttested):
+	case errors.Is(err, ErrClippingRightsNotAttested):
 		return http.StatusUnprocessableEntity
 	default:
 		return http.StatusBadRequest
@@ -713,29 +680,48 @@ func (a *dashboardApp) cleanupExpiredClippingCapabilities(now int64, limit int) 
 	if limit <= 0 || limit > maxClippingCapabilityCleanupBatch {
 		limit = maxClippingCapabilityCleanupBatch
 	}
-	legacy, err := a.store.LegacyClippingCallbackExpirySettings(limit)
-	if err != nil {
-		return 0, err
-	}
-	for _, setting := range legacy {
-		jobID, attemptID, validKey := clippingCallbackExpirySettingIDs(setting.Key)
-		if !validKey {
-			return 0, errors.New("legacy clipping callback expiry key could not be validated")
-		}
-		expiry := int64(0)
-		if a.security != nil {
-			if plaintext, decryptErr := a.security.DecryptSetting(setting.Key, setting.Ciphertext); decryptErr == nil {
-				expiry, _ = strconv.ParseInt(strings.TrimSpace(plaintext), 10, 64)
-			}
-		}
-		if expiry <= 0 {
-			expiry, err = a.store.conservativeClippingCallbackExpiry(jobID, attemptID)
-			if err != nil || expiry <= 0 {
-				return 0, errors.New("legacy clipping callback expiry could not be safely recovered")
-			}
-		}
-		if err := a.store.SetClippingCallbackCapabilityExpiryIndex(jobID, attemptID, expiry); err != nil {
+	// Page past records whose expiry cannot be established. They remain
+	// unresolved in the inventory, but do not block cleanup of other sources.
+	after, indexed := "", 0
+	for indexed < limit {
+		legacy, err := a.store.LegacyClippingCallbackExpirySettings(after, limit)
+		if err != nil {
 			return 0, err
+		}
+		if len(legacy) == 0 {
+			break
+		}
+		for _, setting := range legacy {
+			after = setting.Key
+			jobID, attemptID, validKey := clippingCallbackExpirySettingIDs(setting.Key)
+			if !validKey {
+				continue
+			}
+			expiry := int64(0)
+			if a.security != nil {
+				if plaintext, decryptErr := a.security.DecryptSetting(setting.Key, setting.Ciphertext); decryptErr == nil {
+					expiry, _ = strconv.ParseInt(strings.TrimSpace(plaintext), 10, 64)
+				}
+			}
+			if expiry <= 0 {
+				expiry, err = a.store.conservativeClippingCallbackExpiry(jobID, attemptID)
+				if errors.Is(err, ErrClippingInvalidState) || errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				if err != nil {
+					return 0, err
+				}
+			}
+			if err := a.store.SetClippingCallbackCapabilityExpiryIndex(jobID, attemptID, expiry); err != nil {
+				return 0, err
+			}
+			indexed++
+			if indexed == limit {
+				break
+			}
+		}
+		if len(legacy) < limit {
+			break
 		}
 	}
 	return a.store.CleanupExpiredClippingCapabilities(now, limit)
@@ -781,11 +767,10 @@ func (s *Store) PublishClippingJob(id string) {
 	if err != nil {
 		return
 	}
-	stages, err := s.ClippingStages(id)
+	view, err := s.clippingJobProjection(job)
 	if err != nil {
 		return
 	}
-	view := clippingJobSummary(job, stages, nil)
 	fingerprint, err := snapshotFingerprint(view)
 	if err == nil {
 		s.events.publishSnapshot("clipping_job", id, fingerprint, map[string]any{"id": id, "job": view})
@@ -840,7 +825,7 @@ func (a *dashboardApp) clippingWorkerMedia(w http.ResponseWriter, r *http.Reques
 
 func (a *dashboardApp) workerStage(jobID, attemptID string) (ClippingJob, ClippingStage, ClippingSource, bool) {
 	job, err := a.store.ClippingJob(jobID)
-	if err != nil {
+	if err != nil || job.Provider != ClippingProviderModalLegacy {
 		return ClippingJob{}, ClippingStage{}, ClippingSource{}, false
 	}
 	stages, err := a.store.ClippingStages(jobID)

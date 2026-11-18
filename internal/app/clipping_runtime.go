@@ -31,16 +31,16 @@ const (
 	// Modal's /dispatch waits for ledger admission and a durable spawn before
 	// responding 202. The previous 8s header deadline raced observed ~7.5s
 	// cold submissions; keep both deadlines finite but allow bounded overhead.
-	clippingWorkerSubmitTimeout                   = 30 * time.Second
-	clippingWorkerResponseHeaderTimeout           = 25 * time.Second
-	maxClippingWorkerConfigBodyBytes              = 8 << 10
-	maxClippingWorkerDispatchBodyBytes            = 32 << 10
-	maxClippingWorkerResponseBodyBytes            = 64 << 10
-	maxClippingWorkerTokenBytes                   = 4096
-	clippingWorkerUserAgent                       = "FrameVault-Clipping/2.0"
-	clippingWorkerMediaCapabilityHeader           = "X-FrameVault-Media-Capability"
-	clippingWorkerCallbackCapabilityHeader        = "X-FrameVault-Callback-Capability"
-	clippingWorkerConfigVersion                   = 3
+	clippingWorkerSubmitTimeout            = 30 * time.Second
+	clippingWorkerResponseHeaderTimeout    = 25 * time.Second
+	maxClippingWorkerConfigBodyBytes       = 8 << 10
+	maxClippingWorkerDispatchBodyBytes     = 32 << 10
+	maxClippingWorkerResponseBodyBytes     = 64 << 10
+	maxClippingWorkerTokenBytes            = 4096
+	clippingWorkerUserAgent                = "FrameVault-Clipping/2.0"
+	clippingWorkerMediaCapabilityHeader    = "X-FrameVault-Media-Capability"
+	clippingWorkerCallbackCapabilityHeader = "X-FrameVault-Callback-Capability"
+	clippingWorkerConfigVersion            = 3
 )
 
 var (
@@ -262,46 +262,8 @@ func (a *dashboardApp) dispatchPreparedClippingStage(ctx context.Context, prepar
 // dispatchPreparedClippingStageWithDispatcher keeps the final current-attempt
 // check immediately adjacent to the outbound call. The injected dispatcher is
 // used by local tests to exercise cancellation between durable setup and send.
-func (a *dashboardApp) dispatchPreparedClippingStageWithDispatcher(ctx context.Context, prepared clippingPreparedDispatch, dispatcher *clippingWorkerDispatcher) error {
-	if a == nil || a.store == nil || a.security == nil {
-		return clippingWorkerDispatchFailure(errors.New("clipping worker configuration is unavailable"), false)
-	}
-	config, configured, err := loadClippingWorkerConfig(a.store, a.security)
-	if err != nil || !configured || !config.Enabled {
-		return clippingWorkerDispatchFailure(errors.New("clipping worker is not configured for dispatch"), false)
-	}
-	config, err = validateClippingWorkerConfig(config)
-	if err != nil {
-		return clippingWorkerDispatchFailure(errors.New("clipping worker configuration is invalid"), false)
-	}
-	prepared.Payload.PipelineRevision = config.PipelineRevision
-	if _, err := buildClippingWorkerDispatchV2(prepared.Payload, clippingWorkerProtocolCompatibilityRate, config.MaxComputeSeconds); err != nil {
-		return clippingWorkerDispatchFailure(err, false)
-	}
-	leaseToken, err := a.clippingCapability(prepared.Payload.JobID, prepared.Payload.AttemptID, clippingCapabilityLease)
-	if err != nil {
-		return clippingWorkerDispatchFailure(errors.New("clipping worker lease capability is unavailable"), false)
-	}
-	if err := a.store.SetClippingAttemptPipelineRevision(
-		prepared.Payload.JobID, prepared.Payload.Stage, prepared.Payload.AttemptID, leaseToken, config.PipelineRevision,
-	); err != nil {
-		return clippingWorkerDispatchFailure(errors.New("clipping worker pipeline revision could not be persisted"), false)
-	}
-	if err := a.store.SetClippingAttemptComputeLimit(
-		prepared.Payload.JobID, prepared.Payload.Stage, prepared.Payload.AttemptID, leaseToken, config.MaxComputeSeconds,
-	); err != nil {
-		return clippingWorkerDispatchFailure(errors.New("clipping worker compute timeout could not be persisted"), false)
-	}
-	if dispatcher == nil {
-		dispatcher = newClippingWorkerDispatcher(nil, nil, nil)
-	}
-	dispatcher.beforeSubmit = func(checkCtx context.Context) error {
-		if err := checkCtx.Err(); err != nil {
-			return errors.New("clipping worker dispatch context ended before submission")
-		}
-		return a.checkClippingWorkerAttemptCurrent(checkCtx, prepared.Payload, leaseToken, config.PipelineRevision)
-	}
-	return dispatcher.dispatch(ctx, config, prepared)
+func (a *dashboardApp) dispatchPreparedClippingStageWithDispatcher(_ context.Context, _ clippingPreparedDispatch, _ *clippingWorkerDispatcher) error {
+	return ErrClippingLegacyRetired
 }
 
 func (a *dashboardApp) checkClippingWorkerAttemptCurrent(ctx context.Context, dispatch clippingStageDispatch, leaseToken, pipelineRevision string) error {
@@ -314,7 +276,7 @@ func (a *dashboardApp) checkClippingWorkerAttemptCurrent(ctx context.Context, di
 	}
 	defer tx.Rollback()
 	job, err := scanClippingJob(tx.QueryRow(`SELECT `+clippingJobColumns()+` FROM clipping_jobs WHERE id=?`, dispatch.JobID))
-	if err != nil || job.Status != ClippingJobRunning || job.BatchID != dispatch.BatchID || job.SourceID != dispatch.SourceID {
+	if err != nil || job.Provider != ClippingProviderModalLegacy || job.Status != ClippingJobRunning || job.BatchID != dispatch.BatchID || job.SourceID != dispatch.SourceID {
 		return errors.New("clipping worker attempt is no longer current")
 	}
 	stage, err := readClippingStage(tx, dispatch.JobID, dispatch.Stage)
@@ -665,98 +627,8 @@ func validClippingWorkerTransferURL(raw string) bool {
 		parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" && parsed.RawFragment == ""
 }
 
-func (d *clippingWorkerDispatcher) dispatch(ctx context.Context, config clippingWorkerConfig, prepared clippingPreparedDispatch) (dispatchErr error) {
-	submissionAttempted := false
-	defer func() {
-		if dispatchErr != nil {
-			dispatchErr = clippingWorkerDispatchFailure(dispatchErr, submissionAttempted)
-		}
-	}()
-	if d == nil || d.resolver == nil || d.dial == nil || ctx == nil {
-		return errors.New("clipping worker dispatcher is unavailable")
-	}
-	config, err := validateClippingWorkerConfig(config)
-	if err != nil || !config.Enabled {
-		return errors.New("clipping worker is not configured for dispatch")
-	}
-	prepared.Payload.PipelineRevision = config.PipelineRevision
-	if !validClippingWorkerCapabilityBearer(prepared.MediaBearer) || !validClippingWorkerCapabilityBearer(prepared.CallbackBearer) {
-		return errors.New("clipping worker capabilities are unavailable")
-	}
-	dispatch, err := buildClippingWorkerDispatchV2(prepared.Payload, clippingWorkerProtocolCompatibilityRate, config.MaxComputeSeconds)
-	if err != nil {
-		return err
-	}
-	body, err := json.Marshal(dispatch)
-	if err != nil || len(body) > maxClippingWorkerDispatchBodyBytes {
-		return errors.New("clipping worker dispatch could not be encoded")
-	}
-	endpoint, _, err := normalizeClippingWorkerEndpoint(config.Endpoint)
-	if err != nil {
-		return errors.New("clipping worker endpoint is invalid")
-	}
-	parsed, _ := url.Parse(endpoint)
-
-	timeout := d.timeout
-	if timeout <= 0 || timeout > clippingWorkerSubmitTimeout {
-		timeout = clippingWorkerSubmitTimeout
-	}
-	requestCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	addresses, err := resolveClippingWorkerAddresses(requestCtx, d.resolver, parsed.Hostname())
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return errors.New("clipping worker request could not be created")
-	}
-	request.Header.Set("Authorization", "Bearer "+config.BearerToken)
-	request.Header.Set(clippingWorkerMediaCapabilityHeader, prepared.MediaBearer)
-	request.Header.Set(clippingWorkerCallbackCapabilityHeader, prepared.CallbackBearer)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", clippingWorkerUserAgent)
-
-	client, cleanup := d.httpClientFor(parsed, addresses)
-	defer cleanup()
-	if d.beforeSubmit != nil {
-		if err := d.beforeSubmit(requestCtx); err != nil {
-			return err
-		}
-	}
-	if err := requestCtx.Err(); err != nil {
-		return errors.New("clipping worker dispatch context ended before submission")
-	}
-	submissionAttempted = true
-	response, err := client.Do(request)
-	if err != nil {
-		category := "transport_failure"
-		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			category = "submit_timeout"
-		} else if errors.Is(requestCtx.Err(), context.Canceled) {
-			category = "submit_canceled"
-		}
-		return clippingWorkerDispatchDiagnosticFailure(
-			errors.New("clipping worker submission failed"), category, 0,
-		)
-	}
-	if response == nil || response.Body == nil {
-		return clippingWorkerDispatchDiagnosticFailure(
-			errors.New("clipping worker acceptance response is invalid"), "missing_http_response", 0,
-		)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusAccepted {
-		return clippingWorkerDispatchDiagnosticFailure(
-			errors.New("clipping worker did not accept the dispatch"),
-			"unexpected_http_status", response.StatusCode,
-		)
-	}
-	if err := parseClippingWorkerAcceptedResponse(response.Body, dispatch); err != nil {
-		return clippingWorkerDispatchDiagnosticFailure(err, "invalid_acknowledgement", http.StatusAccepted)
-	}
-	return nil
+func (d *clippingWorkerDispatcher) dispatch(_ context.Context, _ clippingWorkerConfig, _ clippingPreparedDispatch) error {
+	return ErrClippingLegacyRetired
 }
 
 func (d *clippingWorkerDispatcher) httpClientFor(endpoint *url.URL, addresses []net.IP) (*http.Client, func()) {

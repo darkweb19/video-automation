@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="/static/project.css?v=20261007-studio">
   <link rel="stylesheet" href="/static/history-settings.css?v=20261007-studio">
   <link rel="stylesheet" href="/static/youtube.css?v=20261007-studio">
-  <link rel="stylesheet" href="/static/clipping.css?v=20261015-delete-abort">
+  <link rel="stylesheet" href="/static/clipping.css?v=20261112-gemini-ui">
 </head>
 <body>
   <section id="login-screen" class="login-screen" hidden>
@@ -207,60 +207,82 @@
 
         <section id="clipping-view" class="view clipping-view" data-page="clipping" aria-labelledby="clipping-heading">
           <div class="clipping-page-head">
-            <div><h2 id="clipping-heading">Clip a YouTube video</h2><p>Import one public video, then choose Analyze when it is ready.</p></div>
+            <div><h2 id="clipping-heading">Analyze a YouTube video</h2><p>Send one public link for an editorial analysis. The dashboard does not download a local copy.</p></div>
             <button id="clipping-refresh" class="button secondary" type="button">Refresh</button>
           </div>
 
           <section class="panel clipping-import" aria-labelledby="clipping-import-heading">
-            <div class="clipping-section-head"><div><h3 id="clipping-import-heading">Import a YouTube video</h3><p>Use a public single-video link. You must have permission to reuse and process it.</p></div></div>
-            <form id="clipping-link-form" class="clipping-link-form">
+            <div class="clipping-section-head"><div><h3 id="clipping-import-heading">Analyze video</h3><p>Use one public YouTube link and confirm you have permission to reuse and process it. Gemini access and video availability are not verified here.</p></div></div>
+            <form id="clipping-link-form" class="clipping-link-form" novalidate>
               <div class="field">
                 <label for="clipping-link">YouTube link</label>
-                <input id="clipping-link" name="url" type="text" inputmode="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="url" required aria-describedby="clipping-import-limits">
-                <small id="clipping-import-limits">One public video at a time; up to four hours and 20 GiB.</small>
+                <input id="clipping-link" name="url" type="text" inputmode="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="url" required aria-describedby="clipping-import-limits clipping-link-error">
+                <small id="clipping-import-limits">One public video. The model-reported duration limit appears after provider settings load.</small>
               </div>
-              <label class="clipping-consent"><input id="clipping-link-permission-check" type="checkbox" required><span>I have permission to reuse and process this video.</span></label>
+              <label class="clipping-consent"><input id="clipping-link-permission-check" type="checkbox" required aria-describedby="clipping-link-error"><span>I have permission to reuse and process this video.</span></label>
+              <div class="clipping-analysis-options" role="group" aria-label="Analysis options">
+                <div class="field">
+                  <label for="clipping-content-type">Content type</label>
+                  <select id="clipping-content-type" aria-describedby="clipping-options-help clipping-options-error">
+                    <option value="general">General</option>
+                    <option value="podcast">Podcast</option>
+                    <option value="comedy">Comedy</option>
+                    <option value="gaming">Gaming</option>
+                    <option value="movie">Movie</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="clipping-min-clip-seconds">Shortest clip (seconds)</label>
+                  <input id="clipping-min-clip-seconds" type="number" min="15" max="180" step="1" inputmode="numeric" value="15" aria-describedby="clipping-options-help clipping-options-error">
+                </div>
+                <div class="field">
+                  <label for="clipping-max-clip-seconds">Longest clip (seconds)</label>
+                  <input id="clipping-max-clip-seconds" type="number" min="15" max="180" step="1" inputmode="numeric" value="180" aria-describedby="clipping-options-help clipping-options-error">
+                </div>
+                <div class="field">
+                  <label for="clipping-candidate-limit">Maximum suggestions</label>
+                  <select id="clipping-candidate-limit" aria-describedby="clipping-options-help clipping-options-error">
+                    <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option>
+                    <option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10" selected>10</option>
+                  </select>
+                </div>
+                <p id="clipping-options-help" class="clipping-options-help">A new analysis may incur provider charges. Gemini may return fewer suggestions when the video does not contain enough strong moments.</p>
+              </div>
               <p id="clipping-link-error" class="form-error" role="alert" aria-live="polite"></p>
-              <button id="clipping-link-submit" class="button primary" type="submit" disabled>Import YouTube video</button>
+              <p id="clipping-options-error" class="form-error" role="alert" aria-live="polite"></p>
+              <button id="clipping-link-submit" class="button primary clipping-submit" type="submit" disabled>Analyze video</button>
             </form>
             <p id="clipping-workflow-status" class="clipping-live-status" role="status" aria-live="polite"></p>
           </section>
 
-          <div class="clipping-worker-summary-row">
-            <p id="clipping-worker-summary" class="clipping-notice" role="status" aria-live="polite">Checking Modal worker setup…</p>
-            <button id="clipping-open-worker-settings" class="button secondary" type="button">Worker settings</button>
+          <div class="clipping-provider-summary-row">
+            <p id="clipping-gemini-readiness" class="clipping-notice" role="status" aria-live="polite" tabindex="-1">Checking Gemini provider configuration…</p>
           </div>
 
           <div class="clipping-work-grid">
             <section class="panel clipping-panel" aria-labelledby="clipping-sources-heading">
-              <div class="clipping-list-heading"><h3 id="clipping-sources-heading">Videos</h3><span id="clipping-source-count" class="history-count">0</span></div>
+              <div class="clipping-list-heading"><h3 id="clipping-sources-heading">Saved sources</h3><span id="clipping-source-count" class="history-count">0</span></div>
               <p id="clipping-sources-error" class="form-error" role="alert" aria-live="polite"></p>
-              <div id="clipping-sources" class="clipping-list" aria-live="polite"><p class="empty">Imported videos will appear here.</p></div>
+              <div id="clipping-sources" class="clipping-list" aria-live="polite"><p class="empty">Saved YouTube references and legacy sources will appear here.</p></div>
             </section>
             <section class="panel clipping-panel" aria-labelledby="clipping-analysis-heading">
               <div class="clipping-list-heading"><h3 id="clipping-analysis-heading" tabindex="-1">Analysis</h3><span id="clipping-job-count" class="history-count">0</span></div>
               <p id="clipping-jobs-error" class="form-error" role="alert" aria-live="polite"></p>
-              <div id="clipping-jobs" class="clipping-list" aria-live="polite"><p class="empty">Analysis jobs will appear here after you choose Analyze.</p></div>
+              <div id="clipping-jobs" class="clipping-list" aria-live="polite"><p class="empty">Saved analysis requests will appear here.</p></div>
             </section>
           </div>
 
-          <details id="clipping-settings-disclosure" class="clipping-settings">
-            <summary>Modal worker settings</summary>
-            <div class="clipping-settings-body">
-              <p id="clipping-worker-status" class="clipping-worker-status" role="status" aria-live="polite">Worker configuration has not been loaded.</p>
-              <p class="clipping-help">Enter the deployed worker’s HTTPS dispatch URL and matching pipeline revision. The bearer token is stored encrypted and is never displayed again. Saving settings does not test the connection. Enabling analysis can incur Modal charges.</p>
-              <form id="clipping-worker-form" class="clipping-worker-form">
-                <div class="field"><label for="clipping-worker-endpoint">Modal dispatch URL</label><input id="clipping-worker-endpoint" type="url" inputmode="url" autocomplete="url" placeholder="https://your-worker.modal.run/dispatch" required><small>Enter the full URL when setting up or changing the worker.</small></div>
-                <div class="field"><label for="clipping-worker-pipeline-revision">Pipeline revision</label><input id="clipping-worker-pipeline-revision" type="text" autocomplete="off" maxlength="64" placeholder="e.g. m3-2026-10-14-v1" required><small>Must match the revision configured in the deployed worker.</small></div>
-                <div class="field"><label for="clipping-worker-max-compute">Maximum analysis time (minutes)</label><input id="clipping-worker-max-compute" type="number" min="1" max="720" step="1" value="720" inputmode="numeric" required><small>Hard limit for one analysis run, up to 12 hours.</small></div>
-                <div class="field"><label for="clipping-worker-token">Worker bearer token</label><input id="clipping-worker-token" type="password" autocomplete="new-password" placeholder="Enter for setup; blank keeps the saved token"><small>Use the bearer configured for the worker’s dispatch API.</small></div>
-                <label class="clipping-consent clipping-worker-enable"><input id="clipping-worker-enabled" type="checkbox"><span>Enable analysis dispatch</span></label>
-                <p id="clipping-worker-error" class="form-error" role="alert" aria-live="polite"></p>
-                <p id="clipping-worker-save-note" class="clipping-help" aria-live="polite">The worker starts disabled. Configuration status is not a live connection check.</p>
-                <button id="clipping-worker-save" class="button secondary" type="submit">Save worker settings</button>
-              </form>
+          <dialog id="clipping-confirm-dialog" class="clipping-confirm-dialog" aria-labelledby="clipping-confirm-title" aria-describedby="clipping-confirm-description">
+            <div class="clipping-confirm-content">
+              <h3 id="clipping-confirm-title">Delete saved item?</h3>
+              <p id="clipping-confirm-description"></p>
+              <p id="clipping-confirm-error" class="form-error" role="alert" hidden></p>
+              <div class="clipping-confirm-actions">
+                <button id="clipping-confirm-cancel" class="button secondary" type="button">Cancel</button>
+                <button id="clipping-confirm-delete" class="button danger" type="button">Delete</button>
+              </div>
             </div>
-          </details>
+          </dialog>
         </section>
 
         <section class="view" data-page="vault">
@@ -455,7 +477,7 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/clipping.js?v=20261015-delete-abort" defer></script>
-  <script src="/static/app.js?v=20261015-delete-abort" defer></script>
+  <script src="/static/clipping.js?v=20261113-gemini-ui" defer></script>
+  <script src="/static/app.js?v=20261113-gemini-ui" defer></script>
 </body>
 </html>

@@ -5,9 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,7 +16,7 @@ import (
 func TestClippingDashboardDeleteAnalysisCancelsAndSettlesLateCallback(t *testing.T) {
 	store, security, handler, cookie := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "delete-analysis-active-001")
+	jobView, _ := clippingCreateJob(t, store, source.ID, "delete-analysis-active-001")
 	job, err := store.ClippingJob(jobView.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +89,7 @@ func TestClippingDashboardDeleteAnalysisCancelsAndSettlesLateCallback(t *testing
 func TestClippingDashboardDeleteSourceRemovesMediaAndHidesAnalyses(t *testing.T) {
 	store, _, handler, cookie := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "delete-source-job-001")
+	jobView, _ := clippingCreateJob(t, store, source.ID, "delete-source-job-001")
 	if response := clippingDashboardRequest(handler, http.MethodDelete, "/api/clipping/sources/"+source.ID, "", nil, ""); response.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated source delete=%d %s", response.Code, response.Body.String())
 	}
@@ -178,9 +175,9 @@ func TestDeleteSourceDefersFileCleanupUntilCanceledImportStops(t *testing.T) {
 }
 
 func TestAmbiguousFailedAnalysisClaimReleasesAfterCallbackExpiry(t *testing.T) {
-	store, security, handler, cookie := clippingDashboardFixture(t)
+	store, security, _, _ := clippingDashboardFixture(t)
 	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "ambiguous-failure-old-job-001")
+	jobView, _ := clippingCreateJob(t, store, source.ID, "ambiguous-failure-old-job-001")
 	job, err := store.ClippingJob(jobView.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +199,7 @@ func TestAmbiguousFailedAnalysisClaimReleasesAfterCallbackExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	newJob := clippingM3CreateJob(t, store, source.ID, "ambiguous-failure-new-job-001")
-	if _, err := store.RetryClippingStage(job.ID, ClippingStageAnalysis); !errors.Is(err, ErrClippingJobTerminal) {
+	if _, err := store.historicalRetryClippingStage(job.ID, ClippingStageAnalysis); !errors.Is(err, ErrClippingJobTerminal) {
 		t.Fatalf("deleted failed analysis retry result=%v", err)
 	}
 	if claimed, err := store.ClaimClippingAnalysisSource(newJob.ID); err != nil || claimed {
@@ -262,7 +259,7 @@ func TestClippingCurrentAttemptResultErrorsFailAnalysis(t *testing.T) {
 			}
 			callback := clippingSimpleCallback(t, source, job, stage, config.PipelineRevision, computeSeconds)
 			testCase.mutate(t, &callback)
-			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 			response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
 			if response.Code != http.StatusNoContent {
 				t.Fatalf("invalid current result callback=%d %s", response.Code, response.Body.String())
@@ -280,7 +277,7 @@ func TestClippingCurrentAttemptResultErrorsFailAnalysis(t *testing.T) {
 func TestClippingRustSceneWorkerCallbackReconcilesDashboard(t *testing.T) {
 	for _, tc := range []struct {
 		name, visual, inspection string
-		completed bool
+		completed                bool
 	}{
 		{"rust-pair", clippingWorkerRustVisualEventsVersion, clippingWorkerRustCandidateInspectionVersion, true},
 		{"mixed-engine", clippingWorkerRustVisualEventsVersion, clippingWorkerFFmpegCandidateInspectionVersion, false},
@@ -307,7 +304,7 @@ func TestClippingRustSceneWorkerCallbackReconcilesDashboard(t *testing.T) {
 				t.Fatal(err)
 			}
 			callback.Artifact.Payload = encoded
-			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 			for i := 0; i < 2; i++ {
 				response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
 				if response.Code != http.StatusNoContent {
@@ -341,8 +338,8 @@ func TestClippingRustSceneWorkerCallbackReconcilesDashboard(t *testing.T) {
 // truncated audio or incomplete visual scans must fail with a safe reason.
 func TestClippingAudioCoverageCallbackPublishesOnlyBoundedTail(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		audioGap int64
+		name      string
+		audioGap  int64
 		visualGap int64
 		completed bool
 	}{
@@ -374,7 +371,7 @@ func TestClippingAudioCoverageCallbackPublishesOnlyBoundedTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			callback.Artifact.Payload = encoded
-			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 			for i := 0; i < 2; i++ {
 				response := clippingCallbackRequest(handler, job.ID, stage.AttemptID, prepared.CallbackBearer, callback)
 				if response.Code != http.StatusNoContent {
@@ -416,7 +413,7 @@ func TestClippingOversizeCurrentCallbackFailsAnalysis(t *testing.T) {
 			clippingCreateWorkerConfigForTest(t, store, security)
 			job := clippingM3CreateJob(t, store, source.ID, "oversize-callback-"+name+"-001")
 			prepared, stage := clippingStartSimpleJobAttempt(t, store, security, job.ID)
-			clippingAcceptDeleteFailureTestDispatch(t, store, security, prepared)
+			seedHistoricalClippingDispatchConstraints(t, store, security, prepared)
 			body := strings.NewReader(strings.Repeat("x", maxClippingCallbackBodyBytes+1))
 			request := httptest.NewRequest(http.MethodPost, "/api/clipping/worker-callbacks/"+job.ID+"/"+stage.AttemptID, body)
 			if !contentLengthKnown {
@@ -437,37 +434,20 @@ func TestClippingOversizeCurrentCallbackFailsAnalysis(t *testing.T) {
 	}
 }
 
-func clippingAcceptDeleteFailureTestDispatch(t *testing.T, store *Store, security *Security, prepared clippingPreparedDispatch) {
+// The callback represents work issued before retirement. Seed the immutable
+// worker constraints that were persisted before the original submission.
+func seedHistoricalClippingDispatchConstraints(t *testing.T, store *Store, security *Security, prepared clippingPreparedDispatch) {
 	t.Helper()
-	client := &http.Client{Transport: clippingRuntimeRoundTripper(func(request *http.Request) (*http.Response, error) {
-		return clippingRuntimeResponse(request, http.StatusAccepted,
-			`{"accepted":true,"job_id":"`+prepared.Payload.JobID+`","attempt_id":"`+prepared.Payload.AttemptID+`","dispatch_id":"`+prepared.Payload.DispatchID+`"}`), nil
-	})}
-	dispatcher := newClippingWorkerDispatcher(
-		&clippingRuntimeResolver{answers: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}, nil, client)
-	app := &dashboardApp{store: store, security: security}
-	if err := app.dispatchPreparedClippingStageWithDispatcher(context.Background(), prepared, dispatcher); err != nil {
-		t.Fatalf("submit clipping test attempt: %v", err)
+	config, configured, err := loadClippingWorkerConfig(store, security)
+	if err != nil || !configured {
+		t.Fatalf("load historical worker configuration: configured=%v error=%v", configured, err)
 	}
-}
-
-func TestProcessorConfigurationErrorFailsQueuedAnalysis(t *testing.T) {
-	store, security, handler, cookie := clippingDashboardFixture(t)
-	source := makeReadyClippingSource(t, store, clippingM3FixtureDurationMS)
-	jobView, _ := clippingCreateJob(t, handler, cookie, source.ID, "processor-config-error-001")
-	if err := store.SetSetting(clippingWorkerConfigSetting, "invalid encrypted configuration"); err != nil {
+	result, err := store.db.Exec(`UPDATE clipping_stage_attempts SET pipeline_revision=?,max_compute_seconds=? WHERE job_id=? AND attempt_id=?`,
+		config.PipelineRevision, config.MaxComputeSeconds, prepared.Payload.JobID, prepared.Payload.AttemptID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	processor := &Processor{app: &dashboardApp{store: store, security: security}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	worked, err := processor.processNextClippingAnalysis(context.Background())
-	if err != nil || worked {
-		t.Fatalf("processor handling queued config error: worked=%v error=%v", worked, err)
-	}
-	job, err := store.ClippingJob(jobView.ID)
-	if err != nil || job.Status != ClippingJobFailed || !strings.Contains(job.Error, "configuration") {
-		t.Fatalf("queued analysis did not fail visibly on configuration error: job=%+v error=%v", job, err)
-	}
-	if err := store.SetSetting(clippingWorkerConfigSetting, ""); err != nil {
-		t.Fatal(err)
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		t.Fatalf("seed issued attempt count=%d error=%v", count, err)
 	}
 }

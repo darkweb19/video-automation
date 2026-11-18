@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:framevault:clipping:analysis:v3",
+  "title": "Gemini clipping analysis v3",
+  "description": "Model-reported source duration and editorial clip proposals. Scores are estimates, timestamps are proposals, and observations are not verified transcripts or media metadata.",
+  "$comment": "The Go decoder is authoritative for raw JSON size and the size of the default encoding/json Marshal representation (both at most 256 KiB), nesting, UTF-8 and escaped-surrogate validity, duplicate or missing keys, lexical integer fields, UTF-8 byte limits, nonblank text, source-time ranges, rank order, request-dependent candidate count and durations, and the explanation required for a shortfall. Standard maxLength counts Unicode characters; x-maxUtf8Bytes documents the stricter Go byte limit. The four-hour defensive ceiling is not a supported single-request duration claim.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "source_duration_ms", "source_duration_provenance", "summary", "language_codes", "limitations", "candidates", "fewer_candidates_reason"],
+  "properties": {
+    "version": { "const": "framevault.clipping.analysis.v3" },
+    "source_duration_ms": { "type": "integer", "minimum": 1, "maximum": 14400000 },
+    "source_duration_provenance": { "const": "model_reported" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "language_codes": {
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": { "type": "string", "maxLength": 35, "pattern": "^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$" }
+    },
+    "limitations": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/limitation" } },
+    "candidates": {
+      "type": "array", "maxItems": 10,
+      "description": "In model rank order. Overlap is permitted; no deterministic re-ranking or suppression is applied.",
+      "items": { "$ref": "#/$defs/candidate" }
+    },
+    "fewer_candidates_reason": {
+      "type": "string", "maxLength": 2048, "x-maxUtf8Bytes": 2048,
+      "description": "Required to be nonblank when the model returns fewer candidates than requested, including zero. May be empty otherwise."
+    }
+  },
+  "$defs": {
+    "summary": { "type": "string", "minLength": 1, "maxLength": 4096, "x-maxUtf8Bytes": 4096 },
+    "limitation": { "type": "string", "minLength": 1, "maxLength": 1024, "x-maxUtf8Bytes": 1024 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 180, "x-maxUtf8Bytes": 180 },
+    "hook": { "type": "string", "minLength": 1, "maxLength": 480, "x-maxUtf8Bytes": 480 },
+    "rationale": { "type": "string", "minLength": 1, "maxLength": 2048, "x-maxUtf8Bytes": 2048 },
+    "boundary_rationale": { "type": "string", "minLength": 1, "maxLength": 1024, "x-maxUtf8Bytes": 1024 },
+    "context": { "type": "string", "minLength": 1, "maxLength": 2048, "x-maxUtf8Bytes": 2048 },
+    "detail": { "type": "string", "minLength": 1, "maxLength": 1024, "x-maxUtf8Bytes": 1024 },
+    "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "scores": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hook", "emotional_impact", "retention_potential", "shareability", "standalone_context"],
+      "properties": {
+        "hook": { "$ref": "#/$defs/score" },
+        "emotional_impact": { "$ref": "#/$defs/score" },
+        "retention_potential": { "$ref": "#/$defs/score" },
+        "shareability": { "$ref": "#/$defs/score" },
+        "standalone_context": { "$ref": "#/$defs/score" }
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "start_ms", "end_ms", "detail"],
+      "properties": {
+        "kind": { "enum": ["speech", "audio", "visual"] },
+        "start_ms": { "type": "integer", "minimum": 0, "maximum": 14400000 },
+        "end_ms": { "type": "integer", "minimum": 1, "maximum": 14400000 },
+        "detail": { "$ref": "#/$defs/detail" }
+      }
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rank", "start_ms", "end_ms", "title_variants", "hook", "rationale", "boundary_rationale", "context", "editorial_score", "scores", "evidence"],
+      "properties": {
+        "rank": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "start_ms": { "type": "integer", "minimum": 0, "maximum": 14400000 },
+        "end_ms": { "type": "integer", "minimum": 1, "maximum": 14400000 },
+        "title_variants": {
+          "type": "array", "minItems": 1, "maxItems": 3,
+          "description": "The first title is primary.", "items": { "$ref": "#/$defs/title" }
+        },
+        "hook": { "$ref": "#/$defs/hook", "description": "An editorial suggestion, not a verified spoken quotation." },
+        "rationale": { "$ref": "#/$defs/rationale" },
+        "boundary_rationale": { "$ref": "#/$defs/boundary_rationale" },
+        "context": { "$ref": "#/$defs/context" },
+        "editorial_score": { "$ref": "#/$defs/score" },
+        "scores": { "$ref": "#/$defs/scores" },
+        "evidence": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "#/$defs/evidence" } }
+      }
+    }
+  }
+}

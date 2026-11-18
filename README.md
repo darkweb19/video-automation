@@ -1,6 +1,6 @@
 # FrameVault Video Automation
 
-FrameVault is a self-hosted dashboard for generating videos, importing footage for clipping analysis, and storing media locally. It is a Go service with a plain JavaScript dashboard, SQLite metadata, and a persistent `/data` volume.
+FrameVault is a self-hosted dashboard for generating videos, analyzing public YouTube videos with Gemini, and storing media locally. It is a Go service with a plain JavaScript dashboard, SQLite metadata, and a persistent `/data` volume.
 
 Jump to [Quick start](#quick-start), [Create videos](#create-videos), [Clipping](#use-clipping), [YouTube uploads](#upload-to-youtube), [Data and security](#data-and-security), or [Development](#development). See the [documentation index](docs/README.md) for operator guides and architecture notes.
 
@@ -8,11 +8,19 @@ Jump to [Quick start](#quick-start), [Create videos](#create-videos), [Clipping]
 
 - **Video generation:** create a single clip or a 30-second project. Projects use OpenRouter to plan five connected scenes; the selected OpenRouter or Modal video provider creates five six-second, 480p vertical clips, which FFmpeg joins into a silent 1080×1920 video.
 - **YouTube uploads:** upload a completed video manually after connecting a YouTube account. FrameVault does not publish or schedule videos automatically.
-- **Clipping:** import one public YouTube video, then request transcript and candidate analysis from a separately configured Modal worker.
+- **Clipping:** submit a public YouTube URL directly to Google Cloud Gemini. Gemini selects and ranks proposed clips; the Go backend validates and saves the results without downloading the source video.
 
 ## Current clipping limits
 
-The optional analysis worker is not deployed by default. Candidate selection is heuristic. M1 remains skipped, not passed: its remaining real-media feasibility work was waived, so quality and language performance remain unmeasured. Clipping currently supports public YouTube links only; live import success has not been verified and availability is best-effort. The Clipping page does not edit or export candidate videos. See the [clipping plan](docs/clipping/PLAN.md) and [documentation index](docs/README.md) for status and operator guides.
+Gemini analysis defaults off and requires an operator-configured Google Cloud project and Application Default Credentials (ADC). Public YouTube input is Preview and availability is best-effort. The initial source limit is 40 minutes, checked against model-reported duration; clip options span 15–180 seconds and 1–10 candidates. Gemini may return fewer candidates with an explanation.
+
+Scores are editorial estimates and timestamps are proposed boundaries. Live provider access, semantic quality, language performance, latency and cost remain unmeasured by this migration. The page does not edit, extract, render, export or publish candidate videos; `youtube-extractor-rs` integration is a future phase.
+
+## Gemini migration status
+
+All six implementation phases are integrated and independently reviewed: provider contracts, compatible references, durable execution, dashboard/API flow, offline evaluation and legacy-runtime retirement. New analysis uses Gemini exclusively; old import/submission/retry routes and outbound Modal clipping dispatch are retired. Historical media/results and issued legacy callbacks remain supported. Live qualification, a real legacy drain and production rollout have separate gates. See the [migration plan](docs/clipping/GEMINI-MIGRATION.md), [dashboard/API guide](docs/clipping/GEMINI-DASHBOARD.md) and [legacy drain procedure](docs/clipping/LEGACY-RETIREMENT.md).
+
+The final [backend/UI CI](https://github.com/darkweb19/video-automation/actions/runs/43901151940), [offline evaluator CI](https://github.com/darkweb19/video-automation/actions/runs/43901151625), and [container build/runtime/health CI](https://github.com/darkweb19/video-automation/actions/runs/43901151871) passed. These checks establish code/image readiness; they do not establish live Google access, editorial quality, actual cost, a production drain or deployment.
 
 ## Quick start
 
@@ -29,7 +37,7 @@ Username: sujanshrestha
 Password: Sujan@123
 ```
 
-Change the password immediately in **Settings**. Add and test an OpenRouter key there; projects need it for story planning even when Modal is selected for video. Choose a video provider in **Settings > Video generation**. To use Modal, deploy a worker and add its endpoint and key under **Modal accounts**. New Modal jobs also need the dashboard's public HTTPS origin for callbacks:
+Change the password immediately in **Settings**. Add and test an OpenRouter key there; projects need it for story planning even when Modal is selected for video. Choose a video provider in **Settings > Video generation**. To use Modal for video generation, deploy a worker and add its endpoint and key under **Modal accounts**. New Modal jobs also need the dashboard's public HTTPS origin for callbacks:
 
 ```bash
 VIDEO_CALLBACK_BASE_URL="https://video.example.com" docker compose up -d --build
@@ -56,11 +64,20 @@ Project story planning and project ideas use OpenRouter's Haiku model. Single-cl
 
 ## Use Clipping
 
-The **Clipping** tab imports one public YouTube video at a time. Confirm that you have permission to reuse and process the footage. When the video is ready, choose its analysis type and select **Analyze**. Importing a link does not start analysis.
+Enter one public YouTube video URL in **Clipping**, confirm permission to process the footage, choose the profile and duration/candidate options, then select **Analyze video**. Gemini analyzes the URL directly. The saved results include ranked titles, hooks, proposed times, explanations, context and evidence. Private or sign-in-only videos are unsupported.
 
-Links are limited to one video, four hours, and 20 GiB, and the original audio is kept. Availability and compatible formats are best-effort; use the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for supported links and failure details. Private or sign-in-only videos are not supported.
+On a host with ADC supplied by its runtime identity, enable analysis with nonsecret configuration:
 
-Analysis requires the optional Modal worker and operator configuration described in [M3 setup](docs/clipping/M3-IMPLEMENTATION.md). The page shows saved transcript, context, and candidate results. It does not edit, render, export, or publish clips.
+```bash
+CLIPPING_GEMINI_ENABLED=true \
+CLIPPING_GEMINI_PROJECT_ID=your-google-cloud-project \
+CLIPPING_GEMINI_LOCATION=global \
+docker compose up -d --build
+```
+
+The application uses ADC/service accounts, with no Google API-key input. Supported locations are `global`, `us` and `eu`. **Configured** reports local settings only; it does not verify credentials or video access. Analysis may incur Google Cloud charges. See the [operations runbook](docs/clipping/GEMINI-OPERATIONS.md), [provider](docs/clipping/GEMINI-PROVIDER.md) and [execution](docs/clipping/GEMINI-EXECUTION.md) guides before enablement.
+
+An unresolved submission can be resent with the exact original body and key. Unknown provider outcomes are quarantined rather than automatically repeated. After a known terminal result, an explicit new analysis creates a separate job. Cancel/delete stop local publication but cannot guarantee Google stopped or did not charge. Existing saved YouTube sources can be analyzed remotely; legacy media and results remain readable.
 
 ## Upload to YouTube
 
@@ -77,7 +94,7 @@ Google Testing authorizations, including offline refresh tokens, expire after se
 
 ## Data and security
 
-Docker Compose keeps application state in the named `video_automation_data` volume mounted at `/data`. It contains `/data/app.db`, the encryption key at `/data/secret.key`, generated videos in `/data/videos/` and `/data/projects/`, and clipping sources in `/data/clipping/`. Keep the database and key together in backups; without the key, saved credentials cannot be decrypted.
+Docker Compose keeps application state in the named `video_automation_data` volume mounted at `/data`. It contains `/data/app.db`, the encryption key at `/data/secret.key`, generated videos in `/data/videos/` and `/data/projects/`, and legacy clipping media in `/data/clipping/`. New URL references and analysis results live in SQLite; no new source media is downloaded. Keep the database and key together in backups; without the key, saved credentials cannot be decrypted.
 
 Create a portable backup while the app is stopped:
 
@@ -99,7 +116,7 @@ Enter it under **Forgot password?** on the sign-in screen. It expires after 15 m
 
 ## Development
 
-The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go and FFmpeg. Native YouTube imports also need the pinned yt-dlp/Deno runtime and ffprobe. See the [YouTube import guide](docs/clipping/YOUTUBE-IMPORT.md) for runtime details.
+The service entry point is cmd/video-automation/main.go; backend code and tests are in internal/app/, and the embedded dashboard is in internal/webui/static/. Modal workers are under workers/modal/. Native development needs Go 1.24 or newer and FFmpeg for generation and project assembly. Gemini analysis uses ADC and does not require a local video downloader. The clipping downloader, Deno/Python importer runtime, and Modal analysis worker are removed. Modal video-generation workers and FFmpeg assembly remain supported.
 
 Run locally with a writable data directory:
 
@@ -117,5 +134,13 @@ node --check internal/webui/static/app.js
 python3 workers/modal/callback_delivery_test.py
 git diff --check
 ```
+
+Evaluate saved analyses and human annotations without credentials, network calls or media access:
+
+```bash
+go run ./cmd/clipping-gemini-eval --input docs/clipping/gemini-evaluation/synthetic-example.v1.json
+```
+
+The example is synthetic and proves no live quality or readiness. The evaluator withholds incomplete quality metrics, preserves model rank, hashes report identifiers and distinguishes operator evidence from verified facts. See the [Gemini evaluation protocol](docs/clipping/EVALUATION.md#g5-gemini-offline-evaluation).
 
 For deeper implementation notes and decisions, see [docs/README.md](docs/README.md), [architecture decisions](docs/architecture/), and the [clipping tracker](docs/clipping/TRACKER.md).

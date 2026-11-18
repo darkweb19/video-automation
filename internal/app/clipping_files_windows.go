@@ -4,11 +4,12 @@ package app
 
 import (
 	"errors"
-	"math"
 	"os"
 
 	"golang.org/x/sys/windows"
 )
+
+var ErrClippingPlatformUnavailable = errors.New("native clipping source files require a Linux or Unix host; run the application in Docker/Linux")
 
 func clippingFilesystemSupported() error {
 	return clippingOutcome("unsupported", "platform_unavailable", ErrClippingPlatformUnavailable.Error())
@@ -49,19 +50,4 @@ func syncClippingDirectory(path string) error {
 		return errors.New("source directory is not a regular directory")
 	}
 	return windows.FlushFileBuffers(handle)
-}
-
-func clippingAvailableDiskBytes(path string) (int64, error) {
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return 0, err
-	}
-	var available uint64
-	if err := windows.GetDiskFreeSpaceEx(name, &available, nil, nil); err != nil {
-		return 0, err
-	}
-	if available > math.MaxInt64 {
-		return 0, errors.New("invalid filesystem capacity")
-	}
-	return int64(available), nil
 }

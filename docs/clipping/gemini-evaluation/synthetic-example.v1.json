@@ -1,0 +1,72 @@
+{
+  "version": "framevault.clipping.gemini.evaluation.v1",
+  "corpus": [
+    {
+      "id": "synthetic-source-1",
+      "status": "synthetic",
+      "rights_status": "unknown",
+      "content_type": "general",
+      "language_codes": ["en"],
+      "human_duration_ms": 60000
+    }
+  ],
+  "runs": [
+    {
+      "id": "synthetic-run-1",
+      "source_id": "synthetic-source-1",
+      "options": {
+        "content_type": "general",
+        "min_clip_ms": 15000,
+        "max_clip_ms": 180000,
+        "candidate_limit": 1
+      },
+      "provider_snapshot": {
+        "provider": "gemini_enterprise_agent_platform",
+        "model": "synthetic-model-v1",
+        "api_version": "v1",
+        "prompt_version": "synthetic-prompt-v1",
+        "prompt_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schema_version": "synthetic-schema-v1",
+        "schema_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "processing_mode": "STATIC"
+      },
+      "analysis": {
+        "version": "framevault.clipping.analysis.v3",
+        "source_duration_ms": 60000,
+        "source_duration_provenance": "model_reported",
+        "summary": "Synthetic evaluation example.",
+        "language_codes": ["en"],
+        "limitations": ["Synthetic text only; no real media or model output."],
+        "candidates": [
+          {
+            "rank": 1,
+            "start_ms": 5000,
+            "end_ms": 20000,
+            "title_variants": ["Synthetic candidate"],
+            "hook": "SYNTHETIC_PRIVATE_HOOK",
+            "rationale": "Synthetic rationale for contract validation.",
+            "boundary_rationale": "Synthetic boundary rationale.",
+            "context": "Synthetic context.",
+            "editorial_score": 50,
+            "scores": {
+              "hook": 50,
+              "emotional_impact": 50,
+              "retention_potential": 50,
+              "shareability": 50,
+              "standalone_context": 50
+            },
+            "evidence": [
+              {
+                "kind": "speech",
+                "start_ms": 7000,
+                "end_ms": 8000,
+                "detail": "Synthetic evidence detail."
+              }
+            ]
+          }
+        ],
+        "fewer_candidates_reason": ""
+      }
+    }
+  ]
+}
