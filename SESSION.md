@@ -1,4 +1,6 @@
-# Session handoff — 2026-11-16, Gemini code migration complete
+# Session handoff — 2026-11-18, Gemini main merge authorized
+
+The user explicitly authorized merging `feat/gemini-video-analysis` into `main` on 2026-11-18. That supersedes the earlier feature-only scope recorded below. The verified remote inputs were feature `ccf42dcdd19c1d0df183aeb183032051e9c3203e` and main `c85d376ca761b4fcfdd3e1627edc0d9ed15ffcca`, with no existing open PR. Preserve the 151 implementation commits with a merge commit, run the PR checks and use the GitHub PR/main ref as the authoritative merge outcome. This handoff update changes documentation only. Production deployment, live inference, infrastructure changes and extraction remain outside scope; Gemini remains disabled by default.
 
 Historical handoffs are preserved in [docs/SESSION.md](docs/SESSION.md). Current scope is [GEMINI-MIGRATION.md](docs/clipping/GEMINI-MIGRATION.md); [TRACKER.md](docs/clipping/TRACKER.md) records acceptance and authorization.
 

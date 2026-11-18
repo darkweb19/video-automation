@@ -4,7 +4,9 @@ Read the root `SESSION.md` at the start of a task when it exists. Use `README.md
 
 ## AI clipping: planning and multi-session execution
 
-### Gemini migration — current authorization (2026-11-10)
+### Gemini migration — current authorization (updated 2026-11-18)
+
+- On 2026-11-18 the user explicitly authorized merging `feat/gemini-video-analysis` into `main`. This supersedes the earlier feature-only publication restriction for this merge. Preserve the phase commit history, check current remote refs and CI, and record the merge in GitHub. Deployment, infrastructure changes, paid/live inference and force-push remain outside scope.
 
 - The user authorized phased Gemini migration with at least 15 meaningful non-empty commits per phase, Terra (`gpt-6.1-terra`) and LUNA (`gpt-6-luna`) at `max`, and the main thread as CTO/task owner. This supersedes older task-specific model selections and download-first/Modal clipping requirements only for new Gemini migration work. Root coordinates architecture, integration, Git and central records; agents author implementation/tests and a separate agent reviews substantive changes.
 - Read `docs/clipping/GEMINI-MIGRATION.md` for current phase scope/acceptance alongside historical PLAN/TRACKER/ADR records. Keep README.md and AGENTS.md factual at every phase boundary; reconcile TRACKER.md and SESSION.md with actual checks, commits, review and outstanding gates. Do not pad the commit count.

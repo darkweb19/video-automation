@@ -115,6 +115,7 @@ Last updated: 2026-11-16 (America/Toronto). This file is the authoritative statu
 
 | Date | User instruction / scope | Effect |
 | --- | --- | --- |
+| 2026-11-18 | "can you merge the Branch to main" after Gemini phase delivery | Authorizes merging `feat/gemini-video-analysis` into `main`, including PR creation and normal merge publication. Preserve phase history and verify CI/remote outcome. No deployment, infrastructure mutation, paid/live inference, force-push or extraction integration. |
 | 2026-10-15 | "yes push the changes" following completed C3.DELETE/C3.ABORT review and checks | Explicitly authorizes publishing the reviewed local commits and publication handoff to origin/feat/clipper-ai; no deployment, merge, main changes or paid inference. |
 | 2026-10-15 | Implement imported-clip/analysis deletion and abort analysis with a toast on Go/Modal errors, inside feat/clipper-ai, using LUNA Max | Authorizes C3.DELETE/C3.ABORT implementation and local verification/review; no paid inference or deployment. |
 | 2026-10-14 | Pull recently merged feature branch; rebuild YouTube import without YoutubeProxy; preserve Modal analysis; use Luna Max; commit/push feature branch. Follow-up: only YouTube import and Modal analysis, remove reconciliation and other clipping workflows, clean UI. | Authorizes C2.8/C3.SIMPLE implementation, scope replacement, local checks/review and fast-forward publication to existing `feat/clipper-ai`; no deployment or paid test inference. |
